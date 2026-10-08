@@ -47,7 +47,10 @@ pub struct Footplate {
 impl Footplate {
     /// The window on the yard behind `client`, for the user the yard knows
     /// `name` as. It follows the yard from here on.
-    pub fn new(client: Client, name: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Client, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The title in the window's options reaches a macOS and an X11
+        // window; a Wayland one has only what is set on it.
+        window.set_window_title(crate::NAME);
         let line = cx.new(Line::new);
         cx.subscribe(&line, |this, _, _: &Submitted, cx| this.send(cx))
             .detach();
@@ -651,10 +654,12 @@ mod tests {
             bind_keys(cx);
         });
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(Client::new(&socket), "mac-login".into(), cx);
+            let view = Footplate::new(Client::new(&socket), "mac-login".into(), window, cx);
             window.focus(&view.line.focus_handle(cx));
             view
         });
+        // A Wayland window has no title but the one set on it.
+        assert_eq!(cx.window_title().as_deref(), Some("footplate"));
 
         // No yard: the window says so in words, and goes on.
         wait(cx, "that there is no yard", |cx| {

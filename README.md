@@ -23,11 +23,16 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   `runtime_shaders` feature, which compiles the shaders when the window opens.
 - Linux: the development packages gpui builds against, which are those Zed
   lists for building from source: X11 and Wayland, xkbcommon, fontconfig and
-  a Vulkan loader. The Linux build is not tried in this repository's yard,
-  which runs on a Mac.
+  a Vulkan loader; to run, a Vulkan driver (Mesa's software one will do).
+  The yard runs on a Mac and so does the gate: the Linux build is tried by
+  hand, in a container (Debian 13, arm64) under Xvfb and under a headless
+  sway.
 
 gpui is the release on crates.io, pinned exactly in `Cargo.toml`, and
-`Cargo.lock` is committed: the gate builds with `--locked`.
+`Cargo.lock` is committed: the gate builds with `--locked`. `Cargo.toml`
+holds libc below 0.2.190, which footplate does not use itself: with that
+release a crate in gpui's tree no longer builds on Linux, and the gate, on
+a Mac, would not say so.
 
 There is no installer. The binary is the application: copy it where you
 like and run it.
@@ -106,11 +111,23 @@ the binary carries:
 
     rsvg-convert -w 512 -h 512 assets/icon.svg -o assets/icon.png
 
-It stands in the window, and on macOS in the dock. gpui's window options
-have no icon, so on macOS it is set on the application when it starts. On
-Linux a taskbar shows the icon of the desktop entry whose id is the
-window's (`footplate`); installing one is an installer's work, and there is
-none yet.
+It stands in the window, and in the dock or the taskbar. gpui's window
+options have no icon, so the program sees to it when it starts
+(`src/taskbar.rs` for Linux):
+
+- macOS: it is set on the application.
+- Linux: a desktop shows the icon and the name of the desktop entry whose id
+  is the window's (`footplate`). There is no installer to put one there, so
+  footplate writes its own, for you alone: `footplate.desktop` under
+  `$XDG_DATA_HOME/applications` (`~/.local/share` without the variable) and
+  the icon under `icons/hicolor/512x512/apps` beside it. They are written
+  when they are missing or differ, so the entry names the binary that ran
+  last. It is for the open window and not in the menu of applications
+  (`NoDisplay`). A desktop that has not read the entry by the time the
+  window opens, on the very first start, shows the icon from the next.
+  Under X11 the icon is also set on the window itself (`_NET_WM_ICON`), for
+  a panel that reads no desktop entries. To be rid of both, delete the two
+  files.
 
 ## The code
 
@@ -121,6 +138,7 @@ none yet.
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
 | `src/window.rs` | the window: draws the model and makes the calls it asks for |
 | `src/input.rs` | the line that is typed in |
+| `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir that answers the documented JSON |
 
 The tests run without a yard and without a screen: the client against the

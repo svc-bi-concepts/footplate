@@ -29,6 +29,20 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 
+# On Linux the icon is also a property of the X11 window, set on a
+# connection of our own: gpui hands out no handle to its X11 window. Both
+# crates are in gpui's tree already; image scales the icon to a panel's sizes.
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+x11rb = "0.13"
+# Not used by footplate: this holds libc back for gpui's tree. gpui 0.2.2
+# unpacks archives with zed-async-tar, whose xattr 0.2 wants libc::ENOATTR,
+# and libc 0.2.190 no longer has it on Linux: the Linux build fails there
+# ("cannot find value `ENOATTR` in crate `libc`"), and the gate, on a Mac,
+# does not see it. Drop this when a libc has it again or gpui's tree no
+# longer asks.
+libc = ">=0.2.170, <0.2.190"
+
 [dev-dependencies]
 # The window's own test opens it on gpui's test platform, without a screen.
 gpui = { version = "=0.2.2", features = ["test-support"] }

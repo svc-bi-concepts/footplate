@@ -9,6 +9,8 @@ mod fake;
 mod input;
 mod model;
 mod session;
+#[cfg(any(target_os = "linux", test))]
+mod taskbar;
 mod theme;
 mod window;
 
@@ -60,12 +62,12 @@ fn main() {
             }),
             window_min_size: Some(size(px(560.), px(360.))),
             // On Linux the taskbar's icon and name are those of the desktop
-            // entry with this id, where one is installed.
+            // entry with this id, which dock_icon puts there.
             app_id: Some(NAME.into()),
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| Footplate::new(client, name, cx));
+            let view = cx.new(|cx| Footplate::new(client, name, window, cx));
             window.focus(&view.read(cx).line().focus_handle(cx));
             view
         });
@@ -99,5 +101,12 @@ fn dock_icon() {
     unsafe { NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&image)) };
 }
 
-#[cfg(not(target_os = "macos"))]
+/// On Linux it is the desktop entry of the window's id, and under X11 a
+/// property of the window too.
+#[cfg(target_os = "linux")]
+fn dock_icon() {
+    taskbar::show(NAME, window::ICON);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn dock_icon() {}
