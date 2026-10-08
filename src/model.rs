@@ -18,10 +18,6 @@ const PEER_MAIL: &str = "mail";
 /// A mail holds this many bytes.
 pub const MAIL_BYTES: usize = 4096;
 
-/// What the yard says of mail with an image for a linked yard, and the
-/// window before it asks.
-pub const NO_IMAGES_OVER_THE_LINK: &str = "images do not cross the link yet";
-
 /// What a window for the user `me` starts from, read at the seq `head`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct State {
@@ -337,12 +333,13 @@ impl Model {
         out
     }
 
-    /// The hash of every image the open conversation shows, each once.
+    /// The hash of every image the open conversation shows, each once. One
+    /// this yard did not take from a linked yard is none it has.
     pub fn images(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
         let letters = self.selected().and_then(|s| self.convo.get(s));
         for f in letters.into_iter().flatten().flat_map(|l| &l.files) {
-            if !out.contains(&f.hash.as_str()) {
+            if f.not_taken.is_empty() && !out.contains(&f.hash.as_str()) {
                 out.push(&f.hash);
             }
         }
@@ -720,6 +717,12 @@ pub fn over_cap(bytes: usize, cap: u64) -> Option<String> {
             size(cap)
         )
     })
+}
+
+/// The line for an image of mail from a linked yard that this yard did not
+/// take, with the yard's reason.
+pub fn not_taken(file: &BlobRef) -> String {
+    format!("image, {}, not taken: {}", size(file.bytes), file.not_taken)
 }
 
 /// A number of bytes for a person: `70 bytes`, `812 KiB`, `8.5 MiB`.
@@ -1473,6 +1476,21 @@ mod tests {
         );
         assert_eq!(entries[2].files[0].kind, "image/png");
         assert_eq!(m.images(), ["aa", "bb", "cc"]);
+        // One this yard did not take from a linked yard is not asked for:
+        // the line says the yard's reason.
+        let mut refused = png("dd");
+        refused["not_taken"] = json!("the link does not take files");
+        m.event(&event(
+            24,
+            "mail",
+            "yardmaster",
+            json!({"to": "jo", "to_user": true, "text": "And this.", "files": [refused]}),
+        ));
+        assert_eq!(m.images(), ["aa", "bb", "cc"]);
+        assert_eq!(
+            not_taken(&m.entries().last().unwrap().files[0]),
+            "image, 70 bytes, not taken: the link does not take files"
+        );
         // Another conversation has none of them.
         m.select("assembly");
         assert_eq!(m.images(), Vec::<&str>::new());

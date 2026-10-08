@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::model::{self, NO_IMAGES_OVER_THE_LINK, Target};
+use crate::model;
 
 /// What an image from the clipboard is called: it has no name of its own.
 const PASTED: &str = "what was pasted";
@@ -40,19 +40,10 @@ pub struct Attachment {
     pub refused: Option<String>,
 }
 
-/// Why `name` is not attached as an image for mail to where what is typed
-/// goes, if it is not: by its first bytes `head`, and by its size when the
-/// yard's cap is known.
-pub fn unattachable(
-    target: &Target,
-    name: &str,
-    head: &[u8],
-    size: u64,
-    cap: Option<u64>,
-) -> Option<String> {
-    if matches!(target, Target::Peer { .. }) {
-        return Some(NO_IMAGES_OVER_THE_LINK.to_string());
-    }
+/// Why `name` is not attached as an image, if it is not: by its first bytes
+/// `head`, and by its size when the yard's cap is known. Whether a link
+/// carries one to a linked yard is the yard's to say, when the mail is sent.
+pub fn unattachable(name: &str, head: &[u8], size: u64, cap: Option<u64>) -> Option<String> {
     if model::image_type(head).is_none() {
         return Some(format!(
             "mail carries a PNG or a JPEG, and {name} is neither"
@@ -63,11 +54,11 @@ pub fn unattachable(
 
 /// An image from the clipboard. The yard's cap is not known here: the
 /// window asks for it and marks the attachment then.
-pub fn pasted(bytes: Vec<u8>, target: &Target) -> Found {
+pub fn pasted(bytes: Vec<u8>) -> Found {
     let size = bytes.len() as u64;
     Found {
         name: PASTED.to_string(),
-        refused: unattachable(target, PASTED, &bytes, size, None),
+        refused: unattachable(PASTED, &bytes, size, None),
         bytes,
         size,
     }
@@ -76,7 +67,7 @@ pub fn pasted(bytes: Vec<u8>, target: &Target) -> Found {
 /// A file dropped on the window. One that cannot go is refused by its first
 /// bytes and its size: the rest of it is not read, and nothing of it leaves
 /// the window.
-pub fn dropped(path: &Path, target: &Target, cap: Option<u64>) -> Found {
+pub fn dropped(path: &Path, cap: Option<u64>) -> Found {
     let name = match path.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),
         None => path.display().to_string(),
@@ -86,7 +77,7 @@ pub fn dropped(path: &Path, target: &Target, cap: Option<u64>) -> Found {
         let size = file.metadata()?.len();
         let mut bytes = Vec::new();
         file.by_ref().take(8).read_to_end(&mut bytes)?;
-        let refused = unattachable(target, &name, &bytes, size, cap);
+        let refused = unattachable(&name, &bytes, size, cap);
         match refused {
             Some(_) => bytes.clear(),
             None => {
@@ -253,19 +244,8 @@ mod tests {
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nthe rest";
     const JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0, 16];
 
-    fn crew() -> Target {
-        Target::Crew("yardmaster".into())
-    }
-
-    fn peer() -> Target {
-        Target::Peer {
-            name: "clerk".into(),
-            peer: "north".into(),
-        }
-    }
-
     fn image(bytes: &[u8]) -> Found {
-        pasted(bytes.to_vec(), &crew())
+        pasted(bytes.to_vec())
     }
 
     fn ids(drafts: &Drafts, with: &str) -> Vec<u64> {
@@ -389,30 +369,22 @@ mod tests {
     }
 
     #[test]
-    fn an_image_is_for_this_yard_s_crew_a_png_or_a_jpeg_and_under_the_cap() {
-        assert_eq!(unattachable(&crew(), "a.png", PNG, 16, None), None);
-        assert_eq!(unattachable(&crew(), "a.jpg", JPEG, 6, Some(6)), None);
+    fn an_image_is_a_png_or_a_jpeg_and_under_the_cap() {
+        assert_eq!(unattachable("a.png", PNG, 16, None), None);
+        assert_eq!(unattachable("a.jpg", JPEG, 6, Some(6)), None);
         assert_eq!(
-            unattachable(&peer(), "a.png", PNG, 16, Some(1024)).as_deref(),
-            Some("images do not cross the link yet")
-        );
-        assert_eq!(
-            unattachable(&crew(), "notes.pdf", b"%PDF-1.7", 900, Some(1024)).as_deref(),
+            unattachable("notes.pdf", b"%PDF-1.7", 900, Some(1024)).as_deref(),
             Some("mail carries a PNG or a JPEG, and notes.pdf is neither")
         );
         assert_eq!(
-            unattachable(&crew(), "a.png", PNG, 2048, Some(1024)).as_deref(),
+            unattachable("a.png", PNG, 2048, Some(1024)).as_deref(),
             Some(
                 "the image is 2 KiB, and this yard takes one of 1 KiB at most (yardr settings: blob_max_bytes)"
             )
         );
-        // What is pasted is marked by its kind and by where it goes.
+        // What is pasted is marked by its kind.
         assert_eq!(image(PNG).refused, None);
         assert!(image(b"II*\0").refused.is_some());
-        assert_eq!(
-            pasted(PNG.to_vec(), &peer()).refused.as_deref(),
-            Some("images do not cross the link yet")
-        );
     }
 
     #[test]
@@ -424,7 +396,7 @@ mod tests {
             path
         };
 
-        let found = dropped(&at("fence.png", PNG), &crew(), Some(1024));
+        let found = dropped(&at("fence.png", PNG), Some(1024));
         assert_eq!(
             found,
             Found {
@@ -435,22 +407,18 @@ mod tests {
             }
         );
         // The cap could not be asked for: Enter asks again.
-        assert_eq!(dropped(&at("fence.jpg", JPEG), &crew(), None).bytes, JPEG);
+        assert_eq!(dropped(&at("fence.jpg", JPEG), None).bytes, JPEG);
 
         // No image by its bytes, whatever its name: refused, and not read.
-        let found = dropped(&at("notes.png", b"%PDF-1.7 and more"), &crew(), Some(1024));
+        let found = dropped(&at("notes.png", b"%PDF-1.7 and more"), Some(1024));
         assert_eq!(
             found.refused.as_deref(),
             Some("mail carries a PNG or a JPEG, and notes.png is neither")
         );
         assert_eq!((found.bytes.len(), found.size), (0, 17));
-        assert!(
-            dropped(&at("empty.png", b""), &crew(), None)
-                .refused
-                .is_some()
-        );
+        assert!(dropped(&at("empty.png", b""), None).refused.is_some());
 
-        let found = dropped(&at("big.png", PNG), &crew(), Some(15));
+        let found = dropped(&at("big.png", PNG), Some(15));
         assert!(
             found
                 .refused
@@ -461,16 +429,10 @@ mod tests {
         );
         assert!(found.bytes.is_empty());
 
-        let found = dropped(&at("fence.png", PNG), &peer(), Some(1024));
-        assert_eq!(
-            found.refused.as_deref(),
-            Some("images do not cross the link yet")
-        );
-
-        let found = dropped(&dir.path().join("gone.png"), &crew(), None);
+        let found = dropped(&dir.path().join("gone.png"), None);
         let why = found.refused.unwrap();
         assert!(why.starts_with("gone.png could not be read: "), "{why}");
         // A folder is no image either.
-        assert!(dropped(dir.path(), &crew(), None).refused.is_some());
+        assert!(dropped(dir.path(), None).refused.is_some());
     }
 }

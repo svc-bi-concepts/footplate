@@ -59,7 +59,7 @@ JSON object a line. `src/api.rs` is the whole client.
 |---|---|
 | `Mail` | Enter, in a conversation with a crew member |
 | `PutBlob` for each image, then `Mail` with their hashes | Enter, when images are attached to the draft |
-| `MailPeer` | Enter, in a conversation with one of a linked yard |
+| `MailPeer` | Enter, in a conversation with one of a linked yard; after `PutBlob` for each image, with their hashes |
 | `AckUserInbox` | a conversation showed mail that was unread |
 
 It follows the stream and asks nothing of the yard in a loop: `mail`,
@@ -102,9 +102,16 @@ colour, with the reason above the line:
   its name, and a dropped file that is none is not read further;
 - one over the yard's cap (`blob_max_bytes` of `yardr settings`, 8 MiB when
   unset);
-- any image in a conversation with `<name>@<peer>`: `images do not cross the
-  link yet`;
 - one the yard refused when it was sent, with the yard's words.
+
+In a conversation with `<name>@<peer>` an image is attached and sent the
+same way, and whether it crosses is the yard's to say: when the link does
+not carry files (`yardr peer allow <peer> --send file`), the linked yard's
+yardr is too old for them, or the image is over `peer_file_max_bytes`, the
+yard refuses the mail, and the line says its reason. Nothing is marked then,
+since no one image is at fault: the draft is back as it was. An image of
+mail from a linked yard is shown like any other; one this yard did not take
+is a line with the yard's reason.
 
 While an attachment is marked, Enter sends nothing and says so: the mail
 that goes is the draft as it stands, never the draft less an image. Remove

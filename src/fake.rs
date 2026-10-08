@@ -162,6 +162,12 @@ impl Yard {
             .collect()
     }
 
+    /// The method of every call so far, in the order they came.
+    pub fn calls(&self) -> Vec<String> {
+        let state = self.shared.state.lock().unwrap();
+        state.asked.iter().map(|(m, _)| m.clone()).collect()
+    }
+
     /// The head of the last request, as it came.
     pub fn last_request(&self) -> String {
         self.shared.state.lock().unwrap().last_request.clone()

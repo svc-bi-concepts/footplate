@@ -73,10 +73,12 @@ struct Unsent {
 }
 
 /// Sends a draft as one mail from `me`: `PutBlob` for each image in the
-/// order attached, then `Mail` with the text and the hashes they answered.
-/// The cap is asked for first, so that an image over it is refused in
-/// footplate's words and none travels. Answers the images as the yard has
-/// them, or the attachment that kept the mail, if it was one, and why.
+/// order attached, then `Mail` with the text and the hashes they answered,
+/// `MailPeer` to one of a linked yard. The cap is asked for first, so that
+/// an image over it is refused in footplate's words and none travels.
+/// Whether the link carries an image is the yard's to say: it refuses the
+/// mail when not, in its words. Answers the images as the yard has them, or
+/// the attachment that kept the mail, if it was one, and why.
 fn post(
     client: &Client,
     me: &str,
@@ -85,16 +87,6 @@ fn post(
     images: &[Attachment],
 ) -> Result<Vec<BlobRef>, (Option<u64>, String)> {
     let said = |err: api::Error| (None, err.to_string());
-    let name = match target {
-        Target::Crew(name) => name,
-        Target::Peer { .. } if !images.is_empty() => {
-            return Err((None, model::NO_IMAGES_OVER_THE_LINK.to_string()));
-        }
-        Target::Peer { name, peer } => {
-            client.mail_peer(name, peer, text, me).map_err(said)?;
-            return Ok(Vec::new());
-        }
-    };
     let mut blobs = Vec::with_capacity(images.len());
     if !images.is_empty() {
         let cap = client.settings().map_err(said)?.blob_cap();
@@ -112,7 +104,14 @@ fn post(
         }
     }
     let hashes: Vec<String> = blobs.iter().map(|blob| blob.hash.clone()).collect();
-    client.mail(name, text, me, &hashes).map_err(said)?;
+    match target {
+        Target::Crew(name) => client.mail(name, text, me, &hashes).map_err(said)?,
+        Target::Peer { name, peer } => {
+            client
+                .mail_peer(name, peer, text, me, &hashes)
+                .map_err(said)?;
+        }
+    }
     Ok(blobs)
 }
 
@@ -476,10 +475,10 @@ impl Footplate {
     /// conversation: Enter sends it. One that cannot go is marked at once,
     /// and one over the yard's cap as soon as the yard said its cap.
     fn paste(&mut self, image: &Image, cx: &mut Context<Self>) {
-        let Some((with, target)) = self.open() else {
+        let Some((with, _)) = self.open() else {
             return;
         };
-        let found = draft::pasted(image.bytes().to_vec(), &target);
+        let found = draft::pasted(image.bytes().to_vec());
         let (bytes, marked) = (found.bytes.len(), found.refused.is_some());
         let id = self.attach(&with, found, cx);
         if marked {
@@ -505,7 +504,7 @@ impl Footplate {
     /// thread, and one that is no image the yard takes only as far as it
     /// takes to say so.
     fn dropped(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let Some((with, target)) = self.open() else {
+        let Some((with, _)) = self.open() else {
             return;
         };
         let paths = paths.to_vec();
@@ -513,7 +512,7 @@ impl Footplate {
             cx,
             move |client, _| {
                 let cap = client.settings().ok().map(|settings| settings.blob_cap());
-                let found = paths.iter().map(|path| draft::dropped(path, &target, cap));
+                let found = paths.iter().map(|path| draft::dropped(path, cap));
                 found.collect::<Vec<Found>>()
             },
             move |this, found, cx| {
@@ -689,6 +688,9 @@ impl Footplate {
     /// An image of a mail, or the line that says why there is none.
     fn picture(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
         let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
+        if !file.not_taken.is_empty() {
+            return line(model::not_taken(file)).into_any_element();
+        }
         match self.images.get(&file.hash) {
             Some(Picture::Here(image)) => img(image.clone())
                 .h(px(IMAGE_HEIGHT))
@@ -1098,6 +1100,68 @@ mod tests {
 
     const PASTED: &str = "what was pasted";
 
+    /// What the yard says of mail with an image over a link without files.
+    const NO_FILES: &str = "mail to clerk@north: peer north: the link does not carry file out, so mail to it carries no image: the operator allows it with yardr peer allow north --send file";
+
+    fn clerk() -> Target {
+        Target::Peer {
+            name: "clerk".into(),
+            peer: "north".into(),
+        }
+    }
+
+    fn pasted(id: u64) -> Attachment {
+        Attachment {
+            id,
+            name: PASTED.to_string(),
+            size: png().len() as u64,
+            bytes: png(),
+            refused: None,
+        }
+    }
+
+    #[test]
+    fn an_image_for_a_linked_yard_is_put_and_then_mailed_with_its_hash() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        let blobs = post(&yard.client(), "jo", &clerk(), "Like this.", &[pasted(1)]).unwrap();
+        assert_eq!(blobs[0].hash, HASH);
+        assert_eq!(yard.calls(), ["Settings", "PutBlob", "MailPeer"]);
+        assert_eq!(
+            yard.asked("MailPeer"),
+            [
+                json!({"to": "clerk", "peer": "north", "text": "Like this.", "actor": "jo", "files": [HASH]})
+            ]
+        );
+    }
+
+    #[test]
+    fn a_link_that_carries_no_files_refuses_the_mail_in_the_yard_s_words() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        yard.answer(
+            "MailPeer",
+            &json!({"error": {"code": "error", "message": NO_FILES}}).to_string(),
+        );
+        // The reason is the yard's, and no attachment is the one it is
+        // about: the link is.
+        assert_eq!(
+            post(&yard.client(), "jo", &clerk(), "Like this.", &[pasted(1)]),
+            Err((None, NO_FILES.to_string()))
+        );
+        // The mail was asked for once and nothing else went: none to the
+        // crew, and the text not on its own.
+        assert_eq!(yard.calls(), ["Settings", "PutBlob", "MailPeer"]);
+    }
+
     #[gpui::test]
     fn images_are_attached_to_the_draft_and_sent_with_enter(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -1336,30 +1400,34 @@ mod tests {
         assert_eq!(typed(&view, cx), "");
         assert_eq!(attached(&view, cx), []);
 
-        // To one of a linked yard an image is marked with the yard's
-        // refusal, and Enter sends nothing while it is there.
+        // To one of a linked yard an image is attached as to the crew:
+        // whether the link carries it is the yard's to say. This one's does
+        // not, so the mail is refused in the yard's words, and the draft is
+        // back as it was.
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        yard.answer_once_status(
+            "MailPeer",
+            200,
+            &json!({"error": {"code": "error", "message": NO_FILES}}).to_string(),
+        );
         cx.simulate_input("Hello north.");
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
         cx.simulate_keystrokes("cmd-v enter");
-        assert_eq!(
-            attached(&view, cx),
-            [(
-                10,
-                PASTED.to_string(),
-                Some("images do not cross the link yet".to_string())
-            )]
-        );
-        assert_eq!(
-            notice(&view, cx),
-            "what was pasted is marked and cannot go: remove it, then send"
-        );
+        wait(cx, "the yard's refusal", |cx| {
+            notice(&view, cx) == format!("not sent to clerk@north: {NO_FILES}")
+        });
+        assert_eq!(attached(&view, cx), [(10, PASTED.to_string(), None)]);
         assert_eq!(typed(&view, cx), "Hello north.");
-        cx.run_until_parked();
         assert_eq!(
-            (yard.asked("PutBlob").len(), yard.asked("Mail").len()),
-            (puts, mails)
+            yard.asked("MailPeer"),
+            [
+                json!({"to": "clerk", "peer": "north", "text": "Hello north.", "actor": "jo", "files": [HASH]})
+            ]
         );
-        assert_eq!(yard.asked("MailPeer"), Vec::<serde_json::Value>::new());
+        assert_eq!(yard.asked("Mail").len(), mails);
 
         // Back with the yardmaster the draft is as it was left, and with
         // the linked yard again as well.
@@ -1375,9 +1443,27 @@ mod tests {
         click_remove(cx, 10);
         cx.simulate_keystrokes("enter");
         wait(cx, "the mail queued for the peer", |_| {
-            yard.asked("MailPeer")
-                == [json!({"to": "clerk", "peer": "north", "text": "Hello north.", "actor": "jo"})]
+            yard.asked("MailPeer").last()
+                == Some(
+                    &json!({"to": "clerk", "peer": "north", "text": "Hello north.", "actor": "jo"}),
+                )
         });
+
+        // Once the link carries files the image goes with the mail, and is
+        // shown from the bytes that were pasted.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        cx.simulate_keystrokes("cmd-v enter");
+        wait(cx, "the image queued for the peer", |_| {
+            yard.asked("MailPeer").last()
+                == Some(
+                    &json!({"to": "clerk", "peer": "north", "text": "", "actor": "jo", "files": [HASH]}),
+                )
+        });
+        wait(cx, "the draft empty again", |cx| {
+            attached(&view, cx).is_empty()
+        });
+        assert_eq!(notice(&view, cx), "");
+        assert_eq!(picture(&view, cx, HASH), "here");
 
         // Text on the clipboard is pasted into the line, as before.
         cx.simulate_keystrokes("shift-tab");

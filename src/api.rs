@@ -119,6 +119,10 @@ pub struct BlobRef {
     pub kind: String,
     #[serde(default)]
     pub bytes: u64,
+    /// On mail from a linked yard only: why this yard did not take the
+    /// image, when it did not. There is none to ask for then.
+    #[serde(default)]
+    pub not_taken: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -403,12 +407,22 @@ impl Client {
         }
     }
 
-    /// Queues mail to one of a linked yard, `<to>@<peer>`.
-    pub fn mail_peer(&self, to: &str, peer: &str, text: &str, actor: &str) -> Result<Queued> {
-        self.answer(
-            "MailPeer",
-            json!({ "to": to, "peer": peer, "text": text, "actor": actor }),
-        )
+    /// Queues mail to one of a linked yard, `<to>@<peer>`, with the images
+    /// `files` names as for [`Client::mail`]. The yard refuses mail with one
+    /// when the link does not carry files, and says why.
+    pub fn mail_peer(
+        &self,
+        to: &str,
+        peer: &str,
+        text: &str,
+        actor: &str,
+        files: &[String],
+    ) -> Result<Queued> {
+        let mut args = json!({ "to": to, "peer": peer, "text": text, "actor": actor });
+        if !files.is_empty() {
+            args["files"] = json!(files);
+        }
+        self.answer("MailPeer", args)
     }
 
     /// The mail between the user `a` and `b`, oldest first, newer than
@@ -886,7 +900,8 @@ mod tests {
             BlobRef {
                 hash: HASH.into(),
                 kind: "image/png".into(),
-                bytes: 70
+                bytes: 70,
+                not_taken: String::new()
             }
         );
         yard.client()
@@ -945,7 +960,9 @@ mod tests {
             &json!({"result": [
                 {"seq": 12, "from": "jo", "to": "yardmaster", "text": "Paint the fence like this.", "read": false,
                  "files": [{"hash": HASH, "type": "image/png", "bytes": 70}]},
-                {"seq": 13, "from": "yardmaster", "to": "jo", "text": "Will do.", "files": null}
+                {"seq": 13, "from": "yardmaster", "to": "jo", "text": "Will do.", "files": null},
+                {"seq": 14, "from": "clerk@north", "to": "jo", "text": "The ledger.",
+                 "files": [{"hash": HASH, "type": "image/png", "bytes": 70, "not_taken": "the link does not take files"}]}
             ]})
             .to_string(),
         );
@@ -954,8 +971,14 @@ mod tests {
             hash: HASH.into(),
             kind: "image/png".into(),
             bytes: 70,
+            not_taken: String::new(),
         };
         assert_eq!(letters[0].files, vec![png.clone()]);
+        // One this yard did not take from a linked yard says why.
+        assert_eq!(
+            letters[2].files[0].not_taken,
+            "the link does not take files"
+        );
         assert_eq!(letters[1].files, vec![]);
 
         let event: Event = serde_json::from_value(json!({"seq": 12, "kind": "mail", "actor": "jo",
@@ -978,7 +1001,7 @@ mod tests {
         );
         let queued = yard
             .client()
-            .mail_peer("clerk", "north", "Is the ledger closed?", "jo")
+            .mail_peer("clerk", "north", "Is the ledger closed?", "jo", &[])
             .unwrap();
         assert_eq!(
             yard.asked("MailPeer"),
@@ -993,6 +1016,15 @@ mod tests {
                 kind: "mail".into(),
                 at: "2026-10-08T09:30:00Z".into()
             }
+        );
+
+        // With images the mail names them, and needs no text.
+        yard.client()
+            .mail_peer("clerk", "north", "", "jo", &[HASH.to_string()])
+            .unwrap();
+        assert_eq!(
+            yard.asked("MailPeer")[1],
+            json!({"to": "clerk", "peer": "north", "text": "", "actor": "jo", "files": [HASH]})
         );
     }
 
