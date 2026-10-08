@@ -710,21 +710,6 @@ pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Why an image is not sent to where what is typed goes, with the text
-/// typed, if it is not. The text may be empty: the image is the mail.
-pub fn unpastable(target: &Target, image: &[u8], text: &str) -> Option<String> {
-    if matches!(target, Target::Peer { .. }) {
-        return Some(NO_IMAGES_OVER_THE_LINK.to_string());
-    }
-    if image_type(image).is_none() {
-        return Some(
-            "mail carries a PNG or a JPEG, and what was pasted is another kind of image"
-                .to_string(),
-        );
-    }
-    unsendable(text).filter(|why| !why.is_empty())
-}
-
 /// Why an image of `bytes` bytes is not sent in a yard whose cap on one is
 /// `cap`, if it is not.
 pub fn over_cap(bytes: usize, cap: u64) -> Option<String> {
@@ -1500,26 +1485,6 @@ mod tests {
         assert_eq!(image_type(b"GIF89a"), None);
         assert_eq!(image_type(b"II*\0"), None);
         assert_eq!(image_type(b""), None);
-    }
-
-    #[test]
-    fn an_image_goes_to_this_yard_s_crew_and_not_over_a_link() {
-        let crew = Target::Crew("yardmaster".into());
-        assert_eq!(unpastable(&crew, PNG, ""), None);
-        assert_eq!(unpastable(&crew, JPEG, "Like this."), None);
-        let peer = Target::Peer {
-            name: "clerk".into(),
-            peer: "north".into(),
-        };
-        assert_eq!(
-            unpastable(&peer, PNG, "Like this.").as_deref(),
-            Some("images do not cross the link yet")
-        );
-        // Another kind of image, and a text that is no mail.
-        let tiff = unpastable(&crew, b"II*\0", "").unwrap();
-        assert!(tiff.contains("a PNG or a JPEG"), "{tiff}");
-        let long = unpastable(&crew, PNG, &"x".repeat(4097)).unwrap();
-        assert!(long.contains("this is 4097"), "{long}");
     }
 
     #[test]

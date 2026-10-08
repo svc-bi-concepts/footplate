@@ -4,6 +4,7 @@
 //! linked yard exposes, as `yardr chat` shows them.
 
 mod api;
+mod draft;
 #[cfg(test)]
 mod fake;
 mod input;

@@ -80,11 +80,16 @@ pub struct Line {
 }
 
 /// An image was pasted into the line. The line holds text, so it is the
-/// window's to send.
+/// window's to attach.
 pub struct Pasted(pub Image);
+
+/// Backspace was pressed in the empty line: there is no text left to take
+/// from, and the window may hold something before the text.
+pub struct Emptied;
 
 impl EventEmitter<Submitted> for Line {}
 impl EventEmitter<Pasted> for Line {}
+impl EventEmitter<Emptied> for Line {}
 
 impl Line {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -164,6 +169,9 @@ impl Line {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            return cx.emit(Emptied);
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx)
         }

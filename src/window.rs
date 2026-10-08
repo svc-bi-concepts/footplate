@@ -3,16 +3,19 @@
 //! (model.rs); this file draws it and makes the calls the model asks for.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding,
-    MouseButton, ObjectFit, ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px,
+    App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat,
+    KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString, Window, actions, div, img,
+    prelude::*, px,
 };
 
 use crate::api::{self, BlobRef, Client};
-use crate::input::{Line, Pasted, Submitted};
+use crate::draft::{self, Attachment, Drafts, Found};
+use crate::input::{Emptied, Line, Pasted, Submitted};
 use crate::model::{self, Effect, Entry, Model, Row, Target};
 use crate::session::{self, Update};
 use crate::theme::Palette;
@@ -28,6 +31,9 @@ const CONTEXT: &str = "Footplate";
 /// size: the room is there before the image is, so nothing moves under the
 /// reader when it comes.
 const IMAGE_HEIGHT: f32 = 240.;
+
+/// The side of an attachment of the draft, above the line.
+const ATTACHMENT: f32 = 56.;
 
 /// An image a mail of some conversation names, by its hash.
 enum Picture {
@@ -57,25 +63,57 @@ impl Picture {
     }
 }
 
-/// Sends an image as mail from `me` to `to`, with the text: `PutBlob`, then
-/// `Mail` with the hash it answered. The cap is asked for first, so that an
-/// image over it is refused in footplate's words and never travels.
-fn mail_image(
+/// A draft that did not go: all of it, to be put back, with the attachment
+/// that kept it, if it was one, and why.
+struct Unsent {
+    text: String,
+    images: Vec<Attachment>,
+    at: Option<u64>,
+    why: String,
+}
+
+/// Sends a draft as one mail from `me`: `PutBlob` for each image in the
+/// order attached, then `Mail` with the text and the hashes they answered.
+/// The cap is asked for first, so that an image over it is refused in
+/// footplate's words and none travels. Answers the images as the yard has
+/// them, or the attachment that kept the mail, if it was one, and why.
+fn post(
     client: &Client,
     me: &str,
-    to: &str,
+    target: &Target,
     text: &str,
-    image: &[u8],
-) -> Result<BlobRef, String> {
-    let cap = client.settings().map_err(|err| err.to_string())?.blob_cap();
-    if let Some(why) = model::over_cap(image.len(), cap) {
-        return Err(why);
+    images: &[Attachment],
+) -> Result<Vec<BlobRef>, (Option<u64>, String)> {
+    let said = |err: api::Error| (None, err.to_string());
+    let name = match target {
+        Target::Crew(name) => name,
+        Target::Peer { .. } if !images.is_empty() => {
+            return Err((None, model::NO_IMAGES_OVER_THE_LINK.to_string()));
+        }
+        Target::Peer { name, peer } => {
+            client.mail_peer(name, peer, text, me).map_err(said)?;
+            return Ok(Vec::new());
+        }
+    };
+    let mut blobs = Vec::with_capacity(images.len());
+    if !images.is_empty() {
+        let cap = client.settings().map_err(said)?.blob_cap();
+        if let Some((image, why)) = images
+            .iter()
+            .find_map(|a| Some((a, model::over_cap(a.bytes.len(), cap)?)))
+        {
+            return Err((Some(image.id), why));
+        }
+        for image in images {
+            let blob = client
+                .put_blob(&image.bytes)
+                .map_err(|err| (Some(image.id), err.to_string()))?;
+            blobs.push(blob);
+        }
     }
-    let blob = client.put_blob(image).map_err(|err| err.to_string())?;
-    client
-        .mail(to, text, me, std::slice::from_ref(&blob.hash))
-        .map_err(|err| err.to_string())?;
-    Ok(blob)
+    let hashes: Vec<String> = blobs.iter().map(|blob| blob.hash.clone()).collect();
+    client.mail(name, text, me, &hashes).map_err(said)?;
+    Ok(blobs)
 }
 
 /// The keys of the window, as `yardr chat` has them.
@@ -98,6 +136,11 @@ pub struct Footplate {
     /// The images of the conversations that were open, by hash: an image
     /// never changes under its hash, so each is asked for once.
     images: HashMap<String, Picture>,
+    /// What is attached and not sent, for each conversation, and the text
+    /// typed in those that are not open; the open one's is in the line.
+    drafts: Drafts,
+    /// The attachments that are images, by id, as they are drawn.
+    thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
     icon: Arc<Image>,
 }
@@ -116,6 +159,8 @@ impl Footplate {
             this.paste(&pasted.0, cx)
         })
         .detach();
+        cx.subscribe(&line, |this, _, _: &Emptied, cx| this.remove_last(cx))
+            .detach();
 
         // The yard is followed on a thread of its own, which blocks on the
         // socket; what it learns comes here.
@@ -147,6 +192,8 @@ impl Footplate {
             line,
             conversation: ScrollHandle::new(),
             images: HashMap::new(),
+            drafts: Drafts::default(),
+            thumbs: HashMap::new(),
             focus: cx.focus_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
         }
@@ -167,6 +214,7 @@ impl Footplate {
                 let (model, effects) = Model::new(*state, open.as_deref());
                 self.model = Some(model);
                 self.down = None;
+                self.turned(open, cx);
                 self.conversation.scroll_to_bottom();
                 // What the yard did not give while it was away is asked for
                 // again.
@@ -193,6 +241,7 @@ impl Footplate {
         if before != (model.selected().map(str::to_string), model.entries().len()) {
             self.conversation.scroll_to_bottom();
         }
+        self.turned(before.0, cx);
         self.shown(cx);
         self.pictures(cx);
         self.run(effects, cx);
@@ -226,6 +275,23 @@ impl Footplate {
                 },
             );
         }
+    }
+
+    /// The conversation `from` was open. When another is now, what is typed
+    /// stays with the one it was typed in, and the line has what was typed
+    /// in the one that is open.
+    fn turned(&mut self, from: Option<String>, cx: &mut Context<Self>) {
+        let to = self
+            .model
+            .as_ref()
+            .and_then(|m| m.selected().map(str::to_string));
+        let Some(from) = from.filter(|from| Some(from) != to.as_ref()) else {
+            return;
+        };
+        let typed = self.line.read(cx).text().to_string();
+        self.drafts.put_text(&from, typed);
+        let text = to.map(|to| self.drafts.take_text(&to)).unwrap_or_default();
+        self.line.update(cx, |line, cx| line.set_text(&text, cx));
     }
 
     /// The line says whom it writes to.
@@ -323,93 +389,157 @@ impl Footplate {
         }
     }
 
-    /// Sends what is typed as mail to whom the open conversation is with.
+    /// Whom the open conversation is with, and where what is typed goes.
+    fn open(&self) -> Option<(String, Target)> {
+        let model = self.model.as_ref()?;
+        Some((model.selected()?.to_string(), model.target()?))
+    }
+
+    /// Sends the draft of the open conversation as one mail: what is typed,
+    /// and what is attached. A draft with a marked attachment is not sent.
     fn send(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
-            return;
-        };
-        let (Some(to), Some(target)) = (model.selected().map(str::to_string), model.target())
-        else {
+        let Some((to, target)) = self.open() else {
             return;
         };
         let text = self.line.read(cx).text().trim().to_string();
-        match model::unsendable(&text) {
+        match draft::unsendable(&text, self.drafts.attachments(&to)) {
             Some(why) if why.is_empty() => return,
             Some(why) => return self.notice(why, cx),
             None => {}
         }
+        // The draft is empty while the mail is on its way, so that Enter
+        // again does not send it again.
+        let images = self.drafts.take(&to);
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.notice(String::new(), cx);
         self.ask(
             cx,
-            move |client, me| {
-                let sent = match &target {
-                    Target::Crew(name) => client.mail(name, &text, me, &[]),
-                    Target::Peer { name, peer } => {
-                        client.mail_peer(name, peer, &text, me).map(drop)
-                    }
-                };
-                sent.map_err(|err| (err, text))
+            move |client, me| match post(client, me, &target, &text, &images) {
+                Ok(blobs) => Ok(images.iter().map(|a| a.id).zip(blobs).collect::<Vec<_>>()),
+                Err((at, why)) => Err(Unsent {
+                    text,
+                    images,
+                    at,
+                    why,
+                }),
             },
             move |this, sent, cx| match sent {
-                Ok(()) => this.change(cx, |m| m.sent(&to)),
-                Err((err, text)) => this.unsent(&to, text, &err.to_string(), cx),
-            },
-        );
-    }
-
-    /// Nothing typed is lost to a failed send: what did not go is back in
-    /// the line, before what was typed since, and the window says why.
-    fn unsent(&mut self, to: &str, text: String, why: &str, cx: &mut Context<Self>) {
-        self.line.update(cx, |line, cx| {
-            let typed = line.text().to_string();
-            let back = match (text.is_empty(), typed.is_empty()) {
-                (_, true) => text,
-                (true, false) => typed,
-                (false, false) => format!("{text} {typed}"),
-            };
-            line.set_text(&back, cx);
-        });
-        self.notice(format!("not sent to {to}: {why}"), cx);
-    }
-
-    /// Sends an image that was pasted as mail to whom the open conversation
-    /// is with, with what is typed. One that cannot go is refused in words,
-    /// and what is typed stays.
-    fn paste(&mut self, image: &Image, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
-            return;
-        };
-        let (Some(to), Some(target)) = (model.selected().map(str::to_string), model.target())
-        else {
-            return;
-        };
-        let text = self.line.read(cx).text().trim().to_string();
-        if let Some(why) = model::unpastable(&target, image.bytes(), &text) {
-            return self.notice(why, cx);
-        }
-        let Target::Crew(name) = target else {
-            return;
-        };
-        let image = image.clone();
-        self.line.update(cx, |line, cx| line.set_text("", cx));
-        self.notice(String::new(), cx);
-        self.ask(
-            cx,
-            move |client, me| match mail_image(client, me, &name, &text, image.bytes()) {
-                Ok(blob) => Ok((blob, image)),
-                Err(why) => Err((why, text)),
-            },
-            move |this, sent, cx| match sent {
-                Ok((blob, image)) => {
+                Ok(sent) => {
                     // The bytes are here already: the yard is not asked.
-                    let picture = Picture::of(&blob.hash, Ok(Some(image.bytes)));
-                    this.images.insert(blob.hash, picture);
+                    for (id, blob) in sent {
+                        if let Some(image) = this.thumbs.remove(&id) {
+                            this.images.insert(blob.hash, Picture::Here(image));
+                        }
+                    }
                     this.change(cx, |m| m.sent(&to))
                 }
-                Err((why, text)) => this.unsent(&to, text, &why, cx),
+                Err(unsent) => this.unsent(&to, unsent, cx),
             },
         );
+    }
+
+    /// Nothing of a draft is lost to a failed send: what did not go is back
+    /// where it was, before what was typed and attached since, the
+    /// attachment that kept it is marked, and the window says why.
+    fn unsent(&mut self, to: &str, unsent: Unsent, cx: &mut Context<Self>) {
+        self.drafts.restore(to, unsent.images);
+        if let Some(id) = unsent.at {
+            self.drafts.refuse(id, &unsent.why);
+        }
+        let open = self.model.as_ref().and_then(|m| m.selected()) == Some(to);
+        if open {
+            self.line.update(cx, |line, cx| {
+                let back = draft::rejoin(unsent.text, line.text().to_string());
+                line.set_text(&back, cx);
+            });
+        } else {
+            self.drafts.unsend(to, unsent.text);
+        }
+        self.notice(format!("not sent to {to}: {}", unsent.why), cx);
+    }
+
+    /// Attaches what was pasted or dropped to the draft for `with`. An
+    /// image among it is drawn from the bytes that came.
+    fn attach(&mut self, with: &str, found: Found, cx: &mut Context<Self>) -> u64 {
+        let image = model::image_type(&found.bytes)
+            .and_then(ImageFormat::from_mime_type)
+            .map(|format| Arc::new(Image::from_bytes(format, found.bytes.clone())));
+        let id = self.drafts.attach(with, found);
+        if let Some(image) = image {
+            self.thumbs.insert(id, image);
+        }
+        cx.notify();
+        id
+    }
+
+    /// Attaches an image that was pasted to the draft of the open
+    /// conversation: Enter sends it. One that cannot go is marked at once,
+    /// and one over the yard's cap as soon as the yard said its cap.
+    fn paste(&mut self, image: &Image, cx: &mut Context<Self>) {
+        let Some((with, target)) = self.open() else {
+            return;
+        };
+        let found = draft::pasted(image.bytes().to_vec(), &target);
+        let (bytes, marked) = (found.bytes.len(), found.refused.is_some());
+        let id = self.attach(&with, found, cx);
+        if marked {
+            return;
+        }
+        self.ask(
+            cx,
+            |client, _| client.settings().map(|settings| settings.blob_cap()),
+            move |this, cap, cx| {
+                // A yard that does not say its cap now is asked at Enter.
+                if let Ok(cap) = cap
+                    && let Some(why) = model::over_cap(bytes, cap)
+                {
+                    this.drafts.refuse(id, &why);
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// Attaches the files that were dropped on the window to the draft of
+    /// the conversation that was open then. They are read off the window's
+    /// thread, and one that is no image the yard takes only as far as it
+    /// takes to say so.
+    fn dropped(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let Some((with, target)) = self.open() else {
+            return;
+        };
+        let paths = paths.to_vec();
+        self.ask(
+            cx,
+            move |client, _| {
+                let cap = client.settings().ok().map(|settings| settings.blob_cap());
+                let found = paths.iter().map(|path| draft::dropped(path, &target, cap));
+                found.collect::<Vec<Found>>()
+            },
+            move |this, found, cx| {
+                for found in found {
+                    this.attach(&with, found, cx);
+                }
+            },
+        );
+    }
+
+    /// Takes an attachment off its draft.
+    fn remove(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.drafts.remove(id);
+        self.thumbs.remove(&id);
+        cx.notify();
+    }
+
+    /// Backspace in the empty line takes the last attachment off the draft.
+    fn remove_last(&mut self, cx: &mut Context<Self>) {
+        let Some((with, _)) = self.open() else {
+            return;
+        };
+        if let Some(id) = self.drafts.remove_last(&with) {
+            self.thumbs.remove(&id);
+            cx.notify();
+        }
     }
 
     fn select(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -576,6 +706,70 @@ impl Footplate {
         }
     }
 
+    /// An attachment of the draft: the image small, or its name when it is
+    /// none footplate draws, with the mark that removes it. One that cannot
+    /// go is pale in a frame of the colour its reason is said in.
+    fn attachment(
+        &self,
+        attachment: &Attachment,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let id = attachment.id;
+        let marked = attachment.refused.is_some();
+        let name = attachment.name.clone();
+        let named = move || {
+            div()
+                .size_full()
+                .p_1()
+                .text_xs()
+                .text_color(palette.faint)
+                .child(name.clone())
+        };
+        let shown = match self.thumbs.get(&id) {
+            Some(image) => img(image.clone())
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(move || named().into_any_element())
+                .into_any_element(),
+            None => named().into_any_element(),
+        };
+        div()
+            .relative()
+            .flex_none()
+            .size(px(ATTACHMENT))
+            .child(
+                div()
+                    .size_full()
+                    .rounded_md()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(if marked { palette.warn } else { palette.line })
+                    .when(marked, |el| el.opacity(0.5))
+                    .child(shown),
+            )
+            .child(
+                div()
+                    .id(("remove", id))
+                    .debug_selector(|| format!("remove {id}"))
+                    .absolute()
+                    .top(px(-6.))
+                    .right(px(-6.))
+                    .size(px(16.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.ground)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .cursor_pointer()
+                    .child("×")
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove(id, cx))),
+            )
+    }
+
     fn entry(&self, entry: Entry, palette: Palette) -> impl IntoElement + use<> {
         div()
             .flex()
@@ -668,6 +862,16 @@ impl Footplate {
 
         let (others, from) = model.others();
         let focus = self.line.focus_handle(cx);
+        let attached = self.drafts.attachments(with);
+        let attached = (!attached.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_3()
+                .pt_1()
+                .children(attached.iter().map(|a| self.attachment(a, palette, cx)))
+        });
+        let reasons = self.drafts.reasons(with);
         pane.child(head)
             .child(mail)
             .when(!model.notice.is_empty(), |el| {
@@ -703,7 +907,25 @@ impl Footplate {
                     .border_1()
                     .border_color(palette.line)
                     .bg(palette.side)
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    // A press anywhere in the frame is for the line. The
+                    // window itself takes the focus of a press no one
+                    // claimed, so this one is claimed.
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        window.focus(&focus);
+                        window.prevent_default();
+                    })
+                    .children(attached)
+                    // Why a marked attachment cannot go, by the line it
+                    // keeps from being sent.
+                    .children(reasons.into_iter().map(|why| {
+                        div()
+                            .text_sm()
+                            .text_color(palette.warn)
+                            .child(format!("! {why}"))
+                    }))
                     .child(self.line.clone()),
             )
     }
@@ -723,6 +945,11 @@ impl Render for Footplate {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &Previous, _, cx| this.step(-1, cx)))
+            // Files dropped anywhere on the window are for the draft of the
+            // open conversation.
+            .on_drop(
+                cx.listener(|this, files: &ExternalPaths, _, cx| this.dropped(files.paths(), cx)),
+            )
             .size_full()
             .flex()
             .bg(palette.ground)
@@ -839,8 +1066,40 @@ mod tests {
         })
     }
 
+    /// What is attached to the draft of the open conversation: for each
+    /// its id, its name and why it is marked.
+    fn attached(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(u64, String, Option<String>)> {
+        view.read_with(cx, |v, _| {
+            let with = v.model.as_ref().unwrap().selected().unwrap();
+            let all = v.drafts.attachments(with).iter();
+            all.map(|a| (a.id, a.name.clone(), a.refused.clone()))
+                .collect()
+        })
+    }
+
+    fn typed(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, cx| v.line.read(cx).text().to_string())
+    }
+
+    /// Clicks the mark that removes the attachment `id`, where it is drawn.
+    fn click_remove(cx: &mut VisualTestContext, id: u64) {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let mark: &'static str = Box::leak(format!("remove {id}").into_boxed_str());
+        let bounds = cx
+            .debug_bounds(mark)
+            .unwrap_or_else(|| panic!("no mark is drawn that removes attachment {id}"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    }
+
+    const PASTED: &str = "what was pasted";
+
     #[gpui::test]
-    fn an_image_is_pasted_as_mail_and_the_images_of_mail_are_shown(cx: &mut TestAppContext) {
+    fn images_are_attached_to_the_draft_and_sent_with_enter(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         // The yardmaster's mail carries two images, and the yard has one.
@@ -883,8 +1142,9 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.blobs_asked().len(), 2);
 
-        // An image over the yard's cap is refused in words: nothing is put,
-        // nothing sent, and what is typed stays.
+        // An image that is pasted is attached to the draft, and nothing is
+        // sent. One over the yard's cap is marked as soon as the yard said
+        // its cap, with the reason.
         yard.answer(
             "Settings",
             r#"{"result": {"operator": "jo", "blob_max_bytes": "69"}}"#,
@@ -893,33 +1153,61 @@ mod tests {
         let image = Image::from_bytes(ImageFormat::Png, png());
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
         cx.simulate_keystrokes("cmd-v");
+        let over = "the image is 70 bytes, and this yard takes one of 69 bytes at most (yardr settings: blob_max_bytes)";
         wait(cx, "that the image is over the cap", |cx| {
-            notice(&view, cx)
-                == "not sent to yardmaster: the image is 70 bytes, and this yard takes one of 69 bytes at most (yardr settings: blob_max_bytes)"
+            attached(&view, cx) == [(1, PASTED.to_string(), Some(over.to_string()))]
         });
-        view.read_with(cx, |v, cx| {
-            assert_eq!(v.line.read(cx).text(), "Paint the fence like this.")
-        });
+        // Enter sends nothing of a draft with a marked attachment, and says
+        // so; what is typed stays.
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            notice(&view, cx),
+            "what was pasted is marked and cannot go: remove it, then send"
+        );
+        assert_eq!(typed(&view, cx), "Paint the fence like this.");
+        cx.run_until_parked();
         assert_eq!(yard.asked("PutBlob"), Vec::<serde_json::Value>::new());
+        assert_eq!(yard.asked("Mail"), Vec::<serde_json::Value>::new());
+        // Its mark removes it.
+        click_remove(cx, 1);
+        assert_eq!(attached(&view, cx), []);
+        view.read_with(cx, |v, _| assert!(v.thumbs.is_empty()));
 
-        // Under it: the image is put, and mail sent with its hash and with
-        // what is typed.
+        // Under the cap: two images wait in the draft, with what is typed,
+        // until Enter.
         yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
         cx.simulate_keystrokes("cmd-v");
-        wait(cx, "the mail with the image", |_| {
+        let jpeg = Image::from_bytes(ImageFormat::Jpeg, vec![0xff, 0xd8, 0xff, 0xe0, 0, 16]);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&jpeg));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(
+            attached(&view, cx),
+            [(2, PASTED.to_string(), None), (3, PASTED.to_string(), None)]
+        );
+        assert_eq!(yard.asked("PutBlob"), Vec::<serde_json::Value>::new());
+        assert_eq!(yard.asked("Mail"), Vec::<serde_json::Value>::new());
+
+        // Enter: each image is put, in the order attached, and one mail
+        // sent with their hashes and with what is typed.
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail with the images", |_| {
             yard.asked("Mail")
                 == [
-                    json!({"to": "yardmaster", "text": "Paint the fence like this.", "actor": "jo", "files": [HASH]}),
+                    json!({"to": "yardmaster", "text": "Paint the fence like this.", "actor": "jo", "files": [HASH, HASH]}),
                 ]
         });
         let put = yard.asked("PutBlob");
-        assert_eq!(put.len(), 1);
+        assert_eq!(put.len(), 2);
         assert_eq!(
             put[0]["data"],
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
         );
-        wait(cx, "the line empty again", |cx| {
-            view.read_with(cx, |v, cx| v.line.read(cx).text().is_empty())
+        assert_eq!(put[1]["data"], "/9j/4AAQ");
+        wait(cx, "the draft empty again", |cx| {
+            typed(&view, cx).is_empty() && attached(&view, cx).is_empty()
         });
         assert_eq!(notice(&view, cx), "");
 
@@ -933,37 +1221,111 @@ mod tests {
         assert_eq!(yard.blobs_asked().len(), 2);
 
         // With nothing typed the image is the mail.
-        cx.simulate_keystrokes("cmd-v");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        cx.simulate_keystrokes("cmd-v enter");
         wait(cx, "the mail that is an image only", |_| {
             yard.asked("Mail").last()
                 == Some(&json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [HASH]}))
         });
+        wait(cx, "the draft empty again", |cx| {
+            attached(&view, cx).is_empty()
+        });
 
-        // What the yard refuses is said, and the text is back in the line.
+        // Backspace takes text while there is text, and then the last
+        // attachment.
+        cx.simulate_keystrokes("cmd-v cmd-v");
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(attached(&view, cx).len(), 2);
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(attached(&view, cx), [(5, PASTED.to_string(), None)]);
+
+        // What the yard refuses is said: the text is back in the line and
+        // the image in the draft, marked with the yard's words, and no mail
+        // was sent.
+        let mails = yard.asked("Mail").len();
         yard.answer(
             "PutBlob",
             r#"{"error": {"code": "error", "message": "an image is a PNG or a JPEG"}}"#,
         );
         cx.simulate_input("And this.");
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("enter");
         wait(cx, "why the image was not sent", |cx| {
             notice(&view, cx) == "not sent to yardmaster: an image is a PNG or a JPEG"
         });
-        view.read_with(cx, |v, cx| assert_eq!(v.line.read(cx).text(), "And this."));
+        assert_eq!(typed(&view, cx), "And this.");
+        assert_eq!(
+            attached(&view, cx),
+            [(
+                5,
+                PASTED.to_string(),
+                Some("an image is a PNG or a JPEG".to_string())
+            )]
+        );
+        assert_eq!(yard.asked("Mail").len(), mails);
+        click_remove(cx, 5);
 
-        // Another kind of image never leaves the window.
+        // Another kind of image is marked as it is pasted, and never leaves
+        // the window.
         let tiff = Image::from_bytes(ImageFormat::Tiff, b"II*\0".to_vec());
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&tiff));
         cx.simulate_keystrokes("cmd-v");
-        assert!(
-            notice(&view, cx).contains("a PNG or a JPEG, and what was pasted"),
-            "{}",
-            notice(&view, cx)
+        let neither = "mail carries a PNG or a JPEG, and what was pasted is neither";
+        assert_eq!(
+            attached(&view, cx),
+            [(7, PASTED.to_string(), Some(neither.to_string()))]
         );
+        click_remove(cx, 7);
 
-        // To one of a linked yard nothing is sent: the window says that
-        // images do not cross the link, and what is typed stays.
-        let (puts, mails) = (yard.asked("PutBlob").len(), yard.asked("Mail").len());
+        // Files that are dropped are attached as well, and one that is no
+        // image the yard takes is refused in words, before anything is put.
+        let puts = yard.asked("PutBlob").len();
+        let dir = tempfile::tempdir().unwrap();
+        let (fence, notes) = (dir.path().join("fence.png"), dir.path().join("notes.pdf"));
+        std::fs::write(&fence, png()).unwrap();
+        std::fs::write(&notes, b"%PDF-1.7 and more").unwrap();
+        view.update(cx, |v, cx| v.dropped(&[fence, notes], cx));
+        wait(cx, "the dropped files", |cx| attached(&view, cx).len() == 2);
+        assert_eq!(
+            attached(&view, cx),
+            [
+                (8, "fence.png".to_string(), None),
+                (
+                    9,
+                    "notes.pdf".to_string(),
+                    Some("mail carries a PNG or a JPEG, and notes.pdf is neither".to_string())
+                )
+            ]
+        );
+        view.read_with(cx, |v, _| {
+            let reasons = v.drafts.reasons("yardmaster");
+            assert_eq!(
+                reasons,
+                ["mail carries a PNG or a JPEG, and notes.pdf is neither"]
+            );
+            assert!(v.thumbs.contains_key(&8) && !v.thumbs.contains_key(&9));
+        });
+        // The window draws both, and nothing went to the yard.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(yard.asked("PutBlob").len(), puts);
+        // A drop on the window reaches the same place. gpui hands out no
+        // way to make the paths of one, so this one carries none: the yard
+        // is asked its cap for it, and nothing is attached.
+        let asked = yard.asked("Settings").len();
+        let position = gpui::point(px(400.), px(300.));
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths::default(),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Submit { position });
+        wait(cx, "the drop", |_| yard.asked("Settings").len() > asked);
+        cx.run_until_parked();
+        assert_eq!(attached(&view, cx).len(), 2);
+
+        // Each conversation keeps its draft: the text and the attachments
+        // stay with the yardmaster's when another is opened.
+        let mails = yard.asked("Mail").len();
         yard.answer("Conversation", r#"{"result": []}"#);
         cx.simulate_keystrokes("tab");
         wait(cx, "the conversation with the linked yard", |cx| {
@@ -971,10 +1333,27 @@ mod tests {
                 v.model.as_ref().unwrap().selected() == Some("clerk@north")
             })
         });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(attached(&view, cx), []);
+
+        // To one of a linked yard an image is marked with the yard's
+        // refusal, and Enter sends nothing while it is there.
+        cx.simulate_input("Hello north.");
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-        cx.simulate_keystrokes("cmd-v");
-        assert_eq!(notice(&view, cx), "images do not cross the link yet");
-        view.read_with(cx, |v, cx| assert_eq!(v.line.read(cx).text(), "And this."));
+        cx.simulate_keystrokes("cmd-v enter");
+        assert_eq!(
+            attached(&view, cx),
+            [(
+                10,
+                PASTED.to_string(),
+                Some("images do not cross the link yet".to_string())
+            )]
+        );
+        assert_eq!(
+            notice(&view, cx),
+            "what was pasted is marked and cannot go: remove it, then send"
+        );
+        assert_eq!(typed(&view, cx), "Hello north.");
         cx.run_until_parked();
         assert_eq!(
             (yard.asked("PutBlob").len(), yard.asked("Mail").len()),
@@ -982,12 +1361,29 @@ mod tests {
         );
         assert_eq!(yard.asked("MailPeer"), Vec::<serde_json::Value>::new());
 
+        // Back with the yardmaster the draft is as it was left, and with
+        // the linked yard again as well.
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(typed(&view, cx), "And this.");
+        assert_eq!(attached(&view, cx).len(), 2);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(typed(&view, cx), "Hello north.");
+        assert_eq!(attached(&view, cx).len(), 1);
+
+        // Without the image the text goes over the link.
+        cx.simulate_keystrokes("end");
+        click_remove(cx, 10);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail queued for the peer", |_| {
+            yard.asked("MailPeer")
+                == [json!({"to": "clerk", "peer": "north", "text": "Hello north.", "actor": "jo"})]
+        });
+
         // Text on the clipboard is pasted into the line, as before.
+        cx.simulate_keystrokes("shift-tab");
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(" Two\nlines.".into()));
         cx.simulate_keystrokes("cmd-v");
-        view.read_with(cx, |v, cx| {
-            assert_eq!(v.line.read(cx).text(), "And this. Two lines.")
-        });
+        assert_eq!(typed(&view, cx), "And this. Two lines.");
     }
 
     #[gpui::test]
