@@ -83,7 +83,8 @@ fn main() {
 }
 
 /// gpui's window options have no icon. On macOS a program that is no bundle
-/// gets the dock's icon by setting it on the application.
+/// gets the dock's icon by setting it on the application. In a bundle
+/// (scripts/bundle-mac.sh) it is the same picture as the bundle's own.
 #[cfg(target_os = "macos")]
 fn dock_icon() {
     use objc2::{AllocAnyThread, MainThreadMarker};

@@ -37,6 +37,16 @@ a Mac, would not say so.
 There is no installer. The binary is the application: copy it where you
 like and run it.
 
+On macOS a script wraps it as an application for Finder, with the icon as
+an icns:
+
+    cargo build --release && scripts/bundle-mac.sh
+
+That is the whole of it. `target/Footplate.app` runs on a double-click and
+can be moved to `/Applications`. It is not signed or notarized, so it is
+for the Mac that built it. The script needs `sips` and `iconutil`, which
+macOS has, and says so on another system.
+
 ## What it talks to
 
 The yard's server, over its unix socket: `$YARDR_HOME/yard.sock` when
@@ -154,16 +164,23 @@ resizing one that is over the cap, or sending files that are no image.
 
 ## The icon
 
-`assets/icon.svg` is the drawing and `assets/icon.png` its rendering, which
-the binary carries:
+The icon is a painting by mckean: a navy tank engine with brass fittings,
+head-on, a speech bubble on its buffer beam, a yard at dusk behind.
+`assets/icon.png` is its master, 1024 pixels square: the rounded square is
+824 wide in the middle of it, with the 100 pixels of margin Apple's template
+has, and the corners are transparent. The binary carries it at half the
+size, which is all a window, a dock or a taskbar shows of it:
 
-    rsvg-convert -w 512 -h 512 assets/icon.svg -o assets/icon.png
+    sips -z 512 512 assets/icon.png --out assets/icon-512.png
 
 It stands in the window, and in the dock or the taskbar. gpui's window
 options have no icon, so the program sees to it when it starts
 (`src/taskbar.rs` for Linux):
 
-- macOS: it is set on the application.
+- macOS: it is set on the application, which is what a bare binary
+  (`cargo run`) has to show in the dock. Finder, Spotlight and the dock
+  while footplate is not running show the icon of the bundle, when there is
+  one: see "Building".
 - Linux: a desktop shows the icon and the name of the desktop entry whose id
   is the window's (`footplate`). There is no installer to put one there, so
   footplate writes its own, for you alone: `footplate.desktop` under

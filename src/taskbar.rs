@@ -18,7 +18,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The icon as a file is this size: assets/icon.png.
+/// The icon as a file is this size: assets/icon-512.png.
 const ICON_SIZE: u32 = 512;
 
 /// Where a person's own desktop entries and icons are: `$XDG_DATA_HOME`

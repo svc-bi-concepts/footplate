@@ -20,8 +20,9 @@ use crate::model::{self, Effect, Entry, Model, Row, Target};
 use crate::session::{self, Update};
 use crate::theme::Palette;
 
-/// The application's icon, drawn in assets/icon.svg.
-pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
+/// The application's icon: assets/icon.png, the master, at half its size,
+/// which is all a window, a dock or a taskbar shows of it.
+pub const ICON: &[u8] = include_bytes!("../assets/icon-512.png");
 
 actions!(footplate, [Next, Previous]);
 
