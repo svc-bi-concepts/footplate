@@ -133,7 +133,7 @@ write in.
 |---|---|
 | `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open |
 | `cmd+v` (`ctrl+v` on Linux) | pastes text into the line; an image is attached to the draft |
-| a file dropped on the window | is attached to the draft, when it is a PNG or a JPEG |
+| a file dropped on the window | is added to the draft; a non-PNG or non-JPEG is marked and refused |
 | `backspace` in an empty line | removes the last attachment |
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
@@ -143,7 +143,7 @@ Not in this slice, and in `yardr chat`: the `yard` row with your
 notifications, a crew member's pane, and a text of several lines or longer
 than one mail (4096 bytes): the line is one line, and a longer text is
 refused with its size, not split. Nor here: saving an image to disk,
-resizing one that is over the cap, and files that are no image.
+resizing one that is over the cap, or sending files that are no image.
 
 ## The icon
 
