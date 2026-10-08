@@ -15,6 +15,9 @@ publish = false
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# An image goes to the yard in base64, in the JSON of the call. In gpui's
+# tree already.
+base64 = "0.22"
 # The stream's thread hands its events to gpui's foreground through this.
 async-channel = "2"
 # A mail's time in the zone of the person reading.

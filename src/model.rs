@@ -10,13 +10,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, TimeZone};
 
-use crate::api::{CrewMember, Event, Letter, Peer};
+use crate::api::{BlobRef, CrewMember, Event, Letter, Peer};
 
 /// The kind of message a link must carry out for mail to be written.
 const PEER_MAIL: &str = "mail";
 
 /// A mail holds this many bytes.
 pub const MAIL_BYTES: usize = 4096;
+
+/// What the yard says of mail with an image for a linked yard, and the
+/// window before it asks.
+pub const NO_IMAGES_OVER_THE_LINK: &str = "images do not cross the link yet";
 
 /// What a window for the user `me` starts from, read at the seq `head`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -102,6 +106,8 @@ pub struct Entry {
     pub at: String,
     pub from: String,
     pub text: String,
+    /// The images it carries, shown under its text.
+    pub files: Vec<BlobRef>,
     /// The user's own.
     pub mine: bool,
     /// Where a mail the user sent stands. Mails that stand alike share one
@@ -323,9 +329,22 @@ impl Model {
                 at: l.at.clone(),
                 from: l.from.clone(),
                 text: plain(&l.text),
+                files: l.files.clone(),
                 mine,
                 standing,
             });
+        }
+        out
+    }
+
+    /// The hash of every image the open conversation shows, each once.
+    pub fn images(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        let letters = self.selected().and_then(|s| self.convo.get(s));
+        for f in letters.into_iter().flatten().flat_map(|l| &l.files) {
+            if !out.contains(&f.hash.as_str()) {
+                out.push(&f.hash);
+            }
         }
         out
     }
@@ -548,6 +567,7 @@ impl Model {
             from: e.actor.clone(),
             to: to.to_string(),
             text: e.text("text").to_string(),
+            files: e.files(),
             ..Letter::default()
         };
         let peer = e.text("to_peer");
@@ -675,6 +695,56 @@ pub fn unsendable(text: &str) -> Option<String> {
             "a mail holds {MAIL_BYTES} bytes, and this is {n}: send it in parts"
         )),
         _ => None,
+    }
+}
+
+/// The type of an image the yard takes, read from its bytes as the yard
+/// reads it: `image/png` or `image/jpeg`, and nothing for anything else.
+pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
+}
+
+/// Why an image is not sent to where what is typed goes, with the text
+/// typed, if it is not. The text may be empty: the image is the mail.
+pub fn unpastable(target: &Target, image: &[u8], text: &str) -> Option<String> {
+    if matches!(target, Target::Peer { .. }) {
+        return Some(NO_IMAGES_OVER_THE_LINK.to_string());
+    }
+    if image_type(image).is_none() {
+        return Some(
+            "mail carries a PNG or a JPEG, and what was pasted is another kind of image"
+                .to_string(),
+        );
+    }
+    unsendable(text).filter(|why| !why.is_empty())
+}
+
+/// Why an image of `bytes` bytes is not sent in a yard whose cap on one is
+/// `cap`, if it is not.
+pub fn over_cap(bytes: usize, cap: u64) -> Option<String> {
+    (bytes as u64 > cap).then(|| {
+        format!(
+            "the image is {}, and this yard takes one of {} at most (yardr settings: blob_max_bytes)",
+            size(bytes as u64),
+            size(cap)
+        )
+    })
+}
+
+/// A number of bytes for a person: `70 bytes`, `812 KiB`, `8.5 MiB`.
+pub fn size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    match bytes {
+        n if n < KIB => format!("{n} bytes"),
+        n if n < MIB => format!("{} KiB", n / KIB),
+        n => format!("{:.1} MiB", n as f64 / MIB as f64),
     }
 }
 
@@ -1372,6 +1442,98 @@ mod tests {
         assert_eq!(clock("2026-12-31T23:30:00.123456Z", &zone), "01-01 01:30");
         assert_eq!(clock("", &zone), "");
         assert_eq!(clock("yesterday", &zone), "");
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nthe rest";
+    const JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0, 16];
+
+    fn png(hash: &str) -> Value {
+        json!({"hash": hash, "type": "image/png", "bytes": 70})
+    }
+
+    #[test]
+    fn a_mail_s_images_are_shown_with_it_from_the_yard_and_from_the_stream() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let files: Vec<BlobRef> = serde_json::from_value(json!([png("aa"), png("bb")])).unwrap();
+        m.conversation(
+            "yardmaster",
+            vec![
+                Letter {
+                    files: files.clone(),
+                    ..letter(12, "yardmaster", "jo", "Like this?")
+                },
+                letter(13, "jo", "yardmaster", "Yes."),
+            ],
+        );
+        // The user's own, with no text, as the stream tells of it; and one
+        // to the user that carries an image the conversation has already.
+        m.event(&event(
+            21,
+            "mail",
+            "jo",
+            json!({"to": "yardmaster", "text": "", "files": [png("cc")]}),
+        ));
+        m.event(&event(
+            22,
+            "mail",
+            "yardmaster",
+            json!({"to": "jo", "to_user": true, "text": "Again.", "files": [png("aa")]}),
+        ));
+        let entries = m.entries();
+        assert_eq!(entries[0].files, files);
+        assert_eq!(entries[1].files, []);
+        assert_eq!(
+            (entries[2].text.as_str(), entries[2].files[0].hash.as_str()),
+            ("", "cc")
+        );
+        assert_eq!(entries[2].files[0].kind, "image/png");
+        assert_eq!(m.images(), ["aa", "bb", "cc"]);
+        // Another conversation has none of them.
+        m.select("assembly");
+        assert_eq!(m.images(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn an_image_is_a_png_or_a_jpeg_by_its_bytes() {
+        assert_eq!(image_type(PNG), Some("image/png"));
+        assert_eq!(image_type(JPEG), Some("image/jpeg"));
+        assert_eq!(image_type(b"GIF89a"), None);
+        assert_eq!(image_type(b"II*\0"), None);
+        assert_eq!(image_type(b""), None);
+    }
+
+    #[test]
+    fn an_image_goes_to_this_yard_s_crew_and_not_over_a_link() {
+        let crew = Target::Crew("yardmaster".into());
+        assert_eq!(unpastable(&crew, PNG, ""), None);
+        assert_eq!(unpastable(&crew, JPEG, "Like this."), None);
+        let peer = Target::Peer {
+            name: "clerk".into(),
+            peer: "north".into(),
+        };
+        assert_eq!(
+            unpastable(&peer, PNG, "Like this.").as_deref(),
+            Some("images do not cross the link yet")
+        );
+        // Another kind of image, and a text that is no mail.
+        let tiff = unpastable(&crew, b"II*\0", "").unwrap();
+        assert!(tiff.contains("a PNG or a JPEG"), "{tiff}");
+        let long = unpastable(&crew, PNG, &"x".repeat(4097)).unwrap();
+        assert!(long.contains("this is 4097"), "{long}");
+    }
+
+    #[test]
+    fn an_image_over_the_yard_s_cap_is_refused_with_both_sizes() {
+        assert_eq!(over_cap(70, 8388608), None);
+        assert_eq!(over_cap(8388608, 8388608), None);
+        assert_eq!(
+            over_cap(9 * 1024 * 1024, 8388608).as_deref(),
+            Some(
+                "the image is 9.0 MiB, and this yard takes one of 8.0 MiB at most (yardr settings: blob_max_bytes)"
+            )
+        );
+        assert_eq!(size(70), "70 bytes");
+        assert_eq!(size(2048), "2 KiB");
     }
 
     #[test]

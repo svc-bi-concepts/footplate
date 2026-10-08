@@ -50,13 +50,15 @@ JSON object a line. `src/api.rs` is the whole client.
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
 | `Crew`, `Peers` | whom there is to talk with: the crew, and `<name>@<peer>` for each one a linked yard exposes |
-| `GetUser`, `Settings` | who the window is for |
+| `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on an image, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `Conversation` | the mail both ways with the one whose row is open |
+| `GET /blobs/<hash>` | an image a mail of the open conversation carries, once for each hash |
 
 | It writes | When |
 |---|---|
 | `Mail` | Enter, in a conversation with a crew member |
+| `PutBlob`, then `Mail` with its hash | an image is pasted, in a conversation with a crew member |
 | `MailPeer` | Enter, in a conversation with one of a linked yard |
 | `AckUserInbox` | a conversation showed mail that was unread |
 
@@ -74,6 +76,21 @@ agree. Opening a conversation marks its mail read, and so does mail that
 arrives in the open one. A user's mail has one position for all senders, so
 mail of a conversation you have not opened holds back what came after it:
 nothing is marked read that the window did not show.
+
+**Images.** Mail can carry images, and the window shows those of a mail
+under its text, each in a space 240 points high: scaled down to fit it,
+never up.
+An image is read from the yard once and kept in memory by its hash, for as
+long as the window runs. One the yard no longer has (`yardr store prune`
+removes an image no mail names) is a line that says so. Pasting an image
+(`cmd+v`, `ctrl+v` on Linux) in a conversation with a crew member sends it
+at once, as one mail with whatever is typed in the line; there is no step in
+between, and nothing typed is no hindrance. Three things are refused in
+words, above the line, and send nothing, with what is typed left as it is:
+an image for `<name>@<peer>` (`images do not cross the link yet`), one over
+the yard's cap (`blob_max_bytes` of `yardr settings`, 8 MiB when unset), and
+one that is neither a PNG nor a JPEG, which are what the yard takes: a
+screenshot is a PNG, an image copied out of another program may be a TIFF.
 
 **No yard** (the socket is missing, or nothing answers): the window says so,
 names the socket, and tries again every 3 seconds. footplate does not start
@@ -95,6 +112,7 @@ write in.
 | Key | Does |
 |---|---|
 | `enter` | sends the line as mail to the one whose conversation is open |
+| `cmd+v` (`ctrl+v` on Linux) | pastes text into the line; an image is sent as mail, with the line |
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
 | `cmd+q` (`ctrl+q` on Linux) | quits; so does closing the window |
@@ -102,7 +120,8 @@ write in.
 Not in this slice, and in `yardr chat`: the `yard` row with your
 notifications, a crew member's pane, and a text of several lines or longer
 than one mail (4096 bytes): the line is one line, and a longer text is
-refused with its size, not split.
+refused with its size, not split. Nor here: dropping a file on the window,
+saving an image to disk, and files that are no image.
 
 ## The icon
 
@@ -142,5 +161,6 @@ options have no icon, so the program sees to it when it starts
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir that answers the documented JSON |
 
 The tests run without a yard and without a screen: the client against the
-fake yard for each call and the stream, the model as it is, and the window
-itself on gpui's test platform.
+fake yard for each call, an image and the stream, the model as it is, and
+the window itself on gpui's test platform, where an image on its clipboard
+is pasted.

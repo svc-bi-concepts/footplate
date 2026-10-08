@@ -31,6 +31,9 @@ struct State {
     last_request: String,
     events: Vec<String>,
     streams: Vec<u64>,
+    /// The images the yard holds, by hash, and every hash asked for.
+    blobs: HashMap<String, Vec<u8>>,
+    blobs_asked: Vec<String>,
     stopped: bool,
 }
 
@@ -171,6 +174,21 @@ impl Yard {
         self.shared.changed.notify_all();
     }
 
+    /// An image the yard holds: `GET /blobs/<hash>` answers the bytes.
+    pub fn blob(&self, hash: &str, bytes: &[u8]) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .blobs
+            .insert(hash.into(), bytes.to_vec());
+    }
+
+    /// The hash of every image asked for so far.
+    pub fn blobs_asked(&self) -> Vec<String> {
+        self.shared.state.lock().unwrap().blobs_asked.clone()
+    }
+
     /// The `after` of every stream opened so far.
     pub fn streams_asked(&self) -> Vec<u64> {
         self.shared.state.lock().unwrap().streams.clone()
@@ -234,6 +252,34 @@ fn serve_one(conn: UnixStream, shared: &Shared) -> std::io::Result<()> {
             .and_then(|n| n.parse().ok())
             .unwrap_or(0);
         return stream(conn, shared, after);
+    }
+
+    if let Some(hash) = target.strip_prefix("/blobs/") {
+        let blob = {
+            let mut state = shared.state.lock().unwrap();
+            state.blobs_asked.push(hash.to_string());
+            state.blobs.get(hash).cloned()
+        };
+        match blob {
+            Some(bytes) => {
+                write!(
+                    conn,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+                    bytes.len()
+                )?;
+                conn.write_all(&bytes)?;
+            }
+            // The one answer that is no JSON.
+            None => {
+                let line = "no such image\n";
+                write!(
+                    conn,
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{line}",
+                    line.len()
+                )?;
+            }
+        }
+        return conn.flush();
     }
 
     let method = target.strip_prefix("/call/").unwrap_or("").to_string();

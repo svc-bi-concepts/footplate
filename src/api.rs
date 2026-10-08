@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{env, fmt, thread};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
@@ -33,6 +35,9 @@ const REPLACING_PATIENCE: Duration = Duration::from_secs(30);
 /// yard does not have.
 const REPLACING: &str = "replacing";
 pub const NOT_FOUND: &str = "not-found";
+
+/// The most bytes `PutBlob` takes in a yard that has set no cap of its own.
+pub const BLOB_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Why a call or the stream did not answer.
 #[derive(Debug)]
@@ -85,11 +90,35 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
-/// The yard's settings, of which a client reads the operator.
+/// The yard's settings, of which a client reads the operator and the cap on
+/// an image.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub operator: String,
+    /// A whole number in a string; absent when the yard has set none.
+    #[serde(default)]
+    pub blob_max_bytes: String,
+}
+
+impl Settings {
+    /// The most bytes `PutBlob` takes.
+    pub fn blob_cap(&self) -> u64 {
+        self.blob_max_bytes.parse().unwrap_or(BLOB_MAX_BYTES)
+    }
+}
+
+/// An image mail carries, as a letter names it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct BlobRef {
+    /// The SHA-256 of its bytes, in hex: `GET /blobs/<hash>` answers them.
+    #[serde(default)]
+    pub hash: String,
+    /// `image/png` or `image/jpeg`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -161,6 +190,9 @@ pub struct Letter {
     pub text: String,
     #[serde(default)]
     pub read: bool,
+    /// The images it carries, in the order it was sent with them.
+    #[serde(default, deserialize_with = "or_default")]
+    pub files: Vec<BlobRef>,
     /// On mail to a linked yard only: `queued`, `sent` or `failed`.
     #[serde(default)]
     pub delivery: String,
@@ -216,6 +248,14 @@ impl Event {
     /// A seq of the event's data, 0 when it has none of that name.
     pub fn number(&self, field: &str) -> u64 {
         self.data.get(field).and_then(Value::as_u64).unwrap_or(0)
+    }
+
+    /// The images of a `mail` event, none when it carries none.
+    pub fn files(&self) -> Vec<BlobRef> {
+        self.data
+            .get("files")
+            .and_then(|files| serde_json::from_value(files.clone()).ok())
+            .unwrap_or_default()
     }
 
     pub fn flag(&self, field: &str) -> bool {
@@ -318,10 +358,49 @@ impl Client {
             .map(drop)
     }
 
-    /// Sends mail to a crew member or a user of this yard.
-    pub fn mail(&self, to: &str, text: &str, actor: &str) -> Result<()> {
-        self.call("Mail", json!({ "to": to, "text": text, "actor": actor }))
-            .map(drop)
+    /// Sends mail to a crew member or a user of this yard, with the images
+    /// `files` names by the hash `PutBlob` answered. With one, the text may
+    /// be empty.
+    pub fn mail(&self, to: &str, text: &str, actor: &str, files: &[String]) -> Result<()> {
+        let mut args = json!({ "to": to, "text": text, "actor": actor });
+        if !files.is_empty() {
+            args["files"] = json!(files);
+        }
+        self.call("Mail", args).map(drop)
+    }
+
+    /// Gives the yard an image, a PNG or a JPEG, for mail to carry.
+    pub fn put_blob(&self, bytes: &[u8]) -> Result<BlobRef> {
+        self.answer("PutBlob", json!({ "data": BASE64.encode(bytes) }))
+    }
+
+    /// The bytes of an image, `None` for a hash the yard does not hold: it
+    /// removes an image once no mail it still has names it.
+    pub fn blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        // The hash is what a letter said, and goes into the request's first
+        // line: one that is no hex is no image of the yard's.
+        if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        let mut conn = UnixStream::connect(&self.socket)?;
+        conn.set_read_timeout(Some(CALL_TIMEOUT))?;
+        conn.set_write_timeout(Some(CALL_TIMEOUT))?;
+        write!(
+            conn,
+            "GET /blobs/{hash} HTTP/1.1\r\nHost: yard\r\nX-Yardr-Client: {CLIENT}\r\nConnection: close\r\n\r\n"
+        )?;
+        let (status, mut body) = respond(conn)?;
+        match status {
+            200 => {
+                let mut bytes = Vec::new();
+                body.read_to_end(&mut bytes)?;
+                Ok(Some(bytes))
+            }
+            404 => Ok(None),
+            _ => Err(Error::Protocol(format!(
+                "the image {hash}: status {status}"
+            ))),
+        }
     }
 
     /// Queues mail to one of a linked yard, `<to>@<peer>`.
@@ -754,7 +833,7 @@ mod tests {
         let yard = Yard::start();
         yard.answer("Mail", "{}");
         yard.client()
-            .mail("yardmaster", "Thanks. Land it.", "jo")
+            .mail("yardmaster", "Thanks. Land it.", "jo", &[])
             .unwrap();
         assert_eq!(
             yard.asked("Mail"),
@@ -765,12 +844,129 @@ mod tests {
             "Mail",
             r#"{"error": {"code": "error", "message": "mail is 1 to 4096 bytes"}}"#,
         );
-        let err = yard.client().mail("yardmaster", "", "jo").unwrap_err();
+        let err = yard.client().mail("yardmaster", "", "jo", &[]).unwrap_err();
         assert!(
             matches!(&err, Error::Refused { code, .. } if code == "error"),
             "{err:?}"
         );
         assert!(!err.not_found());
+    }
+
+    /// The PNG of docs/api.md: one pixel, 70 bytes.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const HASH: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
+
+    #[test]
+    fn the_cap_on_an_image_is_the_yard_s_or_8_mib() {
+        let yard = Yard::start();
+        yard.answer(
+            "Settings",
+            r#"{"result": {"blob_max_bytes": "1024", "operator": "jo"}}"#,
+        );
+        assert_eq!(yard.client().settings().unwrap().blob_cap(), 1024);
+        yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
+        assert_eq!(yard.client().settings().unwrap().blob_cap(), 8388608);
+        yard.answer("Settings", r#"{"result": {"blob_max_bytes": "many"}}"#);
+        assert_eq!(yard.client().settings().unwrap().blob_cap(), 8388608);
+    }
+
+    #[test]
+    fn put_blob_then_mail_with_the_hash() {
+        let yard = Yard::start();
+        let bytes = BASE64.decode(PNG).unwrap();
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        yard.answer("Mail", "{}");
+        let blob = yard.client().put_blob(&bytes).unwrap();
+        assert_eq!(yard.asked("PutBlob"), vec![json!({"data": PNG})]);
+        assert_eq!(
+            blob,
+            BlobRef {
+                hash: HASH.into(),
+                kind: "image/png".into(),
+                bytes: 70
+            }
+        );
+        yard.client()
+            .mail("yardmaster", "", "jo", &[blob.hash])
+            .unwrap();
+        assert_eq!(
+            yard.asked("Mail"),
+            vec![json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [HASH]})]
+        );
+
+        yard.answer(
+            "PutBlob",
+            r#"{"error": {"code": "error", "message": "an image is a PNG or a JPEG"}}"#,
+        );
+        let err = yard.client().put_blob(b"GIF89a").unwrap_err();
+        assert_eq!(err.to_string(), "an image is a PNG or a JPEG");
+    }
+
+    #[test]
+    fn an_image_by_its_hash_and_the_one_the_yard_does_not_hold() {
+        let yard = Yard::start();
+        // Bytes that are no text, and more than one read gives.
+        let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        yard.blob(HASH, &bytes);
+        assert_eq!(yard.client().blob(HASH).unwrap(), Some(bytes));
+        let request = yard.last_request();
+        assert!(
+            request.starts_with(&format!("GET /blobs/{HASH} HTTP/1.1\r\n")),
+            "{request}"
+        );
+
+        let gone = "00".repeat(32);
+        assert_eq!(yard.client().blob(&gone).unwrap(), None);
+        assert_eq!(yard.blobs_asked(), vec![HASH.to_string(), gone]);
+
+        // What is no hash is not asked for: it would be a request of its own.
+        assert_eq!(yard.client().blob("").unwrap(), None);
+        assert_eq!(
+            yard.client()
+                .blob("ab HTTP/1.1\r\nX: y\r\n\r\nGET /blobs/cd")
+                .unwrap(),
+            None
+        );
+        assert_eq!(yard.client().blob("../yard.db").unwrap(), None);
+        assert_eq!(yard.blobs_asked().len(), 2);
+
+        yard.stop();
+        assert!(matches!(yard.client().blob(HASH), Err(Error::Down(_))));
+    }
+
+    #[test]
+    fn a_letter_and_a_mail_event_name_their_images() {
+        let yard = Yard::start();
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "from": "jo", "to": "yardmaster", "text": "Paint the fence like this.", "read": false,
+                 "files": [{"hash": HASH, "type": "image/png", "bytes": 70}]},
+                {"seq": 13, "from": "yardmaster", "to": "jo", "text": "Will do.", "files": null}
+            ]})
+            .to_string(),
+        );
+        let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+        let png = BlobRef {
+            hash: HASH.into(),
+            kind: "image/png".into(),
+            bytes: 70,
+        };
+        assert_eq!(letters[0].files, vec![png.clone()]);
+        assert_eq!(letters[1].files, vec![]);
+
+        let event: Event = serde_json::from_value(json!({"seq": 12, "kind": "mail", "actor": "jo",
+            "data": {"to": "yardmaster", "text": "Paint the fence like this.",
+                     "files": [{"hash": HASH, "type": "image/png", "bytes": 70}]}}))
+        .unwrap();
+        assert_eq!(event.files(), vec![png]);
+        let plain: Event =
+            serde_json::from_value(json!({"seq": 13, "kind": "mail", "data": {"files": "none"}}))
+                .unwrap();
+        assert_eq!(plain.files(), vec![]);
     }
 
     #[test]
@@ -862,7 +1058,7 @@ mod tests {
         assert!(socket.exists());
         assert!(matches!(client.head(), Err(Error::Down(_))));
         assert!(matches!(
-            client.mail("yardmaster", "hello", "jo"),
+            client.mail("yardmaster", "hello", "jo", &[]),
             Err(Error::Down(_))
         ));
     }

@@ -2,16 +2,17 @@
 //! conversation and the line to write in. What it shows is the model's
 //! (model.rs); this file draws it and makes the calls the model asks for.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding,
-    MouseButton, ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px,
+    MouseButton, ObjectFit, ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px,
 };
 
-use crate::api::{self, Client};
-use crate::input::{Line, Submitted};
+use crate::api::{self, BlobRef, Client};
+use crate::input::{Line, Pasted, Submitted};
 use crate::model::{self, Effect, Entry, Model, Row, Target};
 use crate::session::{self, Update};
 use crate::theme::Palette;
@@ -22,6 +23,60 @@ pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
 actions!(footplate, [Next, Previous]);
 
 const CONTEXT: &str = "Footplate";
+
+/// How high an image of a mail stands in the conversation, whatever its own
+/// size: the room is there before the image is, so nothing moves under the
+/// reader when it comes.
+const IMAGE_HEIGHT: f32 = 240.;
+
+/// An image a mail of some conversation names, by its hash.
+enum Picture {
+    /// The yard is asked for it.
+    Asked,
+    Here(Arc<Image>),
+    /// Why there is none to show, in a line.
+    Not(String),
+}
+
+impl Picture {
+    /// What the yard answered for the image `hash`.
+    fn of(hash: &str, answer: api::Result<Option<Vec<u8>>>) -> Picture {
+        let short = hash.get(..8).unwrap_or(hash);
+        match answer {
+            Ok(Some(bytes)) => {
+                match model::image_type(&bytes).and_then(ImageFormat::from_mime_type) {
+                    Some(format) => Picture::Here(Arc::new(Image::from_bytes(format, bytes))),
+                    None => Picture::Not(format!(
+                        "image {short}: neither a PNG nor a JPEG, and not shown"
+                    )),
+                }
+            }
+            Ok(None) => Picture::Not(format!("image {short}: the yard no longer has it")),
+            Err(err) => Picture::Not(format!("image {short}: {err}")),
+        }
+    }
+}
+
+/// Sends an image as mail from `me` to `to`, with the text: `PutBlob`, then
+/// `Mail` with the hash it answered. The cap is asked for first, so that an
+/// image over it is refused in footplate's words and never travels.
+fn mail_image(
+    client: &Client,
+    me: &str,
+    to: &str,
+    text: &str,
+    image: &[u8],
+) -> Result<BlobRef, String> {
+    let cap = client.settings().map_err(|err| err.to_string())?.blob_cap();
+    if let Some(why) = model::over_cap(image.len(), cap) {
+        return Err(why);
+    }
+    let blob = client.put_blob(image).map_err(|err| err.to_string())?;
+    client
+        .mail(to, text, me, std::slice::from_ref(&blob.hash))
+        .map_err(|err| err.to_string())?;
+    Ok(blob)
+}
 
 /// The keys of the window, as `yardr chat` has them.
 pub fn bind_keys(cx: &mut App) {
@@ -40,6 +95,9 @@ pub struct Footplate {
     down: Option<String>,
     line: Entity<Line>,
     conversation: ScrollHandle,
+    /// The images of the conversations that were open, by hash: an image
+    /// never changes under its hash, so each is asked for once.
+    images: HashMap<String, Picture>,
     focus: FocusHandle,
     icon: Arc<Image>,
 }
@@ -54,6 +112,10 @@ impl Footplate {
         let line = cx.new(Line::new);
         cx.subscribe(&line, |this, _, _: &Submitted, cx| this.send(cx))
             .detach();
+        cx.subscribe(&line, |this, _, pasted: &Pasted, cx| {
+            this.paste(&pasted.0, cx)
+        })
+        .detach();
 
         // The yard is followed on a thread of its own, which blocks on the
         // socket; what it learns comes here.
@@ -84,6 +146,7 @@ impl Footplate {
             }),
             line,
             conversation: ScrollHandle::new(),
+            images: HashMap::new(),
             focus: cx.focus_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
         }
@@ -105,7 +168,12 @@ impl Footplate {
                 self.model = Some(model);
                 self.down = None;
                 self.conversation.scroll_to_bottom();
+                // What the yard did not give while it was away is asked for
+                // again.
+                self.images
+                    .retain(|_, picture| matches!(picture, Picture::Here(_)));
                 self.shown(cx);
+                self.pictures(cx);
                 self.run(effects, cx);
             }
             Update::Event(event) => self.change(cx, |m| m.event(&event)),
@@ -126,8 +194,38 @@ impl Footplate {
             self.conversation.scroll_to_bottom();
         }
         self.shown(cx);
+        self.pictures(cx);
         self.run(effects, cx);
         cx.notify();
+    }
+
+    /// Asks the yard for the images of the open conversation it was not
+    /// asked for yet.
+    fn pictures(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let new: Vec<String> = model
+            .images()
+            .into_iter()
+            .filter(|hash| !self.images.contains_key(*hash))
+            .map(str::to_string)
+            .collect();
+        for hash in new {
+            self.images.insert(hash.clone(), Picture::Asked);
+            self.ask(
+                cx,
+                {
+                    let hash = hash.clone();
+                    move |client, _| client.blob(&hash)
+                },
+                move |this, answer, cx| {
+                    let picture = Picture::of(&hash, answer);
+                    this.images.insert(hash, picture);
+                    cx.notify();
+                },
+            );
+        }
     }
 
     /// The line says whom it writes to.
@@ -246,7 +344,7 @@ impl Footplate {
             cx,
             move |client, me| {
                 let sent = match &target {
-                    Target::Crew(name) => client.mail(name, &text, me),
+                    Target::Crew(name) => client.mail(name, &text, me, &[]),
                     Target::Peer { name, peer } => {
                         client.mail_peer(name, peer, &text, me).map(drop)
                     }
@@ -255,20 +353,61 @@ impl Footplate {
             },
             move |this, sent, cx| match sent {
                 Ok(()) => this.change(cx, |m| m.sent(&to)),
-                Err((err, text)) => {
-                    // Nothing typed is lost to a failed send: what did not
-                    // go is back in the line, before what was typed since.
-                    this.line.update(cx, |line, cx| {
-                        let typed = line.text().to_string();
-                        let back = if typed.is_empty() {
-                            text
-                        } else {
-                            format!("{text} {typed}")
-                        };
-                        line.set_text(&back, cx);
-                    });
-                    this.notice(format!("not sent to {to}: {err}"), cx);
+                Err((err, text)) => this.unsent(&to, text, &err.to_string(), cx),
+            },
+        );
+    }
+
+    /// Nothing typed is lost to a failed send: what did not go is back in
+    /// the line, before what was typed since, and the window says why.
+    fn unsent(&mut self, to: &str, text: String, why: &str, cx: &mut Context<Self>) {
+        self.line.update(cx, |line, cx| {
+            let typed = line.text().to_string();
+            let back = match (text.is_empty(), typed.is_empty()) {
+                (_, true) => text,
+                (true, false) => typed,
+                (false, false) => format!("{text} {typed}"),
+            };
+            line.set_text(&back, cx);
+        });
+        self.notice(format!("not sent to {to}: {why}"), cx);
+    }
+
+    /// Sends an image that was pasted as mail to whom the open conversation
+    /// is with, with what is typed. One that cannot go is refused in words,
+    /// and what is typed stays.
+    fn paste(&mut self, image: &Image, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let (Some(to), Some(target)) = (model.selected().map(str::to_string), model.target())
+        else {
+            return;
+        };
+        let text = self.line.read(cx).text().trim().to_string();
+        if let Some(why) = model::unpastable(&target, image.bytes(), &text) {
+            return self.notice(why, cx);
+        }
+        let Target::Crew(name) = target else {
+            return;
+        };
+        let image = image.clone();
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.notice(String::new(), cx);
+        self.ask(
+            cx,
+            move |client, me| match mail_image(client, me, &name, &text, image.bytes()) {
+                Ok(blob) => Ok((blob, image)),
+                Err(why) => Err((why, text)),
+            },
+            move |this, sent, cx| match sent {
+                Ok((blob, image)) => {
+                    // The bytes are here already: the yard is not asked.
+                    let picture = Picture::of(&blob.hash, Ok(Some(image.bytes)));
+                    this.images.insert(blob.hash, picture);
+                    this.change(cx, |m| m.sent(&to))
                 }
+                Err((why, text)) => this.unsent(&to, text, &why, cx),
             },
         );
     }
@@ -417,7 +556,27 @@ impl Footplate {
             })
     }
 
-    fn entry(entry: Entry, palette: Palette) -> impl IntoElement {
+    /// An image of a mail, or the line that says why there is none.
+    fn picture(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
+        let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
+        match self.images.get(&file.hash) {
+            Some(Picture::Here(image)) => img(image.clone())
+                .h(px(IMAGE_HEIGHT))
+                .max_w_full()
+                .object_fit(ObjectFit::ScaleDown)
+                .with_fallback(move || {
+                    line("an image footplate cannot draw".to_string()).into_any_element()
+                })
+                .into_any_element(),
+            Some(Picture::Not(why)) => line(why.clone()).into_any_element(),
+            Some(Picture::Asked) | None => div()
+                .h(px(IMAGE_HEIGHT))
+                .child(line(format!("image, {}…", model::size(file.bytes))))
+                .into_any_element(),
+        }
+    }
+
+    fn entry(&self, entry: Entry, palette: Palette) -> impl IntoElement + use<> {
         div()
             .flex()
             .flex_col()
@@ -437,7 +596,15 @@ impl Footplate {
                             .child(entry.from),
                     ),
             )
-            .child(div().pl_4().child(entry.text))
+            .when(!entry.text.is_empty(), |el| {
+                el.child(div().pl_4().child(entry.text))
+            })
+            .children(
+                entry
+                    .files
+                    .iter()
+                    .map(|file| div().pl_4().pt_1().child(self.picture(file, palette))),
+            )
             .when_some(entry.standing, |el, standing| {
                 el.child(
                     div()
@@ -496,7 +663,7 @@ impl Footplate {
                 "No mail between you and {with} yet. What you write here is mail."
             )))
         } else {
-            mail.children(entries.into_iter().map(|entry| Self::entry(entry, palette)))
+            mail.children(entries.into_iter().map(|entry| self.entry(entry, palette)))
         };
 
         let (others, from) = model.others();
@@ -643,6 +810,184 @@ mod tests {
                 .map(|m| m.entries().into_iter().map(|e| e.text).collect())
                 .unwrap_or_default()
         })
+    }
+
+    /// The PNG of docs/api.md of the yardr repository: one pixel, 70 bytes.
+    fn png() -> Vec<u8> {
+        let mut bytes =
+            b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89"
+                .to_vec();
+        bytes.extend(b"\0\0\0\rIDATx\xdacd`\xf8_\x0f\0\x02\x87\x01\x80\xebG\xba\x92");
+        bytes.extend(b"\0\0\0\0IEND\xaeB`\x82");
+        bytes
+    }
+
+    const HASH: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
+
+    fn notice(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.model.as_ref().unwrap().notice.clone())
+    }
+
+    /// What the window has of the image `hash`: `here`, `asked`, the line
+    /// that says why there is none, or nothing.
+    fn picture(view: &Entity<Footplate>, cx: &mut VisualTestContext, hash: &str) -> String {
+        view.read_with(cx, |v, _| match v.images.get(hash) {
+            Some(Picture::Here(_)) => "here".to_string(),
+            Some(Picture::Asked) => "asked".to_string(),
+            Some(Picture::Not(why)) => why.clone(),
+            None => String::new(),
+        })
+    }
+
+    #[gpui::test]
+    fn an_image_is_pasted_as_mail_and_the_images_of_mail_are_shown(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The yardmaster's mail carries two images, and the yard has one.
+        let other = "ab".repeat(32);
+        let gone = "cd".repeat(32);
+        yard.blob(&other, &png());
+        yard.answer(
+            "Conversation",
+            &json!({"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Like this?", "read": false,
+                "files": [{"hash": other, "type": "image/png", "bytes": 70}, {"hash": gone, "type": "image/jpeg", "bytes": 900}]}]})
+            .to_string(),
+        );
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Like this?"]
+        });
+
+        // The image the yard has is there, and the one it has not is a line
+        // that says so; the window draws both and stays.
+        wait(cx, "the image of the mail", |cx| {
+            picture(&view, cx, &other) == "here"
+        });
+        wait(cx, "that the other image is gone", |cx| {
+            picture(&view, cx, &gone) == "image cdcdcdcd: the yard no longer has it"
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(yard.blobs_asked().len(), 2);
+
+        // An image over the yard's cap is refused in words: nothing is put,
+        // nothing sent, and what is typed stays.
+        yard.answer(
+            "Settings",
+            r#"{"result": {"operator": "jo", "blob_max_bytes": "69"}}"#,
+        );
+        cx.simulate_input("Paint the fence like this.");
+        let image = Image::from_bytes(ImageFormat::Png, png());
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        cx.simulate_keystrokes("cmd-v");
+        wait(cx, "that the image is over the cap", |cx| {
+            notice(&view, cx)
+                == "not sent to yardmaster: the image is 70 bytes, and this yard takes one of 69 bytes at most (yardr settings: blob_max_bytes)"
+        });
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.line.read(cx).text(), "Paint the fence like this.")
+        });
+        assert_eq!(yard.asked("PutBlob"), Vec::<serde_json::Value>::new());
+
+        // Under it: the image is put, and mail sent with its hash and with
+        // what is typed.
+        yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
+        cx.simulate_keystrokes("cmd-v");
+        wait(cx, "the mail with the image", |_| {
+            yard.asked("Mail")
+                == [
+                    json!({"to": "yardmaster", "text": "Paint the fence like this.", "actor": "jo", "files": [HASH]}),
+                ]
+        });
+        let put = yard.asked("PutBlob");
+        assert_eq!(put.len(), 1);
+        assert_eq!(
+            put[0]["data"],
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        );
+        wait(cx, "the line empty again", |cx| {
+            view.read_with(cx, |v, cx| v.line.read(cx).text().is_empty())
+        });
+        assert_eq!(notice(&view, cx), "");
+
+        // It comes back from the stream and is shown from the bytes that
+        // were pasted: the yard is not asked for them.
+        yard.emit(&json!({"seq": 21, "kind": "mail", "actor": "jo", "at": "2026-10-08T09:31:00Z",
+            "data": {"to": "yardmaster", "text": "Paint the fence like this.", "files": [{"hash": HASH, "type": "image/png", "bytes": 70}]}}).to_string());
+        wait(cx, "the user's own mail", |cx| texts(&view, cx).len() == 2);
+        assert_eq!(picture(&view, cx, HASH), "here");
+        cx.run_until_parked();
+        assert_eq!(yard.blobs_asked().len(), 2);
+
+        // With nothing typed the image is the mail.
+        cx.simulate_keystrokes("cmd-v");
+        wait(cx, "the mail that is an image only", |_| {
+            yard.asked("Mail").last()
+                == Some(&json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [HASH]}))
+        });
+
+        // What the yard refuses is said, and the text is back in the line.
+        yard.answer(
+            "PutBlob",
+            r#"{"error": {"code": "error", "message": "an image is a PNG or a JPEG"}}"#,
+        );
+        cx.simulate_input("And this.");
+        cx.simulate_keystrokes("cmd-v");
+        wait(cx, "why the image was not sent", |cx| {
+            notice(&view, cx) == "not sent to yardmaster: an image is a PNG or a JPEG"
+        });
+        view.read_with(cx, |v, cx| assert_eq!(v.line.read(cx).text(), "And this."));
+
+        // Another kind of image never leaves the window.
+        let tiff = Image::from_bytes(ImageFormat::Tiff, b"II*\0".to_vec());
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&tiff));
+        cx.simulate_keystrokes("cmd-v");
+        assert!(
+            notice(&view, cx).contains("a PNG or a JPEG, and what was pasted"),
+            "{}",
+            notice(&view, cx)
+        );
+
+        // To one of a linked yard nothing is sent: the window says that
+        // images do not cross the link, and what is typed stays.
+        let (puts, mails) = (yard.asked("PutBlob").len(), yard.asked("Mail").len());
+        yard.answer("Conversation", r#"{"result": []}"#);
+        cx.simulate_keystrokes("tab");
+        wait(cx, "the conversation with the linked yard", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some("clerk@north")
+            })
+        });
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        cx.simulate_keystrokes("cmd-v");
+        assert_eq!(notice(&view, cx), "images do not cross the link yet");
+        view.read_with(cx, |v, cx| assert_eq!(v.line.read(cx).text(), "And this."));
+        cx.run_until_parked();
+        assert_eq!(
+            (yard.asked("PutBlob").len(), yard.asked("Mail").len()),
+            (puts, mails)
+        );
+        assert_eq!(yard.asked("MailPeer"), Vec::<serde_json::Value>::new());
+
+        // Text on the clipboard is pasted into the line, as before.
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(" Two\nlines.".into()));
+        cx.simulate_keystrokes("cmd-v");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.line.read(cx).text(), "And this. Two lines.")
+        });
     }
 
     #[gpui::test]

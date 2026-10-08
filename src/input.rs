@@ -7,12 +7,12 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
-    point, prelude::*, px, relative, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, CursorStyle, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, Image, InspectorElementId, IntoElement, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -79,7 +79,12 @@ pub struct Line {
     is_selecting: bool,
 }
 
+/// An image was pasted into the line. The line holds text, so it is the
+/// window's to send.
+pub struct Pasted(pub Image);
+
 impl EventEmitter<Submitted> for Line {}
+impl EventEmitter<Pasted> for Line {}
 
 impl Line {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -201,8 +206,16 @@ impl Line {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
             self.replace_text_in_range(None, &one_line(&text), window, cx);
+        } else if let Some(image) = item.into_entries().find_map(|entry| match entry {
+            ClipboardEntry::Image(image) => Some(image),
+            ClipboardEntry::String(_) => None,
+        }) {
+            cx.emit(Pasted(image));
         }
     }
 
