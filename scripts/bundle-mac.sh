@@ -28,15 +28,16 @@ cp "$binary" "$app/Contents/MacOS/footplate"
 
 # iconutil goes by the directory's ending and by these names: each size in
 # points, and again at twice the pixels.
-iconset=$(mktemp -d)/footplate.iconset
+iconset_root=$(mktemp -d)
+trap 'rm -rf "$iconset_root"' 0
+trap 'exit 1' HUP INT TERM
+iconset=$iconset_root/footplate.iconset
 mkdir "$iconset"
 for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$icon" --out "$iconset/icon_${size}x${size}.png" >/dev/null
     sips -z "$((size * 2))" "$((size * 2))" "$icon" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil --convert icns --output "$app/Contents/Resources/footplate.icns" "$iconset"
-rm -rf "$(dirname "$iconset")"
-
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
 cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

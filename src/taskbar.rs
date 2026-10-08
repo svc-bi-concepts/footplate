@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 /// The icon as a file is this size: assets/icon-512.png.
 const ICON_SIZE: u32 = 512;
 
+/// Linux desktop themes expect the installed icon in the conventional
+/// 512px hicolor directory; keep using the downscaled master there.
+pub const ICON: &[u8] = include_bytes!("../assets/icon-512.png");
+
 /// Where a person's own desktop entries and icons are: `$XDG_DATA_HOME`
 /// when it is an absolute path, `~/.local/share` otherwise (the XDG base
 /// directory specification, which has a relative one ignored).
@@ -344,9 +348,9 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_the_binary_carries_is_the_size_it_is_installed_as() {
+    fn the_linux_icon_is_the_size_it_is_installed_as() {
         // The PNG's header: its width and height after the IHDR chunk's name.
-        let icon = crate::window::ICON;
+        let icon = ICON;
         let number = |at: usize| u32::from_be_bytes(icon[at..at + 4].try_into().unwrap());
         assert_eq!(&icon[12..16], b"IHDR");
         assert_eq!((number(16), number(20)), (ICON_SIZE, ICON_SIZE));

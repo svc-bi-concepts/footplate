@@ -168,8 +168,8 @@ The icon is a painting by mckean: a navy tank engine with brass fittings,
 head-on, a speech bubble on its buffer beam, a yard at dusk behind.
 `assets/icon.png` is its master, 1024 pixels square: the rounded square is
 824 wide in the middle of it, with the 100 pixels of margin Apple's template
-has, and the corners are transparent. The binary carries it at half the
-size, which is all a window, a dock or a taskbar shows of it:
+has, and the corners are transparent. The window and macOS dock load this
+PNG directly. Linux uses a 512px copy for its conventional hicolor icon path:
 
     sips -z 512 512 assets/icon.png --out assets/icon-512.png
 

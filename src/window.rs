@@ -20,9 +20,8 @@ use crate::model::{self, Effect, Entry, Model, Row, Target};
 use crate::session::{self, Update};
 use crate::theme::Palette;
 
-/// The application's icon: assets/icon.png, the master, at half its size,
-/// which is all a window, a dock or a taskbar shows of it.
-pub const ICON: &[u8] = include_bytes!("../assets/icon-512.png");
+/// The application's icon, from the 1024px master in assets/icon.png.
+pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
 actions!(footplate, [Next, Previous]);
 
@@ -976,6 +975,13 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn the_window_icon_is_the_1024px_master_png() {
+        let number = |at: usize| u32::from_be_bytes(ICON[at..at + 4].try_into().unwrap());
+        assert_eq!(&ICON[12..16], b"IHDR");
+        assert_eq!((number(16), number(20)), (1024, 1024));
+    }
 
     /// The yard is followed on a thread of its own, so the test waits for
     /// what it expects of the window, and no longer than ten seconds.

@@ -107,7 +107,7 @@ fn dock_icon() {
 /// property of the window too.
 #[cfg(target_os = "linux")]
 fn dock_icon() {
-    taskbar::show(NAME, window::ICON);
+    taskbar::show(NAME, taskbar::ICON);
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
