@@ -6,3 +6,30 @@ description = "A native window onto a yardr yard: talk with the crew, and with t
 publish = false
 
 [dependencies]
+# gpui as released on crates.io, not a git revision of Zed: 0.2.2 is the
+# newest release there (8 Oct 2026). Pinned exactly, since gpui changes its
+# API between patch releases. runtime_shaders has the Metal shaders compiled
+# when the window opens and not by the build, which then needs no Metal
+# toolchain of Xcode (a download of its own since Xcode 26); it changes
+# nothing on Linux.
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The stream's thread hands its events to gpui's foreground through this.
+async-channel = "2"
+# A mail's time in the zone of the person reading.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Where a character ends, for the line that is typed in.
+unicode-segmentation = "1"
+
+# gpui's window options have no icon: on macOS the dock's is set on the
+# application, with the bindings gpui itself is built on.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+[dev-dependencies]
+# The window's own test opens it on gpui's test platform, without a screen.
+gpui = { version = "=0.2.2", features = ["test-support"] }
+tempfile = "3"

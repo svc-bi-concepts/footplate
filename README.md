@@ -10,5 +10,119 @@ Rust, drawn with [gpui](https://gpui.rs/), the UI framework Zed is built on.
 Tracked in Linear as YRD-22. Developed in a yardr yard; `.yardr/` holds its
 flow, roles and merge gate (`cargo fmt`, `clippy`, `test`, `build`).
 
-    cargo run            # the window, against the yard on this machine
+    cargo run                # the window, against the yard on this machine
+    cargo build --release    # one binary: target/release/footplate
     cargo test
+
+## Building
+
+Rust, stable (`rustup default stable`), and what gpui needs of the system:
+
+- macOS: the Xcode command line tools. The Metal toolchain, a separate
+  download since Xcode 26, is not needed: gpui is built with its
+  `runtime_shaders` feature, which compiles the shaders when the window opens.
+- Linux: the development packages gpui builds against, which are those Zed
+  lists for building from source: X11 and Wayland, xkbcommon, fontconfig and
+  a Vulkan loader. The Linux build is not tried in this repository's yard,
+  which runs on a Mac.
+
+gpui is the release on crates.io, pinned exactly in `Cargo.toml`, and
+`Cargo.lock` is committed: the gate builds with `--locked`.
+
+There is no installer. The binary is the application: copy it where you
+like and run it.
+
+## What it talks to
+
+The yard's server, over its unix socket: `$YARDR_HOME/yard.sock` when
+`YARDR_HOME` is set, `~/.yardr/yard.sock` otherwise. It speaks what
+`docs/api.md` of the yardr repository promises a program that is not yardr,
+and nothing else: HTTP/1.1 on the socket, a call a `POST /call/<Method>` with
+its arguments as a JSON object, the events a `GET /events?after=<seq>` of one
+JSON object a line. `src/api.rs` is the whole client.
+
+| It reads | For |
+|---|---|
+| `Head`, then `GET /events` after it | what happens from then on |
+| `Crew`, `Peers` | whom there is to talk with: the crew, and `<name>@<peer>` for each one a linked yard exposes |
+| `GetUser`, `Settings` | who the window is for |
+| `UserInbox` | the unread mail, counted on each row |
+| `Conversation` | the mail both ways with the one whose row is open |
+
+| It writes | When |
+|---|---|
+| `Mail` | Enter, in a conversation with a crew member |
+| `MailPeer` | Enter, in a conversation with one of a linked yard |
+| `AckUserInbox` | a conversation showed mail that was unread |
+
+It follows the stream and asks nothing of the yard in a loop: `mail`,
+`mail_read` and `crew_status` are applied as they come, the crew is read
+again on the other `crew_*` events, the linked yards on `peer_*`.
+
+**Who you are** is not typed. The window acts as `yardr chat` does: as the
+user named in `$YARDR_ACTOR`, else as your login name, when the yard has a
+user of that name; else as the yard's operator. A yard that has neither says
+how one is added (`yardr user add <name>`).
+
+**Unread** is the yard's, so `yardr chat`, `yardr inbox` and the window
+agree. Opening a conversation marks its mail read, and so does mail that
+arrives in the open one. A user's mail has one position for all senders, so
+mail of a conversation you have not opened holds back what came after it:
+nothing is marked read that the window did not show.
+
+**No yard** (the socket is missing, or nothing answers): the window says so,
+names the socket, and tries again every 3 seconds. footplate does not start
+the yard's server; any yardr command that reads the yard does
+(`yardr status`). When the server comes back, the conversation that was open
+is open again.
+
+## The window
+
+Left, the rows: the crew with what each one's session does (`working`,
+`idle`, `blocked`, `running`, `not running`, `failed to start`), then those
+the linked yards expose, each with what they are there (a crew member or a
+person) and their role line, and on every row the number of mails from it
+you have not seen. Right, the open conversation, oldest at the top and the
+newest in view, with a line under your own mail that says where it stands
+(`read`, `sent; yardmaster is idle`, `queued for north: …`), and the line to
+write in.
+
+| Key | Does |
+|---|---|
+| `enter` | sends the line as mail to the one whose conversation is open |
+| `tab`, `shift+tab` | the next, the previous row |
+| a click on a row | opens it |
+| `cmd+q` (`ctrl+q` on Linux) | quits; so does closing the window |
+
+Not in this slice, and in `yardr chat`: the `yard` row with your
+notifications, a crew member's pane, and a text of several lines or longer
+than one mail (4096 bytes): the line is one line, and a longer text is
+refused with its size, not split.
+
+## The icon
+
+`assets/icon.svg` is the drawing and `assets/icon.png` its rendering, which
+the binary carries:
+
+    rsvg-convert -w 512 -h 512 assets/icon.svg -o assets/icon.png
+
+It stands in the window, and on macOS in the dock. gpui's window options
+have no icon, so on macOS it is set on the application when it starts. On
+Linux a taskbar shows the icon of the desktop entry whose id is the
+window's (`footplate`); installing one is an installer's work, and there is
+none yet.
+
+## The code
+
+| File | Holds |
+|---|---|
+| `src/api.rs` | the socket client: the calls, the stream, their JSON |
+| `src/session.rs` | following a yard on a thread: who the window is for, the state it starts from, trying again |
+| `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
+| `src/window.rs` | the window: draws the model and makes the calls it asks for |
+| `src/input.rs` | the line that is typed in |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir that answers the documented JSON |
+
+The tests run without a yard and without a screen: the client against the
+fake yard for each call and the stream, the model as it is, and the window
+itself on gpui's test platform.
