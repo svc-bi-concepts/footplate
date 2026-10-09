@@ -33,9 +33,17 @@ install.
 
 1. Ask for the repository's path and its base branch:
    `yardr depot add <depot> <path> --base <branch>`.
-2. `yardr depot init <depot>` writes starter roles, a gate (`.yardr/check`) and a
-   flow under `.yardr/`. Go through the gate's guess together; with their OK,
-   commit the files on the base branch, where yardr reads them from.
+2. `yardr depot init <depot>` writes starter roles and a flow under `.yardr/`;
+   with their OK, commit the files on the base branch, where yardr reads them
+   from. It also sets the depot's test command when the repository says how
+   it is tested (`yardr depot show <depot>` prints it as `test:`): a guess, so
+   ask mckean whether it is what tests the project. To change it, or to set
+   one where the setup found none:
+   `yardr depot add <depot> <path> --base <base> --test '<command>'`, with
+   the path and base `yardr depot list` shows, since an add without a flag
+   drops what the flag set. Builders and reviewers run it before they hand
+   on, and the assembly runs it on what lands; a depot with none lands
+   untested.
 3. Groups on the default harness (`yardr settings get default_kind`):
    `yardr group add <depot>/builders --runner herdr --limit 2 --set prompt=roles/builder.md`,
    and `<depot>/reviewers` the same with `roles/reviewer.md`.
@@ -94,8 +102,9 @@ What you do:
   feature that are not worth having on the base one by one: make each a car
   (`yardr bead create "<title>" -t car -d <depot>`, then
   `yardr dep add <train> <car> -k parent`). Cars are built in parallel, land
-  on the train's branch under the depot's light gate, and are not reviewed one
-  by one; the full gate and the one review are the train's. Keep a train to
+  on the train's branch after the depot's test command, run as for any change
+  and not as for a landing, and are not reviewed one by one; the landing run
+  and the one review are the train's. Keep a train to
   about five cars, so one review can hold all of it. A single fix stays on
   the normal path, as a task. A car with no train does not leave backlog:
   yardr refuses the move. When you send such a train on, its body or a note

@@ -1,0 +1,13 @@
+#!/bin/sh
+# footplate's tests: the depot's test command. A builder and a reviewer run
+# it in their worktree before they hand on, and a bead lands only when it
+# exits 0 on what lands. The landing runs the copy on the base branch (main),
+# so an edit here counts once it has landed there.
+set -e
+# rustup installs into the home, which the yard's processes may not have on PATH.
+export PATH="$HOME/.cargo/bin:$PATH"
+# From the lockfile, so this builds what a clean checkout builds.
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo build --locked
