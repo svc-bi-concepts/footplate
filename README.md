@@ -213,3 +213,11 @@ the window itself on gpui's test platform, where an image on its clipboard
 is pasted and the draft sent with Enter. gpui gives a test no way to make
 the paths of a file drop, so the window's test hands the files to what a
 drop calls and drops nothing but an empty one.
+
+## Licence
+
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The licence covers the code. It does not cover the names yardr and footplate
+or the project's marks (Apache 2.0, section 6): a fork takes a name and a
+mark of its own.
