@@ -9,6 +9,7 @@ mod draft;
 mod fake;
 mod input;
 mod model;
+mod select;
 mod session;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;

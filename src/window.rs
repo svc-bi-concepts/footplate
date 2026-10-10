@@ -8,15 +8,16 @@ use std::sync::Arc;
 use std::thread;
 
 use gpui::{
-    App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat,
-    KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString, Window, actions, div, img,
-    prelude::*, px,
+    App, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
+    ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString, Window, actions,
+    div, img, prelude::*, px,
 };
 
 use crate::api::{self, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
-use crate::input::{Emptied, Line, Pasted, Submitted};
+use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{self, Effect, Entry, Model, Row, Target};
+use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::theme::Palette;
 
@@ -120,6 +121,9 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", Next, Some(CONTEXT)),
         KeyBinding::new("shift-tab", Previous, Some(CONTEXT)),
+        // The line's own binding is the deeper one: with the focus in the
+        // line it copies the line's selection, as before.
+        KeyBinding::new("secondary-c", input::Copy, Some(CONTEXT)),
     ]);
 }
 
@@ -132,6 +136,8 @@ pub struct Footplate {
     down: Option<String>,
     line: Entity<Line>,
     conversation: ScrollHandle,
+    /// What is selected of the open conversation's messages.
+    selection: Entity<Selection>,
     /// The images of the conversations that were open, by hash: an image
     /// never changes under its hash, so each is asked for once.
     images: HashMap<String, Picture>,
@@ -160,6 +166,8 @@ impl Footplate {
         .detach();
         cx.subscribe(&line, |this, _, _: &Emptied, cx| this.remove_last(cx))
             .detach();
+        let selection = cx.new(|_| Selection::default());
+        cx.observe(&selection, |_, _, cx| cx.notify()).detach();
 
         // The yard is followed on a thread of its own, which blocks on the
         // socket; what it learns comes here.
@@ -190,6 +198,7 @@ impl Footplate {
             }),
             line,
             conversation: ScrollHandle::new(),
+            selection,
             images: HashMap::new(),
             drafts: Drafts::default(),
             thumbs: HashMap::new(),
@@ -287,6 +296,9 @@ impl Footplate {
         let Some(from) = from.filter(|from| Some(from) != to.as_ref()) else {
             return;
         };
+        // What was selected is of the conversation that is no longer shown.
+        self.selection
+            .update(cx, |selection, cx| selection.clear(cx));
         let typed = self.line.read(cx).text().to_string();
         self.drafts.put_text(&from, typed);
         let text = to.map(|to| self.drafts.take_text(&to)).unwrap_or_default();
@@ -546,6 +558,14 @@ impl Footplate {
         window.focus(&self.line.focus_handle(cx));
     }
 
+    /// Copies what is selected of the messages. The line copies its own
+    /// selection while the focus is in it.
+    fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.selection.read(cx).text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        }
+    }
+
     fn step(&mut self, by: isize, cx: &mut Context<Self>) {
         self.change(cx, |m| m.step(by));
     }
@@ -773,6 +793,7 @@ impl Footplate {
     }
 
     fn entry(&self, entry: Entry, palette: Palette) -> impl IntoElement + use<> {
+        let seq = entry.seq;
         div()
             .flex()
             .flex_col()
@@ -793,7 +814,14 @@ impl Footplate {
                     ),
             )
             .when(!entry.text.is_empty(), |el| {
-                el.child(div().pl_4().child(entry.text))
+                // The margin is outside the text's bounds, so that these
+                // are where the text is.
+                el.child(
+                    div()
+                        .ml_4()
+                        .debug_selector(|| format!("text {seq}"))
+                        .child(select::text(seq, entry.text, &self.selection)),
+                )
             })
             .children(
                 entry
@@ -947,6 +975,7 @@ impl Render for Footplate {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &Previous, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(Self::copy))
             // Files dropped anywhere on the window are for the draft of the
             // open conversation.
             .on_drop(
@@ -1618,5 +1647,211 @@ mod tests {
         view.read_with(cx, |v, _| {
             assert_eq!(v.model.as_ref().unwrap().selected(), Some("clerk@north"))
         });
+    }
+
+    const LINK: &str = "see https://example.org/a now";
+
+    /// The yardmaster's conversation is these mails, from seq 12 on.
+    fn mails(yard: &Yard, texts: &[&str]) {
+        let mails: Vec<serde_json::Value> = texts
+            .iter()
+            .zip(12..)
+            .map(|(text, seq)| json!({"seq": seq, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": text, "read": false}))
+            .collect();
+        yard.answer("Conversation", &json!({"result": mails}).to_string());
+    }
+
+    /// The window on `yard`, the focus in the line, once it shows `texts`.
+    fn opened<'a>(
+        yard: &Yard,
+        shown: &[&str],
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == shown
+        });
+        (view, cx)
+    }
+
+    /// Where the text of the mail `seq` is drawn.
+    fn text_bounds(cx: &mut VisualTestContext, seq: u64) -> gpui::Bounds<gpui::Pixels> {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let text: &'static str = Box::leak(format!("text {seq}").into_boxed_str());
+        cx.debug_bounds(text)
+            .unwrap_or_else(|| panic!("the text of mail {seq} is not drawn"))
+    }
+
+    /// Where the pointer is `by` pixels after the boundary before byte
+    /// `index` of the mail `seq`, whose text `text` is one line: the text is
+    /// shaped as the window shapes it.
+    fn place(
+        cx: &mut VisualTestContext,
+        seq: u64,
+        text: &str,
+        index: usize,
+        by: f32,
+    ) -> gpui::Point<gpui::Pixels> {
+        let bounds = text_bounds(cx, seq);
+        let x = cx.update(|window, _| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: window.text_style().font(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line =
+                window
+                    .text_system()
+                    .shape_line(text.to_string().into(), px(14.), &[run], None);
+            line.x_for_index(index)
+        });
+        gpui::point(bounds.left() + x + px(by), bounds.center().y)
+    }
+
+    fn drag(
+        cx: &mut VisualTestContext,
+        from: gpui::Point<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+    ) {
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        cx.simulate_mouse_move(to, MouseButton::Left, none);
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+    }
+
+    fn selected(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
+        view.read_with(cx, |v, cx| v.selection.read(cx).text().map(str::to_string))
+    }
+
+    fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    #[gpui::test]
+    fn a_link_in_a_message_is_selected_with_the_mouse_and_copied(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &[LINK]);
+        let (view, cx) = opened(&yard, &[LINK], cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+        // A drag from just inside the link's first character to just inside
+        // its last selects the link: the boundary closest to the pointer
+        // counts, as in the line.
+        let (from, to) = (place(cx, 12, LINK, 4, 1.), place(cx, 12, LINK, 25, -1.));
+        drag(cx, from, to);
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("https://example.org/a")
+        );
+        // Nothing is copied before the key.
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("https://example.org/a"));
+
+        // From right to left it is the same selection.
+        drag(cx, to, from);
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("https://example.org/a")
+        );
+
+        // A second press selects the word under the pointer.
+        let at = place(cx, 12, LINK, 27, 0.);
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::default());
+        assert_eq!(selected(&view, cx).as_deref(), Some("now"));
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("now"));
+
+        // A press on the talk where no text is drops it, and the key then
+        // copies nothing.
+        let name = gpui::point(at.x, text_bounds(cx, 12).top() - px(8.));
+        cx.simulate_click(name, gpui::Modifiers::default());
+        assert_eq!(selected(&view, cx), None);
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+
+        // What is selected is of the open conversation: another one opened
+        // drops it.
+        drag(cx, from, to);
+        assert!(selected(&view, cx).is_some());
+        yard.answer("Conversation", r#"{"result": []}"#);
+        view.update(cx, |v, cx| v.step(1, cx));
+        assert_eq!(selected(&view, cx), None);
+    }
+
+    #[gpui::test]
+    fn a_selection_in_a_second_message_drops_the_first(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let lines = "one\ntwo";
+        mails(&yard, &[LINK, lines]);
+        let (view, cx) = opened(&yard, &[LINK, lines], cx);
+
+        let (from, to) = (place(cx, 12, LINK, 0, 0.), place(cx, 12, LINK, 3, 0.));
+        drag(cx, from, to);
+        assert_eq!(selected(&view, cx).as_deref(), Some("see"));
+
+        // All of the second message, from its first line to its second: the
+        // one selection of the talk is now this, and its line break is one
+        // in what is copied.
+        let second = text_bounds(cx, 13);
+        drag(
+            cx,
+            gpui::point(second.left(), second.top() + px(2.)),
+            gpui::point(second.right() + px(40.), second.bottom() - px(2.)),
+        );
+        assert_eq!(selected(&view, cx).as_deref(), Some(lines));
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("one\ntwo"));
+
+        // A press in the first again drops that of the second.
+        cx.simulate_click(from, gpui::Modifiers::default());
+        assert_eq!(selected(&view, cx), None);
+    }
+
+    #[gpui::test]
+    fn the_line_still_copies_its_own_selection(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &[LINK]);
+        let (view, cx) = opened(&yard, &[LINK], cx);
+
+        cx.simulate_input("Land it today.");
+        cx.simulate_keystrokes("shift-left shift-left shift-left shift-left shift-left shift-left");
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("today."));
+
+        // Also while a message has a selection: the focus is in the line,
+        // so the key is the line's.
+        let (from, to) = (place(cx, 12, LINK, 0, 0.), place(cx, 12, LINK, 3, 0.));
+        drag(cx, from, to);
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("see"));
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_keystrokes("cmd-a cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("Land it today."));
+        assert_eq!(selected(&view, cx).as_deref(), Some("see"));
     }
 }

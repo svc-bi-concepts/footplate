@@ -305,11 +305,16 @@ impl Line {
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
-        self.content
-            .grapheme_indices(true)
-            .find_map(|(idx, _)| (idx > offset).then_some(idx))
-            .unwrap_or(self.content.len())
+        next_boundary(&self.content, offset)
     }
+}
+
+/// Where the character that starts at or before `offset` ends. A message's
+/// text asks the same of its own (select.rs).
+pub fn next_boundary(text: &str, offset: usize) -> usize {
+    text.grapheme_indices(true)
+        .find_map(|(idx, _)| (idx > offset).then_some(idx))
+        .unwrap_or(text.len())
 }
 
 /// A text as the one line holds it: its line breaks are spaces.

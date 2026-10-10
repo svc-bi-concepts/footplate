@@ -150,6 +150,8 @@ write in.
 |---|---|
 | `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open |
 | `cmd+v` (`ctrl+v` on Linux) | pastes text into the line; an image is attached to the draft |
+| a drag over a message's text, a double click on a word | selects it; one selection at a time, within one message |
+| `cmd+c` (`ctrl+c` on Linux) | copies what is selected: of a message, or of the line while you type in it |
 | a file dropped on the window | is added to the draft; a non-PNG or non-JPEG is marked and refused |
 | `backspace` in an empty line | removes the last attachment |
 | `tab`, `shift+tab` | the next, the previous row |
@@ -204,6 +206,7 @@ options have no icon, so the program sees to it when it starts
 | `src/draft.rs` | what is not sent yet, as plain functions: each conversation's attachments and text, what is refused and why |
 | `src/window.rs` | the window: draws the model and the draft, and makes the calls they ask for |
 | `src/input.rs` | the line that is typed in |
+| `src/select.rs` | a message's text, and the selection the mouse makes in it |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir that answers the documented JSON |
 
