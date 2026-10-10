@@ -1,7 +1,8 @@
 //! The text of a message, which can be selected with the mouse: gpui draws
 //! text and wraps it, and keeps no selection. The talk has one selection at
 //! a time, so it is kept beside the texts and not in each of them; a text
-//! draws its part of it and changes it with the mouse.
+//! draws its part of it and changes it with the mouse. A link in the text is
+//! drawn as one, and a click on it opens it.
 
 use std::ops::Range;
 
@@ -9,7 +10,7 @@ use gpui::{
     App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
-    TextLayout, Window,
+    TextLayout, UnderlineStyle, Window, combine_highlights, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,6 +30,9 @@ struct Selected {
     /// What the press selected: a place, or a word. A drag selects from it.
     anchor: Range<usize>,
     range: Range<usize>,
+    /// The link the press was on, until the pointer selects something: a
+    /// release on it then is a click.
+    link: Option<Range<usize>>,
     /// The button is still down.
     selecting: bool,
 }
@@ -61,12 +65,14 @@ impl Selection {
     }
 
     /// A press on the text `key` at `index`: what was selected is dropped,
-    /// wherever it was. A second press selects the word there.
+    /// wherever it was. A second press selects the word there. `link` is
+    /// the link under the pointer.
     fn press(
         &mut self,
         key: u64,
         text: SharedString,
         index: usize,
+        link: Option<Range<usize>>,
         clicks: usize,
         cx: &mut Context<Self>,
     ) {
@@ -78,6 +84,8 @@ impl Selection {
         self.at = Some(Selected {
             key,
             text,
+            // The first press of the two has opened it already.
+            link: link.filter(|_| clicks == 1),
             range: anchor.clone(),
             anchor,
             selecting: true,
@@ -92,14 +100,19 @@ impl Selection {
         let range = at.anchor.start.min(index)..at.anchor.end.max(index);
         if at.range != range {
             at.range = range;
+            // A drag selects, also when it comes back to where it began.
+            at.link = None;
             cx.notify();
         }
     }
 
-    fn release(&mut self) {
-        if let Some(at) = self.at.as_mut() {
-            at.selecting = false;
-        }
+    /// The button came up: the link that was pressed on, if nothing was
+    /// dragged since.
+    fn release(&mut self) -> Option<SharedString> {
+        let at = self.at.as_mut()?;
+        at.selecting = false;
+        let link = at.link.take()?;
+        Some(at.text[link].to_string().into())
     }
 
     /// A press that was not on the text `key`: what is selected in it is
@@ -117,6 +130,47 @@ pub fn word_at(text: &str, index: usize) -> Range<usize> {
         .map(|(start, word)| start..start + word.len())
         .find(|word| word.contains(&index))
         .unwrap_or(index..index)
+}
+
+/// What ends a sentence or closes a bracket after a link, and is no part of
+/// it.
+const AFTER_A_LINK: [char; 11] = ['.', ',', ';', ':', '!', '?', ')', ']', '>', '"', '\''];
+
+/// The links in `text`: each starts with `http://` or `https://` and goes to
+/// the next whitespace, without what closes the sentence or the bracket it
+/// stands in. Nothing else is a link, so only these two are ever opened.
+pub fn links(text: &str) -> Vec<Range<usize>> {
+    let mut links = Vec::new();
+    let mut from = 0;
+    while let Some(start) = text[from..].find("http").map(|at| from + at) {
+        let rest = &text[start..];
+        let Some(scheme) = ["http://", "https://"]
+            .into_iter()
+            .find(|scheme| rest.starts_with(scheme))
+        else {
+            from = start + "http".len();
+            continue;
+        };
+        let run = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let link = rest[..run].trim_end_matches(AFTER_A_LINK);
+        // The scheme alone names nothing.
+        if link.len() > scheme.len() {
+            links.push(start..start + link.len());
+        }
+        from = start + run;
+    }
+    links
+}
+
+/// The link of `links` that the pointer at `position` is over: the
+/// character under it counts here, not the closest boundary.
+fn link_at(
+    layout: &TextLayout,
+    links: &[Range<usize>],
+    position: Point<Pixels>,
+) -> Option<Range<usize>> {
+    let index = layout.index_for_position(position).ok()?;
+    links.iter().find(|link| link.contains(&index)).cloned()
 }
 
 /// Where in `text` a pointer at `position` is: the boundary between two
@@ -150,9 +204,11 @@ fn index_at(layout: &TextLayout, text: &str, position: Point<Pixels>) -> usize {
 /// The text `text` of the talk, which `selection` may be in. `key` tells it
 /// from the other texts.
 pub fn text(key: u64, text: impl Into<SharedString>, selection: &Entity<Selection>) -> Text {
+    let text = text.into();
     Text {
         key,
-        text: text.into(),
+        links: links(&text),
+        text,
         selection: selection.clone(),
     }
 }
@@ -160,6 +216,7 @@ pub fn text(key: u64, text: impl Into<SharedString>, selection: &Entity<Selectio
 pub struct Text {
     key: u64,
     text: SharedString,
+    links: Vec<Range<usize>>,
     selection: Entity<Selection>,
 }
 
@@ -191,14 +248,27 @@ impl Element for Text {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut styled = StyledText::new(self.text.clone());
-        if let Some(range) = self.selection.read(cx).range_in(self.key, &self.text) {
-            let selected = HighlightStyle {
-                background_color: Some(Palette::of(window.appearance()).selection.into()),
-                ..Default::default()
-            };
-            styled = styled.with_highlights([(range, selected)]);
-        }
+        let palette = Palette::of(window.appearance());
+        let link = HighlightStyle {
+            color: Some(palette.accent.into()),
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(palette.accent.into()),
+                wavy: false,
+            }),
+            ..Default::default()
+        };
+        let selected_style = HighlightStyle {
+            background_color: Some(palette.selection.into()),
+            ..Default::default()
+        };
+        let selected = self.selection.read(cx).range_in(self.key, &self.text);
+        // A selection may begin or end inside a link: the two are merged
+        // into runs that do not overlap.
+        let mut styled = StyledText::new(self.text.clone()).with_highlights(combine_highlights(
+            self.links.iter().cloned().map(|range| (range, link)),
+            selected.map(|range| (range, selected_style)),
+        ));
         let (layout, ()) = styled.request_layout(None, None, window, cx);
         (layout, styled)
     }
@@ -227,20 +297,38 @@ impl Element for Text {
         cx: &mut App,
     ) {
         styled.paint(None, None, bounds, &mut (), &mut (), window, cx);
-        window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        // The link under the pointer, where the text is not covered.
+        let over = {
+            let (layout, hitbox, links) =
+                (styled.layout().clone(), hitbox.clone(), self.links.clone());
+            move |position: Point<Pixels>, window: &Window| {
+                hitbox
+                    .is_hovered(window)
+                    .then(|| link_at(&layout, &links, position))
+                    .flatten()
+            }
+        };
+        let on_link = over(window.mouse_position(), window).is_some();
+        let cursor = if on_link {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::IBeam
+        };
+        window.set_cursor_style(cursor, hitbox);
 
         let key = self.key;
         window.on_mouse_event({
             let (selection, text) = (self.selection.clone(), self.text.clone());
-            let (layout, hitbox) = (styled.layout().clone(), hitbox.clone());
+            let (layout, hitbox, over) = (styled.layout().clone(), hitbox.clone(), over.clone());
             move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                     return;
                 }
                 if hitbox.is_hovered(window) {
                     let index = index_at(&layout, &text, event.position);
+                    let link = over(event.position, window);
                     selection.update(cx, |selection, cx| {
-                        selection.press(key, text.clone(), index, event.click_count, cx)
+                        selection.press(key, text.clone(), index, link, event.click_count, cx)
                     });
                 } else {
                     selection.update(cx, |selection, cx| selection.pressed_outside(key, cx));
@@ -251,27 +339,46 @@ impl Element for Text {
         // and not those of the place the text is drawn in.
         window.on_mouse_event({
             let (selection, text) = (self.selection.clone(), self.text.clone());
-            let layout = styled.layout().clone();
-            move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble || !selection.read(cx).selecting(key) {
+            let (layout, over) = (styled.layout().clone(), over.clone());
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
                     return;
                 }
-                // The button came up where the window did not see it.
+                // The pointer came onto a link or left it: the cursor is
+                // set when the text is drawn.
+                if over(event.position, window).is_some() != on_link {
+                    window.refresh();
+                }
+                if !selection.read(cx).selecting(key) {
+                    return;
+                }
+                // The button came up where the window did not see it, so
+                // this is no click.
                 if event.pressed_button != Some(MouseButton::Left) {
-                    return selection.update(cx, |selection, _| selection.release());
+                    selection.update(cx, |selection, _| selection.release());
+                    return;
                 }
                 let index = index_at(&layout, &text, event.position);
                 selection.update(cx, |selection, cx| selection.drag(index, cx));
             }
         });
         window.on_mouse_event({
-            let selection = self.selection.clone();
-            move |event: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble
-                    && event.button == MouseButton::Left
-                    && selection.read(cx).selecting(key)
+            let (selection, text) = (self.selection.clone(), self.text.clone());
+            move |event: &MouseUpEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !selection.read(cx).selecting(key)
                 {
-                    selection.update(cx, |selection, _| selection.release());
+                    return;
+                }
+                // A click on a link: pressed and released on it, and
+                // nothing dragged between the two.
+                let pressed = selection.update(cx, |selection, _| selection.release());
+                let released = over(event.position, window).map(|link| &text[link]);
+                if let Some(url) = pressed
+                    && released == Some(url.as_ref())
+                {
+                    cx.open_url(&url);
                 }
             }
         });
@@ -293,5 +400,50 @@ mod tests {
         assert_eq!(&text[word_at(text, 16)], "José");
         // Past the end there is none.
         assert_eq!(word_at(text, text.len()), text.len()..text.len());
+    }
+
+    fn linked(text: &str) -> Vec<&str> {
+        links(text).into_iter().map(|link| &text[link]).collect()
+    }
+
+    #[test]
+    fn a_link_goes_from_its_scheme_to_the_next_whitespace() {
+        assert_eq!(linked("https://a.example/x"), ["https://a.example/x"]);
+        assert_eq!(linked("see http://a.example now"), ["http://a.example"]);
+        assert_eq!(
+            linked("one https://a.example/x?y=1&z=(2)#top\nand https://b.example/, both"),
+            ["https://a.example/x?y=1&z=(2)#top", "https://b.example/"]
+        );
+        // A word before it without a space is no part of it.
+        assert_eq!(linked("José:https://a.example"), ["https://a.example"]);
+    }
+
+    #[test]
+    fn what_closes_the_sentence_or_the_bracket_is_no_part_of_a_link() {
+        assert_eq!(
+            linked("It is at https://a.example/x."),
+            ["https://a.example/x"]
+        );
+        assert_eq!(
+            linked("(see https://a.example/x)."),
+            ["https://a.example/x"]
+        );
+        assert_eq!(linked("<https://a.example/x>"), ["https://a.example/x"]);
+        assert_eq!(linked("'https://a.example/x'!?"), ["https://a.example/x"]);
+        assert_eq!(
+            linked("[\"https://a.example/x\"]; https://b.example:"),
+            ["https://a.example/x", "https://b.example"]
+        );
+    }
+
+    #[test]
+    fn nothing_but_http_and_https_is_a_link() {
+        assert!(linked("no link in this, José").is_empty());
+        assert!(linked("").is_empty());
+        assert!(linked("ftp://x and file:///x").is_empty());
+        assert!(linked("www.a.example, jo@a.example, http and https").is_empty());
+        // The scheme alone names nothing.
+        assert!(linked("https:// and (http://).").is_empty());
+        assert_eq!(linked("httpx http://a.example"), ["http://a.example"]);
     }
 }

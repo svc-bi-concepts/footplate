@@ -1732,6 +1732,12 @@ mod tests {
         cx.simulate_mouse_up(to, MouseButton::Left, none);
     }
 
+    /// A press and a release where `place` says.
+    fn click(cx: &mut VisualTestContext, seq: u64, text: &str, index: usize, by: f32) {
+        let at = place(cx, seq, text, index, by);
+        cx.simulate_click(at, gpui::Modifiers::default());
+    }
+
     fn selected(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
         view.read_with(cx, |v, cx| v.selection.read(cx).text().map(str::to_string))
     }
@@ -1799,6 +1805,57 @@ mod tests {
         yard.answer("Conversation", r#"{"result": []}"#);
         view.update(cx, |v, cx| v.step(1, cx));
         assert_eq!(selected(&view, cx), None);
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_link_in_a_message_opens_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let two = "(at https://example.org/b). And ftp://example.org/c";
+        mails(&yard, &[LINK, two]);
+        let (view, cx) = opened(&yard, &[LINK, two], cx);
+        let none = gpui::Modifiers::default();
+
+        // A click on the text beside the link opens nothing.
+        click(cx, 12, LINK, 1, 1.);
+        assert_eq!(cx.opened_url(), None);
+
+        // A drag over the link selects it, as before, and opens nothing:
+        // not from end to end, and not when it ends where it began.
+        let (from, to) = (place(cx, 12, LINK, 4, 1.), place(cx, 12, LINK, 25, -1.));
+        drag(cx, from, to);
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("https://example.org/a")
+        );
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("https://example.org/a"));
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        cx.simulate_mouse_move(to, MouseButton::Left, none);
+        cx.simulate_mouse_move(from, MouseButton::Left, none);
+        cx.simulate_mouse_up(from, MouseButton::Left, none);
+        assert_eq!(cx.opened_url(), None);
+        // Nor does a press beside the link that is released on it.
+        let beside = place(cx, 12, LINK, 27, 0.);
+        cx.simulate_mouse_down(beside, MouseButton::Left, none);
+        cx.simulate_mouse_up(from, MouseButton::Left, none);
+        assert_eq!(cx.opened_url(), None);
+
+        // A click on the link opens exactly it, and selects nothing.
+        click(cx, 12, LINK, 10, 1.);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/a"));
+        assert_eq!(selected(&view, cx), None);
+
+        // The bracket and the full stop after a link are no part of it,
+        // and a click on them opens nothing.
+        click(cx, 13, two, 25, 1.);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/a"));
+        click(cx, 13, two, 24, -1.);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/b"));
+
+        // Only http and https are links.
+        click(cx, 13, two, 40, 1.);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/b"));
     }
 
     #[gpui::test]
