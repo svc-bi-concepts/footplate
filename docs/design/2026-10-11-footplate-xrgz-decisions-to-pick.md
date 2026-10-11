@@ -193,18 +193,22 @@ the asker acts. No automation beyond the named move is proposed.
 
 A pick stands until it has taken effect, and until then it can be changed
 or undone. "Taken effect" means the bead moved on the answer, or the asker
-claimed it with `yardr bead take <id> <ask>`, which writes a note of a new
-kind `taken` and closes the ask. Before either, a newer pick on the same
-ask supersedes the older one, and a retraction — an `answer` note naming no
-option — leaves the ask open again; every pick a note, so the history
-stands and nothing is silently rewritten. The ordering is by note sequence:
-a change or retraction is refused when a `taken` note or a bead move has
-landed after the answer it would replace, and the refusal names that claim
-or move; where the person's newer pick lands first, the asker claims the
-new answer as it reads it. Footplate shows the current pick on the card and
-offers "change" while the ask is open; once the bead has moved or the
-answer is taken, the card says the answer stands, and changing it is a new
-conversation — a note, or the bead moved back by hand.
+claimed it with `yardr bead take <id> <ask> <answer-seq>`, naming the note
+sequence of the answer it read, which writes a note of a new kind `taken`
+and closes the ask. The claim carries that sequence as an expected version
+and fails atomically when the named answer is no longer current: if a newer
+pick or a retraction has landed after it, the claim is refused naming the
+replacement, and the asker reads the replacement before claiming again, so
+a claim can never silently take an answer the asker never saw. Before
+either, a newer pick on the same ask supersedes the older one, and a
+retraction — an `answer` note naming no option — leaves the ask open again;
+every pick a note, so the history stands and nothing is silently rewritten.
+The ordering is by note sequence: a change or retraction is refused when a
+`taken` note or a bead move has landed after the answer it would replace,
+and the refusal names that claim or move. Footplate shows the current pick
+on the card and offers "change" while the ask is open; once the bead has
+moved or the answer is taken, the card says the answer stands, and changing
+it is a new conversation — a note, or the bead moved back by hand.
 
 ### 3.3. 'You decide': handing a question back
 
@@ -463,9 +467,11 @@ kind `answer` naming who picked which option with what words, takes the
 move the option names or refuses it with the flow's words, and marks the
 bead's other open asks withdrawn with a note naming the pick; a newer pick
 supersedes, and a retraction reopens the ask, until the bead has moved on
-the answer or the asker has claimed it with `yardr bead take <id> <ask>`
-(a note of kind `taken`), after which a change is refused naming the claim
-or move; and `you decide` records the delegation and moves the bead along
+the answer or the asker has claimed it with `yardr bead take <id> <ask>
+<answer-seq>` (a note of kind `taken`), naming the answer's note sequence
+as an expected version so the claim fails atomically when a newer pick or
+retraction has landed after it, after which a change is refused naming the
+claim or move; and `you decide` records the delegation and moves the bead along
 the ask's named edge, which must be a target the flow allows from the
 bead's stage.
 
