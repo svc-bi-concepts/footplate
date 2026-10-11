@@ -73,10 +73,14 @@ inbox"). `yardr chat` shows the crew's conversations and, above them, the
 `yard` row with the notifications, which has no line to type in
 (docs/chat.md, "The yard"). Footplate today shows only conversations
 (`src/model.rs`: rows of crew and linked parties, the open conversation,
-`Effect::Read` and `Effect::Ack`); it has no `yard` row yet (README,
+`Effect::Read` and `Effect::Ack`); its client implements only
+`UserInbox`/`AckUserInbox` (`src/api.rs`, `user_inbox` and
+`ack_user_inbox`), not the `UserNotifications`/`AckUserNotifications` the
+socket page also promises, and it has no `yard` row yet (README,
 "Not in this slice"). The decisions view must join that separation, not
 blur it: what waits for an answer is a third thing, neither talk nor
-report.
+report. The `yard` row is therefore footplate work in section 6, needing no
+new yardr call.
 
 **What footplate may ask of the yard.** Footplate is an interface over
 yardr's socket API and starts nothing of yardr's (README). It speaks only
@@ -125,8 +129,9 @@ cannot be misread.
 The existing mechanisms carry it: the bead in a manual stage carries the
 question (decide.md already says the bead carries the question and the
 options); the `yardr review` queue carries "each question in its own
-place"; notes carry the writing, with a new note kind for the structured
-part; the flow's outcomes and next stages carry "what picking each one
+place"; notes carry the writing, with new note kinds for the structured
+part (`ask`, `answer`, `taken`); the flow's outcomes and next stages carry
+"what picking each one
 does" wherever the pick is a move. What is new is only: the structured
 shape of a question (an ask), the commands that write and answer one, the
 socket calls that let footplate read and write them, and the footplate
@@ -148,8 +153,8 @@ An ask holds: the question in one line; two to five options, each a label
 and what it means in a line; the one recommended and why in a line; and,
 per option, what picking it does (below). It is stored as a bead note of a
 new kind `ask`, so `yardr prime --bead` and `yardr review` show it as
-numbered text with no new plumbing, and the answer is a plain note naming
-the option picked. A question with no enumerable options ("what should the
+numbered text with no new plumbing, and the answer is a note of kind
+`answer` naming the option picked. A question with no enumerable options ("what should the
 tone of the greeting be?") is an ask with no options: the views show it as
 words wanted, and the answer is words (section 3.5).
 
@@ -171,23 +176,35 @@ reason; 'say build' moves the shaped bead to `new`); the five questions of
 a design bead record only, and the person moves the bead once, after the
 last answer, as today.
 
-Recording is a note: who picked, which ask, which option, and any words
-with it. The answer cannot be misread because it is the option, not a
-paraphrase of it. Anything the pick sets in motion beyond the move is the
-asker's to do on reading the answer ('say go and I move the links': the
-yardmaster moves the links when the pick lands); yardr records, the asker
-acts. No automation beyond the named move is proposed.
+A move takes at once, and takes the bead's other open asks with it: any
+ask still open on the bead when a move-taking pick lands is marked
+withdrawn in the same act, with a note naming the pick that moved the bead.
+The card warns before such a pick how many other questions it will
+withdraw. Writers put moves only on single-ask beads; a withdrawn ask does
+not reopen if the bead comes back to the manual stage — the asker writes a
+new ask. Nothing is held: there is no state between "picked" and "moved".
+
+Recording is a note of a new kind `answer`: who picked, which ask, which
+option, and any words with it. The answer cannot be misread because it is
+the option, not a paraphrase of it. Anything the pick sets in motion beyond
+the move is the asker's to do on reading the answer ('say go and I move the
+links': the yardmaster moves the links when the pick lands); yardr records,
+the asker acts. No automation beyond the named move is proposed.
 
 A pick stands until it has taken effect, and until then it can be changed
 or undone. "Taken effect" means the bead moved on the answer, or the asker
-acted on it. Before that, a newer pick on the same ask supersedes the older
-one: the latest pick is the answer, each pick a note, so the history stands
-and nothing is silently rewritten. Undo is a retraction, recorded the same
-way, which leaves the ask open again. Footplate shows the current pick on
-the card and offers "change" while the ask is open; once the bead has moved
-or the asker has marked the answer taken (a note saying so), the card says
-the answer stands, and changing it is a new conversation — a note, or the
-bead moved back by hand.
+claimed it with `yardr bead take <id> <ask>`, which writes a note of a new
+kind `taken` and closes the ask. Before either, a newer pick on the same
+ask supersedes the older one, and a retraction — an `answer` note naming no
+option — leaves the ask open again; every pick a note, so the history
+stands and nothing is silently rewritten. The ordering is by note sequence:
+a change or retraction is refused when a `taken` note or a bead move has
+landed after the answer it would replace, and the refusal names that claim
+or move; where the person's newer pick lands first, the asker claims the
+new answer as it reads it. Footplate shows the current pick on the card and
+offers "change" while the ask is open; once the bead has moved or the
+answer is taken, the card says the answer stands, and changing it is a new
+conversation — a note, or the bead moved back by hand.
 
 ### 3.3. 'You decide': handing a question back
 
@@ -195,25 +212,36 @@ Handing a question back to the crew member is one of the picks. yardr adds
 `you decide` to every ask with options; the writer does not write it and
 cannot leave it out. Picking it records that the person left this question
 to the asker, with any words ("you decide for the others; keep the paths
-short"), and moves the bead as the ask's `you-decide` move says — by
-default back to where the asker works it (the stage the bead came from, or
-`backlog` for reshaping where the flow has no way back), named on the card
-before the person picks it. The asker reads the delegation as it reads any
-answer, decides, and notes what it took. A whole evening of "your proposal
-is sound" becomes one pick per question; "you decide for the others"
-becomes one pick on each of the rest.
+short"), and moves the bead as the ask's `you-decide` move says — an edge
+the writer names from the targets the flow allows from the bead's stage,
+shown on the card before the person picks it. The suggested default is the
+nearest earlier stage the flow allows from there: for a bead in this
+flow's `decide` (`decide -> approved | draft | backlog`) that is `draft`,
+whatever stage the bead arrived from. Where the flow allows no earlier
+stage from the bead's stage, the default is record-only and the card says
+the bead stays until the person moves it. yardr refuses a named move the
+flow disallows, with the flow's words, as it does for any option's move.
+The asker reads the delegation as it reads any answer, decides, and notes
+what it took. A whole evening of "your proposal is sound" becomes one pick
+per question; "you decide for the others" becomes one pick on each of the
+rest.
 
 ### 3.4. What the person sees
 
 The window keeps its shape: rows on the left, the open thing on the right.
 Above the conversations stands a third list, the decisions: the beads in
-manual stages routed to groups the person is in, longest waiting first, as
-`yardr review` walks them. Each bead is one card, and each card shows the
-bead's title, its stage, and the two or three facts that matter: who asked,
-how long it has waited, and what the writer recommends. The full bead and
-its document are one step away, never on the card: a keypress or click
-expands the card in place to the whole body and notes, and the document of
-a design bead is named by path and branch (`docs/design/…` on
+manual stages routed to groups the person is in that have at least one open
+ask, longest waiting first, as `yardr review` walks them. Each bead is one
+card, and each card shows the bead's title, its stage, and the two or three
+facts that matter: who asked, how long it has waited, and what the writer
+recommends. A bead in a manual stage with no open ask — nothing structured
+asked yet, or every ask answered, taken or withdrawn while the bead still
+waits — is not in the decisions list; it stays where it is today, in
+`yardr review`, until someone writes an ask on it or moves it. Answering a
+bead's last open ask removes its card even before the bead moves. The full
+bead and its document are one step away, never on the card: a keypress or
+click expands the card in place to the whole body and notes, and the
+document of a design bead is named by path and branch (`docs/design/…` on
 `yard/<bead>`), to open outside footplate. An ask answered shows its pick;
 an ask open shows its options as buttons, the recommended one marked, with
 the line under for words with the pick.
@@ -227,6 +255,8 @@ the left list shows the one decision above the conversations:
   ─────────────                  │ asked by yardmaster · recommends: go
   yardmaster  idle               │   go and I move the links
   assembly    working            │
+  ─────────────                  │
+  yard  3 unread                 │
                                  │ ○ 1. Go — move the links now
                                  │ ○ 2. Not yet — after Friday's release
                                  │ ○ 3. You decide — leave it to yardmaster
@@ -246,6 +276,8 @@ note is named, not quoted; the document is one step away:
 > yardr-q2w9  5 questions     5  │ Design: depot working rules in the brief
   ─────────────                  │ asked by yardr-q2w9-draft · doc: docs/design/… on yard/yardr-q2w9
   yardmaster  idle               │ critic's note by yardr-q2w9-critique · e expands all
+  ─────────────                  │
+  yard  3 unread                 │
                                  │
                                  │ 1. Path of the rules file · ★ .yardr/depot.md ✓ picked
                                  │ 2. Pack fallback · ★ depot-only, no fallback
@@ -277,6 +309,8 @@ a rule, and the decisions keep their own count:
   ─────────────                  │ ─────────────────────────────
   yardmaster  idle           2   │ > [                                   ]
   assembly    working            │
+  ─────────────                  │
+  yard  11 unread                │
 ```
 
 ### 3.5. What still needs words, and how a pick and a sentence go together
@@ -296,14 +330,15 @@ discussion.
 ### 3.6. Questions apart from notices
 
 What waits for an answer is never buried by what only informs. Three lists,
-three counts, three positions: the decisions (asks open, longest waiting
-first), the conversations (mail, answered in turn), and the yard's notices
-(the `yard` row, which footplate gains with the notifications calls it
-already knows from the socket page). Opening a card marks nothing else
-read; reading mail marks no ask answered; a night of landed beads fills the
-notices and leaves the decisions where they were. The decisions list is
-ordered by waiting longest, like `yardr review`, so the oldest question is
-the first row, not the last line of a stream.
+three counts, three positions: the decisions (beads with asks open,
+longest waiting first), the conversations (mail, answered in turn), and the
+yard's notices (the `yard` row, which footplate gains by implementing the
+`UserNotifications`/`AckUserNotifications` calls the socket page already
+promises — its own bead in section 6, needing no new yardr call). Opening
+a card marks nothing else read; reading mail marks no ask answered; a night
+of landed beads fills the notices and leaves the decisions where they were.
+The decisions list is ordered by waiting longest, like `yardr review`, so
+the oldest question is the first row, not the last line of a stream.
 
 ### 3.7. What footplate needs from yardr, and what works as yardr is today
 
@@ -380,12 +415,13 @@ would become.
 
 3. **What `you decide` does to the bead.** Option A: it moves the bead back
    to the asker along a named edge, as section 3.3 proposes — costs naming
-   that edge per ask (with the default the stage the bead came from). Option
-   B: it records the delegation and leaves the bead where it is, for the
-   person to move by hand — costs nothing, but leaves a delegated question
-   sitting in the person's queue until they move it, which buries nothing
-   but litters the list. I would take A: a handed-back question should leave
-   the person's queue in the same act.
+   an edge the flow allows from the bead's stage per ask (with the default
+   the nearest earlier stage the flow allows, and record-only where the flow
+   allows no way back). Option B: it records the delegation and leaves the
+   bead where it is, for the person to move by hand — costs nothing, but
+   leaves a delegated question sitting in the person's queue until they move
+   it, which buries nothing but litters the list. I would take A: a
+   handed-back question should leave the person's queue in the same act.
 
 4. **Whether `yardr chat` draws asks now or later.** Option A: with this
    design — the numbered text and answering by number land with the ask
@@ -405,8 +441,8 @@ would become.
 ## 6. The beads it would become
 
 For depot yardr, in order; then for depot footplate, which depend on the
-yardr socket bead. Each is small enough that a builder finishes it without
-asking.
+yardr socket bead except the yard row, which needs only calls already
+stable. Each is small enough that a builder finishes it without asking.
 
 **Yardr 1. A bead carries structured asks.** Goal: whoever sends a bead to
 a manual stage writes each question once, as data. Where to look: the
@@ -420,12 +456,18 @@ shows as words wanted.
 **Yardr 2. An answer is the option picked.** Goal: answering records the
 pick as a note and takes the option's move, and `you decide` is on every
 ask. Where to look: Yardr 1; the flow's outcomes and next stages
-(docs/flows.md, "Outcomes"); the `decide` stage file. Done when: `yardr
-bead answer <id> <ask> <option> [words]` (and the same picks in
-`yardr review`) records who picked which option with what words, takes the
-move the option names or refuses it with the flow's words, a newer pick
-supersedes while the bead has not moved on the answer, and `you decide`
-records the delegation and moves the bead along the ask's named edge.
+(docs/flows.md, "Outcomes"); the `decide` stage file; the note kinds in
+`internal/store/graph.go`. Done when: `yardr bead answer <id> <ask>
+<option> [words]` (and the same picks in `yardr review`) records a note of
+kind `answer` naming who picked which option with what words, takes the
+move the option names or refuses it with the flow's words, and marks the
+bead's other open asks withdrawn with a note naming the pick; a newer pick
+supersedes, and a retraction reopens the ask, until the bead has moved on
+the answer or the asker has claimed it with `yardr bead take <id> <ask>`
+(a note of kind `taken`), after which a change is refused naming the claim
+or move; and `you decide` records the delegation and moves the bead along
+the ask's named edge, which must be a target the flow allows from the
+bead's stage.
 
 **Yardr 3. The socket API serves the decisions.** Goal: a client that is
 not yardr reads the queue and one bead whole, and writes answers, notes
@@ -445,26 +487,40 @@ and 2. Done when: a conversation with an asker shows the bead's open asks
 as numbered options with the recommendation marked, and answering by number
 records the same answer note as `bead answer`.
 
-**Footplate 5. The decisions list.** Goal: the window shows the beads
-waiting on the person, longest waiting first, each its own card with title,
-stage, asker, waits-since and recommendation. Where to look: `src/model.rs`
-(rows, `Effect`), `src/session.rs` (`load`, `follow`), `src/window.rs`
-(`list`, `talk`), and the new socket calls from Yardr 3. Depends on Yardr
-3. Done when: the list stands above the conversations with its own count,
-   follows the new events without asking in a loop, and the fake yard
+**Footplate 5. The yard row.** Goal: the window shows the yard's notices
+apart from the conversations, as `yardr chat`'s `yard` row does, so the
+decisions view joins three lists and not two. Where to look: `src/api.rs`
+(`user_inbox` and `ack_user_inbox`, beside which the new calls sit),
+`src/model.rs`, `src/session.rs`, `src/fake.rs`; `UserNotifications` and
+`AckUserNotifications` in docs/api.md of the yardr repository, already
+stable; docs/chat.md ("The yard"). Depends on nothing new from yardr. Done
+when: the `yard` row stands below the conversations with its own unread
+count, follows the notifications events without asking in a loop, marks
+read on viewing, and the fake yard answers the new calls in tests.
+
+**Footplate 6. The decisions list.** Goal: the window shows the beads with
+open asks waiting on the person, longest waiting first, each its own card
+with title, stage, asker, waits-since and recommendation. Where to look:
+`src/model.rs` (rows, `Effect`), `src/session.rs` (`load`, `follow`),
+`src/window.rs` (`list`, `talk`), and the new socket calls from Yardr 3.
+Depends on Yardr 3 and Footplate 5. Done when: the list stands above the
+conversations with its own count, beads with no open ask are not in it,
+it follows the new events without asking in a loop, and the fake yard
 answers the new calls in tests.
 
-**Footplate 6. Picks, with a sentence.** Goal: an open ask is answered by
+**Footplate 7. Picks, with a sentence.** Goal: an open ask is answered by
 picking, with words alongside, and changed or undone before it takes
-effect. Where to look: Footplate 5; `src/input.rs` for the line.
-Depends on Footplate 5. Done when: the options are buttons with the
+effect. Where to look: Footplate 6; `src/input.rs` for the line.
+Depends on Footplate 6. Done when: the options are buttons with the
 recommendation marked, Enter sends the pick with the line's words, words
-alone go as a note and leave the ask open, and the current pick shows with
-"change" until the answer stands.
+alone go as a note and leave the ask open, the current pick shows with
+"change" until the answer is taken or the bead moved, a move-taking pick
+warns how many other asks it will withdraw, and a refused change shows the
+claim or move that refused it.
 
-**Footplate 7. The full bead one step away.** Goal: the card stays small;
+**Footplate 8. The full bead one step away.** Goal: the card stays small;
 the whole body, notes and document reference open in place. Where to look:
-Footplate 5 and 6. Depends on Footplate 5. Done when: a keypress or click
+Footplate 6 and 7. Depends on Footplate 6. Done when: a keypress or click
 expands the card to the full body and notes, the document path and branch
 show where the bead names one, and nothing waiting is buried by mail or
 notices in any of the three sketches' cases.
