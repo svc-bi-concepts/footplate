@@ -7,15 +7,96 @@ set -e
 # rustup installs into the home, which the yard's processes may not have on PATH.
 export PATH="$HOME/.cargo/bin:$PATH"
 # A fresh worktree would compile gpui and its tree from nothing, and every
-# worktree would pay that at once. When sccache is installed (README says
-# how), route rustc through it, so a fresh worktree restores the
-# dependencies from the cache, which the worktrees share. Without sccache
-# this is nothing: the build below runs as it did.
-if command -v sccache >/dev/null 2>&1; then
-    export RUSTC_WRAPPER=sccache
+# worktree would pay that at once. The last worktree to pass the gate leaves
+# its built dependencies in the cache below, and a fresh worktree starts
+# from that copy instead of an empty target directory, compiling only
+# footplate itself. Every step of that may fail, and then the build runs as
+# it would without the cache.
+warm="$HOME/.cache/footplate-warm-target"
+warm_lock="$warm.lock"
+# A lock of mkdir, which either happens or does not: hold it while the
+# cache is read or replaced, so no worktree reads a half-written copy.
+# Gives up after two minutes, and then the caller carries on without the
+# cache.
+warm_lock() {
+    n=0
+    while ! mkdir "$warm_lock" 2>/dev/null; do
+        n=$((n + 1))
+        if [ "$n" -gt 120 ]; then
+            return 1
+        fi
+        # A lock older than half an hour is a dead holder's: break it.
+        if [ "$n" -eq 60 ] && [ -n "$(find "$warm_lock" -mmin +30 2>/dev/null)" ]; then
+            rmdir "$warm_lock" 2>/dev/null || true
+        fi
+        sleep 1
+    done
+}
+warm_unlock() {
+    rmdir "$warm_lock" 2>/dev/null || true
+}
+# Copies a tree, cheaply where the filesystem clones (APFS), whole where it
+# does not, and keeps the times: cargo reads the freshness of a build from
+# them.
+warm_copy() {
+    cp -cR "$1" "$2" 2>/dev/null || cp -pR "$1" "$2"
+}
+if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_info.json ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
+    if warm_lock; then
+        if [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
+            rm -rf target
+            if warm_copy "$warm/target" target; then
+                # The copy names the worktree it was built in, in the few
+                # files that hold absolute paths to it; point those at this
+                # one, and put their times back, so the build reads its own
+                # copy and cargo still takes it as fresh.
+                from=$(cat "$warm/from")
+                esc_from=$(printf '%s' "$from" | sed 's/[\\&|]/\\&/g')
+                esc_pwd=$(printf '%s' "$PWD" | sed 's/[\\&|]/\\&/g')
+                # A rewrite that fails leaves a half-pointed copy, which is
+                # worse than none: drop the seed and build from nothing.
+                grep -rl -F "$from" target/debug/build --include=output 2>/dev/null | while IFS= read -r f; do
+                    tmp=$(mktemp)
+                    touch -r "$f" "$tmp"
+                    sed "s|$esc_from|$esc_pwd|g" "$f" > "$tmp.out"
+                    cat "$tmp.out" > "$f"
+                    touch -r "$tmp" "$f"
+                    rm -f "$tmp" "$tmp.out"
+                done || rm -rf target
+            else
+                rm -rf target
+            fi
+        fi
+        warm_unlock
+    fi
 fi
 # From the lockfile, so this builds what a clean checkout builds.
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --locked
+# The gate passed: leave this build's dependencies for the next fresh
+# worktree. The cache is built aside and moved into place under the lock,
+# so a reader never sees a half-written copy, and a failure here must not
+# fail the gate.
+if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ]; then
+    if warm_lock; then
+        rm -rf "$warm.tmp" || true
+        if mkdir -p "$warm.tmp" 2>/dev/null && warm_copy target "$warm.tmp/target" 2>/dev/null; then
+            rm -rf "$warm.tmp/target/debug/incremental" || true
+            printf '%s' "$PWD" > "$warm.tmp/from" || true
+            if [ -f "$warm.tmp/from" ]; then
+                rm -rf "$warm.old" || true
+                if [ -e "$warm" ]; then
+                    mv "$warm" "$warm.old" || true
+                fi
+                if [ ! -e "$warm" ]; then
+                    mv "$warm.tmp" "$warm" || true
+                fi
+                rm -rf "$warm.old" || true
+            fi
+        fi
+        rm -rf "$warm.tmp" || true
+        warm_unlock
+    fi
+fi

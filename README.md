@@ -35,12 +35,11 @@ release a crate in gpui's tree no longer builds on Linux, and the gate, on
 a Mac, would not say so.
 
 Compiling gpui's tree takes a while, and every fresh worktree would pay it
-again. The gate routes rustc through
-[sccache](https://github.com/mozilla/sccache) when it is installed, so a
-fresh worktree restores the dependencies from the cache the worktrees
-share, in the platform's usual cache directory. `cargo install sccache`
-gets it (`brew install sccache` on macOS); without it the gate builds as it
-did.
+again. The gate keeps the built dependencies of a worktree that passed it,
+in `~/.cache/footplate-warm-target`, and a fresh worktree starts from that
+copy, compiling only footplate itself. Deleting that directory loses
+nothing but time: the next gate run builds from nothing and leaves a fresh
+copy behind it.
 
 There is no installer. The binary is the application: copy it where you
 like and run it.
