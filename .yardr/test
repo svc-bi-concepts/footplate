@@ -19,6 +19,7 @@ warm_lock="$warm.lock"
 # Gives up after two minutes, and then the caller carries on without the
 # cache.
 warm_lock() {
+    mkdir -p "$(dirname "$warm_lock")" 2>/dev/null || return 1
     n=0
     while ! mkdir "$warm_lock" 2>/dev/null; do
         n=$((n + 1))
