@@ -2512,6 +2512,7 @@ impl Footplate {
         );
         if ask.expanded {
             card = card.child(self.expanded_body(
+                select::key((bead_id, ask_seq)),
                 &detail.body,
                 &detail.notes,
                 &ask.about,
@@ -2678,6 +2679,7 @@ impl Footplate {
             );
             if detail.expanded {
                 body = body.child(self.expanded_body(
+                    select::key((bead, ask)),
                     &detail.body,
                     &detail.notes,
                     &detail.about,
@@ -2704,6 +2706,7 @@ impl Footplate {
     /// A design bead's document is named by path and branch, not fetched.
     fn expanded_body(
         &self,
+        card_key: u64,
         body: &str,
         notes: &[model::CardNote],
         about: &[crate::api::AboutBead],
@@ -2721,7 +2724,7 @@ impl Footplate {
                         .child("body"),
                 )
                 .child(select::text(
-                    select::key(("body", body)),
+                    expanded_text_key(card_key, "body", 0, body),
                     body.to_string(),
                     &self.selection,
                 ));
@@ -2747,7 +2750,7 @@ impl Footplate {
                                 .child(note.author.clone()),
                         )
                         .child(select::text(
-                            select::key(("note", ix, &note.text)),
+                            expanded_text_key(card_key, "note", ix, &note.text),
                             note.text.clone(),
                             &self.selection,
                         )),
@@ -2856,6 +2859,10 @@ impl Render for Footplate {
     }
 }
 
+fn expanded_text_key(card_key: u64, section: &str, index: usize, text: &str) -> u64 {
+    select::key((card_key, section, index, text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2864,6 +2871,18 @@ mod tests {
     use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, WindowAppearance};
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn expanded_text_keys_include_the_card_identity() {
+        assert_ne!(
+            expanded_text_key(1, "body", 0, "same body"),
+            expanded_text_key(2, "body", 0, "same body")
+        );
+        assert_ne!(
+            expanded_text_key(1, "note", 0, "same note"),
+            expanded_text_key(2, "note", 0, "same note")
+        );
+    }
 
     #[test]
     fn the_window_icon_is_the_1024px_master_png() {
