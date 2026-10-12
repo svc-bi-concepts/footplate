@@ -11,6 +11,7 @@ mod input;
 mod model;
 mod select;
 mod session;
+mod settings;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
 mod theme;
@@ -42,7 +43,11 @@ fn main() {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(vec![Menu {
             name: NAME.into(),
-            items: vec![MenuItem::action("Quit footplate", Quit)],
+            items: vec![
+                MenuItem::action("Settings…", window::OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit footplate", Quit),
+            ],
         }]);
         // The one window is the application.
         cx.on_window_closed(|cx| {
@@ -69,7 +74,8 @@ fn main() {
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| Footplate::new(client, name, window, cx));
+            let view =
+                cx.new(|cx| Footplate::new(client, name, window, cx).kept_in(settings::file(), cx));
             window.focus(&view.read(cx).line().focus_handle(cx));
             view
         });

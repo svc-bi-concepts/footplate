@@ -535,7 +535,7 @@ impl Element for LineElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let palette = Palette::of(window.appearance());
+        let palette = Palette::now(window, cx);
         let input = self.input.read(cx);
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();

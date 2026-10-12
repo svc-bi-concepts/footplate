@@ -201,7 +201,27 @@ its ask, as a draft stays with its conversation.
 | `e`, on a card | expands it to the bead whole, or folds it again |
 | `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
+| `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
+| `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |
+| `cmd+shift+l` (`ctrl+shift+l` on Linux) | the next of auto, light, dark |
 | `cmd+q` (`ctrl+q` on Linux) | quits; so does closing the window |
+
+## Settings
+
+Two things can be set, in the settings or by their own keys, and both are
+drawn at once and kept for the next start:
+
+- the text size, 11 to 20 pixels, a pixel a step; 14 is the usual size.
+  Everything that goes with the text goes with it: the left column, the
+  rows, the logo.
+- light, dark or auto. Auto is the desktop's look, and follows it when it
+  changes while the window is open.
+
+They are kept in one file footplate writes on every change:
+`~/Library/Application Support/footplate/settings.json` on macOS,
+`$XDG_CONFIG_HOME/footplate/settings.json` on Linux (`~/.config` when that
+is not set). Without the file, or with one footplate cannot read, the window
+is as it was before there were settings: 14 pixels, auto.
 
 Not in this slice, and in `yardr chat`: a crew member's pane, and a text
 of several lines or longer than one mail (4096 bytes): the line is one

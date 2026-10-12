@@ -248,7 +248,7 @@ impl Element for Text {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let palette = Palette::of(window.appearance());
+        let palette = Palette::now(window, cx);
         let link = HighlightStyle {
             color: Some(palette.accent.into()),
             underline: Some(UnderlineStyle {

@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::thread;
 
 use gpui::{
-    App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
-    Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString, Window,
-    actions, div, img, prelude::*, px,
+    Action, App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable,
+    FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString,
+    Window, actions, div, img, prelude::*, px, relative, rems,
 };
 
 use crate::api::{self, BlobRef, Client};
@@ -22,7 +22,8 @@ use crate::model::{
 };
 use crate::select::{self, Selection};
 use crate::session::{self, Update};
-use crate::theme::Palette;
+use crate::settings::{self, Settings};
+use crate::theme::{Look, Palette};
 
 /// The application's icon, from the 1024px master in assets/icon.png.
 pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
@@ -30,8 +31,30 @@ pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
 actions!(
     footplate,
     [
-        Next, Previous, Dismiss, Pick1, Pick2, Pick3, Pick4, Pick5, Pick6, Pick7, Pick8, Pick9,
-        ChoiceUp, ChoiceDown, Decide, Decline, Expand, FocusWords, Leave
+        Next,
+        Previous,
+        Dismiss,
+        Pick1,
+        Pick2,
+        Pick3,
+        Pick4,
+        Pick5,
+        Pick6,
+        Pick7,
+        Pick8,
+        Pick9,
+        ChoiceUp,
+        ChoiceDown,
+        Decide,
+        Decline,
+        Expand,
+        FocusWords,
+        Leave,
+        OpenSettings,
+        Larger,
+        Smaller,
+        UsualSize,
+        NextLook
     ]
 );
 
@@ -47,8 +70,16 @@ const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 /// reader when it comes.
 const IMAGE_HEIGHT: f32 = 240.;
 
-/// The side of an attachment of the draft, above the line.
-const ATTACHMENT: f32 = 56.;
+/// The side of an attachment of the draft, above the line, in rems: its
+/// name stands in it where it is no image, so it goes with the text size.
+const ATTACHMENT: f32 = 3.5;
+
+/// The key that is cmd on macOS and ctrl elsewhere, as the hints name it.
+const SECONDARY: &str = if cfg!(target_os = "macos") {
+    "cmd"
+} else {
+    "ctrl"
+};
 
 /// An image a mail of some conversation names, by its hash.
 enum Picture {
@@ -241,6 +272,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("i", FocusWords, Some(NO_LINE_CONTEXT)),
     ]);
+    // The settings and their own keys, wherever the focus is, the yard
+    // there or away. Larger is on `=`, the key `+` is on, with shift or
+    // without.
+    cx.bind_keys([
+        KeyBinding::new("secondary-,", OpenSettings, None),
+        KeyBinding::new("secondary-=", Larger, None),
+        KeyBinding::new("secondary-+", Larger, None),
+        KeyBinding::new("secondary--", Smaller, None),
+        KeyBinding::new("secondary-0", UsualSize, None),
+        KeyBinding::new("secondary-shift-l", NextLook, None),
+    ]);
 }
 
 pub struct Footplate {
@@ -275,6 +317,15 @@ pub struct Footplate {
     /// Which read of the queue a put-aside return waits for: an older
     /// timer does nothing when the queue was read since.
     ask_generation: u64,
+    /// The text size and the look, as they are drawn.
+    settings: Settings,
+    /// The file they are kept in, or none: then they last as long as the
+    /// window.
+    kept: Option<PathBuf>,
+    /// Why the last change was not kept, if it was not.
+    unkept: Option<String>,
+    /// The settings are shown where the conversation is.
+    settings_open: bool,
 }
 
 impl Footplate {
@@ -295,6 +346,21 @@ impl Footplate {
             .detach();
         let selection = cx.new(|_| Selection::default());
         cx.observe(&selection, |_, _, cx| cx.notify()).detach();
+        // Auto is the desktop's look: when that changes, the window is
+        // drawn again.
+        cx.observe_window_appearance(window, |_, _, cx| cx.notify())
+            .detach();
+        // The settings' keys are the application's, as quit is. An action
+        // of the window goes by way of what has the focus, and while the
+        // yard is away that is a line that is not drawn: it would go
+        // nowhere.
+        Self::on_app_action::<OpenSettings>(window, cx, Self::toggle_settings);
+        Self::on_app_action::<Larger>(window, cx, |this, _, cx| this.resize(1, cx));
+        Self::on_app_action::<Smaller>(window, cx, |this, _, cx| this.resize(-1, cx));
+        Self::on_app_action::<UsualSize>(window, cx, |this, _, cx| this.usual_size(cx));
+        Self::on_app_action::<NextLook>(window, cx, |this, _, cx| {
+            this.look(this.settings.look.next(), cx)
+        });
 
         // The yard is followed on a thread of its own, which blocks on the
         // socket; what it learns comes here.
@@ -335,7 +401,44 @@ impl Footplate {
             focus: cx.focus_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
             ask_generation: 0,
+            settings: Settings::default(),
+            kept: None,
+            unkept: None,
+            settings_open: false,
         }
+    }
+
+    /// Does `f` in this window for the action `A`, wherever the focus is.
+    fn on_app_action<A: Action>(
+        window: &Window,
+        cx: &mut Context<Self>,
+        f: fn(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
+        let (this, handle) = (cx.weak_entity(), window.window_handle());
+        // The application's own, not the one a context has for its window.
+        let app: &mut App = cx;
+        app.on_action(move |_: &A, cx| {
+            let this = this.clone();
+            // Afterwards: the window is not to be had while the key that
+            // came through it is still on its way.
+            cx.defer(move |cx| {
+                // A window that is closed has nothing to set.
+                let _ = handle.update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| f(this, window, cx))
+                });
+            });
+        });
+    }
+
+    /// The window with what `file` keeps of the text size and the look,
+    /// which is where a change of them is kept from here on.
+    pub fn kept_in(mut self, file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+        if let Some(file) = &file {
+            self.settings = Settings::read(file);
+        }
+        cx.set_global(self.settings.look);
+        self.kept = file;
+        self
     }
 
     pub fn line(&self) -> &Entity<Line> {
@@ -765,6 +868,11 @@ impl Footplate {
     /// The open card's ask: the current one of a decision, or the dealt
     /// with itself.
     fn card(&self) -> Option<(String, u64)> {
+        // The settings stand where the card does: its keys are not for a
+        // card that is not in view.
+        if self.settings_open {
+            return None;
+        }
         match self.model.as_ref()?.selected()? {
             Selected::Decision(_) => self.model.as_ref()?.current_ask(),
             Selected::Decided(bead, ask) => Some((bead.clone(), *ask)),
@@ -992,6 +1100,7 @@ impl Footplate {
     }
 
     fn select(&mut self, sel: Selected, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
         self.change(cx, |m| m.select(sel));
         // What is typed goes to a conversation; elsewhere the window holds
         // the keys, and `x` marks a notice read.
@@ -1011,6 +1120,7 @@ impl Footplate {
     }
 
     fn step(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
         self.change(cx, |m| m.step(by));
         let focus = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
             Some(_) => self.line.focus_handle(cx),
@@ -1109,6 +1219,9 @@ impl Footplate {
     /// Esc leaves what it can: a decline asked for words, the words for
     /// the card's keys, the pick, then the words.
     fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            return self.toggle_settings(window, cx);
+        }
         if self.declining.take().is_some() {
             self.shown(cx);
             window.focus(&self.focus.clone());
@@ -1189,6 +1302,215 @@ impl Footplate {
         });
     }
 
+    /// Shows the settings where the conversation is, or what was open
+    /// again. While they show, the window holds the keys: nothing typed
+    /// goes to a line that is not in view.
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = !self.settings_open;
+        let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
+        let focus = match conversation {
+            Some(_) if !self.settings_open => self.line.focus_handle(cx),
+            _ => self.focus.clone(),
+        };
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    /// Draws the window with `settings` from now on and keeps them. What
+    /// keeps them from being kept is said in the settings, and the window
+    /// has them all the same until it closes.
+    fn set(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        if settings == self.settings {
+            return;
+        }
+        self.settings = settings;
+        // The line and the messages take their colours from this.
+        cx.set_global(settings.look);
+        if let Some(file) = &self.kept {
+            self.unkept = settings.write(file).err().map(|err| err.to_string());
+        }
+        cx.notify();
+    }
+
+    /// The text a step larger or smaller.
+    fn resize(&mut self, by: i8, cx: &mut Context<Self>) {
+        self.set(self.settings.sized(by), cx);
+    }
+
+    fn usual_size(&mut self, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                text: settings::TEXT,
+                ..self.settings
+            },
+            cx,
+        );
+    }
+
+    fn look(&mut self, look: Look, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                look,
+                ..self.settings
+            },
+            cx,
+        );
+    }
+
+    /// The control that opens the settings, and shuts them: in the head of
+    /// the left column, and under the words when the yard is away.
+    fn settings_control(
+        &self,
+        text: String,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        small_button(text, palette)
+            .id("settings")
+            .debug_selector(|| "settings".to_string())
+            .flex_none()
+            .when(self.settings_open, |el| el.bg(palette.open))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
+    }
+
+    /// The settings: the text size and the look, each with its buttons and
+    /// its keys, and where they are kept.
+    fn talk_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let kept = match &self.kept {
+            Some(file) => format!("Kept in {}", file.display()),
+            None => "Not kept: there is no home directory to keep them in.".to_string(),
+        };
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("settings"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .truncate()
+                            .child(kept),
+                    ),
+            )
+            .child(
+                small_button("back (esc)".to_string(), palette)
+                    .id("settings back")
+                    .debug_selector(|| "settings back".to_string())
+                    .flex_none()
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
+            );
+        // What a setting is called, over its buttons and the keys for it.
+        let setting = |name: &'static str, keys: String| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+                .child(div().text_sm().text_color(palette.faint).child(keys))
+        };
+        let text = self.settings.text;
+        let size = setting(
+            "text size",
+            format!("{SECONDARY}+= larger · {SECONDARY}+- smaller · {SECONDARY}+0 the usual size"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    small_button("smaller".to_string(), palette)
+                        .id("text smaller")
+                        .debug_selector(|| "text smaller".to_string())
+                        .when(text == settings::TEXT_MIN, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.resize(-1, cx))),
+                )
+                .child(div().debug_selector(|| "text size".to_string()).child(
+                    if text == settings::TEXT {
+                        format!("{text} px, the usual size")
+                    } else {
+                        format!("{text} px")
+                    },
+                ))
+                .child(
+                    small_button("larger".to_string(), palette)
+                        .id("text larger")
+                        .debug_selector(|| "text larger".to_string())
+                        .when(text == settings::TEXT_MAX, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.resize(1, cx))),
+                )
+                .child(
+                    small_button("the usual size".to_string(), palette)
+                        .id("text usual")
+                        .debug_selector(|| "text usual".to_string())
+                        .when(text == settings::TEXT, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.usual_size(cx))),
+                ),
+        );
+        let chosen = self.settings.look;
+        let look = setting(
+            "light or dark",
+            format!("{SECONDARY}+shift+l the next of auto, light, dark · auto is the desktop's"),
+        )
+        .child(div().flex().flex_wrap().items_center().gap_2().children(
+            Look::ALL.into_iter().map(|look| {
+                small_button(look.name().to_string(), palette)
+                    .id(SharedString::from(format!("look {}", look.name())))
+                    .debug_selector(|| format!("look {}", look.name()))
+                    .when(look == chosen, |el| {
+                        el.bg(palette.open)
+                            .text_color(palette.text)
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.look(look, cx)))
+            }),
+        ));
+        pane.child(head)
+            .child(
+                div()
+                    .id("settings pane")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(size)
+                    .child(look),
+            )
+            .when_some(self.unkept.clone(), |el, why| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! not kept: {why}")),
+                )
+            })
+            .child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(format!("{SECONDARY}+, or esc goes back")),
+            )
+    }
+
     fn toggle_decided(&mut self, cx: &mut Context<Self>) {
         self.change(cx, |m| {
             m.toggle_decided();
@@ -1197,7 +1519,7 @@ impl Footplate {
     }
 
     /// No yard: why, in words, and that it is tried again.
-    fn away(&self, why: &str, palette: Palette) -> impl IntoElement {
+    fn away(&self, why: &str, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -1206,10 +1528,10 @@ impl Footplate {
             .justify_center()
             .gap_3()
             .p_8()
-            .child(img(self.icon.clone()).size(px(72.)))
+            .child(img(self.icon.clone()).size(rems(4.5)))
             .child(
                 div()
-                    .max_w(px(520.))
+                    .max_w(rems(32.5))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -1224,6 +1546,7 @@ impl Footplate {
                         session::RETRY.as_secs()
                     ))),
             )
+            .child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
     }
 
     fn list(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1235,11 +1558,19 @@ impl Footplate {
             .p_3()
             .border_b_1()
             .border_color(palette.line)
-            .child(img(self.icon.clone()).size(px(32.)).flex_none())
+            // As high as the two lines beside it, nearly: 40 pixels at the
+            // usual text size, and with the text when that is set.
+            .child(
+                img(self.icon.clone())
+                    .size(rems(2.5))
+                    .flex_none()
+                    .debug_selector(|| "logo".to_string()),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
                     .min_w_0()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("footplate"))
                     .child(
@@ -1249,7 +1580,8 @@ impl Footplate {
                             .truncate()
                             .child(model.me().to_string()),
                     ),
-            );
+            )
+            .child(self.settings_control("settings".to_string(), palette, cx));
         let now = chrono::Utc::now();
         let mut body = div()
             .id("rows")
@@ -1326,7 +1658,11 @@ impl Footplate {
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
         div()
-            .w(px(260.))
+            // 260 pixels at the usual text size. Its rows are cut to it, so
+            // it grows with the text, but never over the conversation: the
+            // smallest window still has the larger part for that.
+            .w(rems(16.25))
+            .max_w(relative(0.45))
             .flex_none()
             .h_full()
             .flex()
@@ -1410,6 +1746,7 @@ impl Footplate {
         let sel = Selected::Decision(row.bead.clone());
         div()
             .id(SharedString::from(format!("decision {}", row.bead)))
+            .debug_selector(|| format!("decision row {}", row.bead))
             .mx_1()
             .px_2()
             .py_1p5()
@@ -1569,7 +1906,7 @@ impl Footplate {
         div()
             .relative()
             .flex_none()
-            .size(px(ATTACHMENT))
+            .size(rems(ATTACHMENT))
             .child(
                 div()
                     .size_full()
@@ -1585,9 +1922,9 @@ impl Footplate {
                     .id(("remove", id))
                     .debug_selector(|| format!("remove {id}"))
                     .absolute()
-                    .top(px(-6.))
-                    .right(px(-6.))
-                    .size(px(16.))
+                    .top(rems(-0.375))
+                    .right(rems(-0.375))
+                    .size(rems(1.))
                     .rounded_full()
                     .border_1()
                     .border_color(palette.line)
@@ -2402,10 +2739,16 @@ impl Focusable for Footplate {
 
 impl Render for Footplate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = Palette::of(window.appearance());
+        // The one place the text size is set: every size that goes with the
+        // text is in rems, and the text itself is seven eighths of one.
+        window.set_rem_size(self.settings.rem());
+        let palette = Palette::now(window, cx);
         // On a card the window holds the keys to pick with, and the line to
         // type words in: with the focus in the line those keys are text.
         let context = match self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            // The settings stand where the card or the notices do: the keys
+            // that pick and mark read are not for what is not in view.
+            _ if self.settings_open => CONTEXT,
             Some(Selected::Conversation(_)) => CONTEXT,
             Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
                 if self.line.focus_handle(cx).is_focused(window) =>
@@ -2446,9 +2789,13 @@ impl Render for Footplate {
             .flex()
             .bg(palette.ground)
             .text_color(palette.text)
-            .text_size(px(14.));
+            .text_size(rems(0.875));
         match (&self.down, &self.model) {
-            (Some(why), _) => root.child(self.away(why, palette)),
+            (Some(_), _) if self.settings_open => root.child(self.talk_settings(palette, cx)),
+            (Some(why), _) => root.child(self.away(why, palette, cx)),
+            (None, Some(model)) if self.settings_open => root
+                .child(self.list(model, palette, cx))
+                .child(self.talk_settings(palette, cx)),
             (None, Some(model)) => root
                 .child(self.list(model, palette, cx))
                 .child(self.talk(model, palette, cx)),
@@ -2462,7 +2809,7 @@ mod tests {
     use super::*;
     use crate::fake::Yard;
     use crate::input;
-    use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext};
+    use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, WindowAppearance};
     use serde_json::json;
     use std::time::Duration;
 
@@ -4202,5 +4549,315 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// The window on `yard` with its settings kept in `file`, the focus in
+    /// the line, once the yardmaster's conversation shows.
+    fn opened_kept<'a>(
+        yard: &Yard,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        let (client, file) = (yard.client(), file.to_path_buf());
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(client, "jo".into(), window, cx).kept_in(Some(file), cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        (view, cx)
+    }
+
+    fn settings_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Settings {
+        view.read_with(cx, |v, _| v.settings)
+    }
+
+    fn settings_open(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
+        view.read_with(cx, |v, _| v.settings_open)
+    }
+
+    /// The colours the window is drawn in, the line and the messages too.
+    fn palette(cx: &mut VisualTestContext) -> Palette {
+        cx.run_until_parked();
+        cx.update(|window, cx| Palette::now(window, cx))
+    }
+
+    #[gpui::test]
+    fn the_settings_change_the_window_at_once_and_are_kept(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        // No file yet: today's look, and nothing is written for looking.
+        let today = Settings {
+            text: 14,
+            look: Look::Auto,
+        };
+        assert_eq!(settings_of(&view, cx), today);
+        let desktop = cx.update(|window, _| window.appearance());
+        assert_eq!(palette(cx), Palette::of(Look::Auto, desktop));
+        assert_eq!(cx.update(|window, _| window.rem_size()), px(16.));
+        assert!(!file.exists());
+
+        // One key shows the settings where the conversation was. What is
+        // typed then is not for the line, which is out of view.
+        cx.simulate_input("hal");
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "text size"));
+        assert!(drawn(cx, "look auto"));
+        cx.simulate_input("x");
+        assert_eq!(typed(&view, cx), "hal");
+
+        // Larger and smaller by a key each: the whole window at once, by
+        // its rem, and the file has it.
+        cx.simulate_keystrokes("secondary-= secondary-=");
+        assert_eq!(settings_of(&view, cx).text, 16);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, _| window.rem_size()),
+            px(16. * 16. / 14.)
+        );
+        assert_eq!(Settings::read(&file).text, 16);
+        cx.simulate_keystrokes("secondary--");
+        assert_eq!(settings_of(&view, cx).text, 15);
+        cx.simulate_keystrokes("secondary-0");
+        assert_eq!(settings_of(&view, cx).text, 14);
+        assert_eq!(Settings::read(&file), today);
+        // And by the buttons.
+        click_on(cx, "text larger");
+        click_on(cx, "text larger");
+        click_on(cx, "text smaller");
+        assert_eq!(settings_of(&view, cx).text, 15);
+        click_on(cx, "text usual");
+        assert_eq!(settings_of(&view, cx).text, 14);
+        // The ends hold.
+        for _ in 0..12 {
+            cx.simulate_keystrokes("secondary-=");
+        }
+        assert_eq!(settings_of(&view, cx).text, settings::TEXT_MAX);
+        for _ in 0..12 {
+            cx.simulate_keystrokes("secondary--");
+        }
+        assert_eq!(settings_of(&view, cx).text, settings::TEXT_MIN);
+        assert_eq!(Settings::read(&file).text, settings::TEXT_MIN);
+
+        // The look: one key steps through them, a button chooses one, and
+        // the window is drawn in it at once, whatever the desktop has.
+        cx.simulate_keystrokes("secondary-shift-l");
+        assert_eq!(settings_of(&view, cx).look, Look::Light);
+        assert_eq!(palette(cx), Palette::of(Look::Light, desktop));
+        cx.simulate_keystrokes("secondary-shift-l");
+        assert_eq!(settings_of(&view, cx).look, Look::Dark);
+        assert_eq!(
+            palette(cx),
+            Palette::of(Look::Dark, WindowAppearance::Light)
+        );
+        cx.simulate_keystrokes("secondary-shift-l");
+        assert_eq!(settings_of(&view, cx).look, Look::Auto);
+        click_on(cx, "look light");
+        assert_eq!(settings_of(&view, cx).look, Look::Light);
+        click_on(cx, "look dark");
+        assert_eq!(
+            palette(cx),
+            Palette::of(Look::Dark, WindowAppearance::Light)
+        );
+        let set = Settings {
+            text: settings::TEXT_MIN,
+            look: Look::Dark,
+        };
+        assert_eq!(Settings::read(&file), set);
+        assert_eq!(view.read_with(cx, |v, _| v.unkept.clone()), None);
+
+        // Esc goes back to the conversation, and the line has the keys.
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
+        cx.simulate_input("t");
+        assert_eq!(typed(&view, cx), "halt");
+        // The control in the head opens them and shuts them; so does the
+        // back button, and a row that is opened.
+        click_on(cx, "settings");
+        assert!(settings_open(&view, cx));
+        click_on(cx, "settings");
+        assert!(!settings_open(&view, cx));
+        click_on(cx, "settings");
+        click_on(cx, "settings back");
+        assert!(!settings_open(&view, cx));
+        cx.simulate_keystrokes("secondary-,");
+        cx.simulate_keystrokes("tab");
+        assert!(!settings_open(&view, cx));
+        // The keys of their own work with the settings shut too.
+        cx.simulate_keystrokes("secondary-=");
+        assert_eq!(settings_of(&view, cx).text, settings::TEXT_MIN + 1);
+
+        // A restart: the next window is as this one was left.
+        let left = settings_of(&view, cx);
+        let (again, cx) = opened_kept(&yard, &file, cx);
+        assert_eq!(settings_of(&again, cx), left);
+        assert_eq!(left.look, Look::Dark);
+        assert_eq!(
+            palette(cx),
+            Palette::of(Look::Dark, WindowAppearance::Light)
+        );
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|window, _| window.rem_size()), left.rem());
+    }
+
+    /// A file that cannot be written keeps nothing, and says so; the window
+    /// has the change all the same.
+    #[gpui::test]
+    fn a_change_that_cannot_be_kept_is_said_and_still_drawn(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let in_the_way = dir.path().join("footplate");
+        std::fs::write(&in_the_way, "a file where the directory would be").unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &in_the_way.join("settings.json"), cx);
+        assert_eq!(settings_of(&view, cx), Settings::default());
+        cx.simulate_keystrokes("secondary-=");
+        assert_eq!(settings_of(&view, cx).text, 15);
+        assert!(view.read_with(cx, |v, _| v.unkept.is_some()));
+    }
+
+    /// With the yard away there is no left column: the settings are reached
+    /// by the same key, and by a control under the words.
+    #[gpui::test]
+    fn the_settings_are_reached_while_the_yard_is_away(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("yard.sock");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(Client::new(&socket), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "that there is no yard", |cx| {
+            view.read_with(cx, |v, _| {
+                v.down
+                    .as_deref()
+                    .is_some_and(|why| why.starts_with("No yard"))
+            })
+        });
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "look auto"));
+        cx.simulate_keystrokes("secondary-shift-l secondary-=");
+        assert_eq!(
+            settings_of(&view, cx),
+            Settings {
+                text: 15,
+                look: Look::Light
+            }
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
+        click_on(cx, "settings");
+        assert!(settings_open(&view, cx));
+        click_on(cx, "settings back");
+        assert!(!settings_open(&view, cx));
+    }
+
+    /// The layout at the smallest and the largest text: the rows of the
+    /// left column stand under one another, a long head still ends before
+    /// the bead's id (which is why it ends in an ellipsis, footplate-eryf),
+    /// and the column, its rows and the logo go with the text.
+    #[gpui::test]
+    fn the_layout_holds_at_the_smallest_and_the_largest_text(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "A deliberately long question that must be cut before the id", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"},
+                {"bead": "bead-b", "bead_title": "Short", "topic": "topic:linear-out",
+                 "ask": 4, "question": "Name it?", "asker": "yardmaster",
+                 "since": "2026-10-10T11:00:00Z"}
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decisions", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decisions_count() == 2)
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+
+        let mut rows = Vec::new();
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings { text, ..v.settings };
+                v.set(set, cx)
+            });
+            let rem = settings_of(&view, cx).rem();
+            let first = bounds_of(cx, "decision row bead-a");
+            let second = bounds_of(cx, "decision row bead-b");
+            let long = bounds_of(cx, "decision head bead-a");
+            let short = bounds_of(cx, "decision head bead-b");
+            let id = bounds_of(cx, "decision id bead-a");
+            assert!(
+                first.bottom() <= second.top(),
+                "at {text} px a row overlaps the next: {first:?} {second:?}"
+            );
+            assert!(
+                first.top() <= long.top() && long.bottom() <= first.bottom(),
+                "at {text} px the head leaves its row: {long:?} {first:?}"
+            );
+            assert!(
+                long.right() < id.left() && id.right() <= first.right(),
+                "at {text} px the long head touches the id: {long:?} {id:?}"
+            );
+            assert_eq!(
+                short.size.width, long.size.width,
+                "at {text} px the head's column hugs its content"
+            );
+            // The logo is two and a half rems a side: 40 pixels as a rule.
+            let logo = bounds_of(cx, "logo");
+            let side = rem * 2.5;
+            assert!(
+                (logo.size.width - side).abs() < px(1.) && (logo.size.height - side).abs() < px(1.),
+                "at {text} px the logo is {logo:?}, not {side:?} a side"
+            );
+            let control = bounds_of(cx, "settings");
+            assert!(
+                logo.right() < control.left() && control.right() <= first.right() + rem,
+                "at {text} px the head of the column does not hold: {logo:?} {control:?}"
+            );
+            rows.push((first.size.width, first.size.height, long.size.height));
+        }
+        // Smaller and larger than the usual in every measure.
+        assert!(rows[0].0 < rows[1].0 && rows[1].0 < rows[2].0, "{rows:?}");
+        assert!(rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1, "{rows:?}");
+        assert!(rows[0].2 < rows[1].2 && rows[1].2 < rows[2].2, "{rows:?}");
+        let logo = bounds_of(cx, "logo");
+        assert!(logo.size.width > px(40.));
     }
 }
