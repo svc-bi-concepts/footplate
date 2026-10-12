@@ -247,7 +247,8 @@ pub fn bind_keys(cx: &mut App) {
             // the line it copies the line's selection, as before.
             KeyBinding::new("secondary-c", input::Copy, Some(context)),
             // The arrows choose even while words are typed: the line keeps
-            // left and right for its cursor.
+            // left and right for its cursor, and up and down while its
+            // words have a row to go to.
             KeyBinding::new("up", ChoiceUp, Some(context)),
             KeyBinding::new("down", ChoiceDown, Some(context)),
             KeyBinding::new("escape", Leave, Some(context)),
@@ -3412,11 +3413,12 @@ mod tests {
         assert_eq!(notice(&view, cx), "");
         assert_eq!(picture(&view, cx, HASH), "here");
 
-        // Text on the clipboard is pasted into the line, as before.
+        // Text on the clipboard is pasted into the line, as before, and
+        // with its line break.
         cx.simulate_keystrokes("shift-tab");
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(" Two\nlines.".into()));
         cx.simulate_keystrokes("cmd-v");
-        assert_eq!(typed(&view, cx), "And this. Two lines.");
+        assert_eq!(typed(&view, cx), "And this. Two\nlines.");
     }
 
     #[gpui::test]
@@ -3887,6 +3889,43 @@ mod tests {
         assert_eq!(selected(&view, cx), None);
     }
 
+    /// What is typed with line breaks is one mail, and the yard gets them:
+    /// in the text of the call, and kept while another conversation is
+    /// open.
+    #[gpui::test]
+    fn a_mail_with_line_breaks_arrives_with_them(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &[LINK]);
+        let (view, cx) = opened(&yard, &[LINK], cx);
+
+        cx.simulate_input("Land it today:");
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("- the links");
+        cx.simulate_keystrokes("shift-enter shift-enter");
+        cx.simulate_input("Then tell me.");
+        let text = "Land it today:\n- the links\n\nThen tell me.";
+        assert_eq!(typed(&view, cx), text);
+        assert_eq!(yard.asked("Mail"), Vec::<serde_json::Value>::new());
+        // Four rows, and the box as high.
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.line.read(cx).rows()), (4, 4));
+
+        // Another conversation and back: the draft has its line breaks.
+        cx.simulate_keystrokes("tab");
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(typed(&view, cx), text);
+
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail of four lines", |_| {
+            yard.asked("Mail") == [json!({"to": "yardmaster", "text": text, "actor": "jo"})]
+        });
+        assert_eq!(typed(&view, cx), "");
+    }
+
     #[gpui::test]
     fn the_line_still_copies_its_own_selection(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4164,6 +4203,72 @@ mod tests {
         cx.simulate_keystrokes("up");
         assert_eq!(chosen_of(&view, cx, "bead-a", 3), 3);
         assert_eq!(typed(&view, cx), "tonight?");
+    }
+
+    /// The words of a card are typed in the same line as a mail: shift
+    /// and Enter break the line, the words go with their line break, and
+    /// the arrows are the words' while they have a row to go to.
+    #[gpui::test]
+    fn the_words_of_a_card_take_line_breaks_and_the_arrows_choose_at_their_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        assert_eq!(current_ask_of(&view, cx), 3);
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("2");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("after Friday,");
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("the freeze is over then");
+        assert_eq!(typed(&view, cx), "after Friday,\nthe freeze is over then");
+        // The words are two rows, and the field as high.
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.line.read(cx).rows()), (2, 2));
+
+        // Up is the words' from the second row: the option stays. From the
+        // first row it chooses, and down from the last.
+        cx.simulate_keystrokes("up");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+        cx.simulate_keystrokes("up");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 1);
+        cx.simulate_keystrokes("down");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 1);
+        cx.simulate_keystrokes("down");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+
+        // Enter sends the pick with the words as typed.
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pick with words of two lines", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-a", "ask": 3, "option": 2,
+                           "words": "after Friday,\nthe freeze is over then", "actor": "jo"})]
+        });
+        assert_eq!(typed(&view, cx), "");
     }
 
     /// Clicks where `selector` is drawn.
@@ -4839,6 +4944,11 @@ mod tests {
         assert!(drawn(cx, "look auto"));
         cx.simulate_input("x");
         assert_eq!(typed(&view, cx), "hal");
+        // The settings have no text of their own to type: shift and Enter
+        // break no line there, and Enter sends nothing.
+        cx.simulate_keystrokes("shift-enter enter");
+        assert_eq!(typed(&view, cx), "hal");
+        assert_eq!(yard.asked("Mail"), Vec::<serde_json::Value>::new());
 
         // Larger and smaller by a key each: the whole window at once, by
         // its rem, and the file has it.

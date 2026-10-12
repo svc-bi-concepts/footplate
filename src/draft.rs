@@ -287,6 +287,17 @@ mod tests {
     }
 
     #[test]
+    fn a_text_kept_for_a_conversation_keeps_its_line_breaks() {
+        let mut drafts = Drafts::default();
+        drafts.put_text("assembly", "one\ntwo\n\nfour".to_string());
+        assert_eq!(drafts.take_text("assembly"), "one\ntwo\n\nfour");
+        // So does one that did not go, before what was typed since.
+        drafts.put_text("assembly", "typed\nsince".to_string());
+        drafts.unsend("assembly", "not\nsent".to_string());
+        assert_eq!(drafts.take_text("assembly"), "not\nsent typed\nsince");
+    }
+
+    #[test]
     fn each_conversation_has_its_own_draft() {
         let mut drafts = Drafts::default();
         let one = drafts.attach("yardmaster", image(PNG));

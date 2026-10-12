@@ -185,7 +185,9 @@ its ask, as a draft stays with its conversation.
 | Key | Does |
 |---|---|
 | `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
-| `cmd+v` (`ctrl+v` on Linux) | pastes text into the line; an image is attached to the draft |
+| `shift+enter` | breaks the line where the cursor is; a text wider than the box goes on in the next row, and the box grows with its rows up to a third of the window, then scrolls |
+| `up`, `down` in a text of several rows | the row above, below, in the same column; `home` and `end` are the row's |
+| `cmd+v` (`ctrl+v` on Linux) | pastes text into the line, with its line breaks; an image is attached to the draft |
 | a drag over a message's text, a double click on a word | selects it; one selection at a time, within one message |
 | `cmd+c` (`ctrl+c` on Linux) | copies what is selected, as it was written: of a message, with the Markdown marks that are not drawn, or of the line while you type in it |
 | a file dropped on the window | is added to the draft; a non-PNG or non-JPEG is marked and refused |
@@ -193,7 +195,7 @@ its ask, as a draft stays with its conversation.
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
 | a click on "Decided" | folds it open, shut |
-| `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed |
+| `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
 | `i`, on a card | types the words in; the window holds the card's keys |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | `x`, on an open card | puts the ask aside |
