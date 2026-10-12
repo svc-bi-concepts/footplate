@@ -62,6 +62,8 @@ JSON object a line. `src/api.rs` is the whole client.
 | `Crew`, `Peers` | whom there is to talk with: the crew, and `<name>@<peer>` for each one a linked yard exposes |
 | `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on an image, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
+| `UserNotifications` | what the yard reports, counted on the `yard` row |
+| `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
 | `Conversation` | the mail both ways with the one whose row is open |
 | `GET /blobs/<hash>` | an image a mail of the open conversation carries, once for each hash |
 
@@ -71,10 +73,14 @@ JSON object a line. `src/api.rs` is the whole client.
 | `PutBlob` for each image, then `Mail` with their hashes | Enter, when images are attached to the draft |
 | `MailPeer` | Enter, in a conversation with one of a linked yard; after `PutBlob` for each image, with their hashes |
 | `AckUserInbox` | a conversation showed mail that was unread |
+| `AckUserNotifications` | `x`, on the open `yard` row: one notice read |
 
 It follows the stream and asks nothing of the yard in a loop: `mail`,
-`mail_read` and `crew_status` are applied as they come, the crew is read
-again on the other `crew_*` events, the linked yards on `peer_*`.
+`mail_read`, `notifications_read` and `crew_status` are applied as they
+come, the crew is read again on the other `crew_*` events, the linked
+yards on `peer_*`, the notices on an event that notified the user, and
+the queue on every `noted` event and once more at each put-aside ask's
+return.
 
 **Who you are** is not typed. The window acts as `yardr chat` does: as the
 user named in `$YARDR_ACTOR`, else as your login name, when the yard has a
@@ -137,14 +143,22 @@ is open again.
 
 ## The window
 
-Left, the rows: the crew with what each one's session does (`working`,
+Left, the rows: above the conversations the open questions addressed to
+you, oldest first and grouped by topic (the bead's first `topic:` label,
+without the prefix; asks with none under "Everything else"), each row the
+question in plain words with whose it is and how long it waits, and the
+bead's id small at its end; a bead with several open asks is one row. Under
+them, folded, "Decided" with the answered, declined and put-aside asks and
+their picks. Then the crew with what each one's session does (`working`,
 `idle`, `blocked`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a
 person) and their role line, and on every row the number of mails from it
-you have not seen. Right, the open conversation, oldest at the top and the
-newest in view, with a line under your own mail that says where it stands
-(`read`, `sent; yardmaster is idle`, `queued for north: …`), and the line to
-write in.
+you have not seen. Below them the `yard` row with the number of the yard's
+notices you have not read. Right, what is open: a conversation, oldest at
+the top and the newest in view, with a line under your own mail that says
+where it stands (`read`, `sent; yardmaster is idle`, `queued for north:
+…`) and the line to write in; the notices, oldest first; or a bead's open
+asks as read-only text, the picking still to come.
 
 | Key | Does |
 |---|---|
@@ -156,13 +170,16 @@ write in.
 | `backspace` in an empty line | removes the last attachment |
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
+| a click on "Decided" | folds it open, shut |
+| `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | `cmd+q` (`ctrl+q` on Linux) | quits; so does closing the window |
 
-Not in this slice, and in `yardr chat`: the `yard` row with your
-notifications, a crew member's pane, and a text of several lines or longer
-than one mail (4096 bytes): the line is one line, and a longer text is
-refused with its size, not split. Nor here: saving an image to disk,
-resizing one that is over the cap, or sending files that are no image.
+Not in this slice, and in `yardr chat`: picking an option, putting aside
+and declining (the open row shows the questions as read-only text), a crew
+member's pane, and a text of several lines or longer than one mail (4096
+bytes): the line is one line, and a longer text is refused with its size,
+not split. Nor here: saving an image to disk, resizing one that is over
+the cap, or sending files that are no image.
 
 ## The icon
 

@@ -131,6 +131,9 @@ pub struct User {
     /// The user's mail is read through this seq.
     #[serde(default)]
     pub cursor: u64,
+    /// The same for the user's notifications.
+    #[serde(default)]
+    pub notification_cursor: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -228,6 +231,101 @@ pub struct Queued {
     pub at: String,
 }
 
+/// One notification of a user: what the yard reports apart from every
+/// conversation.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Notification {
+    pub seq: u64,
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub bead: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub read: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Notifications {
+    #[serde(default, deserialize_with = "or_default")]
+    pub notifications: Vec<Notification>,
+    /// All the unread, shown or not.
+    #[serde(default)]
+    pub unread: u64,
+    /// The seq of the newest unread, 0 when none is.
+    #[serde(default)]
+    pub last: u64,
+}
+
+/// One open question addressed to the user, as the queue lists it: the
+/// question in plain words, without its options or context, which the card
+/// reads with `Bead`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct OpenAsk {
+    pub bead: String,
+    #[serde(default)]
+    pub bead_title: String,
+    /// The bead's first `topic:` label, with its prefix, `""` when none.
+    #[serde(default)]
+    pub topic: String,
+    /// The ask note's seq: what an answer names.
+    #[serde(default)]
+    pub ask: u64,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub asker: String,
+    /// When the ask was written: how long it waits.
+    #[serde(default)]
+    pub since: String,
+}
+
+/// One the user dealt with: answered, put aside or declined, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct DecidedAsk {
+    pub bead: String,
+    #[serde(default)]
+    pub bead_title: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub ask: u64,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub asker: String,
+    #[serde(default)]
+    pub since: String,
+    /// `answered`, `put aside` or `declined`.
+    #[serde(default)]
+    pub state: String,
+    /// The picked option's number; absent on a words answer, an aside ask
+    /// and a declined one.
+    #[serde(default)]
+    pub option: u64,
+    #[serde(default)]
+    pub option_label: String,
+    /// What went with the pick, the words answer, or why declined.
+    #[serde(default)]
+    pub words: String,
+    /// When a put-aside ask comes back; absent otherwise.
+    #[serde(default)]
+    pub return_at: String,
+}
+
+/// The person's decisions: the open asks, oldest first, with what they
+/// dealt with beside them.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Asks {
+    #[serde(default, deserialize_with = "or_default")]
+    pub open: Vec<OpenAsk>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub decided: Vec<DecidedAsk>,
+}
+
 /// One event of the stream. `data` depends on the kind, and a client passes
 /// over a kind or a field it does not know.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -239,6 +337,9 @@ pub struct Event {
     pub actor: String,
     #[serde(default)]
     pub at: String,
+    /// The bead the event is about, when it is about one.
+    #[serde(default)]
+    pub bead: String,
     #[serde(default, deserialize_with = "or_default")]
     pub data: Map<String, Value>,
 }
@@ -267,6 +368,15 @@ impl Event {
             .get(field)
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    }
+
+    /// Whether the event became a notification for `user`: its data names
+    /// the notified users with the reason each.
+    pub fn notified(&self, user: &str) -> bool {
+        self.data
+            .get("notified")
+            .and_then(Value::as_object)
+            .is_some_and(|n| n.contains_key(user))
     }
 }
 
@@ -360,6 +470,28 @@ impl Client {
     pub fn ack_user_inbox(&self, name: &str, through: u64) -> Result<()> {
         self.call("AckUserInbox", json!({ "name": name, "through": through }))
             .map(drop)
+    }
+
+    /// What the yard reports to a user, apart from every conversation,
+    /// oldest first; `limit` 0 is all the inbox keeps.
+    pub fn user_notifications(&self, name: &str, limit: u64) -> Result<Notifications> {
+        self.answer("UserNotifications", json!({ "name": name, "limit": limit }))
+    }
+
+    /// Marks the user's notifications read through a seq: a position of its
+    /// own, which the mail's does not move.
+    pub fn ack_user_notifications(&self, name: &str, through: u64) -> Result<()> {
+        self.call(
+            "AckUserNotifications",
+            json!({ "name": name, "through": through }),
+        )
+        .map(drop)
+    }
+
+    /// The person's decisions: the open asks, oldest first, with what they
+    /// dealt with beside them.
+    pub fn user_asks(&self, name: &str) -> Result<Asks> {
+        self.answer("UserAsks", json!({ "name": name }))
     }
 
     /// Sends mail to a crew member or a user of this yard, with the images
@@ -708,7 +840,8 @@ mod tests {
             yard.client().users().unwrap(),
             vec![User {
                 name: "jo".into(),
-                cursor: 7
+                cursor: 7,
+                notification_cursor: 0
             }]
         );
     }
@@ -839,6 +972,121 @@ mod tests {
         assert_eq!(
             yard.asked("AckUserInbox"),
             vec![json!({"name": "jo", "through": 12})]
+        );
+    }
+
+    #[test]
+    fn user_notifications_and_ack() {
+        let yard = Yard::start();
+        yard.answer(
+            "UserNotifications",
+            r#"{"result": {"notifications": [
+                {"seq": 10, "at": "2026-10-08T09:30:00Z", "kind": "created", "bead": "yd-shed",
+                 "text": "yd-shed created (all) by yardmaster", "read": false},
+                {"seq": 11, "kind": "noted", "text": "yd-shed noted", "read": true}
+            ], "unread": 1, "last": 10}}"#,
+        );
+        let notifications = yard.client().user_notifications("jo", 0).unwrap();
+        assert_eq!(
+            yard.asked("UserNotifications"),
+            vec![json!({"name": "jo", "limit": 0})]
+        );
+        assert_eq!((notifications.unread, notifications.last), (1, 10));
+        assert_eq!(notifications.notifications.len(), 2);
+        assert_eq!(
+            notifications.notifications[0],
+            Notification {
+                seq: 10,
+                at: "2026-10-08T09:30:00Z".into(),
+                kind: "created".into(),
+                bead: "yd-shed".into(),
+                text: "yd-shed created (all) by yardmaster".into(),
+                read: false,
+            }
+        );
+        // The bead is absent when the event is about none.
+        assert_eq!(notifications.notifications[1].bead, "");
+        assert!(notifications.notifications[1].read);
+
+        yard.answer("AckUserNotifications", "{}");
+        yard.client().ack_user_notifications("jo", 10).unwrap();
+        assert_eq!(
+            yard.asked("AckUserNotifications"),
+            vec![json!({"name": "jo", "through": 10})]
+        );
+    }
+
+    #[test]
+    fn user_asks_open_oldest_first_with_what_was_decided() {
+        let yard = Yard::start();
+        yard.answer(
+            "UserAsks",
+            r#"{"result": {"open": [
+                {"bead": "yd-links", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "Move the links now?", "asker": "yardmaster",
+                 "since": "2026-10-08T09:30:00Z"},
+                {"bead": "yd-greet", "bead_title": "The greeting", "topic": "",
+                 "ask": 5, "question": "What tone?", "asker": "yardmaster",
+                 "since": "2026-10-09T09:30:00Z"}
+            ], "decided": [
+                {"bead": "yd-links", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 6, "question": "Send them to build?", "asker": "yardmaster",
+                 "since": "2026-10-07T09:30:00Z", "state": "answered",
+                 "option": 1, "option_label": "Send them", "words": "tonight"},
+                {"bead": "yd-greet", "bead_title": "The greeting", "topic": "",
+                 "ask": 12, "question": "Build the cleanup?", "asker": "assembly",
+                 "since": "2026-10-06T09:30:00Z", "state": "put aside",
+                 "return_at": "2026-10-10T09:30:00Z"}
+            ]}}"#,
+        );
+        let asks = yard.client().user_asks("jo").unwrap();
+        assert_eq!(yard.asked("UserAsks"), vec![json!({"name": "jo"})]);
+        assert_eq!(asks.open.len(), 2);
+        assert_eq!(
+            (asks.open[0].bead.as_str(), asks.open[0].ask),
+            ("yd-links", 3)
+        );
+        assert_eq!(asks.open[0].topic, "topic:linear-out");
+        assert_eq!(asks.open[1].topic, "");
+        assert_eq!(asks.decided.len(), 2);
+        assert_eq!(
+            (
+                asks.decided[0].state.as_str(),
+                asks.decided[0].option,
+                asks.decided[0].option_label.as_str()
+            ),
+            ("answered", 1, "Send them")
+        );
+        assert_eq!(asks.decided[1].return_at, "2026-10-10T09:30:00Z");
+    }
+
+    #[test]
+    fn an_event_names_its_bead_and_whom_it_notified() {
+        let event: Event = serde_json::from_value(json!({
+            "seq": 11, "kind": "noted", "actor": "yardmaster", "bead": "yd-shed",
+            "data": {"note": 1, "notified": {"jo": "all"}}
+        }))
+        .unwrap();
+        assert_eq!(event.bead, "yd-shed");
+        assert!(event.notified("jo"));
+        assert!(!event.notified("ada"));
+        let bare: Event = serde_json::from_value(json!({"seq": 12, "kind": "mail"})).unwrap();
+        assert_eq!(bare.bead, "");
+        assert!(!bare.notified("jo"));
+    }
+
+    #[test]
+    fn null_where_asks_are_promised_is_no_asks() {
+        let yard = Yard::start();
+        yard.answer("UserAsks", r#"{"result": {"open": null, "decided": null}}"#);
+        assert_eq!(yard.client().user_asks("jo").unwrap(), Asks::default());
+        yard.answer(
+            "UserNotifications",
+            r#"{"result": {"notifications": null, "unread": 0, "last": 0}}"#,
+        );
+        assert_eq!(
+            yard.client().user_notifications("jo", 0).unwrap(),
+            Notifications::default()
         );
     }
 

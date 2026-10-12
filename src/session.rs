@@ -110,13 +110,18 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         inbox = client.user_inbox(&user.name, inbox.unread)?;
     }
     let unread = inbox.mail.into_iter().filter(|l| !l.read).collect();
+    let notifications = client.user_notifications(&user.name, 0)?.notifications;
+    let asks = client.user_asks(&user.name)?;
     Ok(State {
-        me: user.name,
+        me: user.name.clone(),
         head,
         crew,
         peers,
         cursor: user.cursor,
         unread,
+        notification_cursor: user.notification_cursor,
+        notifications,
+        asks,
     })
 }
 
@@ -179,6 +184,11 @@ mod tests {
             "UserInbox",
             r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
         );
+        yard.answer(
+            "UserNotifications",
+            r#"{"result": {"notifications": [], "unread": 0, "last": 0}}"#,
+        );
+        yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
     }
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;
@@ -249,6 +259,41 @@ mod tests {
                 json!({"name": "jo", "limit": 3})
             ]
         );
+    }
+
+    #[test]
+    fn load_reads_the_notifications_and_the_asks() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "GetUser",
+            r#"{"result": {"name": "jo", "cursor": 5, "notification_cursor": 9}}"#,
+        );
+        yard.answer(
+            "UserNotifications",
+            r#"{"result": {"notifications": [
+                {"seq": 10, "kind": "created", "bead": "yd-shed", "text": "yd-shed created", "read": false}
+            ], "unread": 1, "last": 10}}"#,
+        );
+        yard.answer(
+            "UserAsks",
+            r#"{"result": {"open": [
+                {"bead": "yd-links", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-08T09:30:00Z"}
+            ], "decided": []}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.notification_cursor, 9);
+        assert_eq!(state.notifications.len(), 1);
+        assert_eq!(state.notifications[0].bead, "yd-shed");
+        assert_eq!(state.asks.open.len(), 1);
+        assert_eq!(state.asks.open[0].question, "Move them now?");
+        assert_eq!(
+            yard.asked("UserNotifications"),
+            vec![json!({"name": "jo", "limit": 0})]
+        );
+        assert_eq!(yard.asked("UserAsks"), vec![json!({"name": "jo"})]);
     }
 
     #[test]

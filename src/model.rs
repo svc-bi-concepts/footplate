@@ -10,13 +10,24 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, TimeZone};
 
-use crate::api::{BlobRef, CrewMember, Event, Letter, Peer};
+use crate::api::{
+    Asks, BlobRef, CrewMember, DecidedAsk, Event, Letter, Notification, OpenAsk, Peer,
+};
 
 /// The kind of message a link must carry out for mail to be written.
 const PEER_MAIL: &str = "mail";
 
 /// A mail holds this many bytes.
 pub const MAIL_BYTES: usize = 4096;
+
+/// The prefix of a bead label that makes it a topic; shown without it.
+const TOPIC_PREFIX: &str = "topic:";
+
+/// Where asks with no topic stand.
+pub const EVERYTHING_ELSE: &str = "Everything else";
+
+/// The row below the conversations: what the yard reports.
+pub const YARD: &str = "yard";
 
 /// What a window for the user `me` starts from, read at the seq `head`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -29,6 +40,12 @@ pub struct State {
     pub cursor: u64,
     /// The user's unread mail.
     pub unread: Vec<Letter>,
+    /// How far the user's notifications are acknowledged.
+    pub notification_cursor: u64,
+    /// What the yard reports, oldest first.
+    pub notifications: Vec<Notification>,
+    /// The person's open asks with what they dealt with.
+    pub asks: Asks,
 }
 
 /// One whom a linked yard exposes to this one: `<name>@<peer>`.
@@ -120,6 +137,98 @@ pub enum Target {
     Peer { name: String, peer: String },
 }
 
+/// What the left list has open: a bead with open asks, one dealt with, a
+/// conversation, or what the yard reports.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Selected {
+    /// A bead with open asks, by its id. A bead with several is one row.
+    Decision(String),
+    /// One dealt with, by bead and ask note seq.
+    Decided(String, u64),
+    /// A conversation, by crew name or `<name>@<peer>`.
+    Conversation(String),
+    Yard,
+}
+
+/// One bead's row among the decisions: the question in plain words, or the
+/// bead's title with how many it asks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionRow {
+    /// The bead's id, whole; `short` is what the row ends with.
+    pub bead: String,
+    /// The question, or `<title>: <n> questions`.
+    pub head: String,
+    /// `<asker> · <waits>`, or `<waits>` when several ask.
+    pub sub: String,
+    /// The bead's id small, at the row's end: past its last `-`.
+    pub short: String,
+    pub selected: bool,
+}
+
+/// One topic's beads, in the order their oldest ask waits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopicGroup {
+    /// Without the `topic:` prefix, or "Everything else".
+    pub topic: String,
+    pub rows: Vec<DecisionRow>,
+}
+
+/// One dealt with, with its pick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecidedRow {
+    pub bead: String,
+    pub ask: u64,
+    /// The question in plain words.
+    pub head: String,
+    /// `<asker> · <pick|declined|put aside>`.
+    pub sub: String,
+    pub short: String,
+    pub selected: bool,
+}
+
+/// One notice of the yard row, as it is shown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Notice {
+    pub seq: u64,
+    pub at: String,
+    pub bead: String,
+    pub text: String,
+    pub read: bool,
+}
+
+/// A bead's open asks, as the open row shows them: read-only text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionDetail {
+    pub bead: String,
+    pub title: String,
+    pub topic: String,
+    pub asks: Vec<DecisionAsk>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionAsk {
+    pub ask: u64,
+    pub question: String,
+    pub asker: String,
+    pub waits: String,
+}
+
+/// One dealt with, as the open row shows it: read-only text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecidedDetail {
+    pub bead: String,
+    pub title: String,
+    pub question: String,
+    pub asker: String,
+    /// `answered`, `put aside` or `declined`.
+    pub state: String,
+    /// The picked option's label, empty on a words answer and elsewhere.
+    pub pick: String,
+    pub words: String,
+    /// When a put-aside ask comes back, empty otherwise.
+    pub return_at: String,
+}
+
 /// A call the yard has to be asked, with what the model does on its answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -133,6 +242,13 @@ pub enum Effect {
     Crew,
     /// `Peers`; answered to [`Model::linked`].
     Peers,
+    /// `UserNotifications`; answered to [`Model::notifications`].
+    Notifications,
+    /// `AckUserNotifications` through a seq; answered to
+    /// [`Model::notifications_acked`] or [`Model::notifications_ack_failed`].
+    AckNotifications { through: u64 },
+    /// `UserAsks`; answered to [`Model::asks`].
+    Asks,
 }
 
 /// One unread mail to the user: who sent it, and whether the window has
@@ -148,7 +264,7 @@ pub struct Model {
     me: String,
     crew: Vec<CrewMember>,
     parties: Vec<Party>,
-    selected: Option<String>,
+    selected: Option<Selected>,
     /// The conversations by whom they are with, each in order of seq, and
     /// those the yard was asked for whole.
     convo: HashMap<String, Vec<Letter>>,
@@ -158,6 +274,13 @@ pub struct Model {
     unread: BTreeMap<u64, Waiting>,
     cursor: u64,
     asked: u64,
+    /// What the yard reports, oldest first.
+    notifications: Vec<Notification>,
+    /// The open asks, oldest first, with what was dealt with, newest first.
+    open: Vec<OpenAsk>,
+    decided: Vec<DecidedAsk>,
+    /// Whether the folded "Decided" stands open.
+    decided_expanded: bool,
     /// The seq of the last `crew_status` applied to each crew member: a
     /// read of the crew that is older does not put an older status back.
     status_at: HashMap<String, u64>,
@@ -166,17 +289,20 @@ pub struct Model {
 }
 
 impl Model {
-    /// The model of a state just read. `selected` is the conversation that
-    /// was open before the yard was lost, if any: it stays open when its
-    /// row is still there. Else the yardmaster's is, as in `yardr chat`,
-    /// else the first.
-    pub fn new(state: State, selected: Option<&str>) -> (Model, Vec<Effect>) {
+    /// The model of a state just read. `selected` is what was open before
+    /// the yard was lost, if any: it stays open when its row is still
+    /// there. Else the yardmaster's conversation is, as in `yardr chat`,
+    /// else the first row from the top.
+    pub fn new(state: State, selected: Option<Selected>) -> (Model, Vec<Effect>) {
         let mut m = Model {
             me: state.me,
             parties: parties(&state.peers),
             crew: state.crew,
             cursor: state.cursor,
             asked: state.cursor,
+            notifications: state.notifications,
+            open: state.asks.open,
+            decided: state.asks.decided,
             ..Model::default()
         };
         for l in state.unread.iter().filter(|l| !l.read && l.seq > m.cursor) {
@@ -188,15 +314,16 @@ impl Model {
                 },
             );
         }
-        let names = m.names();
+        let order = m.order();
         m.selected = selected
-            .filter(|s| names.iter().any(|n| n == s))
-            .or(names
-                .iter()
-                .map(String::as_str)
-                .find(|n| *n == "yardmaster"))
-            .or(names.first().map(String::as_str))
-            .map(str::to_string);
+            .filter(|s| order.contains(s))
+            .or_else(|| {
+                order.iter().find_map(|s| match s {
+                    Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
+                    _ => None,
+                })
+            })
+            .or_else(|| order.into_iter().next());
         m.opened();
         let effects = m.open();
         (m, effects)
@@ -206,18 +333,61 @@ impl Model {
         &self.me
     }
 
-    pub fn selected(&self) -> Option<&str> {
-        self.selected.as_deref()
+    pub fn selected(&self) -> Option<&Selected> {
+        self.selected.as_ref()
     }
 
-    /// The names of the list, in order: the crew, then the addresses of
-    /// those the linked yards expose.
-    fn names(&self) -> Vec<String> {
+    /// The open conversation's name, when a conversation is open.
+    pub fn selected_conversation(&self) -> Option<&str> {
+        match self.selected.as_ref() {
+            Some(Selected::Conversation(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The names of the conversations, in order: the crew, then the
+    /// addresses of those the linked yards expose.
+    fn conversation_names(&self) -> Vec<String> {
         self.crew
             .iter()
             .map(|r| r.name.clone())
             .chain(self.parties.iter().map(Party::address))
             .collect()
+    }
+
+    /// The beads with open asks, each with its asks oldest first, in the
+    /// order their oldest ask waits.
+    fn decision_beads(&self) -> Vec<(String, Vec<&OpenAsk>)> {
+        let mut beads: Vec<(String, Vec<&OpenAsk>)> = Vec::new();
+        for ask in &self.open {
+            match beads.iter_mut().find(|(bead, _)| bead == &ask.bead) {
+                Some((_, asks)) => asks.push(ask),
+                None => beads.push((ask.bead.clone(), vec![ask])),
+            }
+        }
+        beads
+    }
+
+    /// Every row of the left list from the top: the beads with open asks,
+    /// the dealt with when "Decided" stands open, the conversations, the
+    /// yard row.
+    fn order(&self) -> Vec<Selected> {
+        let mut out: Vec<Selected> = Vec::new();
+        for (bead, _) in self.decision_beads() {
+            out.push(Selected::Decision(bead));
+        }
+        if self.decided_expanded {
+            for ask in &self.decided {
+                out.push(Selected::Decided(ask.bead.clone(), ask.ask));
+            }
+        }
+        out.extend(
+            self.conversation_names()
+                .into_iter()
+                .map(Selected::Conversation),
+        );
+        out.push(Selected::Yard);
+        out
     }
 
     fn member(&self, name: &str) -> Option<&CrewMember> {
@@ -238,7 +408,7 @@ impl Model {
     /// linked yard that is not on its roster): how many, and from whom, in
     /// name order. `yardr inbox` reads it.
     pub fn others(&self) -> (usize, Vec<String>) {
-        let names = self.names();
+        let names = self.conversation_names();
         let mut from: Vec<String> = Vec::new();
         let mut count = 0;
         for w in self.unread.values().filter(|w| !names.contains(&w.from)) {
@@ -251,7 +421,7 @@ impl Model {
         (count, from)
     }
 
-    /// The list on the left.
+    /// The conversations of the list on the left.
     pub fn rows(&self) -> Vec<Row> {
         let crew = self
             .crew
@@ -269,9 +439,145 @@ impl Model {
         crew.chain(linked)
             .map(|(name, line)| Row {
                 unread: self.unread(&name),
-                selected: self.selected.as_deref() == Some(name.as_str()),
+                selected: self.selected_conversation() == Some(name.as_str()),
                 name,
                 line,
+            })
+            .collect()
+    }
+
+    /// How many beads have open asks: the `decisions (n)`.
+    pub fn decisions_count(&self) -> usize {
+        self.decision_beads().len()
+    }
+
+    /// The open asks above the conversations, grouped by topic, each group
+    /// in the order its oldest ask waits. A bead with several open asks is
+    /// one row.
+    pub fn decision_groups<Tz: TimeZone>(&self, now: &DateTime<Tz>) -> Vec<TopicGroup>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let mut groups: Vec<TopicGroup> = Vec::new();
+        for (bead, asks) in self.decision_beads() {
+            let first = asks[0];
+            let row = DecisionRow {
+                bead: bead.clone(),
+                head: decision_head(first, &asks),
+                sub: decision_sub(first, &asks, now),
+                short: short_bead(&bead),
+                selected: self.selected.as_ref() == Some(&Selected::Decision(bead)),
+            };
+            let topic = display_topic(&first.topic);
+            match groups.iter_mut().find(|g| g.topic == topic) {
+                Some(g) => g.rows.push(row),
+                None => groups.push(TopicGroup {
+                    topic,
+                    rows: vec![row],
+                }),
+            }
+        }
+        groups
+    }
+
+    /// How many asks were dealt with: the folded "Decided (n)".
+    pub fn decided_count(&self) -> usize {
+        self.decided.len()
+    }
+
+    pub fn decided_expanded(&self) -> bool {
+        self.decided_expanded
+    }
+
+    pub fn toggle_decided(&mut self) {
+        self.decided_expanded = !self.decided_expanded;
+    }
+
+    /// The dealt with, newest first, with their picks.
+    pub fn decided_rows(&self) -> Vec<DecidedRow> {
+        self.decided
+            .iter()
+            .map(|ask| DecidedRow {
+                bead: ask.bead.clone(),
+                ask: ask.ask,
+                head: plain(&ask.question),
+                sub: decided_sub(ask),
+                short: short_bead(&ask.bead),
+                selected: self.selected.as_ref()
+                    == Some(&Selected::Decided(ask.bead.clone(), ask.ask)),
+            })
+            .collect()
+    }
+
+    /// A bead's open asks, oldest first, as read-only text.
+    pub fn decision_detail<Tz: TimeZone>(
+        &self,
+        bead: &str,
+        now: &DateTime<Tz>,
+    ) -> Option<DecisionDetail>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let (_, asks) = self.decision_beads().into_iter().find(|(b, _)| b == bead)?;
+        let first = asks[0];
+        Some(DecisionDetail {
+            bead: bead.to_string(),
+            title: first.bead_title.clone(),
+            topic: display_topic(&first.topic),
+            asks: asks
+                .iter()
+                .map(|ask| DecisionAsk {
+                    ask: ask.ask,
+                    question: plain(&ask.question),
+                    asker: ask.asker.clone(),
+                    waits: waits(&ask.since, now),
+                })
+                .collect(),
+        })
+    }
+
+    /// One dealt with, as read-only text.
+    pub fn decided_detail(&self, bead: &str, ask: u64) -> Option<DecidedDetail> {
+        self.decided
+            .iter()
+            .find(|a| a.bead == bead && a.ask == ask)
+            .map(|a| DecidedDetail {
+                bead: a.bead.clone(),
+                title: a.bead_title.clone(),
+                question: plain(&a.question),
+                asker: a.asker.clone(),
+                state: a.state.clone(),
+                pick: a.option_label.clone(),
+                words: plain(&a.words),
+                return_at: a.return_at.clone(),
+            })
+    }
+
+    /// The `yard` row below the conversations, with its own unread count.
+    pub fn yard_row(&self) -> Row {
+        Row {
+            name: YARD.to_string(),
+            line: "notifications".to_string(),
+            unread: self.yard_unread(),
+            selected: self.selected.as_ref() == Some(&Selected::Yard),
+        }
+    }
+
+    /// How many notifications the user has not read.
+    pub fn yard_unread(&self) -> usize {
+        self.notifications.iter().filter(|n| !n.read).count()
+    }
+
+    /// The notices of the open yard row, oldest first.
+    pub fn notices(&self) -> Vec<Notice> {
+        self.notifications
+            .iter()
+            .map(|n| Notice {
+                seq: n.seq,
+                at: n.at.clone(),
+                bead: n.bead.clone(),
+                text: plain(&n.text),
+                read: n.read,
             })
             .collect()
     }
@@ -280,7 +586,7 @@ impl Model {
     /// and for one of a linked yard who that is there, then whatever keeps
     /// the mail from arriving.
     pub fn about(&self) -> Vec<String> {
-        let Some(p) = self.selected().and_then(|s| self.party(s)) else {
+        let Some(p) = self.selected_conversation().and_then(|s| self.party(s)) else {
             return Vec::new();
         };
         let is = if p.person {
@@ -306,7 +612,7 @@ impl Model {
 
     /// The open conversation, oldest first.
     pub fn entries(&self) -> Vec<Entry> {
-        let Some(letters) = self.selected().and_then(|s| self.convo.get(s)) else {
+        let Some(letters) = self.selected_conversation().and_then(|s| self.convo.get(s)) else {
             return Vec::new();
         };
         let mut out: Vec<Entry> = Vec::with_capacity(letters.len());
@@ -337,7 +643,7 @@ impl Model {
     /// this yard did not take from a linked yard is none it has.
     pub fn images(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        let letters = self.selected().and_then(|s| self.convo.get(s));
+        let letters = self.selected_conversation().and_then(|s| self.convo.get(s));
         for f in letters.into_iter().flatten().flat_map(|l| &l.files) {
             if f.not_taken.is_empty() && !out.contains(&f.hash.as_str()) {
                 out.push(&f.hash);
@@ -373,7 +679,7 @@ impl Model {
 
     /// Where what is typed goes, when a conversation is open.
     pub fn target(&self) -> Option<Target> {
-        let name = self.selected()?;
+        let name = self.selected_conversation()?;
         Some(match self.party(name) {
             Some(p) => Target::Peer {
                 name: p.name.clone(),
@@ -383,12 +689,13 @@ impl Model {
         })
     }
 
-    /// Opens the conversation with `name`, a row of the list.
-    pub fn select(&mut self, name: &str) -> Vec<Effect> {
-        if !self.names().iter().any(|n| n == name) {
+    /// Opens a row of the list: a bead, one dealt with, a conversation, the
+    /// yard row. A row that is not there changes nothing.
+    pub fn select(&mut self, sel: Selected) -> Vec<Effect> {
+        if !self.order().contains(&sel) {
             return Vec::new();
         }
-        self.selected = Some(name.to_string());
+        self.selected = Some(sel);
         self.notice.clear();
         self.opened();
         self.open()
@@ -396,31 +703,35 @@ impl Model {
 
     /// Opens the row `by` after the open one, around the ends.
     pub fn step(&mut self, by: isize) -> Vec<Effect> {
-        let names = self.names();
-        if names.is_empty() {
+        let order = self.order();
+        if order.is_empty() {
             return Vec::new();
         }
-        let n = names.len() as isize;
+        let n = order.len() as isize;
         let at = self
-            .selected()
-            .and_then(|s| names.iter().position(|name| name == s))
+            .selected
+            .as_ref()
+            .and_then(|s| order.iter().position(|o| o == s))
             .unwrap_or(0) as isize;
         let next = (at + by).rem_euclid(n) as usize;
-        self.select(&names[next])
+        self.select(order[next].clone())
     }
 
     /// What opening a conversation does here: the unread mail in it is seen.
     fn opened(&mut self) {
-        let Some(sel) = &self.selected else { return };
+        let Some(Selected::Conversation(sel)) = &self.selected else {
+            return;
+        };
         for w in self.unread.values_mut().filter(|w| &w.from == sel) {
             w.seen = true;
         }
     }
 
     /// Reads the open conversation if it was not read before, and
-    /// acknowledges what opening it showed.
+    /// acknowledges what opening it showed. A bead, one dealt with and the
+    /// yard row need no call to open.
     fn open(&mut self) -> Vec<Effect> {
-        let Some(sel) = self.selected.clone() else {
+        let Some(Selected::Conversation(sel)) = self.selected.clone() else {
             return Vec::new();
         };
         let mut effects = Vec::new();
@@ -515,7 +826,13 @@ impl Model {
 
     /// Applies one event of the stream.
     pub fn event(&mut self, e: &Event) -> Vec<Effect> {
-        match e.kind.as_str() {
+        // An event that became a notification for the user carries less
+        // than what changed: the notices are read again.
+        let mut effects = Vec::new();
+        if e.notified(&self.me) {
+            effects.push(Effect::Notifications);
+        }
+        effects.extend(match e.kind.as_str() {
             "mail" => self.mail(e),
             "mail_read" => {
                 let (reader, through) = (e.text("reader"), e.number("through"));
@@ -528,6 +845,17 @@ impl Model {
                 }
                 Vec::new()
             }
+            "notifications_read" => {
+                let (reader, through) = (e.text("reader"), e.number("through"));
+                if reader == self.me {
+                    self.notifications_acked(through);
+                }
+                Vec::new()
+            }
+            // A note on a bead: a question asked, answered, put aside or
+            // declined, or the asker's next note. It says no more than
+            // that, so the queue is read again.
+            "noted" => vec![Effect::Asks],
             "crew_status" => {
                 let name = e.text("crew").to_string();
                 if let Some(r) = self
@@ -549,7 +877,8 @@ impl Model {
             }
             kind if kind.starts_with("peer_") => self.link(e),
             _ => Vec::new(),
-        }
+        });
+        effects
     }
 
     /// A mail event: one the user sent, or one to the user. Mail the user
@@ -584,7 +913,7 @@ impl Model {
             self.add(&e.actor, l);
             if !read && !self.unread.contains_key(&e.seq) {
                 // In the open conversation it is seen as it arrives.
-                let seen = self.selected() == Some(e.actor.as_str());
+                let seen = self.selected_conversation() == Some(e.actor.as_str());
                 self.unread.insert(
                     e.seq,
                     Waiting {
@@ -624,8 +953,8 @@ impl Model {
     }
 
     /// The crew as read at `head`. A status the stream told of since is
-    /// newer than the read and stays. When the open conversation's row is
-    /// gone the first is opened.
+    /// newer than the read and stays. When the open row is gone the first
+    /// from the top is opened.
     pub fn listed(&mut self, head: u64, mut crew: Vec<CrewMember>) -> Vec<Effect> {
         for r in crew.iter_mut().filter(|r| r.state == "running") {
             if let Some(old) = self.member(&r.name)
@@ -644,12 +973,61 @@ impl Model {
         self.reselect()
     }
 
-    fn reselect(&mut self) -> Vec<Effect> {
-        let names = self.names();
-        if self.selected.as_ref().is_some_and(|s| names.contains(s)) {
+    /// The notices as read again. The yard row stands whatever they are.
+    pub fn notifications(&mut self, list: Vec<Notification>) {
+        self.notifications = list;
+    }
+
+    /// Marks one notice read: the oldest unread, one key. Elsewhere than
+    /// the open yard row it does nothing.
+    pub fn dismiss(&mut self) -> Vec<Effect> {
+        if self.selected.as_ref() != Some(&Selected::Yard) {
             return Vec::new();
         }
-        self.selected = names.first().cloned();
+        match self.notifications.iter().find(|n| !n.read) {
+            Some(n) => vec![Effect::AckNotifications { through: n.seq }],
+            None => Vec::new(),
+        }
+    }
+
+    /// The user's notifications through `through` are read: by this window,
+    /// or by anything else that acknowledged them (`yardr inbox --ack`).
+    pub fn notifications_acked(&mut self, through: u64) {
+        for n in self.notifications.iter_mut().filter(|n| n.seq <= through) {
+            n.read = true;
+        }
+    }
+
+    /// The yard did not take the acknowledgement: the notice stays unread,
+    /// and the next `x` asks again.
+    pub fn notifications_ack_failed(&mut self, why: &str) {
+        self.notice = format!("your notices could not be marked read: {why}");
+    }
+
+    /// The queue as read again. When the open bead or the open dealt with
+    /// is gone the first row from the top is opened.
+    pub fn asks(&mut self, asks: Asks) -> Vec<Effect> {
+        self.open = asks.open;
+        self.decided = asks.decided;
+        self.reselect()
+    }
+
+    /// When a put-aside ask comes back next, if one waits: the window reads
+    /// the queue again then, since that return arrives with no event.
+    pub fn next_return(&self) -> Option<String> {
+        self.decided
+            .iter()
+            .filter(|a| a.state == "put aside" && !a.return_at.is_empty())
+            .map(|a| a.return_at.clone())
+            .min()
+    }
+
+    fn reselect(&mut self) -> Vec<Effect> {
+        let order = self.order();
+        if self.selected.as_ref().is_some_and(|s| order.contains(s)) {
+            return Vec::new();
+        }
+        self.selected = order.into_iter().next();
         self.opened();
         self.open()
     }
@@ -679,6 +1057,95 @@ where
     match DateTime::parse_from_rfc3339(at) {
         Ok(t) => t.with_timezone(zone).format("%m-%d %H:%M").to_string(),
         Err(_) => String::new(),
+    }
+}
+
+/// A topic as the decisions show it: the label without its `topic:`
+/// prefix, or "Everything else" for an ask with none.
+fn display_topic(topic: &str) -> String {
+    match topic.strip_prefix(TOPIC_PREFIX) {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ if topic.is_empty() => EVERYTHING_ELSE.to_string(),
+        _ => topic.to_string(),
+    }
+}
+
+/// A bead's id small, at a row's end: past its last `-`.
+fn short_bead(bead: &str) -> String {
+    bead.rsplit('-').next().unwrap_or(bead).to_string()
+}
+
+/// A bead's row head: the question in plain words, or the bead's title
+/// with how many it asks.
+fn decision_head(first: &OpenAsk, asks: &[&OpenAsk]) -> String {
+    if asks.len() == 1 {
+        return plain(&first.question);
+    }
+    let title = if first.bead_title.is_empty() {
+        first.bead.clone()
+    } else {
+        first.bead_title.clone()
+    };
+    format!("{}: {} questions", plain(&title), asks.len())
+}
+
+/// A bead's row sub: whose it is and how long it waits, or how long the
+/// oldest of several waits.
+fn decision_sub<Tz: TimeZone>(first: &OpenAsk, asks: &[&OpenAsk], now: &DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let waits = waits(&first.since, now);
+    if asks.len() == 1 {
+        return format!("{} · {waits}", first.asker);
+    }
+    waits
+}
+
+/// A dealt with row sub: whose it was and its pick.
+fn decided_sub(ask: &DecidedAsk) -> String {
+    let mut sub = ask.asker.clone();
+    match ask.state.as_str() {
+        "answered" if !ask.option_label.is_empty() => {
+            sub = format!("{sub} · {}", plain(&ask.option_label));
+            if !ask.words.is_empty() {
+                sub = format!("{sub} · {}", plain(&ask.words));
+            }
+        }
+        "answered" => {
+            sub = format!("{sub} · {}", plain(&ask.words));
+        }
+        "declined" => {
+            sub = format!("{sub} · declined");
+            if !ask.words.is_empty() {
+                sub = format!("{sub} · {}", plain(&ask.words));
+            }
+        }
+        _ => {
+            sub = format!("{sub} · put aside");
+        }
+    }
+    sub
+}
+
+/// How long an ask waits, from its `since` to now: `now`, `5m`, `2h`, `3d`.
+/// Nothing for a time that cannot be read.
+pub fn waits<Tz: TimeZone>(since: &str, now: &DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let Ok(since) = DateTime::parse_from_rfc3339(since) else {
+        return String::new();
+    };
+    let minutes = (now.timestamp() - since.timestamp()) / 60;
+    if minutes < 1 {
+        "now".to_string()
+    } else if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 24 * 60 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{}d", minutes / (24 * 60))
     }
 }
 
@@ -814,6 +1281,7 @@ mod tests {
                 .iter()
                 .map(|(seq, from)| letter(*seq, from, "jo", "unread"))
                 .collect(),
+            ..State::default()
         }
     }
 
@@ -867,18 +1335,18 @@ mod tests {
     #[test]
     fn it_opens_on_the_yardmaster_and_reads_that_conversation() {
         let (m, effects) = Model::new(yard(&[]), None);
-        assert_eq!(m.selected(), Some("yardmaster"));
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
         assert_eq!(effects, [read("yardmaster", 0)]);
         assert!(m.rows()[1].selected);
         assert!(!m.rows()[0].selected);
     }
 
     #[test]
-    fn without_a_yardmaster_it_opens_on_the_first_row_and_on_none_in_an_empty_yard() {
+    fn without_a_yardmaster_it_opens_on_the_first_row_and_on_yard_in_an_empty_yard() {
         let mut state = yard(&[]);
         state.crew.remove(1);
         let (m, _) = Model::new(state, None);
-        assert_eq!(m.selected(), Some("assembly"));
+        assert_eq!(m.selected_conversation(), Some("assembly"));
 
         let (mut m, effects) = Model::new(
             State {
@@ -887,49 +1355,60 @@ mod tests {
             },
             None,
         );
-        assert_eq!(m.selected(), None);
+        // The yard row stands whatever the yard has.
+        assert_eq!(m.selected(), Some(&Selected::Yard));
         assert_eq!(effects, []);
         assert_eq!(m.target(), None);
         assert_eq!(m.step(1), []);
+        assert_eq!(m.selected(), Some(&Selected::Yard));
         assert_eq!(m.entries(), []);
     }
 
     #[test]
     fn the_conversation_that_was_open_stays_open_when_the_yard_is_back() {
-        let (m, _) = Model::new(yard(&[]), Some("clerk@north"));
-        assert_eq!(m.selected(), Some("clerk@north"));
+        let (m, _) = Model::new(
+            yard(&[]),
+            Some(Selected::Conversation("clerk@north".into())),
+        );
+        assert_eq!(m.selected_conversation(), Some("clerk@north"));
         // One that is gone meanwhile does not.
-        let (m, _) = Model::new(yard(&[]), Some("gone"));
-        assert_eq!(m.selected(), Some("yardmaster"));
+        let (m, _) = Model::new(yard(&[]), Some(Selected::Conversation("gone".into())));
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
     }
 
     #[test]
     fn selecting_opens_a_conversation_and_reads_it_once() {
         let (mut m, _) = Model::new(yard(&[]), None);
-        assert_eq!(m.select("assembly"), [read("assembly", 0)]);
-        assert_eq!(m.selected(), Some("assembly"));
+        assert_eq!(
+            m.select(Selected::Conversation("assembly".into())),
+            [read("assembly", 0)]
+        );
+        assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(
             m.conversation("assembly", vec![letter(3, "assembly", "jo", "hello")]),
             []
         );
-        m.select("yardmaster");
+        m.select(Selected::Conversation("yardmaster".into()));
         // It was read: nothing is asked again.
-        assert_eq!(m.select("assembly"), []);
+        assert_eq!(m.select(Selected::Conversation("assembly".into())), []);
         // A name that is no row changes nothing.
-        assert_eq!(m.select("nobody"), []);
-        assert_eq!(m.selected(), Some("assembly"));
+        assert_eq!(m.select(Selected::Conversation("nobody".into())), []);
+        assert_eq!(m.selected_conversation(), Some("assembly"));
     }
 
     #[test]
     fn step_goes_to_the_next_row_and_around_the_ends() {
         let (mut m, _) = Model::new(yard(&[]), None);
         m.step(1);
-        assert_eq!(m.selected(), Some("clerk@north"));
+        assert_eq!(m.selected_conversation(), Some("clerk@north"));
         m.step(1);
+        assert_eq!(m.selected_conversation(), Some("mckean@north"));
         m.step(1);
-        assert_eq!(m.selected(), Some("assembly"));
+        assert_eq!(m.selected(), Some(&Selected::Yard));
+        m.step(1);
+        assert_eq!(m.selected_conversation(), Some("assembly"));
         m.step(-1);
-        assert_eq!(m.selected(), Some("mckean@north"));
+        assert_eq!(m.selected(), Some(&Selected::Yard));
     }
 
     #[test]
@@ -979,7 +1458,7 @@ mod tests {
         assert_eq!((m.unread("yardmaster"), m.unread("assembly")), (1, 1));
         // Opening assembly's shows 7, and 8 was seen before.
         assert_eq!(
-            m.select("assembly"),
+            m.select(Selected::Conversation("assembly".into())),
             [read("assembly", 0), Effect::Ack { through: 8 }]
         );
         m.acked(8);
@@ -995,7 +1474,10 @@ mod tests {
             []
         );
         m.acked(6);
-        assert_eq!(m.select("assembly"), [read("assembly", 0)]);
+        assert_eq!(
+            m.select(Selected::Conversation("assembly".into())),
+            [read("assembly", 0)]
+        );
     }
 
     #[test]
@@ -1051,7 +1533,7 @@ mod tests {
         // And holds back the open one's, which is seen.
         assert_eq!(m.event(&mail_to_jo(23, "yardmaster")), []);
         assert_eq!(
-            m.select("assembly"),
+            m.select(Selected::Conversation("assembly".into())),
             [read("assembly", 0), Effect::Ack { through: 21 }]
         );
     }
@@ -1181,7 +1663,7 @@ mod tests {
     #[test]
     fn mails_that_stand_alike_share_one_line_under_the_last() {
         let (mut m, _) = Model::new(yard(&[]), None);
-        m.select("assembly");
+        m.select(Selected::Conversation("assembly".into()));
         m.conversation(
             "assembly",
             vec![
@@ -1200,7 +1682,10 @@ mod tests {
     #[test]
     fn mail_to_a_linked_yard_stands_by_its_delivery() {
         let (mut m, _) = Model::new(yard(&[]), None);
-        assert_eq!(m.select("clerk@north"), [read("clerk@north", 0)]);
+        assert_eq!(
+            m.select(Selected::Conversation("clerk@north".into())),
+            [read("clerk@north", 0)]
+        );
         assert_eq!(
             m.target(),
             Some(Target::Peer {
@@ -1284,25 +1769,37 @@ mod tests {
     #[test]
     fn above_a_conversation_with_a_linked_yard_stands_who_that_is() {
         let mut state = yard(&[]);
-        let (m, _) = Model::new(state.clone(), Some("clerk@north"));
+        let (m, _) = Model::new(
+            state.clone(),
+            Some(Selected::Conversation("clerk@north".into())),
+        );
         assert_eq!(
             m.about(),
             ["a crew member of the linked yard north: Keeps the books"]
         );
-        let (m, _) = Model::new(state.clone(), Some("mckean@north"));
+        let (m, _) = Model::new(
+            state.clone(),
+            Some(Selected::Conversation("mckean@north".into())),
+        );
         assert_eq!(m.about(), ["a person of the linked yard north"]);
-        let (m, _) = Model::new(state.clone(), Some("yardmaster"));
+        let (m, _) = Model::new(
+            state.clone(),
+            Some(Selected::Conversation("yardmaster".into())),
+        );
         assert_eq!(m.about(), Vec::<String>::new());
 
         state.peers[0].said.as_mut().unwrap().roster[0].mail = false;
-        let (m, _) = Model::new(state.clone(), Some("clerk@north"));
+        let (m, _) = Model::new(
+            state.clone(),
+            Some(Selected::Conversation("clerk@north".into())),
+        );
         assert!(
             m.about()[1].starts_with("north takes no mail from this yard yet"),
             "{:?}",
             m.about()
         );
         state.peers[0].send.clear();
-        let (m, _) = Model::new(state, Some("clerk@north"));
+        let (m, _) = Model::new(state, Some(Selected::Conversation("clerk@north".into())));
         assert!(
             m.about()[1].ends_with("yardr peer allow north --send mail"),
             "{:?}",
@@ -1382,10 +1879,13 @@ mod tests {
     fn when_the_open_row_is_gone_the_first_is_opened() {
         let (mut m, _) = Model::new(yard(&[(6, "assembly")]), None);
         let effects = m.listed(21, vec![member("assembly", "running", "idle")]);
-        assert_eq!(m.selected(), Some("assembly"));
+        assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(effects, [read("assembly", 0), Effect::Ack { through: 6 }]);
 
-        let (mut m, _) = Model::new(yard(&[]), Some("clerk@north"));
+        let (mut m, _) = Model::new(
+            yard(&[]),
+            Some(Selected::Conversation("clerk@north".into())),
+        );
         assert_eq!(
             m.event(&event(21, "peer_said", "", json!({"peer": "north"}))),
             [Effect::Peers]
@@ -1394,7 +1894,7 @@ mod tests {
         assert_eq!(names(&m), ["assembly", "yardmaster"]);
         // One that is still there stays open.
         assert_eq!(m.linked(&[north()]), []);
-        assert_eq!(m.selected(), Some("assembly"));
+        assert_eq!(m.selected_conversation(), Some("assembly"));
     }
 
     #[test]
@@ -1492,7 +1992,7 @@ mod tests {
             "image, 70 bytes, not taken: the link does not take files"
         );
         // Another conversation has none of them.
-        m.select("assembly");
+        m.select(Selected::Conversation("assembly".into()));
         assert_eq!(m.images(), Vec::<&str>::new());
     }
 
@@ -1526,5 +2026,429 @@ mod tests {
         assert_eq!(unsendable(&"x".repeat(4096)), None);
         let long = unsendable(&"é".repeat(2049)).unwrap();
         assert!(long.contains("this is 4098"), "{long}");
+    }
+
+    fn open_ask(
+        bead: &str,
+        title: &str,
+        topic: &str,
+        ask: u64,
+        question: &str,
+        asker: &str,
+        since: &str,
+    ) -> OpenAsk {
+        OpenAsk {
+            bead: bead.into(),
+            bead_title: title.into(),
+            topic: topic.into(),
+            ask,
+            question: question.into(),
+            asker: asker.into(),
+            since: since.into(),
+        }
+    }
+
+    fn decided_ask(
+        bead: &str,
+        ask: u64,
+        question: &str,
+        state: &str,
+        option_label: &str,
+        words: &str,
+        return_at: &str,
+    ) -> DecidedAsk {
+        DecidedAsk {
+            bead: bead.into(),
+            bead_title: format!("{bead} title"),
+            topic: String::new(),
+            ask,
+            question: question.into(),
+            asker: "yardmaster".into(),
+            since: "2026-10-08T09:30:00Z".into(),
+            state: state.into(),
+            option: u64::from(!option_label.is_empty()),
+            option_label: option_label.into(),
+            words: words.into(),
+            return_at: return_at.into(),
+        }
+    }
+
+    fn notification(seq: u64, bead: &str, text: &str, read: bool) -> Notification {
+        Notification {
+            seq,
+            at: "2026-10-08T09:30:00Z".into(),
+            kind: "created".into(),
+            bead: bead.into(),
+            text: text.into(),
+            read,
+        }
+    }
+
+    fn noon() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-10-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// That evening's asks, oldest first: two topics and one with none.
+    fn evening() -> Vec<OpenAsk> {
+        vec![
+            open_ask(
+                "yardr-n8ta",
+                "Move the links",
+                "topic:linear-out",
+                3,
+                "Move this yard's 64 links to the declared source now?",
+                "yardmaster",
+                "2026-10-10T10:00:00Z",
+            ),
+            open_ask(
+                "yardr-3msx",
+                "Send to build",
+                "topic:linear-out",
+                4,
+                "Send yardr-3msx and yardr-vgjp to build?",
+                "yardmaster",
+                "2026-10-10T11:00:00Z",
+            ),
+            open_ask(
+                "yardr-9f2c",
+                "Cleanup",
+                "topic:web-view",
+                5,
+                "The web view cleanup: build?",
+                "assembly",
+                "2026-10-09T12:00:00Z",
+            ),
+            open_ask(
+                "yardr-7h11",
+                "Sketch",
+                "",
+                6,
+                "Close sketch PR #3?",
+                "yardmaster",
+                "2026-10-10T11:30:00Z",
+            ),
+        ]
+    }
+
+    #[test]
+    fn decisions_are_grouped_by_topic_oldest_first_without_the_prefix() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (m, _) = Model::new(state, None);
+        assert_eq!(m.decisions_count(), 4);
+        let groups = m.decision_groups(&noon());
+        // Topics in the order their oldest ask waits.
+        let topics: Vec<&str> = groups.iter().map(|g| g.topic.as_str()).collect();
+        assert_eq!(topics, ["linear-out", "web-view", "Everything else"]);
+        assert_eq!(groups[0].rows.len(), 2);
+        assert_eq!(groups[1].rows.len(), 1);
+        // Within a topic, oldest first.
+        assert_eq!(
+            groups[0].rows[0].head,
+            "Move this yard's 64 links to the declared source now?"
+        );
+        assert_eq!(
+            groups[0].rows[1].head,
+            "Send yardr-3msx and yardr-vgjp to build?"
+        );
+    }
+
+    #[test]
+    fn a_row_leads_with_the_question_then_asker_and_waits_bead_small_at_its_end() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (m, _) = Model::new(state, None);
+        let groups = m.decision_groups(&noon());
+        let row = &groups[0].rows[0];
+        assert_eq!(row.sub, "yardmaster · 2h");
+        assert_eq!(row.short, "n8ta");
+        assert_eq!(row.bead, "yardr-n8ta");
+        // No row reads "<id> go?".
+        assert!(!row.head.contains("yardr-n8ta"), "{}", row.head);
+        // A day's wait.
+        assert_eq!(groups[1].rows[0].sub, "assembly · 1d");
+    }
+
+    #[test]
+    fn a_bead_with_several_open_asks_is_one_row() {
+        let mut state = yard(&[]);
+        state.asks.open = vec![
+            open_ask(
+                "yardr-me78",
+                "Depot rules",
+                "topic:design-lane",
+                7,
+                "First?",
+                "yardmaster",
+                "2026-10-09T12:00:00Z",
+            ),
+            open_ask(
+                "yardr-me78",
+                "Depot rules",
+                "topic:design-lane",
+                8,
+                "Second?",
+                "yardmaster",
+                "2026-10-10T11:00:00Z",
+            ),
+            open_ask(
+                "yardr-me78",
+                "Depot rules",
+                "topic:design-lane",
+                9,
+                "Third?",
+                "assembly",
+                "2026-10-10T11:30:00Z",
+            ),
+            open_ask(
+                "yardr-me78",
+                "Depot rules",
+                "topic:design-lane",
+                10,
+                "Fourth?",
+                "yardmaster",
+                "2026-10-10T11:45:00Z",
+            ),
+        ];
+        let (m, _) = Model::new(state, None);
+        assert_eq!(m.decisions_count(), 1);
+        let groups = m.decision_groups(&noon());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].topic, "design-lane");
+        let row = &groups[0].rows[0];
+        assert_eq!(row.head, "Depot rules: 4 questions");
+        // How long the oldest waits; no one asker.
+        assert_eq!(row.sub, "1d");
+        assert_eq!(row.short, "me78");
+        // The open row shows each ask oldest first.
+        let detail = m.decision_detail("yardr-me78", &noon()).unwrap();
+        assert_eq!(detail.title, "Depot rules");
+        assert_eq!(detail.topic, "design-lane");
+        let questions: Vec<&str> = detail.asks.iter().map(|a| a.question.as_str()).collect();
+        assert_eq!(questions, ["First?", "Second?", "Third?", "Fourth?"]);
+        assert_eq!(detail.asks[0].waits, "1d");
+    }
+
+    #[test]
+    fn how_long_an_ask_waits() {
+        let now = noon();
+        assert_eq!(waits("2026-10-10T11:59:30Z", &now), "now");
+        assert_eq!(waits("2026-10-10T11:55:00Z", &now), "5m");
+        assert_eq!(waits("2026-10-10T10:00:00Z", &now), "2h");
+        assert_eq!(waits("2026-10-09T12:00:00Z", &now), "1d");
+        assert_eq!(waits("2026-10-07T12:00:00Z", &now), "3d");
+        assert_eq!(waits("", &now), "");
+        assert_eq!(waits("yesterday", &now), "");
+    }
+
+    #[test]
+    fn decided_stands_folded_with_the_picks_newest_first() {
+        let mut state = yard(&[]);
+        state.asks.decided = vec![
+            decided_ask(
+                "yd-links",
+                6,
+                "Send them to build?",
+                "answered",
+                "Send them",
+                "tonight",
+                "",
+            ),
+            decided_ask("yd-greet", 10, "Who greets?", "answered", "", "warmly", ""),
+            decided_ask(
+                "yd-links",
+                8,
+                "Close sketch PR #3?",
+                "declined",
+                "",
+                "not mine",
+                "",
+            ),
+            decided_ask(
+                "yd-links",
+                12,
+                "Build the cleanup?",
+                "put aside",
+                "",
+                "",
+                "2026-10-11T09:30:00Z",
+            ),
+        ];
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(m.decided_count(), 4);
+        assert!(!m.decided_expanded());
+        // Folded: its rows are not in the tab order.
+        m.select(Selected::Yard);
+        m.step(-1);
+        assert_eq!(m.selected_conversation(), Some("mckean@north"));
+
+        m.toggle_decided();
+        assert!(m.decided_expanded());
+        let rows = m.decided_rows();
+        assert_eq!(rows[0].head, "Send them to build?");
+        assert_eq!(rows[0].sub, "yardmaster · Send them · tonight");
+        assert_eq!(rows[1].sub, "yardmaster · warmly");
+        assert_eq!(rows[2].sub, "yardmaster · declined · not mine");
+        assert_eq!(rows[3].sub, "yardmaster · put aside");
+        // Open: its rows stand between the decisions and the conversations.
+        m.select(Selected::Yard);
+        m.step(-1);
+        assert_eq!(m.selected_conversation(), Some("mckean@north"));
+        m.select(Selected::Conversation("assembly".into()));
+        m.step(-1);
+        assert_eq!(
+            m.selected(),
+            Some(&Selected::Decided("yd-links".into(), 12))
+        );
+        // The open dealt with shows its pick.
+        let detail = m.decided_detail("yd-links", 6).unwrap();
+        assert_eq!(detail.question, "Send them to build?");
+        assert_eq!(detail.state, "answered");
+        assert_eq!(detail.pick, "Send them");
+        assert_eq!(detail.words, "tonight");
+    }
+
+    #[test]
+    fn the_next_put_aside_return_is_the_earliest() {
+        let mut state = yard(&[]);
+        state.asks.decided = vec![
+            decided_ask("a", 1, "Q?", "put aside", "", "", "2026-10-12T09:30:00Z"),
+            decided_ask("b", 2, "Q?", "answered", "Go", "", ""),
+            decided_ask("c", 3, "Q?", "put aside", "", "", "2026-10-11T09:30:00Z"),
+        ];
+        let (m, _) = Model::new(state, None);
+        assert_eq!(m.next_return().as_deref(), Some("2026-10-11T09:30:00Z"));
+
+        let (m, _) = Model::new(yard(&[]), None);
+        assert_eq!(m.next_return(), None);
+    }
+
+    #[test]
+    fn the_yard_row_counts_its_unread_and_x_marks_one_read() {
+        let mut state = yard(&[]);
+        state.notifications = vec![
+            notification(10, "yd-shed", "yd-shed created", false),
+            notification(11, "yd-shed", "yd-shed noted", true),
+            notification(12, "", "the release went out", false),
+        ];
+        let (mut m, _) = Model::new(state, None);
+        let yard = m.yard_row();
+        assert_eq!((yard.name.as_str(), yard.unread), ("yard", 2));
+        assert!(!yard.selected);
+        let notices = m.notices();
+        assert_eq!(notices.len(), 3);
+        assert_eq!(notices[0].text, "yd-shed created");
+        assert!(!notices[0].read);
+
+        // Elsewhere than the open yard row, `x` does nothing.
+        assert_eq!(m.dismiss(), []);
+        m.select(Selected::Yard);
+        assert!(m.yard_row().selected);
+        // One key marks the oldest unread read.
+        assert_eq!(m.dismiss(), [Effect::AckNotifications { through: 10 }]);
+        m.notifications_acked(10);
+        assert_eq!(m.yard_unread(), 1);
+        assert_eq!(m.dismiss(), [Effect::AckNotifications { through: 12 }]);
+        m.notifications_acked(12);
+        assert_eq!(m.yard_unread(), 0);
+        assert_eq!(m.dismiss(), []);
+        // A refused acknowledgement keeps the notice unread and says so.
+        m.notifications_ack_failed("the yard does not answer");
+        assert!(
+            m.notice.contains("could not be marked read"),
+            "{}",
+            m.notice
+        );
+    }
+
+    #[test]
+    fn notices_read_elsewhere_clear_the_count() {
+        let mut state = yard(&[]);
+        state.notifications = vec![
+            notification(10, "yd-shed", "yd-shed created", false),
+            notification(11, "yd-shed", "yd-shed noted", false),
+        ];
+        let (mut m, _) = Model::new(state, None);
+        m.event(&event(
+            21,
+            "notifications_read",
+            "",
+            json!({"reader": "jo", "through": 10}),
+        ));
+        assert_eq!(m.yard_unread(), 1);
+        // Another user's reading is none of this window's.
+        m.event(&event(
+            22,
+            "notifications_read",
+            "",
+            json!({"reader": "ada", "through": 11}),
+        ));
+        assert_eq!(m.yard_unread(), 1);
+    }
+
+    #[test]
+    fn the_lists_follow_the_stream_and_ask_nothing_in_a_loop() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        // A note on a bead: the queue is read again.
+        assert_eq!(
+            m.event(&event(21, "noted", "yardmaster", json!({"note": 1}))),
+            [Effect::Asks]
+        );
+        // An event that notified the user: the notices are read again.
+        assert_eq!(
+            m.event(&event(
+                22,
+                "created",
+                "yard",
+                json!({"notified": {"jo": "all"}})
+            )),
+            [Effect::Notifications]
+        );
+        // One that notified another user only: nothing.
+        assert_eq!(
+            m.event(&event(
+                23,
+                "created",
+                "yard",
+                json!({"notified": {"ada": "all"}})
+            )),
+            []
+        );
+        // Both at once: a noted event that also notified.
+        assert_eq!(
+            m.event(&event(
+                24,
+                "noted",
+                "yardmaster",
+                json!({"note": 2, "notified": {"jo": "all"}})
+            )),
+            [Effect::Notifications, Effect::Asks]
+        );
+    }
+
+    #[test]
+    fn a_queue_read_again_opens_the_first_row_when_the_open_bead_is_gone() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, None);
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        // Its last ask answered: the bead is gone from the queue.
+        let mut open = evening();
+        open.remove(0);
+        m.asks(Asks {
+            open,
+            decided: vec![],
+        });
+        // The first row from the top, the next decision.
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+        // All answered: the yardmaster's conversation is not first; the
+        // first row is.
+        m.asks(Asks {
+            open: vec![],
+            decided: vec![],
+        });
+        assert_eq!(m.selected_conversation(), Some("assembly"));
     }
 }

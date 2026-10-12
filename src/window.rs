@@ -16,7 +16,7 @@ use gpui::{
 use crate::api::{self, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
-use crate::model::{self, Effect, Entry, Model, Row, Target};
+use crate::model::{self, DecidedRow, DecisionRow, Effect, Entry, Model, Row, Selected, Target};
 use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::theme::Palette;
@@ -24,9 +24,12 @@ use crate::theme::Palette;
 /// The application's icon, from the 1024px master in assets/icon.png.
 pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
-actions!(footplate, [Next, Previous]);
+actions!(footplate, [Next, Previous, Dismiss]);
 
 const CONTEXT: &str = "Footplate";
+/// Where no line is typed in: the yard row and the decisions. `x` marks
+/// one notice read here; with a conversation open it is the line's text.
+const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 
 /// How high an image of a mail stands in the conversation, whatever its own
 /// size: the room is there before the image is, so nothing moves under the
@@ -116,15 +119,24 @@ fn post(
     Ok(blobs)
 }
 
+/// A line between the sections of the left list.
+fn divider(palette: Palette) -> impl IntoElement {
+    div().mx_3().my_1().h(px(1.)).bg(palette.line)
+}
+
 /// The keys of the window, as `yardr chat` has them.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("tab", Next, Some(CONTEXT)),
-        KeyBinding::new("shift-tab", Previous, Some(CONTEXT)),
-        // The line's own binding is the deeper one: with the focus in the
-        // line it copies the line's selection, as before.
-        KeyBinding::new("secondary-c", input::Copy, Some(CONTEXT)),
-    ]);
+    for context in [CONTEXT, NO_LINE_CONTEXT] {
+        cx.bind_keys([
+            KeyBinding::new("tab", Next, Some(context)),
+            KeyBinding::new("shift-tab", Previous, Some(context)),
+            // The line's own binding is the deeper one: with the focus in
+            // the line it copies the line's selection, as before.
+            KeyBinding::new("secondary-c", input::Copy, Some(context)),
+        ]);
+    }
+    // One key marks one notice read, where no line is typed in.
+    cx.bind_keys([KeyBinding::new("x", Dismiss, Some(NO_LINE_CONTEXT))]);
 }
 
 pub struct Footplate {
@@ -148,6 +160,9 @@ pub struct Footplate {
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
     icon: Arc<Image>,
+    /// Which read of the queue a put-aside return waits for: an older
+    /// timer does nothing when the queue was read since.
+    ask_generation: u64,
 }
 
 impl Footplate {
@@ -204,6 +219,7 @@ impl Footplate {
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
+            ask_generation: 0,
         }
     }
 
@@ -215,11 +231,8 @@ impl Footplate {
     fn told(&mut self, update: Update, cx: &mut Context<Self>) {
         match update {
             Update::Up(state) => {
-                let open = self
-                    .model
-                    .as_ref()
-                    .and_then(|m| m.selected().map(str::to_string));
-                let (model, effects) = Model::new(*state, open.as_deref());
+                let open = self.model.as_ref().and_then(|m| m.selected().cloned());
+                let (model, effects) = Model::new(*state, open.clone());
                 self.model = Some(model);
                 self.down = None;
                 self.turned(open, cx);
@@ -231,6 +244,7 @@ impl Footplate {
                 self.shown(cx);
                 self.pictures(cx);
                 self.run(effects, cx);
+                self.schedule_return(cx);
             }
             Update::Event(event) => self.change(cx, |m| m.event(&event)),
             Update::Down(why) => self.down = Some(why),
@@ -238,15 +252,25 @@ impl Footplate {
         cx.notify();
     }
 
-    /// Changes the model and does what the change asks for. When the open
-    /// conversation is another or has more mail, its newest comes in view.
+    /// Changes the model and does what the change asks for. When what is
+    /// open is another or has more in it, its newest comes in view.
     fn change(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Model) -> Vec<Effect>) {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let before = (model.selected().map(str::to_string), model.entries().len());
+        let before = (
+            model.selected().cloned(),
+            model.entries().len(),
+            model.notices().len(),
+        );
         let effects = f(model);
-        if before != (model.selected().map(str::to_string), model.entries().len()) {
+        if before
+            != (
+                model.selected().cloned(),
+                model.entries().len(),
+                model.notices().len(),
+            )
+        {
             self.conversation.scroll_to_bottom();
         }
         self.turned(before.0, cx);
@@ -285,14 +309,11 @@ impl Footplate {
         }
     }
 
-    /// The conversation `from` was open. When another is now, what is typed
-    /// stays with the one it was typed in, and the line has what was typed
-    /// in the one that is open.
-    fn turned(&mut self, from: Option<String>, cx: &mut Context<Self>) {
-        let to = self
-            .model
-            .as_ref()
-            .and_then(|m| m.selected().map(str::to_string));
+    /// What `from` was open. When another is now, what is typed stays
+    /// with the conversation it was typed in, and the line has what was
+    /// typed in the one that is open, if one is.
+    fn turned(&mut self, from: Option<Selected>, cx: &mut Context<Self>) {
+        let to = self.model.as_ref().and_then(|m| m.selected().cloned());
         let Some(from) = from.filter(|from| Some(from) != to.as_ref()) else {
             return;
         };
@@ -300,21 +321,56 @@ impl Footplate {
         self.selection
             .update(cx, |selection, cx| selection.clear(cx));
         let typed = self.line.read(cx).text().to_string();
-        self.drafts.put_text(&from, typed);
-        let text = to.map(|to| self.drafts.take_text(&to)).unwrap_or_default();
+        if let Selected::Conversation(name) = &from {
+            self.drafts.put_text(name, typed);
+        }
+        let text = match &to {
+            Some(Selected::Conversation(name)) => self.drafts.take_text(name),
+            _ => String::new(),
+        };
         self.line.update(cx, |line, cx| line.set_text(&text, cx));
     }
 
-    /// The line says whom it writes to.
+    /// The line says whom it writes to, when a conversation is open.
     fn shown(&mut self, cx: &mut Context<Self>) {
         let to = self
             .model
             .as_ref()
-            .and_then(|m| m.selected())
+            .and_then(|m| m.selected_conversation())
             .map(|s| format!("Write to {s}"))
             .unwrap_or_default();
         self.line
             .update(cx, |line, cx| line.set_placeholder(&to, cx));
+    }
+
+    /// Reads the queue again when the next put-aside ask comes back, which
+    /// arrives with no event. One timer waits at a time; a queue read
+    /// since replaces it.
+    fn schedule_return(&mut self, cx: &mut Context<Self>) {
+        self.ask_generation += 1;
+        let generation = self.ask_generation;
+        let Some(at) = self.model.as_ref().and_then(|m| m.next_return()) else {
+            return;
+        };
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(&at) else {
+            return;
+        };
+        let wait = at.timestamp() - chrono::Utc::now().timestamp();
+        if wait <= 0 {
+            self.change(cx, |_| vec![Effect::Asks]);
+            return;
+        }
+        let wait = std::time::Duration::from_secs(wait as u64);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                if this.ask_generation == generation {
+                    this.change(cx, |_| vec![Effect::Asks]);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Makes a call off the window's thread, as the user the window is for,
@@ -396,6 +452,45 @@ impl Footplate {
                         }
                     },
                 ),
+                Effect::Notifications => self.ask(
+                    cx,
+                    |client, me| client.user_notifications(me, 0),
+                    |this, notifications, cx| match notifications {
+                        Ok(notifications) => this.change(cx, |m| {
+                            m.notifications(notifications.notifications);
+                            Vec::new()
+                        }),
+                        Err(err) => {
+                            this.notice(format!("the notices could not be read: {err}"), cx)
+                        }
+                    },
+                ),
+                Effect::AckNotifications { through } => self.ask(
+                    cx,
+                    move |client, me| client.ack_user_notifications(me, through),
+                    move |this, acked, cx| {
+                        this.change(cx, |m| {
+                            match acked {
+                                Ok(()) => m.notifications_acked(through),
+                                Err(err) => m.notifications_ack_failed(&err.to_string()),
+                            }
+                            Vec::new()
+                        })
+                    },
+                ),
+                Effect::Asks => self.ask(
+                    cx,
+                    |client, me| client.user_asks(me),
+                    |this, asks, cx| match asks {
+                        Ok(asks) => {
+                            this.change(cx, |m| m.asks(asks));
+                            this.schedule_return(cx);
+                        }
+                        Err(err) => {
+                            this.notice(format!("the decisions could not be read: {err}"), cx)
+                        }
+                    },
+                ),
             }
         }
     }
@@ -403,7 +498,7 @@ impl Footplate {
     /// Whom the open conversation is with, and where what is typed goes.
     fn open(&self) -> Option<(String, Target)> {
         let model = self.model.as_ref()?;
-        Some((model.selected()?.to_string(), model.target()?))
+        Some((model.selected_conversation()?.to_string(), model.target()?))
     }
 
     /// Sends the draft of the open conversation as one mail: what is typed,
@@ -457,7 +552,7 @@ impl Footplate {
         if let Some(id) = unsent.at {
             self.drafts.refuse(id, &unsent.why);
         }
-        let open = self.model.as_ref().and_then(|m| m.selected()) == Some(to);
+        let open = self.model.as_ref().and_then(|m| m.selected_conversation()) == Some(to);
         if open {
             self.line.update(cx, |line, cx| {
                 let back = draft::rejoin(unsent.text, line.text().to_string());
@@ -553,9 +648,15 @@ impl Footplate {
         }
     }
 
-    fn select(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.change(cx, |m| m.select(name));
-        window.focus(&self.line.focus_handle(cx));
+    fn select(&mut self, sel: Selected, window: &mut Window, cx: &mut Context<Self>) {
+        self.change(cx, |m| m.select(sel));
+        // What is typed goes to a conversation; elsewhere the window holds
+        // the keys, and `x` marks a notice read.
+        let focus = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
+            Some(_) => self.line.focus_handle(cx),
+            None => self.focus.clone(),
+        };
+        window.focus(&focus);
     }
 
     /// Copies what is selected of the messages. The line copies its own
@@ -566,8 +667,25 @@ impl Footplate {
         }
     }
 
-    fn step(&mut self, by: isize, cx: &mut Context<Self>) {
+    fn step(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
         self.change(cx, |m| m.step(by));
+        let focus = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
+            Some(_) => self.line.focus_handle(cx),
+            None => self.focus.clone(),
+        };
+        window.focus(&focus);
+    }
+
+    /// One key marks one notice read, on the open yard row.
+    fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
+        self.change(cx, |m| m.dismiss());
+    }
+
+    fn toggle_decided(&mut self, cx: &mut Context<Self>) {
+        self.change(cx, |m| {
+            m.toggle_decided();
+            Vec::new()
+        });
     }
 
     /// No yard: why, in words, and that it is tried again.
@@ -624,22 +742,81 @@ impl Footplate {
                             .child(model.me().to_string()),
                     ),
             );
-        let body = div()
+        let now = chrono::Utc::now();
+        let mut body = div()
             .id("rows")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .py_1();
-        let body =
-            if rows.is_empty() {
+        // The open questions above the conversations, grouped by topic.
+        let decisions = model.decisions_count();
+        let decided = model.decided_count();
+        if decisions > 0 || decided > 0 {
+            body = body.child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("decisions ({decisions})")),
+            );
+            for group in model.decision_groups(&now) {
+                body = body.child(
+                    div()
+                        .px_3()
+                        .pt_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(palette.faint)
+                        .child(group.topic),
+                );
+                for row in group.rows {
+                    body = body.child(self.decision_row(row, palette, cx));
+                }
+            }
+            if decided > 0 {
+                let open = model.decided_expanded();
+                body = body.child(
+                    div()
+                        .id("decided")
+                        .mx_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(palette.hover))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_decided(cx)))
+                        .child(div().text_sm().text_color(palette.faint).child(format!(
+                            "{} Decided ({decided})",
+                            if open { "▾" } else { "▸" }
+                        ))),
+                );
+                if open {
+                    for row in model.decided_rows() {
+                        body = body.child(self.decided_row(row, palette, cx));
+                    }
+                }
+            }
+            body = body.child(divider(palette));
+        }
+        if rows.is_empty() {
+            body =
                 body.child(
                     div().p_3().text_sm().text_color(palette.faint).child(
                         "This yard has no crew yet, and no linked yard exposes anyone to it.",
                     ),
                 )
-            } else {
-                body.children(rows.into_iter().map(|row| self.row(row, palette, cx)))
-            };
+        } else {
+            for row in rows {
+                let sel = Selected::Conversation(row.name.clone());
+                body = body.child(self.row(row, sel, palette, cx));
+            }
+        }
+        body = body.child(divider(palette));
+        let yard = model.yard_row();
+        body = body.child(self.row(yard, Selected::Yard, palette, cx));
         div()
             .w(px(260.))
             .flex_none()
@@ -653,10 +830,19 @@ impl Footplate {
             .child(body)
     }
 
-    fn row(&self, row: Row, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let name = row.name.clone();
+    fn row(
+        &self,
+        row: Row,
+        sel: Selected,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let id = match &sel {
+            Selected::Yard => "row yard".to_string(),
+            _ => format!("row {}", row.name),
+        };
         div()
-            .id(SharedString::from(format!("row {}", row.name)))
+            .id(SharedString::from(id))
             .mx_1()
             .px_2()
             .py_1p5()
@@ -670,7 +856,7 @@ impl Footplate {
             .when(!row.selected, |el| {
                 el.hover(|style| style.bg(palette.hover))
             })
-            .on_click(cx.listener(move |this, _, window, cx| this.select(&name, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
             .child(
                 div()
                     .flex()
@@ -703,6 +889,104 @@ impl Footplate {
                         .child(row.unread.to_string()),
                 )
             })
+    }
+
+    /// A bead with open asks: the question in plain words, then whose it
+    /// is and how long it waits, the bead's id small at the row's end.
+    fn decision_row(
+        &self,
+        row: DecisionRow,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let sel = Selected::Decision(row.bead.clone());
+        div()
+            .id(SharedString::from(format!("decision {}", row.bead)))
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .cursor_pointer()
+            .when(row.selected, |el| el.bg(palette.open))
+            .when(!row.selected, |el| {
+                el.hover(|style| style.bg(palette.hover))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(div().truncate().child(row.head))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.faint)
+                            .truncate()
+                            .child(row.sub),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .child(row.short),
+            )
+    }
+
+    /// One dealt with, with its pick.
+    fn decided_row(
+        &self,
+        row: DecidedRow,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let sel = Selected::Decided(row.bead.clone(), row.ask);
+        div()
+            .id(SharedString::from(format!(
+                "decided {} {}",
+                row.bead, row.ask
+            )))
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .cursor_pointer()
+            .when(row.selected, |el| el.bg(palette.open))
+            .when(!row.selected, |el| {
+                el.hover(|style| style.bg(palette.hover))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(div().truncate().child(row.head))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.faint)
+                            .truncate()
+                            .child(row.sub),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .child(row.short),
+            )
     }
 
     /// An image of a mail, or the line that says why there is none.
@@ -841,15 +1125,39 @@ impl Footplate {
     }
 
     fn talk(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
-        let Some(with) = model.selected() else {
-            return pane
+        match model.selected() {
+            Some(Selected::Conversation(with)) => self
+                .talk_conversation(model, with, palette, cx)
+                .into_any_element(),
+            Some(Selected::Yard) => self.talk_yard(model, palette).into_any_element(),
+            Some(Selected::Decision(bead)) => {
+                self.talk_decision(model, bead, palette).into_any_element()
+            }
+            Some(Selected::Decided(bead, ask)) => self
+                .talk_decided(model, bead, *ask, palette)
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
                 .text_color(palette.faint)
-                .child("Nobody to write to yet.");
-        };
+                .child("Nobody to write to yet.")
+                .into_any_element(),
+        }
+    }
 
+    fn talk_conversation(
+        &self,
+        model: &Model,
+        with: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let about = model.about();
         let head = div()
             .p_3()
@@ -959,6 +1267,235 @@ impl Footplate {
                     .child(self.line.clone()),
             )
     }
+
+    /// The yard row open: the notices, oldest first, and no line to type
+    /// in. One key marks one read.
+    fn talk_yard(&self, model: &Model, palette: Palette) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("yard"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("What the yard reports, apart from every conversation."),
+            );
+        let notices = model.notices();
+        let list = div()
+            .id("notices")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.conversation)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
+        let list = if notices.is_empty() {
+            list.child(
+                div()
+                    .text_color(palette.faint)
+                    .child("No notices. The yard reports here what you subscribe to."),
+            )
+        } else {
+            list.children(notices.into_iter().map(|n| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(palette.faint)
+                                    .child(model::clock(&n.at, &chrono::Local)),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(n.bead.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .ml_4()
+                            .when(n.read, |el| el.text_color(palette.faint))
+                            .child(n.text),
+                    )
+            }))
+        };
+        pane.child(head)
+            .child(list)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+            .child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("x marks one read"),
+            )
+    }
+
+    /// A bead with open asks, as read-only text: the picking is the next
+    /// bead's.
+    fn talk_decision(&self, model: &Model, bead: &str, palette: Palette) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let now = chrono::Utc::now();
+        let Some(detail) = model.decision_detail(bead, &now) else {
+            return pane
+                .items_center()
+                .justify_center()
+                .text_color(palette.faint)
+                .child("Its questions are answered.");
+        };
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(detail.title.clone()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(format!("{} · {}", detail.bead, detail.topic)),
+            );
+        let list = div()
+            .id("decision")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.conversation)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .children(detail.asks.into_iter().map(|ask| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(ask.question))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(format!("{} · {} waits", ask.asker, ask.waits)),
+                    )
+            }));
+        pane.child(head)
+            .child(list)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One dealt with, as read-only text.
+    fn talk_decided(
+        &self,
+        model: &Model,
+        bead: &str,
+        ask: u64,
+        palette: Palette,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let Some(detail) = model.decided_detail(bead, ask) else {
+            return pane
+                .items_center()
+                .justify_center()
+                .text_color(palette.faint)
+                .child("It is gone from the decided.");
+        };
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(detail.title.clone()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(format!("{} · ask {ask}", detail.bead)),
+            );
+        let mut body = div()
+            .id("decided")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.conversation)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(detail.question.clone()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(format!("{} · {}", detail.asker, detail.state)),
+            );
+        if !detail.pick.is_empty() {
+            body = body.child(div().child(format!("picked: {}", detail.pick)));
+        }
+        if !detail.words.is_empty() {
+            body = body.child(div().child(detail.words.clone()));
+        }
+        if !detail.return_at.is_empty() {
+            body = body.child(div().text_sm().text_color(palette.faint).child(format!(
+                "back {}",
+                model::clock(&detail.return_at, &chrono::Local)
+            )));
+        }
+        pane.child(head)
+            .child(body)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
 }
 
 impl Focusable for Footplate {
@@ -970,12 +1507,17 @@ impl Focusable for Footplate {
 impl Render for Footplate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(window.appearance());
+        let context = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
+            Some(_) => CONTEXT,
+            None => NO_LINE_CONTEXT,
+        };
         let root = div()
-            .key_context(CONTEXT)
+            .key_context(context)
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
-            .on_action(cx.listener(|this, _: &Previous, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(|this, _: &Next, window, cx| this.step(1, window, cx)))
+            .on_action(cx.listener(|this, _: &Previous, window, cx| this.step(-1, window, cx)))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::dismiss))
             // Files dropped anywhere on the window are for the draft of the
             // open conversation.
             .on_drop(
@@ -1061,6 +1603,12 @@ mod tests {
             r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
         );
         yard.answer("AckUserInbox", "{}");
+        yard.answer(
+            "UserNotifications",
+            r#"{"result": {"notifications": [], "unread": 0, "last": 0}}"#,
+        );
+        yard.answer("AckUserNotifications", "{}");
+        yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         yard.answer("Mail", "{}");
         yard.answer(
             "MailPeer",
@@ -1111,7 +1659,7 @@ mod tests {
         cx: &mut VisualTestContext,
     ) -> Vec<(u64, String, Option<String>)> {
         view.read_with(cx, |v, _| {
-            let with = v.model.as_ref().unwrap().selected().unwrap();
+            let with = v.model.as_ref().unwrap().selected_conversation().unwrap();
             let all = v.drafts.attachments(with).iter();
             all.map(|a| (a.id, a.name.clone(), a.refused.clone()))
                 .collect()
@@ -1430,7 +1978,7 @@ mod tests {
         cx.simulate_keystrokes("tab");
         wait(cx, "the conversation with the linked yard", |cx| {
             view.read_with(cx, |v, _| {
-                v.model.as_ref().unwrap().selected() == Some("clerk@north")
+                v.model.as_ref().unwrap().selected_conversation() == Some("clerk@north")
             })
         });
         assert_eq!(typed(&view, cx), "");
@@ -1544,7 +2092,7 @@ mod tests {
             let model = v.model.as_ref().unwrap();
             assert_eq!(v.down, None);
             assert_eq!(model.me(), "jo");
-            assert_eq!(model.selected(), Some("yardmaster"));
+            assert_eq!(model.selected_conversation(), Some("yardmaster"));
             let rows: Vec<String> = model.rows().into_iter().map(|r| r.name).collect();
             assert_eq!(rows, ["assembly", "yardmaster", "clerk@north"]);
         });
@@ -1645,7 +2193,10 @@ mod tests {
             view.read_with(cx, |v, _| v.down.is_none())
         });
         view.read_with(cx, |v, _| {
-            assert_eq!(v.model.as_ref().unwrap().selected(), Some("clerk@north"))
+            assert_eq!(
+                v.model.as_ref().unwrap().selected_conversation(),
+                Some("clerk@north")
+            )
         });
     }
 
@@ -1803,7 +2354,7 @@ mod tests {
         drag(cx, from, to);
         assert!(selected(&view, cx).is_some());
         yard.answer("Conversation", r#"{"result": []}"#);
-        view.update(cx, |v, cx| v.step(1, cx));
+        view.update(cx, |v, cx| v.change(cx, |m| m.step(1)));
         assert_eq!(selected(&view, cx), None);
     }
 
