@@ -763,7 +763,6 @@ impl Footplate {
                 {
                     self.scroll_to_newest();
                 }
-                }
                 _ => {}
             }
         }
