@@ -118,6 +118,35 @@ pub fn unsendable(text: &str, attachments: &[Attachment]) -> Option<String> {
     }
 }
 
+/// How long the question in a card's reference may be, before it is cut
+/// short with "...".
+const REFERENCE_QUESTION: usize = 64;
+
+/// The first line a card puts in its asker's draft: the bead's handle as
+/// the card shows it, whole, and the question's first line.
+pub fn ask_reference(bead: &str, question: &str) -> String {
+    let first = question.lines().next().unwrap_or_default();
+    let mut chars = first.chars();
+    let short: String = chars.by_ref().take(REFERENCE_QUESTION).collect();
+    let question = match chars.next() {
+        None => short,
+        Some(_) => format!("{short}..."),
+    };
+    format!("re {bead} \"{question}\"")
+}
+
+/// Puts the card's reference before what the draft holds, with an empty
+/// line between for the caret; a draft that names the card already is
+/// left as it is. Answers the draft and where the caret goes: the empty
+/// line after the reference.
+pub fn prepend_reference(existing: &str, reference: &str) -> (String, usize) {
+    let caret = reference.len() + 1;
+    if existing.lines().next() == Some(reference) {
+        return (existing.to_string(), caret.min(existing.len()));
+    }
+    (format!("{reference}\n\n{existing}"), caret)
+}
+
 /// A text that did not go, before what was typed since.
 pub fn rejoin(unsent: String, typed: String) -> String {
     match (unsent.is_empty(), typed.is_empty()) {
@@ -284,6 +313,46 @@ mod tests {
         assert_eq!(drafts.remove_last("nobody"), None);
         // An id is never given twice, whatever was removed.
         assert!(drafts.attach("yardmaster", image(PNG)) > three);
+    }
+
+    #[test]
+    fn a_card_names_itself_in_its_asker_s_draft() {
+        assert_eq!(
+            ask_reference("bead-a", "Move them now?"),
+            "re bead-a \"Move them now?\""
+        );
+        // A foreign card names the bead whole, with its peer.
+        assert_eq!(
+            ask_reference("yardr-ndv0@mac", "Parallel reviews?"),
+            "re yardr-ndv0@mac \"Parallel reviews?\""
+        );
+        // The question's first line, cut short with "..." when long.
+        assert_eq!(ask_reference("bead-a", "one\ntwo"), "re bead-a \"one\"");
+        let long =
+            "Parallel reviews (quality, security, UI): which of them land tonight, and who signs?";
+        let short: String = long.chars().take(64).collect();
+        assert_eq!(
+            ask_reference("yardr-ndv0@mac", long),
+            format!("re yardr-ndv0@mac \"{short}...\"")
+        );
+    }
+
+    #[test]
+    fn the_reference_goes_before_what_the_draft_holds_once_with_the_caret_after_it() {
+        let reference = "re bead-a \"Move them now?\"";
+        // An empty draft holds the reference and an empty line, the caret
+        // on it.
+        let (text, caret) = prepend_reference("", reference);
+        assert_eq!(text, "re bead-a \"Move them now?\"\n\n");
+        assert_eq!(&text[..caret], "re bead-a \"Move them now?\"\n");
+        // What the draft held is kept after it.
+        let (text, caret) = prepend_reference("half a thought", reference);
+        assert_eq!(text, "re bead-a \"Move them now?\"\n\nhalf a thought");
+        assert_eq!(&text[..caret], "re bead-a \"Move them now?\"\n");
+        // A second ask names the card once: the draft is left as it is.
+        let (again, caret) = prepend_reference(&text, reference);
+        assert_eq!(again, text);
+        assert_eq!(&again[..caret], "re bead-a \"Move them now?\"\n");
     }
 
     #[test]

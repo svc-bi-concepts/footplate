@@ -515,6 +515,29 @@ impl Model {
         self.parties.iter().find(|p| p.address() == address)
     }
 
+    /// Whether `asker` can be written to from here: one of this yard's
+    /// crew, or one a linked yard exposes. Anyone else has no
+    /// conversation.
+    pub fn can_write(&self, asker: &str) -> bool {
+        self.conversation_names().iter().any(|name| name == asker)
+    }
+
+    /// Why `asker` cannot be written to from here, when they cannot: a
+    /// name the link does not expose, or none of this yard's crew.
+    pub fn unwritable(&self, asker: &str) -> Option<String> {
+        if self.can_write(asker) {
+            return None;
+        }
+        match asker.split_once('@') {
+            Some(_) => Some(format!(
+                "{asker} cannot be written to from here: the link does not expose them"
+            )),
+            None => Some(format!(
+                "{asker} cannot be written to from here: no member of this yard's crew is called that"
+            )),
+        }
+    }
+
     /// How many mails from `name` the user has not seen. Mail that was
     /// shown does not count, also while the yard has it unread still: one
     /// position stands for all senders, so unseen mail of another holds the
@@ -1737,6 +1760,13 @@ fn short_bead(bead: &str) -> String {
     bead.rsplit('-').next().unwrap_or(bead).to_string()
 }
 
+/// Whether the bead is another yard's question: `<id>@<peer>`, as the
+/// queue names it. The yard refuses a plain note on it: notes stay local,
+/// and words for the asker go as mail.
+pub fn foreign_bead(bead: &str) -> bool {
+    bead.contains('@')
+}
+
 /// A bead's row head: the question in plain words, or the bead's title
 /// with how many it asks.
 fn decision_head(first: &OpenAsk, asks: &[&OpenAsk]) -> String {
@@ -2083,6 +2113,33 @@ mod tests {
         assert_eq!(rows[1].line, "working");
         assert_eq!(rows[2].line, "crew member: Keeps the books");
         assert_eq!(rows[3].line, "person");
+    }
+
+    #[test]
+    fn an_asker_is_written_to_in_their_conversation_or_not_at_all() {
+        let (m, _) = Model::new(yard(&[]), None);
+        assert!(m.can_write("yardmaster"));
+        assert!(m.can_write("assembly"));
+        assert!(m.can_write("clerk@north"));
+        assert!(!m.can_write("sage@east"));
+        assert!(!m.can_write("sage"));
+        assert_eq!(m.unwritable("clerk@north"), None);
+        assert_eq!(
+            m.unwritable("sage@east").as_deref(),
+            Some("sage@east cannot be written to from here: the link does not expose them")
+        );
+        assert_eq!(
+            m.unwritable("sage").as_deref(),
+            Some(
+                "sage cannot be written to from here: no member of this yard's crew is called that"
+            )
+        );
+    }
+
+    #[test]
+    fn a_foreign_bead_is_another_yard_s_question() {
+        assert!(!foreign_bead("yardr-n8ta"));
+        assert!(foreign_bead("yardr-ndv0@mac"));
     }
 
     #[test]

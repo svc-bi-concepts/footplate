@@ -166,6 +166,16 @@ impl Line {
         self.changed(cx);
     }
 
+    /// Puts the cursor at `offset`: the window opens a draft with the
+    /// caret on its empty line, not at its end.
+    pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let mut offset = offset.min(self.content.len());
+        while !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        self.move_to(offset, cx);
+    }
+
     /// The rows of the text and how many of them the box shows, as last
     /// drawn.
     #[cfg(test)]
@@ -190,6 +200,12 @@ impl Line {
             self.placeholder = placeholder.to_string().into();
             cx.notify();
         }
+    }
+
+    /// What the line says it writes, as last set.
+    #[cfg(test)]
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {

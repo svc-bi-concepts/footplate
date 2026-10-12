@@ -48,6 +48,7 @@ actions!(
         ChoiceDown,
         Decide,
         Decline,
+        AskAbout,
         Expand,
         FocusWords,
         Leave,
@@ -170,20 +171,33 @@ fn divider(palette: Palette) -> impl IntoElement {
 /// The keys of an open card. Enter with nothing chosen and a recommendation
 /// picks it, and says so. Later and Decline are buttons beside the send
 /// button, and expand its own control below, so their keys are not listed
-/// here; they still work.
-fn decision_keys(ask: &DecisionAsk) -> String {
+/// here; they still work. `foreign` is a bead of another yard: words
+/// alone go as no note there, so Enter promises nothing without a pick.
+/// `writable` is an asker with a conversation: else no key asks about
+/// this.
+fn decision_keys(ask: &DecisionAsk, foreign: bool, writable: bool) -> String {
+    let mut keys: Vec<String> = Vec::new();
     if ask.options.is_empty() {
-        return "words wanted · i words · enter sends the answer".to_string();
-    }
-    let n = ask.options.len();
-    let enter = if ask.chosen != 0 {
-        format!("enter picks {}", ask.chosen)
+        keys.push("words wanted".to_string());
+    } else if ask.chosen != 0 {
+        keys.push(format!("enter picks {}", ask.chosen));
     } else if ask.recommend != 0 {
-        format!("enter picks {}", ask.recommend)
-    } else {
-        "enter sends words as note".to_string()
-    };
-    format!("{enter} · 1-{n} pick · ↑↓ choose · i words")
+        keys.push(format!("enter picks {}", ask.recommend));
+    } else if !foreign {
+        keys.push("enter sends words as note".to_string());
+    }
+    if !ask.options.is_empty() {
+        keys.push(format!("1-{} pick", ask.options.len()));
+        keys.push("↑↓ choose".to_string());
+    }
+    keys.push("i words".to_string());
+    if ask.options.is_empty() {
+        keys.push("enter sends the answer".to_string());
+    }
+    if writable {
+        keys.push("a ask about this".to_string());
+    }
+    keys.join(" · ")
 }
 
 /// What a secret ask's card says under the yard's line of what is asked
@@ -250,7 +264,8 @@ fn small_button(text: String, palette: Palette) -> Div {
 
 /// The keys of the window, as `yardr chat` has them, with the card's:
 /// a number key or the arrows choose an option, Enter sends the pick with
-/// the line's words, `x` puts aside, `d` declines, `e` expands.
+/// the line's words, `x` puts aside, `d` declines, `a` asks about this,
+/// `e` expands.
 pub fn bind_keys(cx: &mut App) {
     for context in [CONTEXT, NO_LINE_CONTEXT] {
         cx.bind_keys([
@@ -283,6 +298,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("9", Pick9, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("enter", Decide, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("d", Decline, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("a", AskAbout, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("i", FocusWords, Some(NO_LINE_CONTEXT)),
     ]);
@@ -835,6 +851,11 @@ impl Footplate {
                     "Why decline? Enter sends, esc leaves".to_string()
                 } else if self.current_options_empty() {
                     "Words wanted: Enter sends the answer".to_string()
+                } else if self.current_foreign() {
+                    // The yard refuses a plain note on another yard's
+                    // bead: words go with a pick, and talking to the asker
+                    // is "ask about this" below.
+                    "Words with the pick".to_string()
                 } else {
                     "Words with the pick, or alone as a note".to_string()
                 }
@@ -900,6 +921,14 @@ impl Footplate {
     fn forget_secret(&mut self, cx: &mut Context<Self>) {
         self.secret_typed.clear();
         self.secret.update(cx, |field, cx| field.set_text("", cx));
+    }
+
+    /// Whether the open card's bead is another yard's question.
+    fn current_foreign(&self) -> bool {
+        self.model
+            .as_ref()
+            .and_then(|m| m.current_ask())
+            .is_some_and(|(bead, _)| model::foreign_bead(&bead))
     }
 
     /// Whether the open card's current ask wants words: it has no options.
@@ -1574,6 +1603,47 @@ impl Footplate {
         self.shown(cx);
         window.focus(&self.line.focus_handle(cx));
         cx.notify();
+    }
+
+    /// The `a` key asks about the open card: the conversation with its
+    /// asker, with the card's reference in the draft.
+    fn ask_about(&mut self, _: &AskAbout, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_about_now(window, cx);
+    }
+
+    /// Opens the conversation with the open card's asker, with the card's
+    /// reference first in its draft: `re <bead> "<question>"`, then an
+    /// empty line with the caret on it. Nothing is sent; what the draft
+    /// held is kept after the reference, which is put once. The ask stays
+    /// open among the decisions: its row is one step back. An asker with
+    /// no conversation says so instead.
+    fn ask_about_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            return;
+        }
+        let open = self.model.as_ref().and_then(|m| {
+            let (bead, ask) = m.current_ask()?;
+            let now = chrono::Utc::now();
+            let card = m
+                .decision_detail(&bead, &now)?
+                .asks
+                .into_iter()
+                .find(|a| a.ask == ask)?;
+            let why = m.unwritable(&card.asker);
+            Some((bead, card.asker, card.question, why))
+        });
+        let Some((bead, asker, question, why)) = open else {
+            return;
+        };
+        if let Some(why) = why {
+            return self.notice(why, cx);
+        }
+        let reference = draft::ask_reference(&bead, &question);
+        let existing = self.drafts.take_text(&asker);
+        let (text, caret) = draft::prepend_reference(&existing, &reference);
+        self.drafts.put_text(&asker, text);
+        self.select(Selected::Conversation(asker), window, cx);
+        self.line.update(cx, |line, cx| line.set_cursor(caret, cx));
     }
 
     /// One key expands the card in place to the bead's body, notes and
@@ -3149,13 +3219,29 @@ impl Footplate {
                     })
                     .child(field),
             );
-            // Under it the send button once an option is chosen, with Later
-            // and Decline beside it.
+            // Under it the send button once an option is chosen, with Later,
+            // Decline and ask-about-this beside it. An asker with no
+            // conversation has the reason in place of that button.
             let send = ask
                 .options
                 .iter()
                 .find(|o| o.number == ask.chosen)
                 .map(|o| format!("Send: {} · {}", o.number, o.label));
+            let unwritable = self.model.as_ref().and_then(|m| m.unwritable(&ask.asker));
+            let ask_about = match &unwritable {
+                None => small_button("Ask about this (a)".to_string(), palette)
+                    .id(SharedString::from(format!("ask {bead_id} {ask_seq}")))
+                    .debug_selector(|| format!("ask {bead_id} {ask_seq}"))
+                    .on_click(cx.listener(|this, _, window, cx| this.ask_about_now(window, cx))),
+                Some(why) => div()
+                    .id(SharedString::from(format!(
+                        "ask unreachable {bead_id} {ask_seq}"
+                    )))
+                    .debug_selector(|| format!("ask unreachable {bead_id} {ask_seq}"))
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(why.clone()),
+            };
             card = card.child(
                 div()
                     .flex()
@@ -3177,17 +3263,19 @@ impl Footplate {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.decline_now(window, cx)),
                             ),
-                    ),
+                    )
+                    .child(ask_about),
             );
             // The keys. Enter with nothing chosen and a recommendation picks
             // it, and says so.
+            let foreign = model::foreign_bead(&detail.bead);
             card = card.child(
                 div()
                     .text_sm()
                     .text_color(palette.faint)
                     .child(match ask.secret {
                         Some(_) => secret_keys(&bead_id, ask_seq),
-                        None => decision_keys(ask),
+                        None => decision_keys(ask, foreign, unwritable.is_none()),
                     }),
             );
         } else {
@@ -3577,6 +3665,7 @@ impl Render for Footplate {
             .on_action(cx.listener(|this, _: &ChoiceDown, _, cx| this.choice(1, cx)))
             .on_action(cx.listener(|this, _: &Decide, _, cx| this.decide(cx)))
             .on_action(cx.listener(Self::decline))
+            .on_action(cx.listener(Self::ask_about))
             .on_action(cx.listener(Self::expand))
             .on_action(cx.listener(Self::focus_words))
             .on_action(cx.listener(Self::leave))
@@ -3658,7 +3747,70 @@ mod tests {
             secret: None,
         };
         assert_eq!(
-            decision_keys(&ask),
+            decision_keys(&ask, false, true),
+            "words wanted · i words · enter sends the answer · a ask about this"
+        );
+    }
+
+    /// The card's keys name ask-about-this with the others; a foreign one
+    /// promises nothing of Enter without a pick, and an asker with no
+    /// conversation names no key for it.
+    #[test]
+    fn the_card_s_keys_name_ask_about_this_and_nothing_it_cannot_do() {
+        let ask = DecisionAsk {
+            ask: 3,
+            question: "Move them now?".to_string(),
+            asker: "yardmaster".to_string(),
+            waits: "2h".to_string(),
+            recommend_label: "Move them now".to_string(),
+            context: Vec::new(),
+            options: vec![
+                model::CardOption {
+                    number: 1,
+                    label: "Move them now".to_string(),
+                    consequence: "all 64 links point tonight".to_string(),
+                },
+                model::CardOption {
+                    number: 2,
+                    label: "You decide".to_string(),
+                    consequence: "leave it to yardmaster".to_string(),
+                },
+            ],
+            recommend: 1,
+            why: "the test passed".to_string(),
+            chosen: 0,
+            current: true,
+            expanded: false,
+            about: Vec::new(),
+            state: "open".to_string(),
+        };
+        assert_eq!(
+            decision_keys(&ask, false, true),
+            "enter picks 1 · 1-2 pick · ↑↓ choose · i words · a ask about this"
+        );
+        let mut none = ask.clone();
+        none.recommend = 0;
+        none.recommend_label.clear();
+        assert_eq!(
+            decision_keys(&none, false, true),
+            "enter sends words as note · 1-2 pick · ↑↓ choose · i words · a ask about this"
+        );
+        // A foreign card: words alone go as no note, so Enter promises
+        // nothing; asking about this is how to talk instead.
+        assert_eq!(
+            decision_keys(&none, true, true),
+            "1-2 pick · ↑↓ choose · i words · a ask about this"
+        );
+        // An asker with no conversation: the control says so, and no key
+        // reaches for it.
+        assert_eq!(
+            decision_keys(&none, false, false),
+            "enter sends words as note · 1-2 pick · ↑↓ choose · i words"
+        );
+        let mut words = none.clone();
+        words.options.clear();
+        assert_eq!(
+            decision_keys(&words, true, false),
             "words wanted · i words · enter sends the answer"
         );
     }
@@ -3777,6 +3929,10 @@ mod tests {
 
     fn typed(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, cx| v.line.read(cx).text().to_string())
+    }
+
+    fn placeholder(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, cx| v.line.read(cx).placeholder().to_string())
     }
 
     /// Clicks the mark that removes the attachment `id`, where it is drawn.
@@ -5691,6 +5847,296 @@ mod tests {
         assert_eq!(typed(&view, cx), "x");
     }
 
+    /// One bead with one open ask, for asking about this.
+    fn asks_about(bead: &str, asker: &str, question: &str) -> String {
+        json!({"result": {"open": [
+            {"bead": bead, "bead_title": "The title", "topic": "",
+             "ask": 3, "question": question, "asker": asker,
+             "since": "2026-10-10T10:00:00Z"}
+        ], "decided": []}})
+        .to_string()
+    }
+
+    /// That bead whole, with two options and the recommendation given.
+    fn bead_about(bead: &str, asker: &str, question: &str, recommend: u64) -> String {
+        json!({"result": {
+            "id": bead, "title": "The title",
+            "body": "The body of the bead.",
+            "stage": "new", "labels": [],
+            "notes": [],
+            "asks": [{
+                "ask": 3, "to": "jo", "asker": asker,
+                "since": "2026-10-10T10:00:00Z",
+                "question": question,
+                "context": ["The books close at six."],
+                "options": [
+                    {"label": "Close them", "consequence": "the books close"},
+                    {"label": "You decide", "consequence": format!("leave it to {asker}")}
+                ],
+                "recommend": recommend, "why": "six is six",
+                "state": "open"
+            }]
+        }})
+        .to_string()
+    }
+
+    fn open_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<Selected> {
+        view.read_with(cx, |v, _| {
+            v.model.as_ref().and_then(|m| m.selected().cloned())
+        })
+    }
+
+    fn card_keys_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        bead: &str,
+        ask: u64,
+    ) -> String {
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let now = chrono::Utc::now();
+            let card = model
+                .decision_detail(bead, &now)
+                .unwrap()
+                .asks
+                .into_iter()
+                .find(|a| a.ask == ask)
+                .unwrap();
+            let writable = model.can_write(&card.asker);
+            decision_keys(&card, model::foreign_bead(bead), writable)
+        })
+    }
+
+    #[gpui::test]
+    fn ask_about_this_opens_the_asker_with_the_card_named_and_the_ask_stays_open(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &asks_about("bead-a", "yardmaster", "Move them now?"),
+        );
+        yard.answer(
+            "Bead",
+            &bead_about("bead-a", "yardmaster", "Move them now?", 1),
+        );
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            open_of(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+
+        // The control stands beside Later and Decline, and the words field
+        // still takes a note alone.
+        assert!(drawn(cx, "ask bead-a 3"));
+        assert_eq!(
+            placeholder(&view, cx),
+            "Words with the pick, or alone as a note"
+        );
+
+        // The `a` key opens the yardmaster with the card named first in
+        // the draft, the caret on the empty line after it. Nothing is
+        // sent.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("a");
+        wait(cx, "the yardmaster", |cx| {
+            open_of(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
+        });
+        assert_eq!(typed(&view, cx), "re bead-a \"Move them now?\"\n\n");
+        assert!(yard.asked("Mail").is_empty());
+        assert!(yard.asked("MailPeer").is_empty());
+        cx.simulate_input("a question");
+        assert_eq!(
+            typed(&view, cx),
+            "re bead-a \"Move them now?\"\na question\n"
+        );
+
+        // The ask stays open: its row is one step back, and nothing was
+        // answered, deferred or declined.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-a".into()), window, cx)
+        });
+        assert_eq!(current_ask_of(&view, cx), 3);
+        assert!(yard.asked("AnswerAsk").is_empty());
+        assert!(yard.asked("DeferAsk").is_empty());
+        assert!(yard.asked("DeclineAsk").is_empty());
+
+        // And a pick from there leads back to the conversation, with the
+        // draft as it was left: the two do not fight.
+        cx.simulate_keystrokes("1");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pick", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-a", "ask": 3, "option": 1, "actor": "jo"})]
+        });
+        wait(cx, "the yardmaster again", |cx| {
+            open_of(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
+        });
+        assert_eq!(
+            typed(&view, cx),
+            "re bead-a \"Move them now?\"\na question\n"
+        );
+    }
+
+    #[gpui::test]
+    fn a_foreign_card_asks_its_asker_and_words_alone_are_the_yard_s_refusal(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &asks_about("bead-f@north", "clerk@north", "Close the books tonight?"),
+        );
+        yard.answer(
+            "Bead",
+            &bead_about("bead-f@north", "clerk@north", "Close the books tonight?", 0),
+        );
+        // The yard refuses a plain note on another yard's bead, in its
+        // words, and names whom to mail instead.
+        yard.answer(
+            "AddNote",
+            r#"{"error": {"code": "error", "message": "bead bead-f@north is a question north asked: words for the asker go as mail, yardr mail clerk@north \"...\""}}"#,
+        );
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            open_of(&view, cx) == Some(Selected::Decision("bead-f@north".into()))
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-f@north"));
+
+        // The words field says what holds on a foreign card, and the keys
+        // promise nothing of Enter without a pick: asking about this is
+        // how to talk instead.
+        assert_eq!(placeholder(&view, cx), "Words with the pick");
+        assert_eq!(
+            card_keys_of(&view, cx, "bead-f@north", 3),
+            "1-2 pick · ↑↓ choose · i words · a ask about this"
+        );
+
+        // With words already in the clerk's draft, the button opens them
+        // with the card named before what was there.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Conversation("clerk@north".into()), window, cx)
+        });
+        cx.simulate_input("half a thought");
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-f@north".into()), window, cx)
+        });
+        click_on(cx, "ask bead-f@north 3");
+        wait(cx, "the clerk", |cx| {
+            open_of(&view, cx) == Some(Selected::Conversation("clerk@north".into()))
+        });
+        assert_eq!(
+            typed(&view, cx),
+            "re bead-f@north \"Close the books tonight?\"\n\nhalf a thought"
+        );
+
+        // A second click names the card once: the draft is as it was.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-f@north".into()), window, cx)
+        });
+        click_on(cx, "ask bead-f@north 3");
+        wait(cx, "the clerk again", |cx| {
+            open_of(&view, cx) == Some(Selected::Conversation("clerk@north".into()))
+        });
+        assert_eq!(
+            typed(&view, cx),
+            "re bead-f@north \"Close the books tonight?\"\n\nhalf a thought"
+        );
+
+        // Words alone on the foreign card go as a plain note, which the
+        // yard refuses: they are back in the line, with the yard's words,
+        // and the ask stays open.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-f@north".into()), window, cx)
+        });
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("what about June?");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the note refused", |_| {
+            yard.asked("AddNote")
+                == [json!({"bead": "bead-f@north", "text": "what about June?", "actor": "jo"})]
+        });
+        wait(cx, "the refusal", |cx| {
+            notice(&view, cx).starts_with("not noted: bead bead-f@north")
+        });
+        assert_eq!(
+            notice(&view, cx),
+            "not noted: bead bead-f@north is a question north asked: words for the asker go as mail, yardr mail clerk@north \"...\""
+        );
+        assert_eq!(typed(&view, cx), "what about June?");
+        assert_eq!(current_ask_of(&view, cx), 3);
+    }
+
+    #[gpui::test]
+    fn an_asker_with_no_conversation_says_so_instead_of_opening_one(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &asks_about("bead-u", "sage@east", "Name the release?"),
+        );
+        yard.answer(
+            "Bead",
+            &bead_about("bead-u", "sage@east", "Name the release?", 1),
+        );
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            open_of(&view, cx) == Some(Selected::Decision("bead-u".into()))
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-u"));
+
+        // No button: the control says the asker cannot be written to, and
+        // the keys name no key for it.
+        assert!(!drawn(cx, "ask bead-u 3"));
+        assert!(drawn(cx, "ask unreachable bead-u 3"));
+        assert_eq!(
+            card_keys_of(&view, cx, "bead-u", 3),
+            "enter picks 1 · 1-2 pick · ↑↓ choose · i words"
+        );
+
+        // The key says so too, and opens no conversation: the card stays
+        // open.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        assert_eq!(
+            notice(&view, cx),
+            "sage@east cannot be written to from here: the link does not expose them"
+        );
+        assert_eq!(
+            open_of(&view, cx),
+            Some(Selected::Decision("bead-u".into()))
+        );
+        assert_eq!(current_ask_of(&view, cx), 3);
+    }
+
     /// One bead with three open asks and one dealt with, for the buttons.
     fn asks_buttons() -> String {
         json!({"result": {
@@ -5794,9 +6240,12 @@ mod tests {
                 .into_iter()
                 .find(|a| a.ask == 3)
                 .unwrap();
-            decision_keys(&ask)
+            decision_keys(&ask, false, true)
         });
-        assert_eq!(keys, "enter picks 1 · 1-3 pick · ↑↓ choose · i words");
+        assert_eq!(
+            keys,
+            "enter picks 1 · 1-3 pick · ↑↓ choose · i words · a ask about this"
+        );
 
         // A click on an option's line chooses it, as its number key does.
         click_on(cx, "pick bead-a 3 2");
