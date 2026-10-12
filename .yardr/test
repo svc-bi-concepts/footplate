@@ -6,6 +6,14 @@
 set -e
 # rustup installs into the home, which the yard's processes may not have on PATH.
 export PATH="$HOME/.cargo/bin:$PATH"
+# A fresh worktree would compile gpui and its tree from nothing, and every
+# worktree would pay that at once. When sccache is installed (README says
+# how), route rustc through it, so a fresh worktree restores the
+# dependencies from the cache, which the worktrees share. Without sccache
+# this is nothing: the build below runs as it did.
+if command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER=sccache
+fi
 # From the lockfile, so this builds what a clean checkout builds.
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings

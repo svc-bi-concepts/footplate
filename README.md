@@ -34,6 +34,14 @@ holds libc below 0.2.190, which footplate does not use itself: with that
 release a crate in gpui's tree no longer builds on Linux, and the gate, on
 a Mac, would not say so.
 
+Compiling gpui's tree takes a while, and every fresh worktree would pay it
+again. The gate routes rustc through
+[sccache](https://github.com/mozilla/sccache) when it is installed, so a
+fresh worktree restores the dependencies from the cache the worktrees
+share, in the platform's usual cache directory. `cargo install sccache`
+gets it (`brew install sccache` on macOS); without it the gate builds as it
+did.
+
 There is no installer. The binary is the application: copy it where you
 like and run it.
 
