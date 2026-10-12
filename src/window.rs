@@ -294,6 +294,9 @@ pub struct Footplate {
     down: Option<String>,
     line: Entity<Line>,
     conversation: ScrollHandle,
+    /// The conversation's position when it was left for a decision, so
+    /// dealing with that decision can return to the same place.
+    back_position: Option<(String, gpui::Point<gpui::Pixels>)>,
     /// The open card's own scroll: mail and notices arriving never move it.
     decision: ScrollHandle,
     /// What is selected of the open conversation's messages.
@@ -391,6 +394,7 @@ impl Footplate {
             }),
             line,
             conversation: ScrollHandle::new(),
+            back_position: None,
             decision: ScrollHandle::new(),
             selection,
             images: HashMap::new(),
@@ -482,16 +486,38 @@ impl Footplate {
             return;
         };
         let before_sel = model.selected().cloned();
+        let before_position = matches!(&before_sel, Some(Selected::Conversation(_)))
+            .then(|| self.conversation.offset());
         let before_entries = model.entries().len();
         let before_notices = model.notices().len();
         let effects = f(model);
         let after_sel = model.selected().cloned();
+        if let (Some(Selected::Conversation(name)), Some(position), Some(Selected::Decision(_))) =
+            (&before_sel, before_position, &after_sel)
+        {
+            self.back_position = Some((name.clone(), position));
+        }
+        let returning_position = match (&before_sel, &after_sel) {
+            (
+                Some(Selected::Decision(_) | Selected::Decided(_, _)),
+                Some(Selected::Conversation(name)),
+            ) => self
+                .back_position
+                .take()
+                .filter(|(back, _)| back == name)
+                .map(|(_, position)| position),
+            _ => None,
+        };
         if before_sel != after_sel {
             match &after_sel {
                 Some(Selected::Decision(_)) | Some(Selected::Decided(_, _)) => {
                     self.decision.scroll_to_item(0);
                 }
-                _ => self.conversation.scroll_to_bottom(),
+                _ if returning_position.is_some() => {}
+                _ => {
+                    self.back_position = None;
+                    self.conversation.scroll_to_bottom();
+                }
             }
         } else {
             match &after_sel {
@@ -503,6 +529,9 @@ impl Footplate {
                 }
                 _ => {}
             }
+        }
+        if let Some(position) = returning_position {
+            self.conversation.set_offset(position);
         }
         self.turned(before_sel, cx);
         self.shown(cx);
@@ -4407,6 +4436,17 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Conversation("yardmaster".into()), window, cx)
         });
+        mails(
+            &yard,
+            &["A long enough letter to make the conversation scroll."; 12],
+        );
+        wait(cx, "the full conversation", |cx| {
+            texts(&view, cx).len() == 12
+        });
+        view.read_with(cx, |v, _| v.conversation.scroll_to_top_of_item(3));
+        cx.run_until_parked();
+        let place = view.read_with(cx, |v, _| v.conversation.offset());
+        assert!(place.y < px(0.));
         cx.simulate_input("half a thought");
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Decision("bead-a".into()), window, cx)
@@ -4422,6 +4462,7 @@ mod tests {
             open(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
         });
         assert_eq!(typed(&view, cx), "half a thought");
+        assert_eq!(view.read_with(cx, |v, _| v.conversation.offset()), place);
     }
 
     /// One bead with three open asks and one dealt with, for the buttons.
