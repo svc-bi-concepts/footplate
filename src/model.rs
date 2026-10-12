@@ -3489,7 +3489,7 @@ mod tests {
 
     #[test]
     fn a_name_trusted_as_a_crew_user_is_folded_into_the_crew_row() {
-        let mut state = yard(&[(6, "assembly@airy")]);
+        let mut state = yard(&[(6, "jo@airy")]);
         state.users.push(user("assembly"));
         let mut peer = airy();
         peer.trust.insert("jo".into(), "assembly".into());
