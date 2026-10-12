@@ -231,29 +231,64 @@ fn decided_keys(detail: &DecidedDetail) -> String {
     format!("1-{} change your pick", detail.options.len())
 }
 
-/// The button that sends the chosen option with the line's words, exactly
-/// as Enter does: `Send: 1 · Move them now` on an open ask, `Change to:
-/// 2 · …` on a dealt with. The card shows it only once an option is
+/// The button that sends a card, exactly as Enter does: `Give NAME` on a
+/// secret ask, `Send` where words alone go, `Send: 1 · Move them now` with
+/// a pick (`Change to: 2 · …` on a dealt with). Disabled while its field
+/// is empty: drawn faint, and no click. A pick button is never disabled:
+/// a pick alone sends. The card shows a pick button only once an option is
 /// chosen: never a button that sends the recommendation unasked.
 fn send_button(
-    bead: &str,
-    ask: u64,
+    id: String,
     text: String,
+    enabled: bool,
     palette: Palette,
     cx: &mut Context<Footplate>,
 ) -> impl IntoElement {
+    let click = enabled.then(|| cx.listener(|this, _, _, cx| this.decide(cx)));
     div()
-        .id(SharedString::from(format!("send {bead} {ask}")))
-        .debug_selector(|| format!("send {bead} {ask}"))
+        .id(SharedString::from(id.clone()))
+        .debug_selector(|| id.clone())
         .px_3()
         .py_1()
         .rounded_md()
-        .bg(palette.accent)
-        .text_color(palette.on_accent)
-        .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .on_click(cx.listener(|this, _, _, cx| this.decide(cx)))
+        .when(enabled, |el| {
+            el.bg(palette.accent)
+                .text_color(palette.on_accent)
+                .font_weight(FontWeight::SEMIBOLD)
+                .cursor_pointer()
+        })
+        .when(!enabled, |el| {
+            el.bg(palette.side)
+                .text_color(palette.faint)
+                .border_1()
+                .border_color(palette.line)
+        })
+        .when_some(click, |el, click| el.on_click(click))
         .child(text)
+}
+
+/// What the button on a secret ask's card says: `Give` with the name the
+/// field takes now (`Give PUSHOVER_TOKEN`), where the ask names it.
+fn give_label(secret: &api::Secret, typed: usize) -> String {
+    match secret.env.get(typed) {
+        Some(name) => format!("Give {name}"),
+        None => "Give".to_string(),
+    }
+}
+
+/// Whether the words of an open ordinary card want their own `Send` button:
+/// they are the answer where there are no options, or a note where there
+/// is no pick and none recommended. With a pick the pick's button sends
+/// them; with a recommendation and no pick there is no button that would
+/// send it unasked; on another yard's bead words alone go as no note.
+fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
+    if ask.secret.is_some() || ask.chosen != 0 {
+        return false;
+    }
+    if ask.options.is_empty() {
+        return true;
+    }
+    ask.recommend == 0 && !foreign
 }
 
 /// A small button beside the send button, without what it does: Later and
@@ -491,6 +526,10 @@ impl Footplate {
         let secret = cx.new(Line::masked);
         cx.subscribe(&secret, |this, _, _: &Submitted, cx| this.give(cx))
             .detach();
+        // The card's Give and Send buttons are disabled while their field
+        // is empty: the window is drawn again with what is typed.
+        cx.observe(&line, |_, _, cx| cx.notify()).detach();
+        cx.observe(&secret, |_, _, cx| cx.notify()).detach();
         // Enter in the address or the code of a pairing sends the code.
         let field = |hint: &'static str, cx: &mut Context<Self>| {
             let field = cx.new(|cx| {
@@ -3668,14 +3707,39 @@ impl Footplate {
                     })
                     .child(field),
             );
-            // Under it the send button once an option is chosen, with Later,
-            // Decline and ask-about-this beside it. An asker with no
-            // conversation has the reason in place of that button.
-            let send = ask
-                .options
-                .iter()
-                .find(|o| o.number == ask.chosen)
-                .map(|o| format!("Send: {} · {}", o.number, o.label));
+            // Under it the button that sends the field, exactly as Enter
+            // does, with Later, Decline and ask-about-this beside it. An
+            // asker with no conversation has the reason in place of that
+            // button.
+            let foreign = model::foreign_bead(&detail.bead);
+            let send = match (&ask.secret, self.giving()) {
+                (Some(_), Some(secret)) => Some((
+                    format!("give {bead_id} {ask_seq}"),
+                    give_label(&secret, self.secret_typed.len()),
+                    !self.secret.read(cx).text().is_empty(),
+                )),
+                (Some(_), None) => None,
+                (None, _) => ask
+                    .options
+                    .iter()
+                    .find(|o| o.number == ask.chosen)
+                    .map(|o| {
+                        (
+                            format!("send {bead_id} {ask_seq}"),
+                            format!("Send: {} · {}", o.number, o.label),
+                            true,
+                        )
+                    })
+                    .or_else(|| {
+                        words_send(ask, foreign).then(|| {
+                            (
+                                format!("send {bead_id} {ask_seq}"),
+                                "Send".to_string(),
+                                !self.line.read(cx).text().is_empty(),
+                            )
+                        })
+                    }),
+            };
             let unwritable = self.model.as_ref().and_then(|m| m.unwritable(&ask.asker));
             let ask_about = match &unwritable {
                 None => small_button("Ask about this (a)".to_string(), palette)
@@ -3696,8 +3760,8 @@ impl Footplate {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when_some(send, |el, text| {
-                        el.child(send_button(&bead_id, ask_seq, text, palette, cx))
+                    .when_some(send, |el, (id, text, enabled)| {
+                        el.child(send_button(id, text, enabled, palette, cx))
                     })
                     .child(
                         small_button("Later (x)".to_string(), palette)
@@ -3717,7 +3781,6 @@ impl Footplate {
             );
             // The keys. Enter with nothing chosen and a recommendation picks
             // it, and says so.
-            let foreign = model::foreign_bead(&detail.bead);
             card = card.child(
                 div()
                     .text_sm()
@@ -3899,7 +3962,7 @@ impl Footplate {
             // A line for words with the later pick, or the field of a
             // secret to give it again: a declined one takes none, and no
             // line for words stands where a value could be typed in sight.
-            let giving = model.giving(bead, ask).is_some();
+            let giving = model.giving(bead, ask);
             let field = match detail.secret {
                 Some(_) => self.secret.clone(),
                 None => self.line.clone(),
@@ -3910,7 +3973,7 @@ impl Footplate {
             } else {
                 "words"
             };
-            body = body.when(detail.secret.is_none() || giving, |body| {
+            body = body.when(detail.secret.is_none() || giving.is_some(), |body| {
                 body.child(
                     div()
                         .debug_selector(|| format!("{kind} {bead} {ask}"))
@@ -3927,20 +3990,43 @@ impl Footplate {
                         .child(field),
                 )
             });
-            // Under it the button that replaces the pick, once one is
-            // chosen.
-            if let Some(option) = detail.options.iter().find(|o| o.number == detail.chosen) {
-                body = body.child(send_button(
-                    bead,
-                    ask,
-                    format!("Change to: {} · {}", option.number, option.label),
-                    palette,
-                    cx,
-                ));
-            }
+            // Under it the button that sends the field, exactly as Enter
+            // does: the value again on a secret, the words where they are
+            // the answer, the new pick where one is chosen.
+            let send = match (&detail.secret, giving) {
+                (Some(_), Some(secret)) => Some((
+                    format!("give {bead} {ask}"),
+                    give_label(secret, self.secret_typed.len()),
+                    !self.secret.read(cx).text().is_empty(),
+                )),
+                (Some(_), None) => None,
+                (None, _) => detail
+                    .options
+                    .iter()
+                    .find(|o| o.number == detail.chosen)
+                    .map(|o| {
+                        (
+                            format!("send {bead} {ask}"),
+                            format!("Change to: {} · {}", o.number, o.label),
+                            true,
+                        )
+                    })
+                    .or_else(|| {
+                        detail.options.is_empty().then(|| {
+                            (
+                                format!("send {bead} {ask}"),
+                                "Send".to_string(),
+                                !self.line.read(cx).text().is_empty(),
+                            )
+                        })
+                    }),
+            };
+            body = body.when_some(send, |body, (id, text, enabled)| {
+                body.child(send_button(id, text, enabled, palette, cx))
+            });
             body = body.child(div().text_sm().text_color(palette.faint).child(
                 match detail.secret {
-                    Some(_) if giving => secret_keys(bead, ask, false),
+                    Some(_) if giving.is_some() => secret_keys(bead, ask, false),
                     Some(_) => String::new(),
                     None => decided_keys(&detail),
                 },
@@ -4280,6 +4366,84 @@ mod tests {
             format!("{ordinary} · a ask about this")
         );
         assert_eq!(secret_keys("bead-s", 7, false), ordinary);
+    }
+
+    /// The secret's button names the value the field takes now.
+    #[test]
+    fn the_give_button_names_the_value_the_field_takes_now() {
+        let secret = api::Secret {
+            source: "books".to_string(),
+            env: vec!["CRM_TOKEN".to_string(), "CRM_UPDATE_TOKEN".to_string()],
+            line: "a secret".to_string(),
+        };
+        assert_eq!(give_label(&secret, 0), "Give CRM_TOKEN");
+        assert_eq!(give_label(&secret, 1), "Give CRM_UPDATE_TOKEN");
+        assert_eq!(give_label(&secret, 2), "Give");
+        let one = api::Secret {
+            env: vec!["PUSHOVER_TOKEN".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(give_label(&one, 0), "Give PUSHOVER_TOKEN");
+    }
+
+    /// An open ordinary ask with `options` options, `chosen` chosen and
+    /// `recommend` recommended.
+    fn ordinary(options: usize, chosen: u64, recommend: u64) -> DecisionAsk {
+        DecisionAsk {
+            ask: 3,
+            question: "Move them now?".to_string(),
+            asker: "yardmaster".to_string(),
+            waits: "2h".to_string(),
+            recommend_label: if recommend == 0 {
+                String::new()
+            } else {
+                "Move them now".to_string()
+            },
+            context: Vec::new(),
+            options: (1..=options as u64)
+                .map(|n| model::CardOption {
+                    number: n,
+                    label: format!("option {n}"),
+                    consequence: "it happens".to_string(),
+                })
+                .collect(),
+            recommend,
+            why: if recommend == 0 {
+                String::new()
+            } else {
+                "the test passed".to_string()
+            },
+            chosen,
+            current: true,
+            expanded: false,
+            about: Vec::new(),
+            state: "open".to_string(),
+            secret: None,
+        }
+    }
+
+    /// Words alone want their own Send button where Enter sends them: as
+    /// the answer where there are no options, as a note where there is no
+    /// pick and none recommended.
+    #[test]
+    fn words_alone_want_a_send_button_where_enter_sends_them() {
+        // No options: the words are the answer, here and on another yard's
+        // bead.
+        assert!(words_send(&ordinary(0, 0, 0), false));
+        assert!(words_send(&ordinary(0, 0, 0), true));
+        // No pick and none recommended: the words go as a note, but not on
+        // another yard's bead.
+        assert!(words_send(&ordinary(2, 0, 0), false));
+        assert!(!words_send(&ordinary(2, 0, 0), true));
+        // With a pick the pick's button sends the words with it.
+        assert!(!words_send(&ordinary(2, 2, 0), false));
+        assert!(!words_send(&ordinary(2, 2, 1), false));
+        // With a recommendation and no pick no button sends it unasked.
+        assert!(!words_send(&ordinary(2, 0, 1), false));
+        // A secret ask has its Give button, never Send.
+        let mut secret = ordinary(0, 0, 0);
+        secret.secret = Some(api::Secret::default());
+        assert!(!words_send(&secret, false));
     }
 
     /// The yard is followed on a thread of its own, so the test waits for
@@ -6793,6 +6957,171 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Words alone on an ordinary card have a Send button where Enter sends
+    /// them as a note: no pick and none recommended. It is disabled while
+    /// the line is empty; with a recommendation and no pick there is still
+    /// no button that would send it unasked. The look is untried.
+    #[gpui::test]
+    fn words_alone_have_a_send_button_where_enter_sends_a_note(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AddNote", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+
+        // With a recommendation and no pick there is no send button, even
+        // with words typed: never one that sends it unasked.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_input("some words");
+        assert!(!drawn(cx, "send bead-a 3"));
+
+        // With no pick and none recommended the words go as a note, from
+        // the button as from Enter.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 5, cx));
+        assert!(drawn(cx, "send bead-a 5"));
+        assert_eq!(typed(&view, cx), "");
+        click_on(cx, "send bead-a 5");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AddNote"), Vec::<Value>::new());
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_input("what about the docs links?");
+        click_on(cx, "send bead-a 5");
+        wait(cx, "the note", |_| {
+            yard.asked("AddNote")
+                == [json!({"bead": "bead-a", "text": "what about the docs links?", "actor": "jo"})]
+        });
+        assert_eq!(typed(&view, cx), "");
+    }
+
+    /// One open ask that wants words, on its own bead.
+    fn asks_words_only() -> String {
+        json!({"result": {"open": [
+            {"bead": "bead-w", "bead_title": "Greet", "topic": "",
+             "ask": 9, "question": "Who greets the newcomer?", "asker": "yardmaster",
+             "since": "2026-10-12T11:07:00Z"}
+        ], "decided": []}})
+        .to_string()
+    }
+
+    fn bead_words_only() -> String {
+        json!({"result": {
+            "id": "bead-w", "title": "Greet",
+            "body": "The body of bead-w.",
+            "stage": "new", "labels": [],
+            "notes": [],
+            "asks": [{
+                "ask": 9, "to": "jo", "asker": "yardmaster",
+                "since": "2026-10-12T11:07:00Z",
+                "question": "Who greets the newcomer?",
+                "context": ["Somebody should."],
+                "options": [],
+                "state": "open"
+            }]
+        }})
+        .to_string()
+    }
+
+    /// A words-wanted card sends the answer from its Send button, open and
+    /// dealt with, as Enter does. The look is untried.
+    #[gpui::test]
+    fn a_words_wanted_card_sends_the_answer_from_its_send_button(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_words_only());
+        yard.answer("Bead", &bead_words_only());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-w".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-w"));
+        assert!(drawn(cx, "send bead-w 9"));
+        assert_eq!(typed(&view, cx), "");
+        click_on(cx, "send bead-w 9");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_input("warmly");
+        click_on(cx, "send bead-w 9");
+        wait(cx, "the answer", |_| {
+            yard.asked("AnswerAsk")
+                == [
+                    json!({"bead": "bead-w", "ask": 9, "option": 0, "words": "warmly", "actor": "jo"}),
+                ]
+        });
+        assert_eq!(typed(&view, cx), "");
+    }
+
+    /// A dealt-with words answer is sent again from its Send button, as
+    /// Enter sends it. The look is untried.
+    #[gpui::test]
+    fn a_decided_words_answer_is_sent_again_from_its_send_button(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
+        yard.answer("Bead", &bead_decided());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        open_decided(&view, cx, "bead-d", 16);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-d"));
+        assert!(drawn(cx, "send bead-d 16"));
+        assert_eq!(typed(&view, cx), "");
+        click_on(cx, "send bead-d 16");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("kindly");
+        click_on(cx, "send bead-d 16");
+        wait(cx, "the answer again", |_| {
+            yard.asked("AnswerAsk")
+                == [
+                    json!({"bead": "bead-d", "ask": 16, "option": 0, "words": "kindly", "actor": "jo"}),
+                ]
+        });
+        assert_eq!(typed(&view, cx), "");
+    }
+
     /// The window on `yard` with its settings kept in `file`, the focus in
     /// the line, once the yardmaster's conversation shows.
     fn opened_kept<'a>(
@@ -8228,6 +8557,99 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("GiveSecret").len(), 1);
         assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+    }
+
+    /// The Give button beside a secret's field gives the typed value by the
+    /// same path as Enter: `GiveSecret`, the field empty whatever is
+    /// answered, the yard's line shown. It is disabled while the field is
+    /// empty: a click then sends nothing. The value is in no label, no
+    /// notice and nothing kept; the footer still names Enter. The look is
+    /// untried.
+    #[gpui::test]
+    fn a_secret_card_s_give_button_gives_what_enter_gives(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        );
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [
+                queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"])
+            ]}})
+            .to_string(),
+        );
+        let nowhere = |view: &Entity<Footplate>, cx: &mut VisualTestContext, when: &str| {
+            let kept = kept_outside_the_field(view, cx, dir.path());
+            assert!(!kept.contains(VALUE), "{when}: {kept}");
+        };
+
+        // The button stands by the field, and the footer still names Enter.
+        assert!(drawn(cx, "give bead-s 7"));
+        assert!(drawn(cx, "secret bead-s 7"));
+        assert!(!drawn(cx, "send bead-s 7"));
+        assert!(secret_keys("bead-s", 7, true).contains("enter sends it to the yard"));
+
+        // Disabled on an empty field: a click sends nothing and says
+        // nothing.
+        assert_eq!(secret_field(&view, cx).0, "");
+        click_on(cx, "give bead-s 7");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
+        assert_eq!(notice(&view, cx), "");
+
+        // Typed, a click gives the value as Enter does: the call, the field
+        // empty at once, the yard's line shown.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        click_on(cx, "give bead-s 7");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "given by the button", |_| {
+            yard.asked("GiveSecret")
+                == [
+                    json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"}),
+                ]
+        });
+        wait(cx, "the yard's line", |cx| {
+            notice(&view, cx)
+                == "gave BOOKS_TOKEN · BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"
+        });
+        nowhere(&view, cx, "given by the button");
+
+        // The label names the variable, never the value: what the button
+        // draws, from the ask as the window has it.
+        let label = view.read_with(cx, |v, _| {
+            let secret = v
+                .model
+                .as_ref()
+                .unwrap()
+                .secret("bead-s", 7)
+                .unwrap()
+                .clone();
+            give_label(&secret, 0)
+        });
+        assert_eq!(label, "Give BOOKS_TOKEN");
+        assert!(!label.contains(VALUE));
+
+        // Given, the decided card gives again from the same button.
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        assert!(drawn(cx, "give bead-s 7"));
+        assert!(drawn(cx, "secret bead-s 7"));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        click_on(cx, "give bead-s 7");
+        wait(cx, "given again by the button", |_| {
+            yard.asked("GiveSecret").len() == 2
+        });
+        assert_eq!(secret_field(&view, cx).0, "");
+        nowhere(&view, cx, "given again");
     }
 
     /// Whether the jump control stands over the open conversation.
