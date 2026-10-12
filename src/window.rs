@@ -3776,14 +3776,14 @@ mod tests {
         let d = decided_detail_of(&view, cx, "bead-d", 11);
         assert_eq!(d.picked, 1);
         assert_eq!(d.words, "");
-        assert_eq!(d.state_line, "you picked 1 · Switch to attention · 11:07");
+        assert_eq!(d.state_line, "you picked 1 · Switch to attention");
         assert_eq!(d.chosen, 0);
         assert_eq!(decided_keys(&d), "1-4 change your pick · e expand");
 
         let d = decided_detail_of(&view, cx, "bead-d", 12);
         assert_eq!(d.picked, 2);
         assert_eq!(d.words, "go slow");
-        assert_eq!(d.state_line, "you picked 2 · Add only the three · 11:07");
+        assert_eq!(d.state_line, "you picked 2 · Add only the three");
 
         let d = decided_detail_of(&view, cx, "bead-d", 13);
         assert_eq!(d.picked, 0);
@@ -3865,7 +3865,7 @@ mod tests {
         });
         assert_eq!(
             decided_detail_of(&view, cx, "bead-d", 11).state_line,
-            "you picked 2 · Add only the three · 11:07"
+            "you picked 2 · Add only the three"
         );
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());

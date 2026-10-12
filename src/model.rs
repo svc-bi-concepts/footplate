@@ -277,7 +277,7 @@ pub struct DecidedDetail {
     pub asker: String,
     /// `answered`, `put aside` or `declined`.
     pub state: String,
-    /// What was decided, in plain words with who and when.
+    /// What was decided, in plain words.
     pub state_line: String,
     /// The picked option's number, 0 on a words answer and elsewhere.
     pub picked: u64,
@@ -1545,19 +1545,6 @@ where
     }
 }
 
-/// The time of day of a time (RFC 3339, as the yard gives it), for the
-/// decided state line: `11:07`, in the zone of the person reading.
-/// Nothing for a time that cannot be read.
-pub fn daytime<Tz: TimeZone>(at: &str, zone: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    match DateTime::parse_from_rfc3339(at) {
-        Ok(t) => t.with_timezone(zone).format("%H:%M").to_string(),
-        Err(_) => String::new(),
-    }
-}
-
 /// A topic as the decisions show it: the label without its `topic:`
 /// prefix, or "Everything else" for an ask with none.
 fn display_topic(topic: &str) -> String {
@@ -1626,11 +1613,11 @@ fn decided_sub(ask: &DecidedAsk) -> String {
     sub
 }
 
-/// What one dealt with did with it, in plain words with who and when:
-/// `you picked 1 · Move them now · 11:07`, `put aside, back 10-11 09:30`,
-/// `you declined: <words>`, `left to <asker>`. The when of a pick is the
-/// ask's `since`: the yard serves no time of its own for an answer, so an
-/// ask decided long after it arrived shows when it arrived.
+/// What one dealt with did with it, in plain words: `you picked 1 · Move
+/// them now`, `put aside, back 10-11 09:30`, `you declined: <words>`,
+/// `left to <asker>`. A pick carries no time: the yard serves none of its
+/// own for an answer, and the ask's `since` is when it arrived, not when
+/// it was decided.
 fn decided_state<Tz: TimeZone>(ask: &DecidedAsk, zone: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -1642,12 +1629,7 @@ where
         "answered" if ask.option_label == YOU_DECIDE => {
             format!("left to {}", ask.asker)
         }
-        "answered" => format!(
-            "you picked {} · {} · {}",
-            ask.option,
-            plain(&ask.option_label),
-            daytime(&ask.since, zone)
-        ),
+        "answered" => format!("you picked {} · {}", ask.option, plain(&ask.option_label)),
         "put aside" if ask.return_at.is_empty() => "put aside".to_string(),
         "put aside" => format!("put aside, back {}", clock(&ask.return_at, zone)),
         "declined" => format!("you declined: {}", plain(&ask.words)),
@@ -2900,7 +2882,7 @@ mod tests {
         assert_eq!(detail.picked, 1);
         assert_eq!(detail.pick, "Send them");
         assert_eq!(detail.words, "tonight");
-        assert_eq!(detail.state_line, "you picked 1 · Send them · 09:30");
+        assert_eq!(detail.state_line, "you picked 1 · Send them");
     }
 
     #[test]
@@ -3298,7 +3280,7 @@ mod tests {
         assert_eq!(detail.picked, 2);
         assert_eq!(detail.pick, "After Friday");
         assert_eq!(detail.words, "after all, Friday");
-        assert_eq!(detail.state_line, "you picked 2 · After Friday · 10:00");
+        assert_eq!(detail.state_line, "you picked 2 · After Friday");
         assert_eq!(
             m.selected(),
             Some(&Selected::Decided("yardr-n8ta".into(), 3))
@@ -3331,21 +3313,17 @@ mod tests {
     }
 
     #[test]
-    fn the_decided_state_line_says_what_was_decided_with_who_and_when() {
-        let answered = DecidedAsk {
-            since: "2026-10-10T11:07:00Z".into(),
-            ..decided_ask(
-                "yd-links",
-                6,
-                "Move them now?",
-                "answered",
-                "Move them now",
-                "",
-                "",
-            )
-        };
+    fn the_decided_state_line_says_what_was_decided() {
+        let answered = decided_ask(
+            "yd-links",
+            6,
+            "Move them now?",
+            "answered",
+            "Move them now",
+            "",
+            "",
+        );
         let answered_words = DecidedAsk {
-            since: "2026-10-10T11:07:00Z".into(),
             option: 2,
             ..decided_ask(
                 "yd-links",
@@ -3397,17 +3375,13 @@ mod tests {
                 .unwrap()
                 .state_line
         };
-        assert_eq!(line(6), "you picked 1 · Move them now · 11:07");
+        assert_eq!(line(6), "you picked 1 · Move them now");
         // The words stand under the picked option, not in the line.
-        assert_eq!(line(7), "you picked 2 · After Friday · 11:07");
+        assert_eq!(line(7), "you picked 2 · After Friday");
         assert_eq!(line(8), "put aside, back 10-11 09:30");
         assert_eq!(line(9), "you declined: not mine");
         assert_eq!(line(10), "left to yardmaster");
         assert_eq!(line(11), "you answered: warmly");
-        // The when of a pick is the ask's since: the yard serves no time of
-        // its own for an answer.
-        assert_eq!(daytime("2026-10-10T11:07:00Z", &chrono::Utc), "11:07");
-        assert_eq!(daytime("noon", &chrono::Utc), "");
     }
 
     #[test]
