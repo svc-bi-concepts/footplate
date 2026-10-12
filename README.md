@@ -53,8 +53,10 @@ an icns:
     cargo build --release && scripts/bundle-mac.sh
 
 That is the whole of it. `target/Footplate.app` runs on a double-click and
-can be moved to `/Applications`. It is not signed or notarized, so it is
-for the Mac that built it. The script needs `sips` and `iconutil`, which
+can be moved to `/Applications`. It is signed ad hoc, with no identity, so
+that its signature carries the bundle's id, which macOS files an
+application's [notifications](#notifications) under; it is not notarized,
+so it is for the Mac that built it. The script needs `sips` and `iconutil`, which
 macOS has, and says so on another system.
 
 ## What it talks to
@@ -333,7 +335,8 @@ be given again from its card under "Decided", which replaces it.
 
 Two things can be set, in the settings or by their own keys, and both are
 drawn at once and kept for the next start; the third is the yard, which
-[A yard at an address](#a-yard-at-an-address) has:
+[A yard at an address](#a-yard-at-an-address) has, and the fourth what the
+system tells of, which [Notifications](#notifications) has:
 
 - the text size, 11 to 20 pixels, a pixel a step; 14 is the usual size.
   Everything that goes with the text goes with it: the left column, the
@@ -341,11 +344,65 @@ drawn at once and kept for the next start; the third is the yard, which
 - light, dark or auto. Auto is the desktop's look, and follows it when it
   changes while the window is open.
 
-They are kept in one file footplate writes on every change:
+They are kept, with the yard and the notifications that were chosen, in one
+file footplate writes on every change:
 `~/Library/Application Support/footplate/settings.json` on macOS,
 `$XDG_CONFIG_HOME/footplate/settings.json` on Linux (`~/.config` when that
 is not set). Without the file, or with one footplate cannot read, the window
 is as it was before there were settings: 14 pixels, auto.
+
+## Notifications
+
+footplate can have the operating system show a notification for what
+arrives while you do not look at it. It is off until you switch it on: in
+the settings (`cmd+,`), under "notifications", choose "on", and then what it
+tells of: mail to you, decisions (a new ask, or one you put aside that
+comes back), the yard's notices. Mail and decisions are chosen to begin
+with; the notices tell of every bead that moves, so they wait to be chosen.
+The choice is kept with the other settings.
+
+What you get:
+
+- A notification names who it is from and the first line of what they
+  wrote. Several things that arrive within three seconds are one
+  notification ("3 from yardmaster@mac"), so one is up to three seconds
+  late.
+- Nothing while the window is in front and shows the row it belongs to:
+  you read it there. In front on another conversation, behind another
+  window, or with the settings open, you are told.
+- Nothing for what you wrote yourself, and nothing for what was already
+  unread or open when the window started. What arrived while the yard was
+  away is told of when it is back.
+- What is shown is text, whoever wrote it and in whichever yard: nothing of
+  it is run or read as markup.
+
+What the system asks:
+
+- **macOS** asks you once, the first time you choose "on": "Footplate
+  would like to send you notifications". Allow it. If you do not, or
+  switch it off later, the settings say so in a line, and the way back is
+  System Settings, Notifications, Footplate. macOS notifies for an
+  application and not for a bare program, so this needs `Footplate.app`
+  ([Building](#building): `scripts/bundle-mac.sh`); from `cargo run` the
+  settings say that instead and nothing is shown. Clicking a notification
+  brings the window forward on that conversation, card or the yard row.
+- **Linux** asks nothing. footplate hands the notification to the
+  desktop's notification service through `notify-send` (libnotify's), and
+  the settings say so when that is not installed. Clicking one opens
+  nothing: `notify-send` has no way back into a running program.
+- On another system nothing is shown, and the settings say so.
+
+**This is not the yard's own telling.** A yard can tell a user on a phone
+through a notify source (`yardr user set <user> notify=pushover`, yardr's
+`docs/users.md`, "Told outside the yard"). That is sent by the yard's
+server, for all that lands in your inbox, your own mail too, whether or not
+footplate runs and whether or not you have read it here. footplate's
+notifications are this window's alone: they come from the machine it runs
+on, only while it runs, and only for what the window does not show. The two
+know nothing of each other, so with both on a mail that arrives while the
+window is behind another is told twice, once by each. Switch off the one
+you do not want: footplate's in its settings, the yard's with
+`yardr user set <user> notify=`.
 
 Not in this slice, and in `yardr chat`: a crew member's pane, and a text
 of several lines or longer than one mail (4096 bytes): the line is one
@@ -399,6 +456,7 @@ options have no icon, so the program sees to it when it starts
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
+| `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON |
 
 The tests run without a yard and without a screen: the client against the

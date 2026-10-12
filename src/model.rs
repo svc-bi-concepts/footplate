@@ -332,6 +332,33 @@ pub enum Effect {
     Bead { bead: String },
 }
 
+/// What a piece of news is: the settings choose which kinds the system
+/// tells of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Mail,
+    Decision,
+    Notice,
+}
+
+/// Something that arrived for the person since the window started: a mail
+/// to them, a new ask, a notice of the yard. Never what they wrote
+/// themselves, and never what was unread or open when the window started.
+/// The window takes it ([`Model::take_news`]) and decides whether the
+/// system tells of it (notify.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct News {
+    pub kind: Kind,
+    /// Who it is from: a mail's sender, an ask's asker, the yard.
+    pub from: String,
+    /// The mail's text, the ask's question, the notice.
+    pub text: String,
+    /// The row it belongs to.
+    pub target: Selected,
+    /// Whether that row was open as it arrived.
+    pub open: bool,
+}
+
 /// One unread mail to the user: who sent it, and whether the window has
 /// shown it.
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +405,8 @@ pub struct Model {
     /// The seq of the last `crew_status` applied to each crew member: a
     /// read of the yard that is older does not put an older status back.
     status_at: HashMap<String, u64>,
+    /// What arrived and the window has not taken yet, oldest first.
+    news: Vec<News>,
     /// What went wrong last, in words; empty when nothing.
     pub notice: String,
 }
@@ -433,6 +462,7 @@ impl Model {
     /// open stays open as in [`Model::new`], and the conversation to come
     /// back to from a decision stays that one.
     pub fn resumed(&self, state: State) -> (Model, Vec<Effect>) {
+        let unread = state.unread.clone();
         let (mut m, mut effects) = Model::new(state, self.selected.clone());
         if m.back.is_none() {
             m.back = self.back.clone();
@@ -441,8 +471,83 @@ impl Model {
         for (seq, w) in m.unread.iter_mut() {
             w.seen |= self.unread.get(seq).is_some_and(|before| before.seen);
         }
+        // What the yard has now and had not before it was lost arrived
+        // meanwhile, and is news as if the stream had told of it.
+        for l in unread {
+            let arrived = l.seq > self.cursor && !self.unread.contains_key(&l.seq);
+            if arrived && m.unread.contains_key(&l.seq) {
+                m.mail_news(&l.from, &l.text);
+            }
+        }
+        m.ask_news(&self.open, &self.decided);
+        m.notice_news(&self.notifications);
         effects.extend(m.ack());
         (m, effects)
+    }
+
+    /// What arrived since the window last took it, oldest first.
+    pub fn take_news(&mut self) -> Vec<News> {
+        std::mem::take(&mut self.news)
+    }
+
+    /// A mail to the user arrived from `from`: news of the row that shows
+    /// its sender, which is the yard row for the yard's own mail.
+    fn mail_news(&mut self, from: &str, text: &str) {
+        let target = if from == YARD && self.yard_takes_mail() {
+            Selected::Yard
+        } else {
+            Selected::Conversation(from.to_string())
+        };
+        self.news.push(News {
+            kind: Kind::Mail,
+            from: from.to_string(),
+            text: text.to_string(),
+            open: self.showing() == Some(from),
+            target,
+        });
+    }
+
+    /// The asks that are open now and were not in `open` are news. One the
+    /// person dealt with is not when it is open again (an answer the yard
+    /// did not take), unless it was put aside: that one has come back.
+    fn ask_news(&mut self, open: &[OpenAsk], decided: &[DecidedAsk]) {
+        let news: Vec<News> = self
+            .open
+            .iter()
+            .filter(|a| !open.iter().any(|o| o.bead == a.bead && o.ask == a.ask))
+            .filter(|a| {
+                !decided
+                    .iter()
+                    .any(|d| d.bead == a.bead && d.ask == a.ask && d.state != "put aside")
+            })
+            .map(|a| News {
+                kind: Kind::Decision,
+                from: a.asker.clone(),
+                text: a.question.clone(),
+                open: self.selected == Some(Selected::Decision(a.bead.clone())),
+                target: Selected::Decision(a.bead.clone()),
+            })
+            .collect();
+        self.news.extend(news);
+    }
+
+    /// The unread notices that are newer than all of `before` are news.
+    fn notice_news(&mut self, before: &[Notification]) {
+        let newest = before.iter().map(|n| n.seq).max().unwrap_or(0);
+        let open = self.selected == Some(Selected::Yard);
+        let news: Vec<News> = self
+            .notifications
+            .iter()
+            .filter(|n| !n.read && n.seq > newest)
+            .map(|n| News {
+                kind: Kind::Notice,
+                from: YARD.to_string(),
+                text: n.text.clone(),
+                target: Selected::Yard,
+                open,
+            })
+            .collect();
+        self.news.extend(news);
     }
 
     pub fn me(&self) -> &str {
@@ -1573,6 +1678,7 @@ impl Model {
                         seen,
                     },
                 );
+                self.mail_news(&e.actor, e.text("text"));
                 return self.ack();
             }
         }
@@ -1627,7 +1733,8 @@ impl Model {
 
     /// The notices as read again. The yard row stands whatever they are.
     pub fn notifications(&mut self, list: Vec<Notification>) {
-        self.notifications = list;
+        let before = std::mem::replace(&mut self.notifications, list);
+        self.notice_news(&before);
     }
 
     /// Marks one notice read: the oldest unread, one key. Elsewhere than
@@ -1662,8 +1769,10 @@ impl Model {
     /// the queue leaves what the cards kept of it; the open bead is read
     /// when it is not yet.
     pub fn asks(&mut self, asks: Asks) -> Vec<Effect> {
-        self.open = asks.open;
-        self.decided = asks.decided;
+        let open = std::mem::replace(&mut self.open, asks.open);
+        let decided = std::mem::replace(&mut self.decided, asks.decided);
+        let news = self.news.len();
+        self.ask_news(&open, &decided);
         let mut keep = HashSet::new();
         for bead in self
             .open
@@ -1678,6 +1787,11 @@ impl Model {
         self.expanded.retain(|(bead, _)| keep.contains(bead));
         self.current.retain(|bead, _| keep.contains(bead));
         let effects = self.reselect();
+        // Which row is open is known only now.
+        let selected = self.selected.clone();
+        for n in &mut self.news[news..] {
+            n.open = selected.as_ref() == Some(&n.target);
+        }
         if !effects.is_empty() {
             return effects;
         }
@@ -4163,5 +4277,243 @@ mod tests {
             decided: vec![],
         });
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+    }
+
+    fn mail_news(from: &str, text: &str, target: Selected, open: bool) -> News {
+        News {
+            kind: Kind::Mail,
+            from: from.into(),
+            text: text.into(),
+            target,
+            open,
+        }
+    }
+
+    #[test]
+    fn mail_that_arrives_for_the_person_is_news_and_what_was_unread_at_the_start_is_not() {
+        // The window opens on the yardmaster, with mail of assembly unread.
+        let (mut m, _) = Model::new(yard(&[(6, "assembly"), (7, "yardmaster")]), None);
+        assert_eq!(m.take_news(), []);
+        // The conversation the yard answers with is no news either.
+        m.conversation("yardmaster", vec![letter(7, "yardmaster", "jo", "unread")]);
+        assert_eq!(m.take_news(), []);
+
+        // Mail arrives in the open conversation, and in another.
+        m.event(&mail_to_jo(21, "yardmaster"));
+        m.event(&mail_to_jo(22, "assembly"));
+        assert_eq!(
+            m.take_news(),
+            [
+                mail_news(
+                    "yardmaster",
+                    "mail 21",
+                    Selected::Conversation("yardmaster".into()),
+                    true
+                ),
+                mail_news(
+                    "assembly",
+                    "mail 22",
+                    Selected::Conversation("assembly".into()),
+                    false
+                ),
+            ]
+        );
+        // Taken once.
+        assert_eq!(m.take_news(), []);
+        // The stream telling of a mail again is no second arrival.
+        m.event(&mail_to_jo(22, "assembly"));
+        assert_eq!(m.take_news(), []);
+    }
+
+    #[test]
+    fn what_the_person_wrote_and_mail_for_others_is_no_news() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        // The person's own, from this window or another client.
+        m.event(&event(
+            21,
+            "mail",
+            "jo",
+            json!({"to": "assembly", "text": "Go on."}),
+        ));
+        m.event(&event(
+            22,
+            "mail",
+            "jo",
+            json!({"to": "clerk", "to_peer": "north", "text": "And you."}),
+        ));
+        // Mail between others, and to a crew member of the person's name.
+        m.event(&event(
+            23,
+            "mail",
+            "yardmaster",
+            json!({"to": "assembly", "text": "Yours."}),
+        ));
+        m.event(&event(
+            24,
+            "mail",
+            "yardmaster",
+            json!({"to": "jo", "text": "To the crew member jo."}),
+        ));
+        // Mail the person has read elsewhere already.
+        m.acked(30);
+        m.event(&mail_to_jo(25, "assembly"));
+        assert_eq!(m.take_news(), []);
+    }
+
+    #[test]
+    fn the_yard_s_own_mail_is_news_of_the_yard_row() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.event(&mail_to_jo(21, YARD));
+        assert_eq!(
+            m.take_news(),
+            [mail_news(YARD, "mail 21", Selected::Yard, false)]
+        );
+        m.select(Selected::Yard);
+        m.event(&mail_to_jo(22, YARD));
+        assert_eq!(
+            m.take_news(),
+            [mail_news(YARD, "mail 22", Selected::Yard, true)]
+        );
+    }
+
+    #[test]
+    fn a_new_ask_is_news_and_one_that_was_open_at_the_start_is_not() {
+        let mut state = yard(&[]);
+        let mut open = evening();
+        let new = open.pop().unwrap();
+        state.asks.open = open.clone();
+        // The window opens on the first bead's card.
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        assert_eq!(m.take_news(), []);
+        // The queue read again as it was: nothing new.
+        m.asks(Asks {
+            open: open.clone(),
+            decided: vec![],
+        });
+        assert_eq!(m.take_news(), []);
+
+        // One more on another bead, and a second on the open bead.
+        open.push(new);
+        open.push(open_ask(
+            "yardr-n8ta",
+            "Move the links",
+            "topic:linear-out",
+            9,
+            "And the keys?",
+            "assembly",
+            "2026-10-10T12:00:00Z",
+        ));
+        m.asks(Asks {
+            open: open.clone(),
+            decided: vec![],
+        });
+        let news = |from: &str, text: &str, bead: &str, open: bool| News {
+            kind: Kind::Decision,
+            from: from.into(),
+            text: text.into(),
+            target: Selected::Decision(bead.into()),
+            open,
+        };
+        assert_eq!(
+            m.take_news(),
+            [
+                news("yardmaster", "Close sketch PR #3?", "yardr-7h11", false),
+                news("assembly", "And the keys?", "yardr-n8ta", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ask_put_aside_is_news_when_it_comes_back_and_one_answered_is_not() {
+        let mut state = yard(&[]);
+        state.asks.decided = vec![
+            decided_ask(
+                "yardr-7h11",
+                6,
+                "Close sketch PR #3?",
+                "put aside",
+                "",
+                "",
+                "",
+            ),
+            decided_ask("yardr-9f2c", 5, "Build?", "answered", "Yes", "", ""),
+        ];
+        let (mut m, _) = Model::new(state, None);
+        // Both are open again: the one put aside came back, and the yard
+        // did not take the answer to the other.
+        let open: Vec<OpenAsk> = evening()
+            .into_iter()
+            .filter(|a| a.bead == "yardr-7h11" || a.bead == "yardr-9f2c")
+            .collect();
+        m.asks(Asks {
+            open,
+            decided: vec![],
+        });
+        let news = m.take_news();
+        assert_eq!(news.len(), 1);
+        assert_eq!(news[0].target, Selected::Decision("yardr-7h11".into()));
+        // The queue had no row before, so the first of it opened.
+        assert_eq!(
+            m.selected(),
+            Some(&Selected::Conversation("yardmaster".into()))
+        );
+        assert!(!news[0].open);
+    }
+
+    #[test]
+    fn a_notice_newer_than_those_there_is_news_and_one_read_is_not() {
+        let mut state = yard(&[]);
+        state.notifications = vec![notification(10, "yd-shed", "yd-shed created", false)];
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(m.take_news(), []);
+        m.notifications(vec![
+            notification(10, "yd-shed", "yd-shed created", false),
+            notification(11, "yd-shed", "yd-shed closed", false),
+            notification(12, "yd-barn", "yd-barn created", true),
+        ]);
+        let news = |text: &str, open: bool| News {
+            kind: Kind::Notice,
+            from: YARD.into(),
+            text: text.into(),
+            target: Selected::Yard,
+            open,
+        };
+        assert_eq!(m.take_news(), [news("yd-shed closed", false)]);
+        // The same list again is nothing new; on the open yard row a new
+        // one arrives where it is shown.
+        m.select(Selected::Yard);
+        m.notifications(vec![
+            notification(11, "yd-shed", "yd-shed closed", false),
+            notification(12, "yd-barn", "yd-barn created", true),
+            notification(13, "yd-barn", "yd-barn closed", false),
+        ]);
+        assert_eq!(m.take_news(), [news("yd-barn closed", true)]);
+    }
+
+    #[test]
+    fn what_arrived_while_the_yard_was_away_is_news_when_it_is_back() {
+        let mut state = yard(&[(6, "assembly")]);
+        state.asks.open = evening()[..1].to_vec();
+        let (m, _) = Model::new(state, None);
+
+        // The yard is back with the mail and the ask it had, a mail and an
+        // ask more, and a notice.
+        let mut back = yard(&[(6, "assembly"), (9, "assembly")]);
+        back.asks.open = evening()[..2].to_vec();
+        back.notifications = vec![notification(10, "yd-shed", "yd-shed created", false)];
+        let (mut m, _) = m.resumed(back.clone());
+        let news = m.take_news();
+        assert_eq!(
+            news.iter().map(|n| (n.kind, &n.target)).collect::<Vec<_>>(),
+            [
+                (Kind::Mail, &Selected::Conversation("assembly".into())),
+                (Kind::Decision, &Selected::Decision("yardr-3msx".into())),
+                (Kind::Notice, &Selected::Yard),
+            ]
+        );
+        // Away and back once more with nothing new: no news.
+        let (mut m, _) = m.resumed(back);
+        assert_eq!(m.take_news(), []);
     }
 }

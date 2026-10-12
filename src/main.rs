@@ -11,6 +11,7 @@ mod fake;
 mod input;
 mod markdown;
 mod model;
+mod notify;
 mod select;
 mod session;
 mod settings;

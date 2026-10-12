@@ -1,5 +1,5 @@
 //! What a person set and the window keeps between runs: the text size, the
-//! look, and which yard it shows. One small JSON file where the platform has a program's own
+//! look, which yard it shows, and what the system tells of. One small JSON file where the platform has a program's own
 //! configuration: `~/Library/Application Support/footplate/settings.json`
 //! on macOS, `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere
 //! (`~/.config` when that is not set). It is footplate's to write, on every
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use gpui::{Pixels, px};
 use serde::{Deserialize, Serialize};
 
+use crate::model::Kind;
 use crate::theme::Look;
 
 /// The text size the window was drawn with before there was a setting, in
@@ -41,6 +42,66 @@ pub struct Settings {
     /// (yard.rs).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub address: String,
+    /// What the system tells of. Left out of the file while nothing was
+    /// chosen, as the yard is.
+    #[serde(skip_serializing_if = "Notify::is_usual")]
+    pub notifications: Notify,
+}
+
+/// Whether the system shows a notification for what arrives while the
+/// window does not show it, and for which kinds. Off until a person
+/// switches it on: nothing surprises one who did not ask. The kinds are
+/// kept while it is off, for the next time it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notify {
+    pub on: bool,
+    pub mail: bool,
+    pub decisions: bool,
+    /// The yard's notices tell of every bead that moves, so they are not
+    /// among what tells until they are chosen.
+    pub notices: bool,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Notify {
+            on: false,
+            mail: true,
+            decisions: true,
+            notices: false,
+        }
+    }
+}
+
+impl Notify {
+    fn is_usual(&self) -> bool {
+        *self == Notify::default()
+    }
+
+    /// Whether `kind` is among what tells; whether anything tells is `on`.
+    pub fn chosen(&self, kind: Kind) -> bool {
+        match kind {
+            Kind::Mail => self.mail,
+            Kind::Decision => self.decisions,
+            Kind::Notice => self.notices,
+        }
+    }
+
+    /// Whether the system tells of news of `kind`.
+    pub fn tells(&self, kind: Kind) -> bool {
+        self.on && self.chosen(kind)
+    }
+
+    /// With `kind` among what tells, or not.
+    pub fn with(mut self, kind: Kind, tells: bool) -> Notify {
+        match kind {
+            Kind::Mail => self.mail = tells,
+            Kind::Decision => self.decisions = tells,
+            Kind::Notice => self.notices = tells,
+        }
+        self
+    }
 }
 
 impl Default for Settings {
@@ -50,6 +111,7 @@ impl Default for Settings {
             look: Look::Auto,
             remote: false,
             address: String::new(),
+            notifications: Notify::default(),
         }
     }
 }
@@ -245,6 +307,51 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(none.chosen(), None);
+    }
+
+    #[test]
+    fn notifications_are_off_until_they_are_chosen_and_the_choice_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Nobody chose: nothing tells, whatever the kind, and the file of
+        // a person who changes something else says nothing of it.
+        let usual = Settings::default();
+        for kind in [Kind::Mail, Kind::Decision, Kind::Notice] {
+            assert!(!usual.notifications.tells(kind), "{kind:?}");
+        }
+        fs::write(&file, "{\"text\": 15}").unwrap();
+        assert_eq!(Settings::read(&file).notifications, Notify::default());
+        usual.write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("notifications"));
+
+        // Switched on, mail and decisions tell, and the yard's notices
+        // only once they are chosen.
+        let on = Notify {
+            on: true,
+            ..Notify::default()
+        };
+        assert!(on.tells(Kind::Mail) && on.tells(Kind::Decision) && !on.tells(Kind::Notice));
+        let chosen = on.with(Kind::Notice, true).with(Kind::Mail, false);
+        assert!(!chosen.tells(Kind::Mail) && chosen.tells(Kind::Notice));
+        let set = Settings {
+            notifications: chosen,
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        assert_eq!(Settings::read(&file), set);
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"notifications\": {\n    \"on\": true,\n    \"mail\": false,\n    \"decisions\": true,\n    \"notices\": true\n  }\n}\n"
+        );
+        // Off again, the kinds stay for the next time, and nothing tells.
+        let off = Notify {
+            on: false,
+            ..chosen
+        };
+        assert!(!off.tells(Kind::Notice) && off.chosen(Kind::Notice));
+        // A file that names one of them keeps the others as they are usual.
+        fs::write(&file, "{\"notifications\": {\"on\": true}}").unwrap();
+        assert_eq!(Settings::read(&file).notifications, on);
     }
 
     #[test]

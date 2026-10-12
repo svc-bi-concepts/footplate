@@ -1,9 +1,9 @@
 #!/bin/sh
 # Builds target/Footplate.app from the release binary, for macOS only: the
 # icon's sizes are rendered with sips and packed with iconutil, which no
-# other system has. Run it after `cargo build --release`. Nothing is signed
-# or notarized, and there is no installer: the bundle is for the machine
-# that built it.
+# other system has. Run it after `cargo build --release`. The bundle is
+# signed ad hoc and not notarized, and there is no installer: it is for the
+# machine that built it.
 set -e
 
 if [ "$(uname -s)" != Darwin ]; then
@@ -65,5 +65,10 @@ cat >"$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# Ad hoc, with no identity: the linker signed the binary alone, under a
+# name of its own making. Signed as a bundle, the signature carries the
+# bundle's id, which the system files its notifications under.
+codesign --force --sign - "$app"
 
 echo "$app"

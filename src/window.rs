@@ -18,11 +18,12 @@ use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, DecidedDetail, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow,
-    Effect, Entry, Model, Row, Selected, Target,
+    Effect, Entry, Kind, Model, Row, Selected, Target,
 };
+use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
 use crate::session::{self, Update};
-use crate::settings::{self, Settings};
+use crate::settings::{self, Notify, Settings};
 use crate::theme::{Look, Palette};
 use crate::yard::{self, Env};
 
@@ -419,6 +420,18 @@ pub struct Footplate {
     pairing_open: bool,
     pairing: bool,
     yard_said: Option<String>,
+    /// The system's notifications, and what it answered when it was asked
+    /// whether footplate may notify: it is asked when the settings switch
+    /// them on, and at the start when they are on.
+    system: Box<dyn notify::System>,
+    permission: Option<Permission>,
+    /// Hands on the rows of the notifications a person activates, for as
+    /// long as it is held here.
+    _heeding: Task<()>,
+    /// What arrived and is told of when the burst it came in is over.
+    burst: Burst,
+    /// Whether the window is the one in front.
+    front: bool,
 }
 
 impl Footplate {
@@ -495,6 +508,14 @@ impl Footplate {
         Self::on_app_action::<NextLook>(window, cx, |this, _, cx| {
             this.look(this.settings.look.next(), cx)
         });
+        // What arrives on the open row of a window in front is read there,
+        // and the system tells of the rest.
+        cx.observe_window_activation(window, |this, window, _| {
+            this.front = window.is_window_active()
+        })
+        .detach();
+        let system = notify::system();
+        let heeding = Self::heed(system.as_ref(), cx);
 
         Footplate {
             client: None,
@@ -533,7 +554,98 @@ impl Footplate {
             pairing_open: false,
             pairing: false,
             yard_said: None,
+            system,
+            permission: None,
+            _heeding: heeding,
+            burst: Burst::default(),
+            front: window.is_window_active(),
         }
+    }
+
+    /// Brings the window forward on the row of each notification of
+    /// `system` a person activates.
+    fn heed(system: &dyn notify::System, cx: &mut Context<Self>) -> Task<()> {
+        let activated = system.activated();
+        cx.spawn(async move |this, cx| {
+            while let Ok(row) = activated.recv().await {
+                if this
+                    .update(cx, |this, cx| this.come_forward(row, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// The window with `system` for its notifications, in place of this
+    /// system's.
+    #[cfg(test)]
+    fn notified_by(mut self, system: Box<dyn notify::System>, cx: &mut Context<Self>) -> Self {
+        self._heeding = Self::heed(system.as_ref(), cx);
+        self.system = system;
+        self.permission = None;
+        if self.settings.notifications.on {
+            self.ask_permission(cx);
+        }
+        self
+    }
+
+    /// Asks the system whether footplate may notify, which on macOS asks
+    /// the person the first time. What it answers stands in the settings
+    /// when it is a refusal.
+    fn ask_permission(&mut self, cx: &mut Context<Self>) {
+        let answer = self.system.ask();
+        cx.spawn(async move |this, cx| {
+            if let Ok(permission) = answer.recv().await {
+                this.update(cx, |this, cx| {
+                    this.permission = Some(permission);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Takes what arrived from the model, and has the system tell of what
+    /// the settings choose and the window does not show: once the burst it
+    /// came in is over, in one notification.
+    fn news(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let in_view = self.front && !self.settings_open;
+        for news in model.take_news() {
+            let wanted = notify::wanted(&self.settings.notifications, &news, in_view);
+            if wanted && self.burst.add(news) {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(notify::BURST).await;
+                    this.update(cx, |this, _| {
+                        if let Some(telling) = this.burst.take() {
+                            this.system.show(&telling);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// A notification was activated: the window comes forward on its row.
+    /// A row that is gone since leaves open what was.
+    fn come_forward(&mut self, row: Selected, cx: &mut Context<Self>) {
+        cx.activate(true);
+        let (this, handle) = (cx.weak_entity(), self.handle);
+        // Afterwards: the window is not to be had from here.
+        cx.defer(move |cx| {
+            // A window that is closed has nothing to bring forward.
+            let _ = handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                this.update(cx, |this, cx| this.select(row, window, cx))
+            });
+        });
     }
 
     /// Opens the yard the environment names, else the one the settings
@@ -557,6 +669,8 @@ impl Footplate {
         self.ask_words.clear();
         self.declining = None;
         self.back_position = None;
+        // What arrived in the yard before is not told of as this one's.
+        self.burst = Burst::default();
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.forget_secret(cx);
         cx.notify();
@@ -627,6 +741,9 @@ impl Footplate {
         }
         cx.set_global(self.settings.look);
         self.kept = file;
+        if self.settings.notifications.on {
+            self.ask_permission(cx);
+        }
         self
     }
 
@@ -687,6 +804,8 @@ impl Footplate {
                 self.pictures(cx);
                 self.run(effects, cx);
                 self.schedule_return(cx);
+                // What arrived while the yard was away.
+                self.news(cx);
             }
             Update::Event(event) => self.change(cx, |m| m.event(&event)),
             Update::Down(why) => {
@@ -793,6 +912,7 @@ impl Footplate {
         self.shown(cx);
         self.pictures(cx);
         self.run(effects, cx);
+        self.news(cx);
         cx.notify();
     }
 
@@ -1890,8 +2010,38 @@ impl Footplate {
         if let Some(file) = &self.kept {
             self.unkept = settings.write(file).err().map(|err| err.to_string());
         }
+        let switched_on = settings.notifications.on && !self.settings.notifications.on;
         self.settings = settings;
+        if switched_on {
+            self.ask_permission(cx);
+        }
         cx.notify();
+    }
+
+    /// The system tells of what arrives, or no longer.
+    fn notify_on(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                notifications: Notify {
+                    on,
+                    ..self.settings.notifications
+                },
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
+    /// `kind` is among what the system tells of, or no longer.
+    fn notify_of(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        let notifications = self.settings.notifications;
+        self.set(
+            Settings {
+                notifications: notifications.with(kind, !notifications.chosen(kind)),
+                ..self.settings.clone()
+            },
+            cx,
+        );
     }
 
     /// The text a step larger or smaller.
@@ -2093,8 +2243,9 @@ impl Footplate {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
     }
 
-    /// The settings: the text size, the look and the yard, each with its
-    /// buttons and its keys, and where they are kept.
+    /// The settings: the text size, the look, the yard and what the system
+    /// tells of, each with its buttons and its keys, and where they are
+    /// kept.
     fn talk_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let kept = match &self.kept {
@@ -2298,6 +2449,65 @@ impl Footplate {
                     .child(said.clone()),
             );
         }
+        // What the system tells of: nothing, or the kinds that are chosen,
+        // and what the system said if it does not let footplate notify.
+        let notify = self.settings.notifications;
+        let mut notifications = setting(
+            "notifications",
+            "the system tells of what arrives while the window is behind another or shows another row"
+                .to_string(),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .children([("off", false), ("on", true)].map(|(name, on)| {
+                    chosen(
+                        small_button(name.to_string(), palette)
+                            .id(SharedString::from(format!("notify {name}"))),
+                        on == notify.on,
+                    )
+                    .debug_selector(move || format!("notify {name}"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.notify_on(on, cx)))
+                })),
+        );
+        if notify.on {
+            notifications = notifications.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_color(palette.faint).child("of"))
+                    .children(
+                        [
+                            ("mail", Kind::Mail),
+                            ("decisions", Kind::Decision),
+                            ("the yard's notices", Kind::Notice),
+                        ]
+                        .map(|(name, kind)| {
+                            chosen(
+                                small_button(name.to_string(), palette)
+                                    .id(SharedString::from(format!("notify {name}"))),
+                                notify.chosen(kind),
+                            )
+                            .debug_selector(move || format!("notify {name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.notify_of(kind, cx)))
+                        }),
+                    ),
+            );
+            if let Some(Permission::Refused(why)) = &self.permission {
+                notifications = notifications.child(
+                    div()
+                        .debug_selector(|| "notify said".to_string())
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(why.clone()),
+                );
+            }
+        }
         pane.child(head)
             .child(
                 div()
@@ -2311,7 +2521,8 @@ impl Footplate {
                     .gap_4()
                     .child(size)
                     .child(look)
-                    .child(yard),
+                    .child(yard)
+                    .child(notifications),
             )
             .when_some(self.unkept.clone(), |el, why| {
                 el.child(
@@ -3854,6 +4065,8 @@ mod tests {
     use crate::input;
     use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, WindowAppearance};
     use serde_json::{Value, json};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::time::Duration;
 
     #[test]
@@ -6886,6 +7099,269 @@ mod tests {
     }
 
     /// A yard at its listener, told from `a_yard_of_jo` by its mail.
+    /// A system for a test: what it was asked and shown is read here, and
+    /// what it answers and what a person activates is said here.
+    #[derive(Clone)]
+    struct Told {
+        answer: Rc<RefCell<Permission>>,
+        asked: Rc<Cell<usize>>,
+        shown: Rc<RefCell<Vec<notify::Telling>>>,
+        activated: (
+            async_channel::Sender<Selected>,
+            async_channel::Receiver<Selected>,
+        ),
+    }
+
+    impl Told {
+        fn new() -> Told {
+            Told {
+                answer: Rc::new(RefCell::new(Permission::Allowed)),
+                asked: Rc::new(Cell::new(0)),
+                shown: Rc::default(),
+                activated: async_channel::unbounded(),
+            }
+        }
+
+        /// What was shown since the last look, once a burst's time is over.
+        fn shown(&self, cx: &mut VisualTestContext) -> Vec<(String, String, Selected)> {
+            cx.run_until_parked();
+            cx.executor().advance_clock(notify::BURST);
+            cx.run_until_parked();
+            let shown = std::mem::take(&mut *self.shown.borrow_mut());
+            shown
+                .into_iter()
+                .map(|telling| (telling.title, telling.body, telling.target))
+                .collect()
+        }
+    }
+
+    impl notify::System for Told {
+        fn ask(&self) -> async_channel::Receiver<Permission> {
+            self.asked.set(self.asked.get() + 1);
+            let (tell, told) = async_channel::bounded(1);
+            tell.try_send(self.answer.borrow().clone()).unwrap();
+            told
+        }
+
+        fn show(&self, telling: &notify::Telling) {
+            self.shown.borrow_mut().push(telling.clone());
+        }
+
+        fn activated(&self) -> async_channel::Receiver<Selected> {
+            self.activated.1.clone()
+        }
+    }
+
+    fn mail_event(seq: u64, from: &str, text: &str) -> String {
+        json!({"seq": seq, "kind": "mail", "actor": from, "at": "2026-10-08T09:31:00Z",
+            "data": {"to": "jo", "to_user": true, "text": text}})
+        .to_string()
+    }
+
+    fn unread_of(view: &Entity<Footplate>, cx: &mut VisualTestContext, from: &str) -> usize {
+        view.read_with(cx, |v, _| v.model.as_ref().unwrap().unread(from))
+    }
+
+    #[gpui::test]
+    fn the_system_tells_of_what_arrives_where_the_window_does_not_show_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let told = Told::new();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx)
+                .kept_in(Some(file.clone()), cx)
+                .notified_by(Box::new(told.clone()), cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        // The window is behind another: everything that arrives is news.
+        cx.deactivate_window();
+        assert!(!view.read_with(cx, |v, _| v.front));
+
+        // Nobody chose: the system is asked nothing and shows nothing,
+        // not for what was unread at the start and not for what arrives.
+        yard.emit(&mail_event(21, "assembly", "Built."));
+        wait(cx, "the unread mail", |cx| {
+            unread_of(&view, cx, "assembly") == 1
+        });
+        assert_eq!(told.shown(cx), []);
+        assert_eq!(told.asked.get(), 0);
+
+        // Switched on in the settings: the system is asked, once, and what
+        // it refuses is said there in its words.
+        *told.answer.borrow_mut() = Permission::Refused("The system says no.".into());
+        cx.simulate_keystrokes("cmd-,");
+        assert!(!drawn(cx, "notify mail"));
+        click_on(cx, "notify on");
+        assert!(settings_of(&view, cx).notifications.on);
+        assert!(Settings::read(&file).notifications.on);
+        assert_eq!(told.asked.get(), 1);
+        assert!(drawn(cx, "notify said"));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.permission.clone()),
+            Some(Permission::Refused("The system says no.".into()))
+        );
+        // Off and on again, it is asked again, and what it says now
+        // stands for what it said before.
+        click_on(cx, "notify off");
+        assert!(!Settings::read(&file).notifications.on);
+        *told.answer.borrow_mut() = Permission::Allowed;
+        click_on(cx, "notify on");
+        assert_eq!(told.asked.get(), 2);
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.permission.clone()),
+            Some(Permission::Allowed)
+        );
+        // What tells is chosen kind by kind, and kept.
+        click_on(cx, "notify the yard's notices");
+        click_on(cx, "notify decisions");
+        let chosen = Notify {
+            on: true,
+            mail: true,
+            decisions: false,
+            notices: true,
+        };
+        assert_eq!(settings_of(&view, cx).notifications, chosen);
+        assert_eq!(Settings::read(&file).notifications, chosen);
+        click_on(cx, "notify the yard's notices");
+        click_on(cx, "notify decisions");
+        assert_eq!(
+            Settings::read(&file).notifications,
+            Notify {
+                on: true,
+                ..Notify::default()
+            }
+        );
+        // Choosing told of nothing that was there before.
+        click_on(cx, "settings back");
+        assert_eq!(told.shown(cx), []);
+
+        // Behind another window, mail in the open conversation is told of:
+        // who it is from, and its first line.
+        yard.emit(&mail_event(22, "yardmaster", "Landed.\nThe tests held."));
+        wait(cx, "the mail", |cx| texts(&view, cx).len() == 2);
+        assert_eq!(
+            told.shown(cx),
+            [(
+                "yardmaster".to_string(),
+                "Landed.".to_string(),
+                Selected::Conversation("yardmaster".into())
+            )]
+        );
+
+        // In front on that conversation it is read where it stands.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.front));
+        yard.emit(&mail_event(23, "yardmaster", "And pushed."));
+        wait(cx, "the mail", |cx| texts(&view, cx).len() == 3);
+        assert_eq!(told.shown(cx), []);
+        // With the settings where the conversation would be, it is not.
+        cx.simulate_keystrokes("cmd-,");
+        yard.emit(&mail_event(24, "yardmaster", "Shall I go on?"));
+        wait(cx, "the mail", |cx| texts(&view, cx).len() == 4);
+        assert_eq!(told.shown(cx).len(), 1);
+        cx.simulate_keystrokes("cmd-,");
+
+        // In front on another conversation: a burst is one notification.
+        for (seq, text) in [(25, "One."), (26, "Two."), (27, "Three.")] {
+            yard.emit(&mail_event(seq, "assembly", text));
+        }
+        wait(cx, "the burst", |cx| unread_of(&view, cx, "assembly") == 4);
+        assert_eq!(
+            told.shown(cx),
+            [(
+                "3 from assembly".to_string(),
+                "Three.".to_string(),
+                Selected::Conversation("assembly".into())
+            )]
+        );
+        // And the next after it is one of its own.
+        yard.emit(&mail_event(28, "assembly", "Four."));
+        wait(cx, "the mail", |cx| unread_of(&view, cx, "assembly") == 5);
+        assert_eq!(told.shown(cx).len(), 1);
+
+        // What the person wrote, here or elsewhere, tells of nothing.
+        cx.deactivate_window();
+        yard.emit(r#"{"seq": 29, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "Go on."}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "the user's own mail", |cx| texts(&view, cx).len() == 5);
+        assert_eq!(told.shown(cx), []);
+
+        // A new decision is told of, by who asks and the question.
+        yard.answer(
+            "UserAsks",
+            r#"{"result": {"open": [{"bead": "bead-a", "bead_title": "Move the links", "topic": "",
+                "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                "since": "2026-10-10T10:00:00Z"}], "decided": []}}"#,
+        );
+        yard.emit(r#"{"seq": 30, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 3}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().decisions_count() == 1)
+        });
+        assert_eq!(
+            told.shown(cx),
+            [(
+                "yardmaster asks".to_string(),
+                "Move them now?".to_string(),
+                Selected::Decision("bead-a".into())
+            )]
+        );
+
+        // Activating a notification brings the window forward on its row,
+        // out of the settings too.
+        cx.simulate_keystrokes("cmd-,");
+        assert!(settings_open(&view, cx));
+        told.activated
+            .0
+            .try_send(Selected::Conversation("assembly".into()))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.front));
+        assert!(!settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+            Some(Selected::Conversation("assembly".into()))
+        );
+        // A row that is gone since leaves open what was.
+        told.activated
+            .0
+            .try_send(Selected::Decision("bead-gone".into()))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+            Some(Selected::Conversation("assembly".into()))
+        );
+
+        // Kept on, the next start asks the system at once.
+        let (again, cx) = {
+            let (client, file, told) = (yard.client(), file.clone(), told.clone());
+            let asked = told.asked.get();
+            let (again, cx) = cx.add_window_view(|window, cx| {
+                Footplate::new(client, "jo".into(), window, cx)
+                    .notified_by(Box::new(told.clone()), cx)
+                    .kept_in(Some(file), cx)
+            });
+            assert_eq!(told.asked.get(), asked + 1);
+            (again, cx)
+        };
+        cx.run_until_parked();
+        assert_eq!(
+            again.read_with(cx, |v, _| v.permission.clone()),
+            Some(Permission::Allowed)
+        );
+    }
+
     fn a_far_yard_of_jo(yard: &Yard) {
         yard.answer("Head", r#"{"result": 40}"#);
         yard.answer(

@@ -36,7 +36,13 @@ socket2 = "0.6"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSError", "NSString"] }
+# A notification of the system's (notify.rs) goes through the user
+# notifications framework, whose answers come to blocks. block2 is in
+# gpui's tree already; the framework's bindings are the one crate footplate
+# adds, of the same family as those above.
+block2 = "0.6"
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "bitflags", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 # On Linux the icon is also a property of the X11 window, set on a
 # connection of our own: gpui hands out no handle to its X11 window. Both
