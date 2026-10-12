@@ -136,6 +136,7 @@ pub fn who(client: &Client, name: &str) -> Result<api::User, Trouble> {
 pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     let head = client.head()?;
     let crew = client.crew()?;
+    let users = client.users()?;
     let peers = client.peers()?;
     // At an address the token says who the window is for, and no name of
     // this machine is asked after.
@@ -160,6 +161,7 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         me: user.name.clone(),
         head,
         crew,
+        users,
         peers,
         cursor: user.cursor,
         unread,
@@ -225,6 +227,10 @@ mod tests {
         yard.answer("Head", r#"{"result": 20}"#);
         yard.answer("Crew", r#"{"result": [{"name": "yardmaster", "enabled": true, "state": "running", "status": "idle"}]}"#);
         yard.answer("Peers", r#"{"result": []}"#);
+        yard.answer(
+            "Users",
+            r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0}]}"#,
+        );
         yard.answer(
             "GetUser",
             r#"{"result": {"name": "jo", "cursor": 5, "notification_cursor": 0}}"#,
@@ -300,6 +306,7 @@ mod tests {
         let state = load(&yard.client(), "jo").unwrap();
         assert_eq!((state.me.as_str(), state.head, state.cursor), ("jo", 20, 5));
         assert_eq!(state.crew[0].name, "yardmaster");
+        assert_eq!(state.users[0].name, "jo");
         assert_eq!(state.unread.len(), 3);
         // One to learn how many are unread, then that many.
         assert_eq!(

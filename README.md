@@ -74,32 +74,33 @@ Or a yard that is not on this machine, at the address of its listener: see
 | It reads | For |
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
-| `Crew`, `Peers` | whom there is to talk with: the crew, and `<name>@<peer>` for each one a linked yard exposes |
+| `Crew`, `Peers`, `Users` | whom there is to talk with: the crew, `<name>@<peer>` for each one a linked yard exposes, and the users of this yard, yourself among them. A peer's `trust` says which of its names are a user of this yard speaking |
 | `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on an image, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
 | `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
 | `Bead` | the open bead whole: each ask's options, recommendation and words, the body, notes and about-beads |
-| `Conversation` | the mail both ways with the one whose row is open |
+| `Conversation` | the mail both ways with the one whose row is open, and with each name trusted as them; on the `yard` row with the yard and with each sender who has no row |
 | `GET /blobs/<hash>` | an image a mail of the open conversation carries, once for each hash |
 
 | It writes | When |
 |---|---|
-| `Mail` | Enter, in a conversation with a crew member |
+| `Mail` | Enter, in a conversation with a crew member or a user of this yard, your own too |
 | `PutBlob` for each image, then `Mail` with their hashes | Enter, when images are attached to the draft |
-| `MailPeer` | Enter, in a conversation with one of a linked yard; after `PutBlob` for each image, with their hashes |
+| `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each image, with their hashes |
 | `AnswerAsk` | Enter, on a card: the option chosen, with the line's words in the one answer; an ask with no options is answered with words |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
 | `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide"; a secret ask with none |
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
-| `AckUserInbox` | a conversation showed mail that was unread |
+| `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read |
 
 It follows the stream and asks nothing of the yard in a loop: `mail`,
 `mail_read`, `notifications_read` and `crew_status` are applied as they
 come, the crew is read again on the other `crew_*` events, the linked
-yards on `peer_*`, the notices on an event that notified the user, the
+yards on `peer_*`, the users on mail from a name of this yard that has no
+row, the notices on an event that notified the user, the
 queue on every `noted` event and once more at each put-aside ask's
 return, and a bead shown on every event whose bead it is. Mail and
 notices arriving never cover or move the open card.
@@ -115,7 +116,10 @@ that is read: you are the user the device's token is of, as the yard's
 agree. Opening a conversation marks its mail read, and so does mail that
 arrives in the open one. A user's mail has one position for all senders, so
 mail of a conversation you have not opened holds back what came after it:
-nothing is marked read that the window did not show.
+nothing is marked read that the window did not show. Every mail has a row
+that shows it and counts it until then: its sender's, the row of the user
+a linked yard's name is trusted as, and the `yard` row for the yard's own
+mail and for anyone who has no row.
 
 **Images.** Mail can carry images, and the window shows those of a mail
 under its text, each in a space 240 points high: scaled down to fit it,
@@ -260,9 +264,14 @@ them, folded, "Decided" with the answered, declined and put-aside asks and
 their picks. Then the crew with what each one's session does (`working`,
 `idle`, `blocked`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a
-person) and their role line, and on every row the number of mails from it
-you have not seen. Below them the `yard` row with the number of the yard's
-notices you have not read. Right, what is open: a conversation, oldest at
+person) and their role line, then the users of this yard, your own row
+among them (`you, notes to self`), and on every row the number of mails
+from it you have not seen. A name of a linked yard that the operator trusts
+as a user of this yard (`yardr peer allow <peer> --trust <name>=<user>`)
+has no row of its own: its mail is in that user's row, and what you write
+there goes to whoever wrote last, as in `yardr chat`. Below them the `yard`
+row with the number of the yard's notices you have not read and of the mail
+it shows: the yard's own, and that of a sender who has no row. Right, what is open: a conversation, oldest at
 the top and the newest in view, an arrow at its bottom right back to the
 newest when scrolled up, with a line under your own mail that says
 where it stands (`read`, `sent; yardmaster is idle`, `queued for north:

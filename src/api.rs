@@ -11,6 +11,7 @@
 //! HTTP are written out, since a call is one request on one connection and
 //! neither needs a runtime nor a client library with a unix connector.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
@@ -183,6 +184,10 @@ pub struct Peer {
     pub send: Vec<String>,
     #[serde(default, deserialize_with = "or_default")]
     pub receive: Vec<String>,
+    /// The names of the peer's yard the link trusts as a user of this one,
+    /// each with that user: mail from `<name>@<peer>` is the user speaking.
+    #[serde(default, deserialize_with = "or_default")]
+    pub trust: HashMap<String, String>,
     /// What the peer last said of itself; a yard that has not said exposes
     /// nobody.
     #[serde(default)]
@@ -975,10 +980,8 @@ impl Client {
         self.answer("Settings", json!({}))
     }
 
-    /// The users of the yard. The window asks `GetUser` for the one it is
-    /// for and does not call this; it is here as part of what the page
-    /// promises a chat client, held by the same tests.
-    #[allow(dead_code)]
+    /// The users of the yard: each has a row to be written to in, the
+    /// window's own among them.
     pub fn users(&self) -> Result<Vec<User>> {
         self.list("Users", json!({}))
     }
@@ -2005,6 +2008,7 @@ mod tests {
             "Peers",
             r#"{"result": [
                 {"name": "north", "send": ["mail"], "receive": ["mail"], "key": "k",
+                 "trust": {"jo": "jo"},
                  "said": {"roster": [{"name": "clerk", "kind": "crew", "role": "Keeps the books", "mail": true}], "at": "2026-10-08T09:30:00Z"}},
                 {"name": "south", "send": [], "receive": []}
             ]}"#,
@@ -2022,6 +2026,12 @@ mod tests {
             }]
         );
         assert_eq!(peers[1].said, None);
+        // Whom the link trusts as a user of this yard; nobody when absent.
+        assert_eq!(
+            peers[0].trust,
+            [("jo".to_string(), "jo".to_string())].into()
+        );
+        assert!(peers[1].trust.is_empty());
     }
 
     #[test]

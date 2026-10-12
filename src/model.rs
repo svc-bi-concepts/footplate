@@ -12,7 +12,7 @@ use chrono::{DateTime, TimeZone};
 
 use crate::api::{
     self, AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Me,
-    Notification, OpenAsk, Peer, Secret,
+    Notification, OpenAsk, Peer, Secret, User,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -40,6 +40,8 @@ pub struct State {
     pub me: String,
     pub head: u64,
     pub crew: Vec<CrewMember>,
+    /// The users of the yard, the window's own among them.
+    pub users: Vec<User>,
     pub peers: Vec<Peer>,
     /// How far the user's mail is acknowledged.
     pub cursor: u64,
@@ -96,6 +98,19 @@ pub fn parties(peers: &[Peer]) -> Vec<Party> {
     out
 }
 
+/// The names the links trust as a user of this yard, `<name>@<peer>` with
+/// the user: mail from such a name is that user speaking, and stands in the
+/// user's row.
+pub fn trusted(peers: &[Peer]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for p in peers {
+        for (name, user) in &p.trust {
+            out.insert(format!("{name}@{}", p.name), user.clone());
+        }
+    }
+    out
+}
+
 /// What a crew member's session does, in the words of `yardr chat`.
 pub fn state_of(member: &CrewMember) -> &'static str {
     match (member.state.as_str(), member.status.as_str()) {
@@ -111,10 +126,11 @@ pub fn state_of(member: &CrewMember) -> &'static str {
 /// A row of the list on the left.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
-    /// A crew member's name, or `<name>@<peer>`.
+    /// A crew member's name, a user's, or `<name>@<peer>`.
     pub name: String,
-    /// Under the name: a crew member's state, or what one of a linked yard
-    /// is there and their role line.
+    /// Under the name: a crew member's state, that a user is a person or
+    /// the window's own, or what one of a linked yard is there and their
+    /// role line.
     pub line: String,
     pub unread: usize,
     pub selected: bool,
@@ -139,7 +155,7 @@ pub struct Entry {
 /// Where what is typed goes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
-    /// `Mail` to a crew member of this yard.
+    /// `Mail` to a crew member or a user of this yard.
     Crew(String),
     /// `MailPeer` to one of a linked yard.
     Peer { name: String, peer: String },
@@ -153,7 +169,7 @@ pub enum Selected {
     Decision(String),
     /// One dealt with, by bead and ask note seq.
     Decided(String, u64),
-    /// A conversation, by crew name or `<name>@<peer>`.
+    /// A conversation, by crew name, user name or `<name>@<peer>`.
     Conversation(String),
     Yard,
 }
@@ -320,6 +336,8 @@ pub enum Effect {
     Crew,
     /// `Peers`; answered to [`Model::linked`].
     Peers,
+    /// `Users`; answered to [`Model::users`].
+    Users,
     /// `UserNotifications`; answered to [`Model::notifications`].
     Notifications,
     /// `AckUserNotifications` through a seq; answered to
@@ -371,7 +389,11 @@ struct Waiting {
 pub struct Model {
     me: String,
     crew: Vec<CrewMember>,
+    /// The users of the yard by name, the window's own among them.
+    users: Vec<String>,
     parties: Vec<Party>,
+    /// The names the links trust as a user of this yard, with the user.
+    trust: BTreeMap<String, String>,
     selected: Option<Selected>,
     /// The conversation that was open last: the one opened again when the
     /// open row is gone, so that a decision dealt with leads back to where
@@ -420,6 +442,7 @@ impl Model {
         let mut m = Model {
             me: state.me,
             parties: parties(&state.peers),
+            trust: trusted(&state.peers),
             crew: state.crew,
             cursor: state.cursor,
             asked: state.cursor,
@@ -428,6 +451,7 @@ impl Model {
             decided: state.asks.decided,
             ..Model::default()
         };
+        m.set_users(state.users);
         for l in state.unread.iter().filter(|l| !l.read && l.seq > m.cursor) {
             m.unread.insert(
                 l.seq,
@@ -491,18 +515,18 @@ impl Model {
     }
 
     /// A mail to the user arrived from `from`: news of the row that shows
-    /// its sender, which is the yard row for the yard's own mail.
+    /// its sender, which is the yard row for the yard's own mail and for
+    /// anyone who has no row.
     fn mail_news(&mut self, from: &str, text: &str) {
-        let target = if from == YARD && self.yard_takes_mail() {
-            Selected::Yard
-        } else {
-            Selected::Conversation(from.to_string())
+        let target = match self.row_of(from) {
+            Some(row) => Selected::Conversation(row.to_string()),
+            None => Selected::Yard,
         };
         self.news.push(News {
             kind: Kind::Mail,
             from: from.to_string(),
             text: text.to_string(),
-            open: self.showing() == Some(from),
+            open: self.shows(from),
             target,
         });
     }
@@ -566,14 +590,101 @@ impl Model {
         }
     }
 
-    /// The names of the conversations, in order: the crew, then the
-    /// addresses of those the linked yards expose.
+    /// The names of the conversations, in order: the crew, the addresses
+    /// of those the linked yards expose, then the users of this yard.
     fn conversation_names(&self) -> Vec<String> {
         self.crew
             .iter()
             .map(|r| r.name.clone())
-            .chain(self.parties.iter().map(Party::address))
+            .chain(
+                self.parties
+                    .iter()
+                    .map(Party::address)
+                    .filter(|a| self.folded(a).is_none()),
+            )
+            .chain(self.people().cloned())
             .collect()
+    }
+
+    /// The users of this yard who have a row, the window's own among
+    /// them. One a crew member has the name of has none: that row is the
+    /// crew member's.
+    fn people(&self) -> impl Iterator<Item = &String> {
+        self.users.iter().filter(|u| self.member(u).is_none())
+    }
+
+    /// The user in whose row the mail of `address` stands: the one a link
+    /// trusts that name as, when that user has a row. Such a name has no
+    /// row of its own, as in `yardr chat`: it is how the user spoke.
+    fn folded(&self, address: &str) -> Option<&str> {
+        let user = self.trust.get(address)?;
+        self.people().any(|u| u == user).then_some(user.as_str())
+    }
+
+    /// The conversation that shows the mail `from` sent: their own row, or
+    /// the row of the user they are trusted as. `None` is the yard row: it
+    /// has the yard's own mail and that of anyone left without a row, so
+    /// that no mail is nowhere.
+    fn row_of<'a>(&'a self, from: &'a str) -> Option<&'a str> {
+        if let Some(user) = self.folded(from) {
+            return Some(user);
+        }
+        let row = self.member(from).is_some()
+            || self.people().any(|u| u == from)
+            || self.party(from).is_some();
+        row.then_some(from)
+    }
+
+    /// Whether the open row shows the mail `from` sent.
+    fn shows(&self, from: &str) -> bool {
+        match self.selected.as_ref() {
+            Some(Selected::Conversation(name)) => self.row_of(from) == Some(name.as_str()),
+            Some(Selected::Yard) => self.row_of(from).is_none(),
+            _ => false,
+        }
+    }
+
+    /// Whose mail the row `sel` shows, each a party a conversation is read
+    /// with. A conversation's is the one it is with, and in a user's row
+    /// each name trusted as them; the yard row's is the yard and whoever
+    /// wrote and has no row.
+    fn sources(&self, sel: &Selected) -> Vec<String> {
+        match sel {
+            Selected::Conversation(name) => std::iter::once(name.clone())
+                .chain(
+                    self.trust
+                        .keys()
+                        .filter(|a| self.folded(a) == Some(name.as_str()))
+                        .cloned(),
+                )
+                .collect(),
+            Selected::Yard => {
+                let mut rest: Vec<&String> = self
+                    .unread
+                    .values()
+                    .map(|w| &w.from)
+                    .chain(self.convo.keys())
+                    .filter(|from| *from != YARD && self.row_of(from).is_none())
+                    .collect();
+                rest.sort();
+                rest.dedup();
+                let yard = self.row_of(YARD).is_none().then(|| YARD.to_string());
+                yard.into_iter().chain(rest.into_iter().cloned()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The mail the row `sel` shows, oldest first.
+    fn letters(&self, sel: &Selected) -> Vec<&Letter> {
+        let mut out: Vec<&Letter> = self
+            .sources(sel)
+            .iter()
+            .filter_map(|name| self.convo.get(name))
+            .flatten()
+            .collect();
+        out.sort_by_key(|l| l.seq);
+        out
     }
 
     /// The beads with open asks, each with its asks oldest first, in the
@@ -620,15 +731,21 @@ impl Model {
         self.parties.iter().find(|p| p.address() == address)
     }
 
-    /// Whether `asker` can be written to from here: one of this yard's
-    /// crew, or one a linked yard exposes. Anyone else has no
-    /// conversation.
+    /// The conversation `asker` is written to in, when there is one: with
+    /// one of this yard's crew or its users, with one a linked yard
+    /// exposes, or with the user such a one is trusted as. Anyone else has
+    /// no conversation.
+    pub fn conversation_with<'a>(&'a self, asker: &'a str) -> Option<&'a str> {
+        self.row_of(asker)
+    }
+
+    /// Whether `asker` can be written to from here.
     pub fn can_write(&self, asker: &str) -> bool {
-        self.conversation_names().iter().any(|name| name == asker)
+        self.row_of(asker).is_some()
     }
 
     /// Why `asker` cannot be written to from here, when they cannot: a
-    /// name the link does not expose, or none of this yard's crew.
+    /// name the link does not expose, or none of this yard's crew or users.
     pub fn unwritable(&self, asker: &str) -> Option<String> {
         if self.can_write(asker) {
             return None;
@@ -638,60 +755,21 @@ impl Model {
                 "{asker} cannot be written to from here: the link does not expose them"
             )),
             None => Some(format!(
-                "{asker} cannot be written to from here: no member of this yard's crew is called that"
+                "{asker} cannot be written to from here: no member of this yard's crew and no user of it is called that"
             )),
         }
     }
 
-    /// How many mails from `name` the user has not seen. Mail that was
-    /// shown does not count, also while the yard has it unread still: one
-    /// position stands for all senders, so unseen mail of another holds the
-    /// acknowledgement back, and the count would stay on a row with nothing
-    /// left to read.
+    /// How many mails of the row `name` the user has not seen. Mail that
+    /// was shown does not count, also while the yard has it unread still:
+    /// one position stands for all senders, so unseen mail of another holds
+    /// the acknowledgement back, and the count would stay on a row with
+    /// nothing left to read.
     pub fn unread(&self, name: &str) -> usize {
         self.unread
             .values()
-            .filter(|w| w.from == name && !w.seen)
+            .filter(|w| !w.seen && self.row_of(&w.from) == Some(name))
             .count()
-    }
-
-    /// Whether the yard row takes the mail the yard itself sends (what
-    /// another yard did not take comes back so). It does unless a crew
-    /// member has the yard's name: then that row has it.
-    fn yard_takes_mail(&self) -> bool {
-        self.member(YARD).is_none()
-    }
-
-    /// The sender whose mail the open row shows: the one the conversation
-    /// is with, or the yard on the yard row.
-    fn showing(&self) -> Option<&str> {
-        match self.selected.as_ref() {
-            Some(Selected::Conversation(name)) => Some(name),
-            Some(Selected::Yard) if self.yard_takes_mail() => Some(YARD),
-            _ => None,
-        }
-    }
-
-    /// The unread mail of senders who have no row (another user, one of a
-    /// linked yard that is not on its roster): how many, and from whom, in
-    /// name order. `yardr inbox` reads it. Mail from the yard is not among
-    /// it: the yard row has that.
-    pub fn others(&self) -> (usize, Vec<String>) {
-        let names = self.conversation_names();
-        let mut from: Vec<String> = Vec::new();
-        let mut count = 0;
-        for w in self
-            .unread
-            .values()
-            .filter(|w| !names.contains(&w.from) && w.from != YARD)
-        {
-            count += 1;
-            if !from.contains(&w.from) {
-                from.push(w.from.clone());
-            }
-        }
-        from.sort();
-        (count, from)
     }
 
     /// The conversations of the list on the left.
@@ -700,6 +778,20 @@ impl Model {
             .crew
             .iter()
             .map(|r| (r.name.clone(), state_of(r).to_string()));
+        let people = self.people().map(|u| {
+            let line = if *u == self.me {
+                "you, notes to self"
+            } else {
+                "person"
+            };
+            (u.clone(), line.to_string())
+        });
+        let folded: Vec<String> = self
+            .parties
+            .iter()
+            .map(Party::address)
+            .filter(|a| self.folded(a).is_some())
+            .collect();
         let linked = self.parties.iter().map(|p| {
             let is = if p.person { "person" } else { "crew member" };
             let line = if p.role.is_empty() {
@@ -709,7 +801,8 @@ impl Model {
             };
             (p.address(), line)
         });
-        crew.chain(linked)
+        crew.chain(linked.filter(|(address, _)| !folded.contains(address)))
+            .chain(people)
             .map(|(name, line)| Row {
                 unread: self.unread(&name),
                 selected: self.selected_conversation() == Some(name.as_str()),
@@ -1274,25 +1367,22 @@ impl Model {
         }
     }
 
-    /// How many notifications the user has not read, with the mail from
-    /// the yard not seen.
+    /// How many notifications the user has not read, with the mail of the
+    /// yard row not seen: the yard's own, and that of anyone without a row.
     pub fn yard_unread(&self) -> usize {
-        let mail = if self.yard_takes_mail() {
-            self.unread(YARD)
-        } else {
-            0
-        };
+        let mail = self
+            .unread
+            .values()
+            .filter(|w| !w.seen && self.row_of(&w.from).is_none())
+            .count();
         self.notifications.iter().filter(|n| !n.read).count() + mail
     }
 
-    /// The mail from the yard itself, oldest first: the yard row shows it
-    /// among the notices.
+    /// The mail of the yard row, oldest first, shown among the notices:
+    /// what the yard itself sent, and what anyone sent who has no row.
+    /// Opening the row reads it, so no mail holds the inbox back unseen.
     pub fn yard_mail(&self) -> Vec<Entry> {
-        if self.yard_takes_mail() {
-            self.entries_with(YARD)
-        } else {
-            Vec::new()
-        }
+        self.entries_of(&Selected::Yard)
     }
 
     /// The notices of the open yard row, oldest first.
@@ -1310,11 +1400,15 @@ impl Model {
     }
 
     /// What stands above the open conversation: nothing for a crew member,
+    /// for a user of this yard who that is and where what is typed goes,
     /// and for one of a linked yard who that is there, then whatever keeps
     /// the mail from arriving.
     pub fn about(&self) -> Vec<String> {
-        let Some(p) = self.selected_conversation().and_then(|s| self.party(s)) else {
+        let Some(name) = self.selected_conversation() else {
             return Vec::new();
+        };
+        let Some(p) = self.party(name) else {
+            return self.about_person(name).into_iter().collect();
         };
         let is = if p.person {
             "a person"
@@ -1337,17 +1431,43 @@ impl Model {
         out
     }
 
-    /// The open conversation, oldest first.
-    pub fn entries(&self) -> Vec<Entry> {
-        self.selected_conversation()
-            .map_or(Vec::new(), |s| self.entries_with(s))
+    /// The line above the conversation with a user of this yard, the
+    /// window's own too: with names trusted as them it says that their
+    /// mail is here, and whom the next mail goes to.
+    fn about_person(&self, name: &str) -> Option<String> {
+        if !self.people().any(|u| u == name) {
+            return None;
+        }
+        let is = if name == self.me {
+            "you: what you write here is mail to yourself".to_string()
+        } else {
+            "a person of this yard".to_string()
+        };
+        let sources = self.sources(&Selected::Conversation(name.to_string()));
+        if sources.len() < 2 {
+            return Some(is);
+        }
+        let goes = match self.target() {
+            Some(Target::Peer { name, peer }) => format!("{name}@{peer}, who wrote last"),
+            _ => format!("{name} in this yard"),
+        };
+        Some(format!(
+            "{is}, also trusted as {}: mail from that name is in this conversation, and what you write goes to {goes}",
+            sources[1..].join(", ")
+        ))
     }
 
-    /// The mail between the user and `name`, oldest first.
-    fn entries_with(&self, name: &str) -> Vec<Entry> {
-        let Some(letters) = self.convo.get(name) else {
-            return Vec::new();
-        };
+    /// The open conversation, oldest first.
+    pub fn entries(&self) -> Vec<Entry> {
+        match self.selected.as_ref() {
+            Some(sel @ Selected::Conversation(_)) => self.entries_of(sel),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The mail the row `sel` shows, oldest first.
+    fn entries_of(&self, sel: &Selected) -> Vec<Entry> {
+        let letters = self.letters(sel);
         let mut out: Vec<Entry> = Vec::with_capacity(letters.len());
         for l in letters {
             let mine = l.from == self.me;
@@ -1376,8 +1496,11 @@ impl Model {
     /// this yard did not take from a linked yard is none it has.
     pub fn images(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        let letters = self.selected_conversation().and_then(|s| self.convo.get(s));
-        for f in letters.into_iter().flatten().flat_map(|l| &l.files) {
+        let letters = match self.selected.as_ref() {
+            Some(sel @ Selected::Conversation(_)) => self.letters(sel),
+            _ => Vec::new(),
+        };
+        for f in letters.into_iter().flat_map(|l| &l.files) {
             if f.not_taken.is_empty() && !out.contains(&f.hash.as_str()) {
                 out.push(&f.hash);
             }
@@ -1410,13 +1533,29 @@ impl Model {
         }
     }
 
-    /// Where what is typed goes, when a conversation is open.
+    /// Where what is typed goes, when a conversation is open. In the row
+    /// of a user whom a name of a linked yard is trusted as it answers
+    /// whoever wrote last, as `yardr chat` does: that name at its yard when
+    /// the newest mail that is not the window's own came from there, else
+    /// the user in this yard.
     pub fn target(&self) -> Option<Target> {
+        let sel = self.selected.as_ref()?;
         let name = self.selected_conversation()?;
-        Some(match self.party(name) {
-            Some(p) => Target::Peer {
+        if let Some(p) = self.party(name) {
+            return Some(Target::Peer {
                 name: p.name.clone(),
                 peer: p.peer.clone(),
+            });
+        }
+        let last = self
+            .letters(sel)
+            .into_iter()
+            .rev()
+            .find(|l| l.from != self.me);
+        Some(match last.and_then(|l| l.from.split_once('@')) {
+            Some((name, peer)) => Target::Peer {
+                name: name.to_string(),
+                peer: peer.to_string(),
             },
             None => Target::Crew(name.to_string()),
         })
@@ -1453,30 +1592,35 @@ impl Model {
     /// What opening a row does here: the unread mail it shows is seen, and
     /// a conversation is the one to come back to.
     fn opened(&mut self) {
-        let Some(from) = self.showing().map(str::to_string) else {
-            return;
-        };
-        for w in self.unread.values_mut().filter(|w| w.from == from) {
-            w.seen = true;
+        let shown: Vec<u64> = self
+            .unread
+            .iter()
+            .filter(|(_, w)| !w.seen && self.shows(&w.from))
+            .map(|(seq, _)| *seq)
+            .collect();
+        for seq in shown {
+            if let Some(w) = self.unread.get_mut(&seq) {
+                w.seen = true;
+            }
         }
         if let Some(Selected::Conversation(sel)) = &self.selected {
             self.back = Some(sel.clone());
         }
     }
 
-    /// Reads the open conversation if it was not read before, and
-    /// acknowledges what opening it showed; the yard row does so with the
-    /// mail from the yard, and its notices need no call. A bead and one
-    /// dealt with read the bead whole when it was not read before.
+    /// Reads the open conversation if it was not read before, with each
+    /// whose mail it shows, and acknowledges what opening it showed; the
+    /// yard row does so with its mail, and its notices need no call. A bead
+    /// and one dealt with read the bead whole when it was not read before.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
-            Some(Selected::Conversation(_) | Selected::Yard) => {
-                let mut effects = Vec::new();
-                if let Some(from) = self.showing().map(str::to_string)
-                    && !self.loaded.contains(&from)
-                {
-                    effects.push(self.read(&from));
-                }
+            Some(sel @ (Selected::Conversation(_) | Selected::Yard)) => {
+                let mut effects: Vec<Effect> = self
+                    .sources(&sel)
+                    .iter()
+                    .filter(|from| !self.loaded.contains(*from))
+                    .map(|from| self.read(from))
+                    .collect();
                 effects.extend(self.ack());
                 effects
             }
@@ -1508,7 +1652,10 @@ impl Model {
     /// shows it when the stream is lost at this moment, and costs what is
     /// new.
     pub fn sent(&mut self, to: &str) -> Vec<Effect> {
-        vec![self.read(to)]
+        self.sources(&Selected::Conversation(to.to_string()))
+            .iter()
+            .map(|with| self.read(with))
+            .collect()
     }
 
     /// Puts `l` into the conversation with `name`, in order. A mail it has
@@ -1588,7 +1735,9 @@ impl Model {
                 let (reader, through) = (e.text("reader"), e.number("through"));
                 if reader == self.me {
                     self.acked(through);
-                } else if let Some(c) = self.convo.get_mut(reader) {
+                }
+                // The user's own row has what they sent themselves.
+                if let Some(c) = self.convo.get_mut(reader) {
                     for l in c.iter_mut().filter(|l| l.to == reader && l.seq <= through) {
                         l.read = true;
                     }
@@ -1662,27 +1811,40 @@ impl Model {
             }
             return Vec::new();
         }
-        if e.actor == self.me {
-            self.add(to, l);
-        } else if to == self.me && e.flag("to_user") {
-            l.read = e.seq <= self.cursor;
-            let read = l.read;
-            self.add(&e.actor, l);
-            if !read && !self.unread.contains_key(&e.seq) {
-                // On the open row that shows it, it is seen as it arrives.
-                let seen = self.showing() == Some(e.actor.as_str());
-                self.unread.insert(
-                    e.seq,
-                    Waiting {
-                        from: e.actor.clone(),
-                        seen,
-                    },
-                );
-                self.mail_news(&e.actor, e.text("text"));
-                return self.ack();
-            }
+        // Mail the user wrote to themselves is both: their own, and unread
+        // in their inbox until their row shows it.
+        let mine = e.actor == self.me;
+        let for_me = to == self.me && e.flag("to_user");
+        if !mine && !for_me {
+            return Vec::new();
         }
-        Vec::new()
+        if for_me {
+            l.read = e.seq <= self.cursor;
+        }
+        let read = l.read;
+        self.add(if mine { to } else { &e.actor }, l);
+        if !for_me || read || self.unread.contains_key(&e.seq) {
+            return Vec::new();
+        }
+        // On the open row that shows it, it is seen as it arrives.
+        let seen = self.shows(&e.actor);
+        self.unread.insert(
+            e.seq,
+            Waiting {
+                from: e.actor.clone(),
+                seen,
+            },
+        );
+        if !mine {
+            self.mail_news(&e.actor, e.text("text"));
+        }
+        let mut effects = self.ack();
+        // A name of this yard with no row may be a user added since the
+        // users were read: they are read again, and the mail has its row.
+        if !mine && e.actor != YARD && !e.actor.contains('@') && self.row_of(&e.actor).is_none() {
+            effects.push(Effect::Users);
+        }
+        effects
     }
 
     /// An event of a link. The roster a peer says changes without an event
@@ -1725,10 +1887,53 @@ impl Model {
         self.reselect()
     }
 
-    /// The linked yards as read again.
+    /// The linked yards as read again. Whom they trust as a user changes
+    /// which row has whose mail, so the open row is opened again: it reads
+    /// what it newly shows.
     pub fn linked(&mut self, peers: &[Peer]) -> Vec<Effect> {
+        let before = self.open_sources();
         self.parties = parties(peers);
-        self.reselect()
+        self.trust = trusted(peers);
+        self.regroup(before)
+    }
+
+    /// The users of the yard as read again.
+    pub fn users(&mut self, users: Vec<User>) -> Vec<Effect> {
+        let before = self.open_sources();
+        self.set_users(users);
+        self.regroup(before)
+    }
+
+    /// Whose mail the open row shows.
+    fn open_sources(&self) -> Vec<String> {
+        self.selected
+            .as_ref()
+            .map_or(Vec::new(), |sel| self.sources(sel))
+    }
+
+    /// The window's own user is one of the yard's whatever was read: their
+    /// row is where the mail they wrote themselves is shown.
+    fn set_users(&mut self, users: Vec<User>) {
+        self.users = users.into_iter().map(|u| u.name).collect();
+        if !self.me.is_empty() && !self.users.contains(&self.me) {
+            self.users.push(self.me.clone());
+        }
+    }
+
+    /// Who has a row changed; `before` is whose mail the open row showed.
+    /// The open row stays when it is still there, and when it shows other
+    /// mail than before that is seen and read. One of a name newly trusted
+    /// as a user goes to that user's row.
+    fn regroup(&mut self, before: Vec<String>) -> Vec<Effect> {
+        if let Some(user) = self.selected_conversation().and_then(|s| self.folded(s)) {
+            self.selected = Some(Selected::Conversation(user.to_string()));
+        }
+        let effects = self.reselect();
+        if !effects.is_empty() || self.open_sources() == before {
+            return effects;
+        }
+        self.opened();
+        self.open()
     }
 
     /// The notices as read again. The yard row stands whatever they are.
@@ -2158,6 +2363,7 @@ mod tests {
                     },
                 ],
             }),
+            ..Peer::default()
         }
     }
 
@@ -2220,7 +2426,13 @@ mod tests {
         let (m, _) = Model::new(yard(&[]), None);
         assert_eq!(
             names(&m),
-            ["assembly", "yardmaster", "clerk@north", "mckean@north"]
+            [
+                "assembly",
+                "yardmaster",
+                "clerk@north",
+                "mckean@north",
+                "jo"
+            ]
         );
         let rows = m.rows();
         assert_eq!(rows[0].line, "idle");
@@ -2245,7 +2457,7 @@ mod tests {
         assert_eq!(
             m.unwritable("sage").as_deref(),
             Some(
-                "sage cannot be written to from here: no member of this yard's crew is called that"
+                "sage cannot be written to from here: no member of this yard's crew and no user of it is called that"
             )
         );
     }
@@ -2264,7 +2476,7 @@ mod tests {
             ..Peer::default()
         });
         let (m, _) = Model::new(state, None);
-        assert_eq!(names(&m).len(), 4);
+        assert_eq!(names(&m).len(), 5);
     }
 
     #[test]
@@ -2288,7 +2500,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_yardmaster_it_opens_on_the_first_row_and_on_yard_in_an_empty_yard() {
+    fn without_a_yardmaster_it_opens_on_the_first_row_and_on_the_own_in_an_empty_yard() {
         let mut state = yard(&[]);
         state.crew.remove(1);
         let (m, _) = Model::new(state, None);
@@ -2301,14 +2513,16 @@ mod tests {
             },
             None,
         );
-        // The yard row stands whatever the yard has.
+        // The user's own row and the yard row stand whatever the yard has.
+        assert_eq!(m.selected_conversation(), Some("jo"));
+        assert_eq!(effects, [read("jo", 0)]);
+        assert_eq!(m.target(), Some(Target::Crew("jo".into())));
+        // The yard row reads the mail the yard itself sent.
+        assert_eq!(m.step(1), [read("yard", 0)]);
         assert_eq!(m.selected(), Some(&Selected::Yard));
-        // It reads the mail the yard itself sent.
-        assert_eq!(effects, [read("yard", 0)]);
         assert_eq!(m.target(), None);
         m.conversation("yard", vec![]);
-        assert_eq!(m.step(1), []);
-        assert_eq!(m.selected(), Some(&Selected::Yard));
+        assert_eq!(m.select(Selected::Yard), []);
         assert_eq!(m.entries(), []);
     }
 
@@ -2351,6 +2565,8 @@ mod tests {
         assert_eq!(m.selected_conversation(), Some("clerk@north"));
         m.step(1);
         assert_eq!(m.selected_conversation(), Some("mckean@north"));
+        m.step(1);
+        assert_eq!(m.selected_conversation(), Some("jo"));
         m.step(1);
         assert_eq!(m.selected(), Some(&Selected::Yard));
         m.step(1);
@@ -2411,8 +2627,6 @@ mod tests {
         );
         assert_eq!(m.unread("clerk@north"), 2);
         assert_eq!(m.yard_row().unread, 2);
-        // The yard's mail has a row: it is not among the senders without.
-        assert_eq!(m.others(), (0, vec![]));
 
         // Opening the conversation shows 6 and 9; 7 holds back 9.
         assert_eq!(
@@ -2491,7 +2705,8 @@ mod tests {
 
     #[test]
     fn what_was_shown_is_not_unseen_again_when_the_yard_is_back() {
-        // ada has no row, so her mail holds back the yardmaster's 8.
+        // ada's mail is on the yard row, which was not opened: it holds
+        // back the yardmaster's 8.
         let unread = [(6, "yardmaster"), (7, "ada"), (8, "yardmaster")];
         let (mut m, _) = Model::new(yard(&unread), None);
         m.select(Selected::Conversation("assembly".into()));
@@ -2501,7 +2716,7 @@ mod tests {
         assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(m.unread("yardmaster"), 0);
         assert_eq!(effects, [read("assembly", 0), Effect::Ack { through: 6 }]);
-        assert_eq!(m.others(), (1, vec!["ada".to_string()]));
+        assert_eq!(m.yard_unread(), 1);
     }
 
     #[test]
@@ -2951,22 +3166,325 @@ mod tests {
             [Effect::Peers]
         );
         assert_eq!(m.linked(&[]), [read("assembly", 0)]);
-        assert_eq!(names(&m), ["assembly", "yardmaster"]);
+        assert_eq!(names(&m), ["assembly", "yardmaster", "jo"]);
         // One that is still there stays open.
         assert_eq!(m.linked(&[north()]), []);
         assert_eq!(m.selected_conversation(), Some("assembly"));
     }
 
+    /// A linked yard whose `jo` the link trusts as this yard's jo.
+    fn airy() -> Peer {
+        Peer {
+            name: "airy".into(),
+            send: vec!["mail".into()],
+            receive: vec!["mail".into()],
+            said: Some(Said {
+                roster: vec![RosterEntry {
+                    name: "jo".into(),
+                    kind: "user".into(),
+                    role: "operator".into(),
+                    mail: true,
+                }],
+            }),
+            trust: [("jo".to_string(), "jo".to_string())].into(),
+        }
+    }
+
+    fn user(name: &str) -> User {
+        User {
+            name: name.into(),
+            ..User::default()
+        }
+    }
+
     #[test]
-    fn unread_mail_of_senders_without_a_row_is_counted_apart() {
-        let (m, _) = Model::new(
-            yard(&[(6, "ada"), (7, "zed@south"), (8, "ada"), (9, "assembly")]),
-            None,
+    fn the_users_of_the_yard_have_rows_after_the_linked_yards_and_the_window_s_own_is_theirs() {
+        let mut state = yard(&[(6, "ada"), (7, "jo")]);
+        state.users = vec![user("ada"), user("jo")];
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(
+            names(&m),
+            [
+                "assembly",
+                "yardmaster",
+                "clerk@north",
+                "mckean@north",
+                "ada",
+                "jo"
+            ]
+        );
+        let rows = m.rows();
+        assert_eq!((rows[4].line.as_str(), rows[4].unread), ("person", 1));
+        assert_eq!(
+            (rows[5].line.as_str(), rows[5].unread),
+            ("you, notes to self", 1)
+        );
+
+        // Another user is read and written to as a crew member is.
+        assert_eq!(
+            m.select(Selected::Conversation("ada".into())),
+            [read("ada", 0), Effect::Ack { through: 6 }]
+        );
+        assert_eq!(m.about(), ["a person of this yard"]);
+        assert_eq!(m.target(), Some(Target::Crew("ada".into())));
+        assert!(m.can_write("ada"));
+        m.conversation("ada", vec![letter(6, "ada", "jo", "hello")]);
+        assert_eq!(m.sent("ada"), [read("ada", 6)]);
+        m.event(&event(
+            21,
+            "mail",
+            "jo",
+            json!({"to": "ada", "to_user": true, "text": "hello ada"}),
+        ));
+        let entries = m.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            (entries[1].mine, entries[1].standing.as_deref()),
+            (true, Some("sent"))
+        );
+        m.event(&event(
+            22,
+            "mail_read",
+            "ada",
+            json!({"reader": "ada", "through": 21}),
+        ));
+        assert_eq!(m.entries()[1].standing.as_deref(), Some("read"));
+    }
+
+    #[test]
+    fn a_user_a_crew_member_has_the_name_of_has_no_second_row() {
+        let mut state = yard(&[]);
+        state.users = vec![user("assembly"), user("jo")];
+        let (m, _) = Model::new(state, None);
+        assert_eq!(
+            names(&m),
+            [
+                "assembly",
+                "yardmaster",
+                "clerk@north",
+                "mckean@north",
+                "jo"
+            ]
+        );
+    }
+
+    #[test]
+    fn mail_the_user_wrote_themselves_is_read_in_their_own_row_and_holds_nothing_back_after() {
+        // footplate-evk8: two mails of the user to themselves, one written
+        // as the name a linked yard is trusted for, were the oldest unread
+        // and had no row. They were never shown, so the twenty of the
+        // yardmaster after them, all read in the open conversation, stayed
+        // unread in the yard.
+        let mut unread = vec![(6, "jo@airy"), (7, "jo")];
+        unread.extend((8..28).map(|seq| (seq, "yardmaster")));
+        let mut state = yard(&unread);
+        state.peers.push(airy());
+        let (mut m, effects) = Model::new(state, None);
+        // The yardmaster's mail is shown: no row counts it, and nothing is
+        // acknowledged, since 6 and 7 are not seen.
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+        assert_eq!(effects, [read("yardmaster", 0)]);
+        assert_eq!(m.unread("yardmaster"), 0);
+        // What is unseen has a row that says so: the user's own. The name
+        // trusted as them has no row of its own.
+        assert_eq!(
+            names(&m),
+            [
+                "assembly",
+                "yardmaster",
+                "clerk@north",
+                "mckean@north",
+                "jo"
+            ]
+        );
+        assert_eq!(m.unread("jo"), 2);
+        assert_eq!(m.yard_unread(), 0);
+
+        // Opening it shows both and acknowledges all there is.
+        assert_eq!(
+            m.select(Selected::Conversation("jo".into())),
+            [
+                read("jo", 0),
+                read("jo@airy", 0),
+                Effect::Ack { through: 27 }
+            ]
+        );
+        m.conversation("jo", vec![letter(7, "jo", "jo", "works")]);
+        m.conversation(
+            "jo@airy",
+            vec![letter(6, "jo@airy", "jo", "testing messaging myself")],
         );
         assert_eq!(
-            m.others(),
-            (3, vec!["ada".to_string(), "zed@south".to_string()])
+            m.entries()
+                .iter()
+                .map(|e| (e.seq, e.from.as_str(), e.mine))
+                .collect::<Vec<_>>(),
+            [(6, "jo@airy", false), (7, "jo", true)]
         );
+        m.acked(27);
+        assert_eq!(m.rows().iter().map(|r| r.unread).sum::<usize>(), 0);
+        assert_eq!(m.yard_unread(), 0);
+    }
+
+    #[test]
+    fn in_a_user_s_row_what_is_typed_answers_whoever_wrote_last() {
+        let mut state = yard(&[]);
+        state.peers.push(airy());
+        let (mut m, _) = Model::new(state, None);
+        m.select(Selected::Conversation("jo".into()));
+        // Nobody wrote: it is mail to the user in this yard.
+        assert_eq!(m.target(), Some(Target::Crew("jo".into())));
+        assert_eq!(
+            m.about(),
+            [
+                "you: what you write here is mail to yourself, also trusted as jo@airy: mail from that name is in this conversation, and what you write goes to jo in this yard"
+            ]
+        );
+        // The trusted name wrote last: the answer goes to it at its yard.
+        m.event(&mail_to_jo(21, "jo@airy"));
+        assert_eq!(
+            m.target(),
+            Some(Target::Peer {
+                name: "jo".into(),
+                peer: "airy".into()
+            })
+        );
+        assert!(m.about()[0].ends_with("what you write goes to jo@airy, who wrote last"));
+        // What was sent there is read from there, and stands in this row.
+        assert_eq!(m.sent("jo"), [read("jo", 0), read("jo@airy", 0)]);
+        m.event(&event(
+            22,
+            "mail",
+            "jo",
+            json!({"to": "jo", "to_peer": "airy", "text": "over there"}),
+        ));
+        assert_eq!(
+            m.entries().iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [21, 22]
+        );
+        // The user's own note to themselves changes nothing of that.
+        m.event(&mail_to_jo(23, "jo"));
+        assert!(matches!(m.target(), Some(Target::Peer { .. })));
+        // An asker of that name is written to in the user's row.
+        assert_eq!(m.conversation_with("jo@airy"), Some("jo"));
+        assert_eq!(m.unwritable("jo@airy"), None);
+    }
+
+    #[test]
+    fn a_note_to_oneself_counts_on_the_own_row_until_it_is_shown_and_is_no_news() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.take_news();
+        // Written elsewhere, with the yardmaster's conversation open.
+        assert_eq!(m.event(&mail_to_jo(21, "jo")), []);
+        assert_eq!(m.unread("jo"), 1);
+        assert_eq!(m.take_news(), []);
+        assert_eq!(
+            m.select(Selected::Conversation("jo".into())),
+            [read("jo", 0), Effect::Ack { through: 21 }]
+        );
+        m.acked(21);
+        // Written in the open row it is seen as it arrives.
+        assert_eq!(
+            m.event(&mail_to_jo(22, "jo")),
+            [Effect::Ack { through: 22 }]
+        );
+        assert_eq!(m.unread("jo"), 0);
+        let entries = m.entries();
+        assert_eq!((entries.len(), entries[0].mine), (2, true));
+        // Read, it stands so.
+        m.event(&event(
+            23,
+            "mail_read",
+            "jo",
+            json!({"reader": "jo", "through": 22}),
+        ));
+        assert_eq!(m.entries()[1].standing.as_deref(), Some("read"));
+    }
+
+    #[test]
+    fn mail_of_a_sender_without_a_row_is_shown_and_read_on_the_yard_row() {
+        // A crew member's agent at a bead, and one of a linked yard that
+        // is not on its roster: neither has a row.
+        let (mut m, effects) = Model::new(
+            yard(&[
+                (6, "bead-agent"),
+                (7, "zed@south"),
+                (8, "yard"),
+                (9, "yardmaster"),
+            ]),
+            None,
+        );
+        assert_eq!(effects, [read("yardmaster", 0)]);
+        assert_eq!(m.yard_row().unread, 3);
+        assert!(!m.can_write("bead-agent"));
+        assert_eq!(
+            m.select(Selected::Yard),
+            [
+                read("yard", 0),
+                read("bead-agent", 0),
+                read("zed@south", 0),
+                Effect::Ack { through: 9 }
+            ]
+        );
+        assert_eq!(m.yard_row().unread, 0);
+        m.conversation("zed@south", vec![letter(7, "zed@south", "jo", "z")]);
+        m.conversation("bead-agent", vec![letter(6, "bead-agent", "jo", "b")]);
+        m.conversation("yard", vec![letter(8, "yard", "jo", "y")]);
+        assert_eq!(
+            m.yard_mail()
+                .iter()
+                .map(|e| (e.seq, e.from.as_str()))
+                .collect::<Vec<_>>(),
+            [(6, "bead-agent"), (7, "zed@south"), (8, "yard")]
+        );
+        // What arrives there while it is open is seen as it arrives.
+        m.acked(9);
+        assert_eq!(
+            m.event(&mail_to_jo(21, "zed@south")),
+            [Effect::Ack { through: 21 }]
+        );
+        assert_eq!(m.yard_mail().len(), 4);
+    }
+
+    #[test]
+    fn mail_from_a_name_of_this_yard_with_no_row_has_the_users_read_again() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        // ada was added after the users were read.
+        assert_eq!(m.event(&mail_to_jo(21, "ada")), [Effect::Users]);
+        assert_eq!(m.yard_unread(), 1);
+        assert_eq!(m.users(vec![user("ada"), user("jo")]), []);
+        assert_eq!((m.unread("ada"), m.yard_unread()), (1, 0));
+        // The yard's own mail and that of a linked yard ask nothing.
+        assert_eq!(m.event(&mail_to_jo(22, "yard")), []);
+        assert_eq!(m.event(&mail_to_jo(23, "zed@south")), []);
+
+        // On the open yard row her mail is seen as it arrives; with her
+        // row it is hers, and stays seen.
+        let (mut m, _) = Model::new(yard(&[]), Some(Selected::Yard));
+        assert_eq!(
+            m.event(&mail_to_jo(21, "ada")),
+            [Effect::Ack { through: 21 }, Effect::Users]
+        );
+        m.users(vec![user("ada"), user("jo")]);
+        assert_eq!((m.unread("ada"), m.yard_unread()), (0, 0));
+    }
+
+    #[test]
+    fn a_name_newly_trusted_as_a_user_takes_its_open_row_and_its_mail_to_the_user_s() {
+        let mut state = yard(&[(6, "jo@airy")]);
+        let mut untrusted = airy();
+        untrusted.trust.clear();
+        state.peers.push(untrusted);
+        let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo@airy".into())));
+        assert_eq!(m.selected_conversation(), Some("jo@airy"));
+        assert_eq!(
+            m.linked(&[north(), airy()]),
+            [read("jo", 0), read("jo@airy", 0)]
+        );
+        // Its mail was seen in the row it had, and counts on neither.
+        assert_eq!(m.unread("jo"), 0);
+        assert_eq!(m.selected_conversation(), Some("jo"));
+        assert!(!names(&m).contains(&"jo@airy".to_string()));
     }
 
     #[test]
@@ -3356,7 +3874,7 @@ mod tests {
         // Folded: its rows are not in the tab order.
         m.select(Selected::Yard);
         m.step(-1);
-        assert_eq!(m.selected_conversation(), Some("mckean@north"));
+        assert_eq!(m.selected_conversation(), Some("jo"));
 
         m.toggle_decided();
         assert!(m.decided_expanded());
@@ -3369,7 +3887,7 @@ mod tests {
         // Open: its rows stand between the decisions and the conversations.
         m.select(Selected::Yard);
         m.step(-1);
-        assert_eq!(m.selected_conversation(), Some("mckean@north"));
+        assert_eq!(m.selected_conversation(), Some("jo"));
         m.select(Selected::Conversation("assembly".into()));
         m.step(-1);
         assert_eq!(

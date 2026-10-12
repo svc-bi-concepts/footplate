@@ -152,6 +152,10 @@ mod tests {
         yard.answer("Crew", r#"{"result": []}"#);
         yard.answer("Peers", r#"{"result": []}"#);
         yard.answer(
+            "Users",
+            r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0}]}"#,
+        );
+        yard.answer(
             "GetUser",
             r#"{"result": {"name": "jo", "cursor": 5, "notification_cursor": 0}}"#,
         );
