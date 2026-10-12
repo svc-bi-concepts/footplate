@@ -596,8 +596,8 @@ impl Footplate {
         self
     }
 
-    /// Which yard the window shows, in words: under the user's name, and
-    /// in the settings.
+    /// Which yard the window shows, in words: the whole telling, as the
+    /// settings say it. The head's line shortens this machine's.
     fn which_yard(&self) -> String {
         let address = self.env.address(self.settings.chosen());
         match (address, &self.said) {
@@ -609,6 +609,18 @@ impl Footplate {
             }
             (Some(address), None) => format!("the yard at {address}"),
             (None, _) => "this machine's yard".to_string(),
+        }
+    }
+
+    /// Which yard the head's line names, short: this machine's, or the
+    /// yard at an address, as the settings say it. The line has the
+    /// column's width beside the logo, and the whole telling stands in
+    /// the settings.
+    fn which_yard_short(&self) -> String {
+        if self.env.address(self.settings.chosen()).is_none() {
+            "this machine's".to_string()
+        } else {
+            self.which_yard()
         }
     }
 
@@ -1898,8 +1910,8 @@ impl Footplate {
         self.reopen(cx);
     }
 
-    /// The control that opens the settings, and shuts them: in the head of
-    /// the left column, and under the words when the yard is away.
+    /// The control that opens the settings, and shuts them: at the foot
+    /// of the left column, and under the words when the yard is away.
     fn settings_control(
         &self,
         text: String,
@@ -2244,13 +2256,13 @@ impl Footplate {
                             .text_color(palette.accent)
                             .truncate()
                             .debug_selector(|| "which yard".to_string())
-                            .child(format!("{} · {}", model.me(), self.which_yard())),
+                            .child(format!("{} · {}", model.me(), self.which_yard_short())),
                     ),
-            )
-            .child(self.settings_control("settings".to_string(), palette, cx));
+            );
         let now = chrono::Utc::now();
         let mut body = div()
             .id("rows")
+            .debug_selector(|| "rows".to_string())
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -2323,6 +2335,18 @@ impl Footplate {
         body = body.child(divider(palette));
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
+        // A quiet row for the column's own controls, under the rows and
+        // outside what scrolls, so it stays in place.
+        let foot = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(palette.line)
+            .child(self.settings_control("settings".to_string(), palette, cx));
         div()
             // 260 pixels at the usual text size. Its rows are cut to it, so
             // it grows with the text, but never over the conversation: the
@@ -2338,6 +2362,7 @@ impl Footplate {
             .border_color(palette.line)
             .child(head)
             .child(body)
+            .child(foot)
     }
 
     fn row(
@@ -6156,10 +6181,15 @@ mod tests {
                 (logo.size.width - side).abs() < px(1.) && (logo.size.height - side).abs() < px(1.),
                 "at {text} px the logo is {logo:?}, not {side:?} a side"
             );
+            let yard = bounds_of(cx, "which yard");
+            assert!(
+                logo.right() < yard.left() && yard.right() <= first.right() + rem,
+                "at {text} px the head of the column does not hold: {logo:?} {yard:?}"
+            );
             let control = bounds_of(cx, "settings");
             assert!(
-                logo.right() < control.left() && control.right() <= first.right() + rem,
-                "at {text} px the head of the column does not hold: {logo:?} {control:?}"
+                yard.bottom() <= control.top(),
+                "at {text} px the button shares the head's row: {yard:?} {control:?}"
             );
             rows.push((first.size.width, first.size.height, long.size.height));
         }
@@ -6169,6 +6199,79 @@ mod tests {
         assert!(rows[0].2 < rows[1].2 && rows[1].2 < rows[2].2, "{rows:?}");
         let logo = bounds_of(cx, "logo");
         assert!(logo.size.width > px(40.));
+    }
+
+    /// The head keeps its line and the button has the foot of the list: at
+    /// the narrowest window the name and this machine's are whole, the line
+    /// ends at the column's edge, and the button is under the rows and opens
+    /// the settings by a click and by its key.
+    #[gpui::test]
+    fn the_button_has_the_foot_and_the_head_its_line(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yard", |cx| {
+            view.read_with(cx, |v, _| v.model.is_some())
+        });
+        // The narrowest window the application opens (main.rs).
+        cx.simulate_resize(gpui::size(px(560.), px(360.)));
+        let head = bounds_of(cx, "which yard");
+        let rows = bounds_of(cx, "rows");
+        let control = bounds_of(cx, "settings");
+        assert!(
+            head.bottom() <= control.top(),
+            "the head's line shares a row with the button: {head:?} {control:?}"
+        );
+        assert!(
+            rows.bottom() <= control.top()
+                && rows.left() <= control.left()
+                && control.right() <= rows.right(),
+            "the button is not at the foot of the column: {rows:?} {control:?}"
+        );
+        // The line has the column's width: it ends at the column's edge,
+        // short of the head's own padding only.
+        let rem = settings_of(&view, cx).rem();
+        assert!(
+            (head.right() - (rows.right() - rem * 0.75)).abs() < px(1.),
+            "the head's line ends before the column's edge: {head:?} {rows:?}"
+        );
+        // Whole: the line as shaped fits where it is drawn. Shaped as the
+        // window shapes it (place()).
+        let line = view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            format!("{} · {}", model.me(), v.which_yard_short())
+        });
+        let width = cx.update(|window, _| {
+            let run = gpui::TextRun {
+                len: line.len(),
+                font: window.text_style().font(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_line(line.clone().into(), rem * 0.875, &[run], None)
+                .width
+        });
+        assert!(
+            width <= head.size.width,
+            "at the narrowest window the head's line is cut: {line:?} is {width:?} in {head:?}"
+        );
+        // The button opens the settings, and its key shuts them again.
+        click_on(cx, "settings");
+        assert!(settings_open(&view, cx));
+        cx.simulate_keystrokes("secondary-,");
+        assert!(!settings_open(&view, cx));
     }
 
     /// A yard at its listener, told from `a_yard_of_jo` by its mail.
