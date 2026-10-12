@@ -13,13 +13,14 @@ use std::ops::Range;
 
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, FontStyle,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Style,
-    StyledText, TextLayout, TextRun, TextStyle, TextStyleRefinement, UnderlineStyle, Window, fill,
-    point, px, rems,
+    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity,
+    FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, SharedString, Style, StyledText, TextLayout, TextRun, TextStyle, TextStyleRefinement,
+    UnderlineStyle, Window, fill, point, px, rems, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -31,7 +32,19 @@ use crate::theme::Palette;
 #[derive(Default)]
 pub struct Selection {
     at: Option<Selected>,
+    /// The block whose copy control reads "copied": the last block copied,
+    /// by text key and block, until it reads "copy" again.
+    copied: Option<(u64, usize)>,
+    /// Which wait for "copied" to end is the current one: an older timer
+    /// ends nothing.
+    copied_generation: u64,
+    /// Where each text's copy controls were last drawn, by text key and
+    /// block: clicks there copy and select nothing.
+    chips: Vec<(u64, Chips)>,
 }
+
+/// Where the copy controls of one text were last drawn, by block.
+type Chips = Vec<(usize, Bounds<Pixels>)>;
 
 struct Selected {
     /// The text it is in, and that text as it was when it was pressed on.
@@ -152,6 +165,65 @@ impl Selection {
         if self.at.as_ref().is_some_and(|at| at.key == key) {
             self.clear(cx);
         }
+    }
+
+    /// The block of the text `key` whose copy control reads "copied", if
+    /// one still does.
+    #[cfg(test)]
+    pub fn copied_in(&self, key: u64) -> Option<usize> {
+        self.copied
+            .filter(|(at, _)| *at == key)
+            .map(|(_, block)| block)
+    }
+
+    /// Where the copy controls of the text `key` were last drawn, by
+    /// block.
+    #[cfg(test)]
+    pub fn chips_in(&self, key: u64) -> Chips {
+        self.chips
+            .iter()
+            .find(|(at, _)| *at == key)
+            .map(|(_, chips)| chips.clone())
+            .unwrap_or_default()
+    }
+
+    /// The copy control of the block `block` of the text `key` was
+    /// clicked: it reads "copied" for a short while, then "copy" again.
+    fn copied_block(&mut self, key: u64, block: usize, cx: &mut Context<Self>) {
+        self.copied_generation += 1;
+        let generation = self.copied_generation;
+        self.copied = Some((key, block));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FOR).await;
+            this.update(cx, |selection, cx| {
+                if selection.copied_generation == generation {
+                    selection.copied = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The copy controls of the text `key` stand at `chips`: clicks there
+    /// copy. Noted while painting, so it notifies nothing.
+    fn note_chips(&mut self, key: u64, chips: Chips) {
+        match self.chips.iter_mut().find(|(at, _)| *at == key) {
+            Some((_, at)) => *at = chips,
+            None => self.chips.push((key, chips)),
+        }
+    }
+
+    /// The text and block whose copy control `position` is on, if any.
+    fn chip_at(&self, position: Point<Pixels>) -> Option<(u64, usize)> {
+        self.chips.iter().find_map(|(key, chips)| {
+            chips
+                .iter()
+                .find(|(_, chip)| chip.contains(&position))
+                .map(|(block, _)| (*key, *block))
+        })
     }
 }
 
@@ -275,6 +347,14 @@ const NEAR: f32 = 0.3;
 /// code is wrapped and not scrolled, and the mark says the break is not one
 /// of the code's own.
 const WRAPPED: &str = "↪";
+/// How far the copy control of a code block stands in from the top right
+/// of its ground, and how large it is, in rems: room for "copied" at any
+/// text size.
+const COPY_INSET: f32 = 0.25;
+const COPY_WIDTH: f32 = 4.;
+const COPY_HEIGHT: f32 = 1.5;
+/// How long a copy control reads "copied" after it was clicked.
+const COPIED_FOR: Duration = Duration::from_secs(2);
 
 /// A monospaced face this machine has, for code: the first of these.
 const MONO: [&str; 7] = [
@@ -434,11 +514,29 @@ fn wrapped_rows(layout: &TextLayout, text: &str) -> Vec<Point<Pixels>> {
     rows
 }
 
+/// The copy control of a code block: a fixed-size chip at the top right
+/// of its ground. Fixed so a click lands where the control was drawn,
+/// whatever it reads.
+fn copy_chip(frame: Bounds<Pixels>, rem: Pixels) -> Bounds<Pixels> {
+    let chip = size(rem * COPY_WIDTH, rem * COPY_HEIGHT);
+    Bounds::new(
+        point(
+            frame.right() - rem * COPY_INSET - chip.width,
+            frame.top() + rem * COPY_INSET,
+        ),
+        chip,
+    )
+}
+
 /// The blocks of a text where they are drawn: what the mouse goes by.
 #[derive(Clone)]
 struct Drawn {
     blocks: Rc<[Shown]>,
     layouts: Rc<[TextLayout]>,
+    /// Where each block's ground is drawn.
+    frames: Rc<[Bounds<Pixels>]>,
+    /// The copy control of each code block, by block.
+    chips: Rc<[(usize, Bounds<Pixels>)]>,
 }
 
 impl Drawn {
@@ -469,6 +567,22 @@ impl Drawn {
         let index = self.layouts[ix].index_for_position(position).ok()?;
         let link = shown.links.iter().find(|link| link.contains(&index))?;
         Some(shown.text[link.clone()].to_string().into())
+    }
+
+    /// The code block the pointer is over, if it is over one's ground:
+    /// its copy control is drawn.
+    fn hovered_code(&self, position: Point<Pixels>) -> Option<usize> {
+        self.chips
+            .iter()
+            .find_map(|(ix, _)| self.frames[*ix].contains(&position).then_some(*ix))
+    }
+
+    /// The code block whose copy control the pointer is on, if any.
+    fn copy_at(&self, position: Point<Pixels>) -> Option<usize> {
+        self.chips
+            .iter()
+            .find(|(_, chip)| chip.contains(&position))
+            .map(|(ix, _)| *ix)
     }
 }
 
@@ -587,6 +701,7 @@ impl Element for Text {
         let palette = Palette::now(window, cx);
         let (base, rem) = (window.text_style(), window.rem_size());
         let size = base.font_size.to_pixels(rem);
+        let key = self.key;
         // What stands beside a block's text and is no part of it: it is
         // not selected, and a copy has what was written there.
         let beside = |text: &'static str, color: gpui::Rgba, window: &mut Window| {
@@ -596,6 +711,26 @@ impl Element for Text {
                 .text_system()
                 .shape_line(text.into(), size, &[run], None)
         };
+        let drawn = Drawn {
+            blocks: self.blocks.clone(),
+            layouts: laid
+                .iter()
+                .map(|laid| laid.styled.layout().clone())
+                .collect(),
+            frames: laid.iter().map(|laid| laid.bounds).collect(),
+            chips: laid
+                .iter()
+                .zip(self.blocks.iter())
+                .enumerate()
+                .filter(|(_, (_, shown))| shown.block.kind == Kind::Code)
+                .map(|(ix, (laid, _))| (ix, copy_chip(laid.bounds, rem)))
+                .collect(),
+        };
+        // Where the copy controls stand, for clicks anywhere in the talk:
+        // a click on one copies and selects nothing, in any text.
+        self.selection.update(cx, |selection, _| {
+            selection.note_chips(key, drawn.chips.to_vec())
+        });
         for (laid, shown) in laid.iter_mut().zip(self.blocks.iter()) {
             let layout = laid.styled.layout().clone();
             let text = layout.bounds();
@@ -628,13 +763,38 @@ impl Element for Text {
                 .paint(None, None, text, &mut (), &mut (), window, cx);
         }
 
-        let drawn = Drawn {
-            blocks: self.blocks.clone(),
-            layouts: laid
-                .iter()
-                .map(|laid| laid.styled.layout().clone())
-                .collect(),
-        };
+        // The copy control of a code block shows while the pointer is over
+        // the block, and after a click reads "copied" for a short while.
+        let copied = self.selection.read(cx).copied;
+        let hovered = hitbox
+            .is_hovered(window)
+            .then(|| drawn.hovered_code(window.mouse_position()))
+            .flatten();
+        for (ix, chip) in drawn.chips.iter() {
+            let just_copied = copied == Some((key, *ix));
+            if Some(*ix) != hovered && !just_copied {
+                continue;
+            }
+            let label = if just_copied { "copied" } else { "copy" };
+            window.paint_quad(fill(*chip, palette.side).corner_radii(rem * 0.25));
+            let mut run = base.to_run(label.len());
+            let color = if just_copied {
+                palette.accent
+            } else {
+                palette.faint
+            };
+            run.color = color.into();
+            let shaped = window
+                .text_system()
+                .shape_line(label.into(), size, &[run], None);
+            let height = drawn.layouts[*ix].line_height();
+            let at = point(
+                chip.left() + (chip.size.width - shaped.width) / 2.,
+                chip.top() + (chip.size.height - height) / 2.,
+            );
+            let _ = shaped.paint(at, height, window, cx);
+        }
+
         // The link under the pointer, where the text is not covered.
         let over = {
             let (drawn, hitbox) = (drawn.clone(), hitbox.clone());
@@ -646,14 +806,14 @@ impl Element for Text {
             }
         };
         let on_link = over(window.mouse_position(), window).is_some();
-        let cursor = if on_link {
+        let on_copy = drawn.copy_at(window.mouse_position()).is_some();
+        let cursor = if on_link || on_copy {
             CursorStyle::PointingHand
         } else {
             CursorStyle::IBeam
         };
         window.set_cursor_style(cursor, hitbox);
 
-        let key = self.key;
         window.on_mouse_event({
             let (selection, text) = (self.selection.clone(), self.text.clone());
             let (drawn, hitbox, over) = (drawn.clone(), hitbox.clone(), over.clone());
@@ -662,12 +822,24 @@ impl Element for Text {
                     return;
                 }
                 if hitbox.is_hovered(window) {
+                    // A click on a copy control copies the block exactly
+                    // as it was written, and starts no selection.
+                    if let Some(block) = drawn.copy_at(event.position) {
+                        if let Some(text) = drawn.blocks[block].block.copy_text() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                            selection
+                                .update(cx, |selection, cx| selection.copied_block(key, block, cx));
+                        }
+                        return;
+                    }
                     let place = drawn.place_at(event.position);
                     let link = over(event.position, window);
                     selection.update(cx, |selection, cx| {
                         selection.press(key, text.clone(), place, link, event.click_count, cx)
                     });
-                } else {
+                } else if selection.read(cx).chip_at(event.position).is_none() {
+                    // A click on another text's copy control is no press
+                    // outside either: it changes no selection.
                     selection.update(cx, |selection, cx| selection.pressed_outside(key, cx));
                 }
             }
@@ -675,14 +847,23 @@ impl Element for Text {
         // A drag goes on outside the text, so these are the window's events
         // and not those of the place the text is drawn in.
         window.on_mouse_event({
-            let (selection, drawn, over) = (self.selection.clone(), drawn, over.clone());
+            let (selection, drawn, hitbox, over) =
+                (self.selection.clone(), drawn, hitbox.clone(), over.clone());
             move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                // The pointer came onto a link or left it: the cursor is
-                // set when the text is drawn.
-                if over(event.position, window).is_some() != on_link {
+                // The pointer came onto a link, a code block or a copy
+                // control, or left one: the cursor and the controls are set
+                // when the text is drawn.
+                let hovered_now = hitbox
+                    .is_hovered(window)
+                    .then(|| drawn.hovered_code(event.position))
+                    .flatten();
+                if over(event.position, window).is_some() != on_link
+                    || hovered_now != hovered
+                    || drawn.copy_at(event.position).is_some() != on_copy
+                {
                     window.refresh();
                 }
                 if !selection.read(cx).selecting(key) {
@@ -881,6 +1062,17 @@ mod tests {
         let all = runs(&block, &base, &palette, None, &[], None);
         assert_eq!(all[1].font, base.to_run(0).font);
         assert_eq!(all[1].background_color, quiet);
+    }
+
+    #[test]
+    fn a_code_block_s_copy_control_is_a_chip_at_its_ground_s_top_right() {
+        let frame = Bounds::new(point(px(10.), px(20.)), size(px(300.), px(100.)));
+        let chip = copy_chip(frame, px(16.));
+        // Fixed size, whatever the control reads, and inside the ground.
+        assert_eq!(chip.size, size(px(64.), px(24.)));
+        assert_eq!(chip.origin, point(px(10. + 300. - 4. - 64.), px(20. + 4.)));
+        assert!(frame.contains(&chip.origin));
+        assert!(frame.contains(&chip.bottom_right()));
     }
 
     #[test]

@@ -4318,6 +4318,71 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_code_block_s_copy_control_copies_it_exactly_and_changes_no_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let short = "```\ncargo test\n```";
+        // What the window holds has no tab: the model renders one as a
+        // space before the message is drawn, so the block keeps spaces.
+        let code = format!(
+            "  deploy --all\n    echo done\n\n{}",
+            "echo a very long line that wraps in the window ".repeat(20)
+        );
+        let long = format!("```sh\n{code}\n```");
+        let two = "First:\n```\none\n```\nSecond:\n```\ntwo\n```";
+        mails(&yard, &[short, &long, two]);
+        let (view, cx) = opened(&yard, &[short, &long, two], cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+        // The long line wraps: one block, much higher than the short one's.
+        let (one, wrapped) = (text_bounds(cx, 12), text_bounds(cx, 13));
+        assert!(wrapped.size.height > one.size.height * 2., "{wrapped:?}");
+
+        // Something selected in another message: a click on a copy control
+        // changes no selection, anywhere.
+        drag(
+            cx,
+            gpui::point(one.left(), one.top() + px(2.)),
+            gpui::point(one.right() - px(2.), one.bottom() - px(2.)),
+        );
+        assert_eq!(selected(&view, cx).as_deref(), Some("cargo test"));
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+
+        // Each block's control copies its own block byte for byte: the
+        // indentation, the empty line and the long wrapped line, without
+        // the fences or the language word.
+        let chip = |cx: &mut VisualTestContext, seq: u64, ix: usize| {
+            view.read_with(cx, |v, cx| v.selection.read(cx).chips_in(seq))[ix]
+                .1
+                .center()
+        };
+        let at = chip(cx, 13, 0);
+        cx.simulate_click(at, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(code.as_str()));
+        assert_eq!(selected(&view, cx).as_deref(), Some("cargo test"));
+        let at = chip(cx, 14, 1);
+        cx.simulate_click(at, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some("two"));
+        assert_eq!(selected(&view, cx).as_deref(), Some("cargo test"));
+        let at = chip(cx, 14, 0);
+        cx.simulate_click(at, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some("one"));
+
+        // The control that was clicked reads "copied", then "copy" again:
+        // only the last one does.
+        let copied = |cx: &mut VisualTestContext, seq: u64| {
+            view.read_with(cx, |v, cx| v.selection.read(cx).copied_in(seq))
+        };
+        assert_eq!(copied(cx, 14), Some(1));
+        assert_eq!(copied(cx, 13), None);
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        assert_eq!(copied(cx, 14), None);
+    }
+
+    #[gpui::test]
     fn a_selection_in_a_second_message_drops_the_first(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);

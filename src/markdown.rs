@@ -77,6 +77,13 @@ impl Block {
         before..after
     }
 
+    /// What a copy of this block puts on the clipboard: a code block's
+    /// is the source between the fences, byte for byte, and no other block
+    /// has a copy control.
+    pub fn copy_text(&self) -> Option<&str> {
+        matches!(self.kind, Kind::Code).then_some(&self.text)
+    }
+
     /// What of the drawn text the stretch `source` of the source covers.
     pub fn shown(&self, source: Range<usize>) -> Range<usize> {
         let mut shown: Option<Range<usize>> = None;
@@ -559,6 +566,23 @@ mod tests {
         );
         // An empty one is still a block.
         assert_eq!(drawn("```\n```"), [(Kind::Code, String::new())]);
+    }
+
+    #[test]
+    fn a_copy_of_a_code_block_is_the_source_between_the_fences() {
+        let code = format!(
+            "  indented\n\ttabbed\n\n{}",
+            "echo a very long line that wraps in the window ".repeat(20)
+        );
+        let src = format!("Run:\n```sh\n{code}\n```\nThen wait.");
+        let all = blocks(&src);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[1].copy_text(), Some(code.as_str()));
+        // The fences and the language word are not in it, and no other
+        // block has a copy control.
+        assert_eq!(all[0].copy_text(), None);
+        assert_eq!(all[2].copy_text(), None);
+        assert!(!all[1].copy_text().unwrap().contains("```"));
     }
 
     #[test]
