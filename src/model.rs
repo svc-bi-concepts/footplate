@@ -24,6 +24,10 @@ pub const MAIL_BYTES: usize = 4096;
 /// The prefix of a bead label that makes it a topic; shown without it.
 const TOPIC_PREFIX: &str = "topic:";
 
+/// The option yardr adds to every ask with options: picking it leaves the
+/// question to the asker.
+const YOU_DECIDE: &str = "You decide";
+
 /// Where asks with no topic stand.
 pub const EVERYTHING_ELSE: &str = "Everything else";
 
@@ -273,6 +277,10 @@ pub struct DecidedDetail {
     pub asker: String,
     /// `answered`, `put aside` or `declined`.
     pub state: String,
+    /// What was decided, in plain words with who and when.
+    pub state_line: String,
+    /// The picked option's number, 0 on a words answer and elsewhere.
+    pub picked: u64,
     /// The picked option's label, empty on a words answer and elsewhere.
     pub pick: String,
     pub words: String,
@@ -673,7 +681,15 @@ impl Model {
 
     /// One dealt with, as its card: the pick with the same options to pick
     /// again from there.
-    pub fn decided_detail(&self, bead: &str, ask: u64) -> Option<DecidedDetail> {
+    pub fn decided_detail<Tz: TimeZone>(
+        &self,
+        bead: &str,
+        ask: u64,
+        zone: &Tz,
+    ) -> Option<DecidedDetail>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
         let a = self
             .decided
             .iter()
@@ -701,6 +717,8 @@ impl Model {
             question: plain(&a.question),
             asker: a.asker.clone(),
             state: a.state.clone(),
+            state_line: decided_state(a, zone),
+            picked: a.option,
             pick: a.option_label.clone(),
             words: plain(&a.words),
             return_at: a.return_at.clone(),
@@ -811,7 +829,9 @@ impl Model {
 
     /// What Enter sends for the ask with the line's words: the option
     /// chosen, or the recommended one when none is, or words alone. `None`
-    /// sends nothing: neither an option, a recommendation, nor words.
+    /// sends nothing: neither an option, a recommendation, nor words. One
+    /// dealt with takes only a new pick: nothing is chosen by default, and
+    /// Enter alone sends nothing, not even the recommendation.
     pub fn answer_action(&self, bead: &str, ask: u64, words: &str) -> Option<AnswerAction> {
         let full = self.bead_ask(bead, ask)?;
         let words = words.trim().to_string();
@@ -829,6 +849,9 @@ impl Model {
                 option: chosen,
                 words,
             });
+        }
+        if self.decided.iter().any(|a| a.bead == bead && a.ask == ask) {
+            return None;
         }
         if full.recommend != 0 {
             return Some(AnswerAction::Answer {
@@ -1522,6 +1545,19 @@ where
     }
 }
 
+/// The time of day of a time (RFC 3339, as the yard gives it), for the
+/// decided state line: `11:07`, in the zone of the person reading.
+/// Nothing for a time that cannot be read.
+pub fn daytime<Tz: TimeZone>(at: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match DateTime::parse_from_rfc3339(at) {
+        Ok(t) => t.with_timezone(zone).format("%H:%M").to_string(),
+        Err(_) => String::new(),
+    }
+}
+
 /// A topic as the decisions show it: the label without its `topic:`
 /// prefix, or "Everything else" for an ask with none.
 fn display_topic(topic: &str) -> String {
@@ -1588,6 +1624,35 @@ fn decided_sub(ask: &DecidedAsk) -> String {
         }
     }
     sub
+}
+
+/// What one dealt with did with it, in plain words with who and when:
+/// `you picked 1 · Move them now · 11:07`, `put aside, back 10-11 09:30`,
+/// `you declined: <words>`, `left to <asker>`. The when of a pick is the
+/// ask's `since`: the yard serves no time of its own for an answer, so an
+/// ask decided long after it arrived shows when it arrived.
+fn decided_state<Tz: TimeZone>(ask: &DecidedAsk, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match ask.state.as_str() {
+        "answered" if ask.option == 0 => {
+            format!("you answered: {}", plain(&ask.words))
+        }
+        "answered" if ask.option_label == YOU_DECIDE => {
+            format!("left to {}", ask.asker)
+        }
+        "answered" => format!(
+            "you picked {} · {} · {}",
+            ask.option,
+            plain(&ask.option_label),
+            daytime(&ask.since, zone)
+        ),
+        "put aside" if ask.return_at.is_empty() => "put aside".to_string(),
+        "put aside" => format!("put aside, back {}", clock(&ask.return_at, zone)),
+        "declined" => format!("you declined: {}", plain(&ask.words)),
+        _ => format!("{} · {}", ask.asker, plain(&ask.state)),
+    }
 }
 
 /// An ask's options as the card numbers them, from 1, `you decide` last
@@ -2829,11 +2894,13 @@ mod tests {
             Some(&Selected::Decided("yd-links".into(), 12))
         );
         // The open dealt with shows its pick.
-        let detail = m.decided_detail("yd-links", 6).unwrap();
+        let detail = m.decided_detail("yd-links", 6, &chrono::Utc).unwrap();
         assert_eq!(detail.question, "Send them to build?");
         assert_eq!(detail.state, "answered");
+        assert_eq!(detail.picked, 1);
         assert_eq!(detail.pick, "Send them");
         assert_eq!(detail.words, "tonight");
+        assert_eq!(detail.state_line, "you picked 1 · Send them · 09:30");
     }
 
     #[test]
@@ -3226,10 +3293,12 @@ mod tests {
         m.select(Selected::Decided("yardr-n8ta".into(), 3));
         m.picked("yardr-n8ta", 3, 2, "after all, Friday");
         assert_eq!(m.decided_count(), 1);
-        let detail = m.decided_detail("yardr-n8ta", 3).unwrap();
+        let detail = m.decided_detail("yardr-n8ta", 3, &chrono::Utc).unwrap();
         assert_eq!(detail.state, "answered");
+        assert_eq!(detail.picked, 2);
         assert_eq!(detail.pick, "After Friday");
         assert_eq!(detail.words, "after all, Friday");
+        assert_eq!(detail.state_line, "you picked 2 · After Friday · 10:00");
         assert_eq!(
             m.selected(),
             Some(&Selected::Decided("yardr-n8ta".into(), 3))
@@ -3250,10 +3319,113 @@ mod tests {
         assert_eq!(m.decisions_count(), 3);
         m.declined("yardr-3msx", 4, "not mine to take");
         assert_eq!(m.decisions_count(), 2);
-        let detail = m.decided_detail("yardr-3msx", 4).unwrap();
+        let detail = m.decided_detail("yardr-3msx", 4, &chrono::Utc).unwrap();
         assert_eq!(detail.state, "declined");
         assert_eq!(detail.words, "not mine to take");
         assert_eq!(detail.pick, "");
+        assert_eq!(detail.state_line, "you declined: not mine to take");
+        // Put aside, the yard has not said when it comes back yet.
+        let detail = m.decided_detail("yardr-n8ta", 3, &chrono::Utc).unwrap();
+        assert_eq!(detail.picked, 0);
+        assert_eq!(detail.state_line, "put aside");
+    }
+
+    #[test]
+    fn the_decided_state_line_says_what_was_decided_with_who_and_when() {
+        let answered = DecidedAsk {
+            since: "2026-10-10T11:07:00Z".into(),
+            ..decided_ask(
+                "yd-links",
+                6,
+                "Move them now?",
+                "answered",
+                "Move them now",
+                "",
+                "",
+            )
+        };
+        let answered_words = DecidedAsk {
+            since: "2026-10-10T11:07:00Z".into(),
+            option: 2,
+            ..decided_ask(
+                "yd-links",
+                7,
+                "Move them now?",
+                "answered",
+                "After Friday",
+                "go slow",
+                "",
+            )
+        };
+        let aside = decided_ask(
+            "yd-links",
+            8,
+            "Move them now?",
+            "put aside",
+            "",
+            "",
+            "2026-10-11T09:30:00Z",
+        );
+        let declined = decided_ask(
+            "yd-links",
+            9,
+            "Move them now?",
+            "declined",
+            "",
+            "not mine",
+            "",
+        );
+        let left = DecidedAsk {
+            option: 4,
+            ..decided_ask(
+                "yd-links",
+                10,
+                "Move them now?",
+                "answered",
+                "You decide",
+                "",
+                "",
+            )
+        };
+        let words = decided_ask("yd-greet", 11, "Who greets?", "answered", "", "warmly", "");
+        let mut state = yard(&[]);
+        state.asks.decided = vec![answered, answered_words, aside, declined, left, words];
+        let (m, _) = Model::new(state, None);
+        let line = |ask: u64| {
+            m.decided_detail("yd-links", ask, &chrono::Utc)
+                .or_else(|| m.decided_detail("yd-greet", ask, &chrono::Utc))
+                .unwrap()
+                .state_line
+        };
+        assert_eq!(line(6), "you picked 1 · Move them now · 11:07");
+        // The words stand under the picked option, not in the line.
+        assert_eq!(line(7), "you picked 2 · After Friday · 11:07");
+        assert_eq!(line(8), "put aside, back 10-11 09:30");
+        assert_eq!(line(9), "you declined: not mine");
+        assert_eq!(line(10), "left to yardmaster");
+        assert_eq!(line(11), "you answered: warmly");
+        // The when of a pick is the ask's since: the yard serves no time of
+        // its own for an answer.
+        assert_eq!(daytime("2026-10-10T11:07:00Z", &chrono::Utc), "11:07");
+        assert_eq!(daytime("noon", &chrono::Utc), "");
+    }
+
+    #[test]
+    fn enter_on_a_dealt_with_sends_only_a_new_pick() {
+        let mut m = evening_with_links();
+        m.picked("yardr-n8ta", 3, 1, "");
+        // Nothing chosen: not even the recommendation, and no note.
+        assert_eq!(m.answer_action("yardr-n8ta", 3, ""), None);
+        assert_eq!(m.answer_action("yardr-n8ta", 3, "second thoughts"), None);
+        // A number chooses the new pick, with the line's words.
+        m.choose("yardr-n8ta", 3, 2);
+        assert_eq!(
+            m.answer_action("yardr-n8ta", 3, "after all, Friday"),
+            Some(AnswerAction::Answer {
+                option: 2,
+                words: "after all, Friday".into()
+            })
+        );
     }
 
     #[test]

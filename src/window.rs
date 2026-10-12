@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::thread;
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
-    ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString, Window, actions,
-    div, img, prelude::*, px,
+    App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString, Window,
+    actions, div, img, prelude::*, px,
 };
 
 use crate::api::{self, BlobRef, Client};
@@ -136,11 +136,11 @@ fn divider(palette: Palette) -> impl IntoElement {
 }
 
 /// The keys of an open card. Enter with nothing chosen and a recommendation
-/// picks it, and says so.
+/// picks it, and says so. Later and Decline are buttons beside the send
+/// button, so their keys are not listed here; they still work.
 fn decision_keys(ask: &DecisionAsk) -> String {
     if ask.options.is_empty() {
-        return "words wanted · i words · enter sends the answer · x later · d decline · e expand"
-            .to_string();
+        return "words wanted · i words · enter sends the answer · e expand".to_string();
     }
     let n = ask.options.len();
     let enter = if ask.chosen != 0 {
@@ -150,23 +150,57 @@ fn decision_keys(ask: &DecisionAsk) -> String {
     } else {
         "enter sends words as note".to_string()
     };
-    format!("{enter} · 1-{n} pick · ↑↓ choose · i words · x later · d decline · e expand")
+    format!("{enter} · 1-{n} pick · ↑↓ choose · i words · e expand")
 }
 
-/// The keys of a dealt with: the same pick again, and the same full bead.
+/// The keys of a dealt with: nothing is chosen by default and Enter alone
+/// sends nothing; a number then Enter replaces the pick.
 fn decided_keys(detail: &DecidedDetail) -> String {
     if detail.options.is_empty() {
-        return "words wanted · i words · enter sends · e expand".to_string();
+        return "i words · enter sends · e expand".to_string();
     }
-    let n = detail.options.len();
-    let enter = if detail.chosen != 0 {
-        format!("enter picks {}", detail.chosen)
-    } else if detail.recommend != 0 {
-        format!("enter picks {}", detail.recommend)
-    } else {
-        "enter sends".to_string()
-    };
-    format!("{enter} · 1-{n} pick · ↑↓ choose · i words · e expand")
+    format!("1-{} change your pick · e expand", detail.options.len())
+}
+
+/// The button that sends the chosen option with the line's words, exactly
+/// as Enter does: `Send: 1 · Move them now` on an open ask, `Change to:
+/// 2 · …` on a dealt with. The card shows it only once an option is
+/// chosen: never a button that sends the recommendation unasked.
+fn send_button(
+    bead: &str,
+    ask: u64,
+    text: String,
+    palette: Palette,
+    cx: &mut Context<Footplate>,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("send {bead} {ask}")))
+        .debug_selector(|| format!("send {bead} {ask}"))
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .bg(palette.accent)
+        .text_color(palette.on_accent)
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| this.decide(cx)))
+        .child(text)
+}
+
+/// A small button beside the send button, without what it does: Later and
+/// Decline, with their keys.
+fn small_button(text: String, palette: Palette) -> Div {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(palette.line)
+        .text_sm()
+        .text_color(palette.faint)
+        .cursor_pointer()
+        .hover(|style| style.bg(palette.hover))
+        .child(text)
 }
 
 /// The keys of the window, as `yardr chat` has them, with the card's:
@@ -478,7 +512,7 @@ impl Footplate {
                 .and_then(|d| d.asks.into_iter().find(|a| a.current))
                 .is_some_and(|a| a.options.is_empty()),
             Some(Selected::Decided(bead, ask)) => model
-                .decided_detail(bead, *ask)
+                .decided_detail(bead, *ask, &chrono::Local)
                 .is_some_and(|d| d.options.is_empty()),
             _ => false,
         }
@@ -991,7 +1025,12 @@ impl Footplate {
             self.change(cx, |m| m.dismiss());
             return;
         }
-        // Later takes no words: only an open ask, never one dealt with.
+        self.later_now(cx);
+    }
+
+    /// Puts the open card's current ask aside: the `x` key and the Later
+    /// button. Later takes no words: only an open ask, never one dealt with.
+    fn later_now(&mut self, cx: &mut Context<Self>) {
         let current = self.model.as_ref().and_then(|m| m.current_ask());
         if let Some((bead, ask)) = current {
             self.send_later(bead, ask, cx);
@@ -1026,6 +1065,12 @@ impl Footplate {
     /// "you decide". With words already typed they go at once; else the
     /// next Enter sends what is typed, and esc leaves it.
     fn decline(&mut self, _: &Decline, window: &mut Window, cx: &mut Context<Self>) {
+        self.decline_now(window, cx);
+    }
+
+    /// Declines the open card's current ask: the `d` key and the Decline
+    /// button.
+    fn decline_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.model.as_ref().and_then(|m| m.current_ask());
         let Some((bead, ask)) = current else {
             return;
@@ -1087,7 +1132,9 @@ impl Footplate {
                         .decision_detail(b, &now)
                         .and_then(|d| d.asks.into_iter().find(|a| a.ask == ask))
                         .map(|a| a.chosen),
-                    Some(Selected::Decided(b, a)) => m.decided_detail(b, *a).map(|d| d.chosen),
+                    Some(Selected::Decided(b, a)) => {
+                        m.decided_detail(b, *a, &chrono::Local).map(|d| d.chosen)
+                    }
                     _ => None,
                 }
             })
@@ -1888,7 +1935,8 @@ impl Footplate {
     /// One card of an open bead, in the order the bead asks for: the
     /// question; the asker and the recommendation; the context; the numbered
     /// options; the recommended one with its why; a line for words; the
-    /// keys. Only the current one takes the keys and the line.
+    /// send, later and decline buttons; the keys. Only the current one takes
+    /// the keys, the line and the buttons.
     fn decision_card(
         &self,
         detail: &DecisionDetail,
@@ -1962,6 +2010,7 @@ impl Footplate {
                 card = card.child(
                     div()
                         .id(SharedString::from(format!("pick {bead_id} {ask_seq} {n}")))
+                        .debug_selector(|| format!("pick {bead_id} {ask_seq} {n}"))
                         .cursor_pointer()
                         .rounded_md()
                         .when(n == ask.chosen, |el| el.bg(palette.open))
@@ -2006,6 +2055,36 @@ impl Footplate {
                         window.prevent_default();
                     })
                     .child(self.line.clone()),
+            );
+            // Under it the send button once an option is chosen, with Later
+            // and Decline beside it.
+            let send = ask
+                .options
+                .iter()
+                .find(|o| o.number == ask.chosen)
+                .map(|o| format!("Send: {} · {}", o.number, o.label));
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(send, |el, text| {
+                        el.child(send_button(&bead_id, ask_seq, text, palette, cx))
+                    })
+                    .child(
+                        small_button("Later (x)".to_string(), palette)
+                            .id(SharedString::from(format!("later {bead_id} {ask_seq}")))
+                            .debug_selector(|| format!("later {bead_id} {ask_seq}"))
+                            .on_click(cx.listener(|this, _, _, cx| this.later_now(cx))),
+                    )
+                    .child(
+                        small_button("Decline (d)".to_string(), palette)
+                            .id(SharedString::from(format!("decline {bead_id} {ask_seq}")))
+                            .debug_selector(|| format!("decline {bead_id} {ask_seq}"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.decline_now(window, cx)),
+                            ),
+                    ),
             );
             // The keys. Enter with nothing chosen and a recommendation picks
             // it, and says so.
@@ -2055,8 +2134,9 @@ impl Footplate {
         card
     }
 
-    /// One dealt with: the pick with the same options to pick again from
-    /// there, and the same full bead one key away.
+    /// One dealt with: what was decided, in plain words with who and when;
+    /// the picked option marked, with its words under it; the same options
+    /// to pick again from there; and the same full bead one key away.
     fn talk_decided(
         &self,
         model: &Model,
@@ -2066,7 +2146,7 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
-        let Some(detail) = model.decided_detail(bead, ask) else {
+        let Some(detail) = model.decided_detail(bead, ask, &chrono::Local) else {
             return pane
                 .items_center()
                 .justify_center()
@@ -2100,7 +2180,7 @@ impl Footplate {
             .flex()
             .flex_col()
             .gap_2();
-        // The question, and whose it was with what was decided.
+        // The question, and what was decided with who and when.
         body = body
             .child(
                 div()
@@ -2109,22 +2189,9 @@ impl Footplate {
             )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child(format!("{} · {}", detail.asker, detail.state)),
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(detail.state_line.clone()),
             );
-        if !detail.pick.is_empty() {
-            body = body.child(div().child(format!("picked: {}", detail.pick)));
-        }
-        if !detail.words.is_empty() {
-            body = body.child(div().child(detail.words.clone()));
-        }
-        if !detail.return_at.is_empty() {
-            body = body.child(div().text_sm().text_color(palette.faint).child(format!(
-                "back {}",
-                model::clock(&detail.return_at, &chrono::Local)
-            )));
-        }
         if !model.has_bead(bead) {
             body = body.child(div().text_color(palette.faint).child("Reading the bead."));
         } else {
@@ -2132,30 +2199,29 @@ impl Footplate {
             for line in &detail.context {
                 body = body.child(div().child(line.clone()));
             }
-            if detail.options.is_empty() {
-                body = body.child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("words wanted"),
-                );
-            } else {
+            // An ask with no options shows none: the answer's words are in
+            // the state line, and nothing is wanted.
+            if !detail.options.is_empty() {
                 for option in &detail.options {
-                    let marker = if option.number == detail.chosen {
-                        "●"
-                    } else {
-                        "○"
-                    };
+                    // The circle marks the pick; a newly chosen option is
+                    // the highlighted one, and the button says what it sends.
+                    let picked = option.number == detail.picked;
+                    let marker = if picked { "●" } else { "○" };
                     let text = format!(
                         "{} {}. {} — {}",
                         marker, option.number, option.label, option.consequence
                     );
                     let n = option.number;
-                    let bead_click = bead.to_string();
                     body = body.child(
                         div()
                             .id(SharedString::from(format!("pick {bead} {ask} {n}")))
+                            .debug_selector(|| format!("pick {bead} {ask} {n}"))
                             .cursor_pointer()
                             .rounded_md()
+                            .when(picked, |el| {
+                                el.font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(palette.accent)
+                            })
                             .when(n == detail.chosen, |el| el.bg(palette.open))
                             .when(n != detail.chosen, |el| {
                                 el.hover(|style| style.bg(palette.hover))
@@ -2163,7 +2229,10 @@ impl Footplate {
                             .on_click(cx.listener(move |this, _, _, cx| this.pick(n, cx)))
                             .child(text),
                     );
-                    let _ = bead_click;
+                    // The words sent with the pick stand under it.
+                    if picked && !detail.words.is_empty() {
+                        body = body.child(div().child(detail.words.clone()));
+                    }
                 }
                 if detail.recommend != 0 {
                     body = body.child(
@@ -2189,6 +2258,17 @@ impl Footplate {
                     })
                     .child(self.line.clone()),
             );
+            // Under it the button that replaces the pick, once one is
+            // chosen.
+            if let Some(option) = detail.options.iter().find(|o| o.number == detail.chosen) {
+                body = body.child(send_button(
+                    bead,
+                    ask,
+                    format!("Change to: {} · {}", option.number, option.label),
+                    palette,
+                    cx,
+                ));
+            }
             body = body.child(
                 div()
                     .text_sm()
@@ -3536,5 +3616,448 @@ mod tests {
         cx.simulate_keystrokes("up");
         assert_eq!(chosen_of(&view, cx, "bead-a", 3), 3);
         assert_eq!(typed(&view, cx), "tonight?");
+    }
+
+    /// Clicks where `selector` is drawn.
+    fn click_on(cx: &mut VisualTestContext, selector: &str) {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        let bounds = cx
+            .debug_bounds(at)
+            .unwrap_or_else(|| panic!("nothing is drawn for {selector}"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    }
+
+    /// Whether `selector` is drawn.
+    fn drawn(cx: &mut VisualTestContext, selector: &str) -> bool {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        cx.debug_bounds(at).is_some()
+    }
+
+    /// Opens one dealt with: "Decided" unfolded, its row selected.
+    fn open_decided(view: &Entity<Footplate>, cx: &mut VisualTestContext, bead: &str, ask: u64) {
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| {
+                if !m.decided_expanded() {
+                    m.toggle_decided();
+                }
+                m.select(Selected::Decided(bead.into(), ask))
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    fn decided_detail_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        bead: &str,
+        ask: u64,
+    ) -> DecidedDetail {
+        view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decided_detail(bead, ask, &chrono::Utc)
+                .unwrap()
+        })
+    }
+
+    /// Six dealt with on one bead, asked by mayor at 11:07: answered,
+    /// answered with words, put aside, declined, left to the asker, and a
+    /// words answer. Ask 11's pick is `pick` with `label`.
+    fn asks_decided(pick: u64, label: &str) -> String {
+        json!({"result": {"open": [], "decided": [
+            {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+             "ask": 11, "question": "Switch my inbox to the 'attention' set of events?", "asker": "mayor",
+             "since": "2026-10-12T11:07:00Z", "state": "answered", "option": pick, "option_label": label},
+            {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+             "ask": 12, "question": "Switch the inbox now or after Friday?", "asker": "mayor",
+             "since": "2026-10-12T11:07:00Z", "state": "answered",
+             "option": 2, "option_label": "Add only the three", "words": "go slow"},
+            {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+             "ask": 13, "question": "Rebuild the index tonight?", "asker": "mayor",
+             "since": "2026-10-12T11:07:00Z", "state": "put aside",
+             "return_at": "2026-10-13T09:30:00Z"},
+            {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+             "ask": 14, "question": "Take the release train?", "asker": "mayor",
+             "since": "2026-10-12T11:07:00Z", "state": "declined", "words": "not mine"},
+            {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+             "ask": 15, "question": "Name the release?", "asker": "mayor",
+             "since": "2026-10-12T11:07:00Z", "state": "answered",
+             "option": 4, "option_label": "You decide"},
+            {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+             "ask": 16, "question": "Who greets the newcomer?", "asker": "mayor",
+             "since": "2026-10-12T11:07:00Z", "state": "answered", "words": "warmly"}
+        ]}})
+        .to_string()
+    }
+
+    fn attention_options() -> serde_json::Value {
+        json!([
+            {"label": "Switch to attention", "consequence": "I run 'yardr crew set mayor --on attention' now; takes effect at once"},
+            {"label": "Add only the three", "consequence": "keep my hand list and append the missing kinds"},
+            {"label": "Leave it", "consequence": "no change; doctor keeps flagging it"},
+            {"label": "You decide", "consequence": "leave it to mayor"}
+        ])
+    }
+
+    fn decided_bead_ask(ask: u64, question: &str, state: &str, options: bool) -> serde_json::Value {
+        let mut a = json!({
+            "ask": ask, "to": "jo", "asker": "mayor",
+            "since": "2026-10-12T11:07:00Z",
+            "question": question,
+            "context": ["My inbox listens to a hand-written list of event kinds."],
+            "state": state,
+        });
+        if options {
+            a["options"] = attention_options();
+            a["recommend"] = json!(1);
+            a["why"] = json!("it follows new kinds without hand edits");
+        } else {
+            a["options"] = json!([]);
+        }
+        a
+    }
+
+    fn bead_decided() -> String {
+        json!({"result": {
+            "id": "bead-d", "title": "Switch the inbox",
+            "body": "The body of bead-d.",
+            "stage": "new", "labels": ["topic:linear-out"],
+            "notes": [],
+            "asks": [
+                decided_bead_ask(11, "Switch my inbox to the 'attention' set of events?", "answered", true),
+                decided_bead_ask(12, "Switch the inbox now or after Friday?", "answered", true),
+                decided_bead_ask(13, "Rebuild the index tonight?", "put aside", true),
+                decided_bead_ask(14, "Take the release train?", "declined", true),
+                decided_bead_ask(15, "Name the release?", "answered", true),
+                decided_bead_ask(16, "Who greets the newcomer?", "answered", false),
+            ]
+        }})
+        .to_string()
+    }
+
+    #[gpui::test]
+    fn a_decided_card_shows_what_was_decided_and_a_new_pick_replaces_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
+        yard.answer("Bead", &bead_decided());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        // Nothing open: the yardmaster's conversation is, with the decided
+        // folded under the decisions.
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.decided_count(), 6);
+            assert!(!model.decided_expanded());
+        });
+
+        open_decided(&view, cx, "bead-d", 11);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-d"));
+
+        // Each state in plain words with who and when, and the pick.
+        let d = decided_detail_of(&view, cx, "bead-d", 11);
+        assert_eq!(d.picked, 1);
+        assert_eq!(d.words, "");
+        assert_eq!(d.state_line, "you picked 1 · Switch to attention · 11:07");
+        assert_eq!(d.chosen, 0);
+        assert_eq!(decided_keys(&d), "1-4 change your pick · e expand");
+
+        let d = decided_detail_of(&view, cx, "bead-d", 12);
+        assert_eq!(d.picked, 2);
+        assert_eq!(d.words, "go slow");
+        assert_eq!(d.state_line, "you picked 2 · Add only the three · 11:07");
+
+        let d = decided_detail_of(&view, cx, "bead-d", 13);
+        assert_eq!(d.picked, 0);
+        assert_eq!(d.state_line, "put aside, back 10-13 09:30");
+
+        let d = decided_detail_of(&view, cx, "bead-d", 14);
+        assert_eq!(d.state_line, "you declined: not mine");
+
+        let d = decided_detail_of(&view, cx, "bead-d", 15);
+        assert_eq!(d.picked, 4);
+        assert_eq!(d.state_line, "left to mayor");
+
+        // An ask with no options: the answer's words are the state line.
+        let d = decided_detail_of(&view, cx, "bead-d", 16);
+        assert_eq!(d.picked, 0);
+        assert_eq!(d.state_line, "you answered: warmly");
+        assert_eq!(decided_keys(&d), "i words · enter sends · e expand");
+
+        // The Decided rows keep showing the picks.
+        let subs: Vec<String> = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decided_rows()
+                .into_iter()
+                .map(|r| r.sub)
+                .collect()
+        });
+        assert_eq!(
+            subs,
+            [
+                "mayor · Switch to attention",
+                "mayor · Add only the three · go slow",
+                "mayor · put aside",
+                "mayor · declined · not mine",
+                "mayor · You decide",
+                "mayor · warmly",
+            ]
+        );
+
+        // The window draws every variant and stays.
+        for ask in [11, 12, 13, 14, 15, 16] {
+            open_decided(&view, cx, "bead-d", ask);
+        }
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        // On a decided ask nothing is chosen by default and Enter alone
+        // sends nothing: not the recommendation, and no note.
+        open_decided(&view, cx, "bead-d", 11);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<serde_json::Value>::new());
+        assert_eq!(yard.asked("AddNote"), Vec::<serde_json::Value>::new());
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("second thoughts");
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<serde_json::Value>::new());
+        assert_eq!(yard.asked("AddNote"), Vec::<serde_json::Value>::new());
+        // Esc leaves the words.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(typed(&view, cx), "");
+
+        // A number then Enter replaces the pick, as before.
+        yard.answer("UserAsks", &asks_decided(2, "Add only the three"));
+        cx.simulate_keystrokes("2");
+        assert_eq!(decided_detail_of(&view, cx, "bead-d", 11).chosen, 2);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the changed pick", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-d", "ask": 11, "option": 2, "actor": "jo"})]
+        });
+        wait(cx, "the new pick shown", |cx| {
+            decided_detail_of(&view, cx, "bead-d", 11).picked == 2
+        });
+        assert_eq!(
+            decided_detail_of(&view, cx, "bead-d", 11).state_line,
+            "you picked 2 · Add only the three · 11:07"
+        );
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// One bead with three open asks and one dealt with, for the buttons.
+    fn asks_buttons() -> String {
+        json!({"result": {
+            "open": [
+                {"bead": "bead-a", "bead_title": "Sketch", "topic": "",
+                 "ask": 3, "question": "Close sketch PR #3?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"},
+                {"bead": "bead-a", "bead_title": "Sketch", "topic": "",
+                 "ask": 4, "question": "Send them to build?", "asker": "yardmaster",
+                 "since": "2026-10-10T11:00:00Z"},
+                {"bead": "bead-a", "bead_title": "Sketch", "topic": "",
+                 "ask": 5, "question": "Name the release?", "asker": "yardmaster",
+                 "since": "2026-10-10T11:30:00Z"}
+            ],
+            "decided": [
+                {"bead": "bead-a", "bead_title": "Sketch", "topic": "",
+                 "ask": 6, "question": "Merge the docs?", "asker": "yardmaster",
+                 "since": "2026-10-10T09:30:00Z", "state": "answered",
+                 "option": 1, "option_label": "Close it"}
+            ]
+        }})
+        .to_string()
+    }
+
+    fn bead_buttons() -> String {
+        let options = json!([
+            {"label": "Close it", "consequence": "PR #3 closes"},
+            {"label": "Leave it", "consequence": "it stays open"},
+            {"label": "You decide", "consequence": "leave it to yardmaster"}
+        ]);
+        let mut asks = Vec::new();
+        for (ask, question) in [
+            (3, "Close sketch PR #3?"),
+            (4, "Send them to build?"),
+            (5, "Name the release?"),
+            (6, "Merge the docs?"),
+        ] {
+            asks.push(json!({
+                "ask": ask, "to": "jo", "asker": "yardmaster",
+                "since": "2026-10-10T10:00:00Z",
+                "question": question,
+                "context": ["The sketch landed yesterday."],
+                "options": options,
+                "recommend": 1, "why": "the sketch landed",
+                "state": "open"
+            }));
+        }
+        json!({"result": {
+            "id": "bead-a", "title": "Sketch",
+            "body": "The body of bead-a.",
+            "stage": "new", "labels": [],
+            "notes": [],
+            "asks": asks
+        }})
+        .to_string()
+    }
+
+    #[gpui::test]
+    fn options_are_chosen_with_a_click_and_a_button_sends_what_it_says(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_buttons());
+        yard.answer("Bead", &bead_buttons());
+        yard.answer("AnswerAsk", "{}");
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        assert_eq!(current_ask_of(&view, cx), 3);
+
+        // With nothing chosen there is no send button, even with a
+        // recommendation: never one that sends it unasked. Later and
+        // Decline stand beside where it will be.
+        assert!(!drawn(cx, "send bead-a 3"));
+        assert!(drawn(cx, "later bead-a 3"));
+        assert!(drawn(cx, "decline bead-a 3"));
+
+        // The keys line stays, shorter.
+        let keys = view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let now = chrono::Utc::now();
+            let ask = model
+                .decision_detail("bead-a", &now)
+                .unwrap()
+                .asks
+                .into_iter()
+                .find(|a| a.ask == 3)
+                .unwrap();
+            decision_keys(&ask)
+        });
+        assert_eq!(
+            keys,
+            "enter picks 1 · 1-3 pick · ↑↓ choose · i words · e expand"
+        );
+
+        // A click on an option's line chooses it, as its number key does.
+        click_on(cx, "pick bead-a 3 2");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+
+        // The button says what it sends; a click sends the pick with the
+        // words, exactly as Enter does. The click takes the focus, so the
+        // line is focused again for the words.
+        assert!(drawn(cx, "send bead-a 3"));
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_input("tonight");
+        assert_eq!(typed(&view, cx), "tonight");
+        click_on(cx, "send bead-a 3");
+        wait(cx, "the pick with words", |_| {
+            yard.asked("AnswerAsk")
+                == [
+                    json!({"bead": "bead-a", "ask": 3, "option": 2, "words": "tonight", "actor": "jo"}),
+                ]
+        });
+
+        // Later is a button too, on the next ask.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 4, cx));
+        click_on(cx, "later bead-a 4");
+        wait(cx, "put aside", |_| {
+            yard.asked("DeferAsk") == [json!({"bead": "bead-a", "ask": 4, "actor": "jo"})]
+        });
+
+        // Decline with an empty line asks for words, as the key does.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 5, cx));
+        assert_eq!(typed(&view, cx), "");
+        click_on(cx, "decline bead-a 5");
+        cx.simulate_input("the greeting can wait");
+        assert_eq!(typed(&view, cx), "the greeting can wait");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "declined after asking", |_| {
+            yard.asked("DeclineAsk").last()
+                == Some(
+                    &json!({"bead": "bead-a", "ask": 5, "words": "the greeting can wait", "actor": "jo"}),
+                )
+        });
+
+        // Decline with words already typed goes at once, once the queue's
+        // next read has brought the asks back.
+        wait(cx, "the asks back", |cx| {
+            view.read_with(cx, |v, _| {
+                let model = v.model.as_ref().unwrap();
+                let now = chrono::Utc::now();
+                model
+                    .decision_detail("bead-a", &now)
+                    .is_some_and(|d| d.asks.len() == 3)
+            })
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_input("not mine");
+        assert_eq!(typed(&view, cx), "not mine");
+        click_on(cx, "decline bead-a 3");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk").last()
+                == Some(&json!({"bead": "bead-a", "ask": 3, "words": "not mine", "actor": "jo"}))
+        });
+
+        // On a dealt with the button replaces the pick.
+        open_decided(&view, cx, "bead-a", 6);
+        assert_eq!(decided_detail_of(&view, cx, "bead-a", 6).picked, 1);
+        assert!(!drawn(cx, "send bead-a 6"));
+        click_on(cx, "pick bead-a 6 2");
+        assert_eq!(decided_detail_of(&view, cx, "bead-a", 6).chosen, 2);
+        assert!(drawn(cx, "send bead-a 6"));
+        click_on(cx, "send bead-a 6");
+        wait(cx, "the changed pick", |_| {
+            yard.asked("AnswerAsk").last()
+                == Some(&json!({"bead": "bead-a", "ask": 6, "option": 2, "actor": "jo"}))
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     }
 }
