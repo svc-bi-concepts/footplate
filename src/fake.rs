@@ -80,6 +80,9 @@ struct Reply {
 #[derive(Default)]
 struct State {
     answers: HashMap<String, Reply>,
+    /// Replies to the calls of a method with one argument a given string,
+    /// by (method, argument, its value), before the standing one.
+    answers_for: HashMap<(String, String, String), Reply>,
     /// Replies given once, before the standing one of `answers`.
     once: HashMap<String, VecDeque<Reply>>,
     /// The methods a call of which is read and never answered.
@@ -271,6 +274,22 @@ impl Yard {
                 chunk: Some(chunk),
             },
         );
+    }
+
+    /// What it answers from now on to a call of the method whose argument
+    /// `arg` is `is`: the conversation with one party, mail to one peer.
+    pub fn answer_for(&self, method: &str, arg: &str, is: &str, body: &str) {
+        let reply = Reply {
+            status: 200,
+            body: body.into(),
+            chunk: None,
+        };
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .answers_for
+            .insert((method.into(), arg.into(), is.into()), reply);
     }
 
     /// What it answers to the next call of the method only.
@@ -545,13 +564,19 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
     let method = target.strip_prefix("/call/").unwrap_or("").to_string();
     let reply = {
         let mut state = shared.state.lock().unwrap();
-        let args = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let args: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let by_arg = state
+            .answers_for
+            .iter()
+            .find(|((m, arg, is), _)| *m == method && args[arg.as_str()] == is.as_str())
+            .map(|(_, reply)| reply.clone());
         state.asked.push((method.clone(), args));
         if state.silent.contains(&method) {
             return Ok(());
         }
         let once = state.once.get_mut(&method).and_then(VecDeque::pop_front);
-        once.or_else(|| state.answers.get(&method).cloned())
+        once.or(by_arg)
+            .or_else(|| state.answers.get(&method).cloned())
             .unwrap_or_else(|| Reply {
                 status: 200,
                 body: format!(

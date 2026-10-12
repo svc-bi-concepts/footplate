@@ -269,7 +269,12 @@ among them (`you, notes to self`), and on every row the number of mails
 from it you have not seen. A name of a linked yard that the operator trusts
 as a user of this yard (`yardr peer allow <peer> --trust <name>=<user>`)
 has no row of its own: its mail is in that user's row, and what you write
-there goes to whoever wrote last, as in `yardr chat`. Below them the `yard`
+there goes to whoever wrote last, as in `yardr chat`: one mail to one
+place, never a copy to the other. The empty line says where before you type
+(`Write to mckean@north`), or `Reading mckean` until all of the row is read,
+and Enter sends nothing until then. When the yard refuses it, the window
+says so with that address (`not sent to mckean@north: …`), keeps what you
+typed, and writes nothing to the user in this yard instead. Below them the `yard`
 row with the number of the yard's notices you have not read and of the mail
 it shows: the yard's own, and that of a sender who has no row. Right, what is open: a conversation, oldest at
 the top and the newest in view, an arrow at its bottom right back to the

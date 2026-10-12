@@ -590,6 +590,18 @@ impl Model {
         }
     }
 
+    /// Whether the open conversation is one whose mail says where the next
+    /// answer goes, and not all of it is read yet: the row of a user whom
+    /// names of linked yards are trusted as. Who wrote last is not known
+    /// until then, and a guess would be the user in this yard.
+    pub fn reading(&self) -> bool {
+        let Some(sel @ Selected::Conversation(_)) = self.selected.as_ref() else {
+            return false;
+        };
+        let sources = self.sources(sel);
+        sources.len() > 1 && sources.iter().any(|s| !self.loaded.contains(s))
+    }
+
     /// The names of the conversations, in order: the crew, the addresses
     /// of those the linked yards expose, then the users of this yard.
     fn conversation_names(&self) -> Vec<String> {
@@ -1774,6 +1786,9 @@ impl Model {
             kind if kind.starts_with("session_prompt") && !e.text("crew").is_empty() => {
                 vec![Effect::Crew]
             }
+            // Removing a user also removes any link trust that named them;
+            // unlike a direct grant change, this is not a `peer_` event.
+            "user_removed" => vec![Effect::Peers],
             kind if kind.starts_with("peer_") => self.link(e),
             _ => Vec::new(),
         });
@@ -3324,6 +3339,41 @@ mod tests {
         m.acked(27);
         assert_eq!(m.rows().iter().map(|r| r.unread).sum::<usize>(), 0);
         assert_eq!(m.yard_unread(), 0);
+    }
+
+    #[test]
+    fn removing_a_user_refreshes_trust_grants() {
+        let mut state = yard(&[]);
+        state.peers.push(airy());
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(
+            m.event(&event(21, "user_removed", "jo", json!({"user": "ada"}))),
+            [Effect::Peers]
+        );
+    }
+
+    #[test]
+    fn where_an_answer_goes_is_not_known_before_all_of_a_user_s_row_is_read() {
+        let mut state = yard(&[]);
+        state.peers.push(airy());
+        let (mut m, _) = Model::new(state, None);
+        // A row with one party goes one way whatever its mail says.
+        assert!(!m.reading());
+        m.select(Selected::Conversation("jo".into()));
+        assert!(m.reading());
+        // The user's own mail is there, the trusted name's not yet: it
+        // may be the newest.
+        m.conversation("jo", vec![letter(7, "jo", "jo", "works")]);
+        assert!(m.reading());
+        m.conversation("jo@airy", vec![letter(8, "jo@airy", "jo", "from airy")]);
+        assert!(!m.reading());
+        assert_eq!(
+            m.target(),
+            Some(Target::Peer {
+                name: "jo".into(),
+                peer: "airy".into()
+            })
+        );
     }
 
     #[test]

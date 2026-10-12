@@ -1184,8 +1184,13 @@ impl Footplate {
         let to = match self.model.as_ref().and_then(|m| m.selected().cloned()) {
             // In the row of a user a name of a linked yard is trusted as,
             // that is the name when it wrote last.
+            // Before all of such a row is read, who wrote last is not
+            // known, and the line names nobody.
             Some(Selected::Conversation(name)) => {
                 match self.model.as_ref().and_then(|m| m.target()) {
+                    _ if self.model.as_ref().is_some_and(Model::reading) => {
+                        format!("Reading {name}")
+                    }
                     Some(Target::Peer { name, peer }) => format!("Write to {name}@{peer}"),
                     _ => format!("Write to {name}"),
                 }
@@ -1500,11 +1505,27 @@ impl Footplate {
             Some(why) => return self.notice(why, cx),
             None => {}
         }
+        // Who wrote last is not known before the conversation is read, and
+        // a guess would be the user in this yard: the line is kept.
+        if self.model.as_ref().is_some_and(Model::reading) {
+            return self.notice(
+                format!(
+                    "the conversation with {to} is still being read, and with it where your answer goes: enter sends once it shows"
+                ),
+                cx,
+            );
+        }
         // The draft is empty while the mail is on its way, so that Enter
         // again does not send it again.
         let images = self.drafts.take(&to);
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.notice(String::new(), cx);
+        // Whom it was written to, which in the row of a user of this yard
+        // may be a name trusted as them: a refusal names that one.
+        let at = match &target {
+            Target::Crew(name) => name.clone(),
+            Target::Peer { name, peer } => format!("{name}@{peer}"),
+        };
         self.ask(
             cx,
             move |client, me| match post(client, me, &target, &text, &images) {
@@ -1526,15 +1547,17 @@ impl Footplate {
                     }
                     this.change(cx, |m| m.sent(&to))
                 }
-                Err(unsent) => this.unsent(&to, unsent, cx),
+                Err(unsent) => this.unsent(&to, &at, unsent, cx),
             },
         );
     }
 
     /// Nothing of a draft is lost to a failed send: what did not go is back
-    /// where it was, before what was typed and attached since, the
-    /// attachment that kept it is marked, and the window says why.
-    fn unsent(&mut self, to: &str, unsent: Unsent, cx: &mut Context<Self>) {
+    /// where it was, in the conversation `to`, before what was typed and
+    /// attached since, the attachment that kept it is marked, and the
+    /// window says why `at`, whom it was written to, did not get it. It is
+    /// written to nobody else instead.
+    fn unsent(&mut self, to: &str, at: &str, unsent: Unsent, cx: &mut Context<Self>) {
         self.drafts.restore(to, unsent.images);
         if let Some(id) = unsent.at {
             self.drafts.refuse(id, &unsent.why);
@@ -1548,7 +1571,7 @@ impl Footplate {
         } else {
             self.drafts.unsend(to, unsent.text);
         }
-        self.notice(format!("not sent to {to}: {}", unsent.why), cx);
+        self.notice(format!("not sent to {at}: {}", unsent.why), cx);
     }
 
     /// The open card's ask: the current one of a decision, or the dealt
@@ -5294,6 +5317,120 @@ mod tests {
             yard.asked("Mail").last()
                 == Some(&json!({"to": "ada", "text": "Hello ada.", "actor": "jo"}))
         });
+    }
+
+    /// What the yard says of mail over a link that carries none out.
+    const NO_MAIL: &str = "peer north: the link does not carry mail out: the operator allows it with yardr peer allow north --send mail";
+
+    #[gpui::test]
+    fn an_answer_to_a_trusted_name_goes_back_to_it_once_and_a_refusal_writes_nothing_instead(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // north's mckean is trusted as the user mckean of this yard.
+        yard.answer(
+            "Peers",
+            r#"{"result": [{"name": "north", "send": ["mail"], "receive": ["mail"], "trust": {"mckean": "mckean"},
+                "said": {"roster": [{"name": "mckean", "kind": "user", "mail": true}], "at": "2026-10-08T09:30:00Z"}}]}"#,
+        );
+        yard.answer(
+            "Users",
+            r#"{"result": [{"name": "mckean", "cursor": 0, "notification_cursor": 0},
+                           {"name": "jo", "cursor": 5, "notification_cursor": 0}]}"#,
+        );
+        yard.answer_for(
+            "Conversation",
+            "b",
+            "mckean",
+            r#"{"result": [{"seq": 14, "at": "2026-10-08T09:28:00Z", "from": "mckean", "to": "jo", "text": "I am here until two.", "read": true}]}"#,
+        );
+        yard.answer_for(
+            "Conversation",
+            "b",
+            "mckean@north",
+            r#"{"result": [{"seq": 15, "at": "2026-10-08T09:29:00Z", "from": "mckean@north", "to": "jo", "text": "I am at the other machine now.", "read": true}]}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The name trusted as the user has no row of its own.
+        view.read_with(cx, |v, _| {
+            let rows: Vec<String> = v
+                .model
+                .as_ref()
+                .unwrap()
+                .rows()
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            assert_eq!(rows, ["assembly", "yardmaster", "mckean", "jo"]);
+        });
+
+        // The user's row has the mail of both, in the order written, and
+        // says where the next answer goes before anything is typed.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Conversation("mckean".into()), window, cx)
+        });
+        wait(cx, "the user's conversation", |cx| {
+            texts(&view, cx) == ["I am here until two.", "I am at the other machine now."]
+        });
+        assert_eq!(placeholder(&view, cx), "Write to mckean@north");
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().about(),
+                [
+                    "a person of this yard, also trusted as mckean@north: mail from that name is in this conversation, and what you write goes to mckean@north, who wrote last"
+                ]
+            )
+        });
+
+        // The answer is one mail, to the name at its yard, and none to the
+        // user in this yard.
+        cx.simulate_input("Fine, the review can wait.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the answer queued for the peer", |_| {
+            yard.asked("MailPeer")
+                == [
+                    json!({"to": "mckean", "peer": "north", "text": "Fine, the review can wait.", "actor": "jo"}),
+                ]
+        });
+        wait(cx, "the line empty", |cx| typed(&view, cx).is_empty());
+        cx.run_until_parked();
+        assert_eq!(yard.asked("Mail"), Vec::<serde_json::Value>::new());
+
+        // The user writes in this yard: the next answer goes to them here.
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "mckean", "data": {"to": "jo", "to_user": true, "text": "Back at this one."}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "where the next answer goes", |cx| {
+            placeholder(&view, cx) == "Write to mckean"
+        });
+        cx.simulate_input("Good.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the answer to the user here", |_| {
+            yard.asked("Mail") == [json!({"to": "mckean", "text": "Good.", "actor": "jo"})]
+        });
+        assert_eq!(yard.asked("MailPeer").len(), 1);
+
+        // The name writes again, and the link carries no mail out by now:
+        // the yard's refusal is shown, the line kept, and nothing written
+        // to the user in this yard instead.
+        yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "mckean@north", "data": {"to": "jo", "to_user": true, "text": "Away again."}, "at": "2026-10-08T09:32:00Z"}"#);
+        wait(cx, "where the next answer goes", |cx| {
+            placeholder(&view, cx) == "Write to mckean@north"
+        });
+        yard.answer(
+            "MailPeer",
+            &json!({"error": {"code": "error", "message": NO_MAIL}}).to_string(),
+        );
+        let before = texts(&view, cx);
+        cx.simulate_input("Again.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why it was not sent", |cx| {
+            notice(&view, cx) == format!("not sent to mckean@north: {NO_MAIL}")
+        });
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "Again.");
+        assert_eq!(yard.asked("MailPeer").len(), 2);
+        assert_eq!(yard.asked("Mail").len(), 1);
+        assert_eq!(texts(&view, cx), before);
     }
 
     const LINK: &str = "see https://example.org/a now";
