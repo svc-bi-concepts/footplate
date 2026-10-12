@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::thread;
 
 use gpui::{
-    Action, App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable,
-    FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle, SharedString,
-    Window, actions, div, img, prelude::*, px, relative, rems,
+    Action, AnyWindowHandle, App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle,
+    Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle,
+    SharedString, Window, actions, div, img, prelude::*, px, relative, rems,
 };
 
 use crate::api::{self, BlobRef, Client};
@@ -317,6 +317,9 @@ pub struct Footplate {
     /// The attachments that are images, by id, as they are drawn.
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
+    /// The window this is drawn in: a change that comes with no key or
+    /// click of its own, as the yard's answer does, moves the focus by it.
+    handle: AnyWindowHandle,
     icon: Arc<Image>,
     /// Which read of the queue a put-aside return waits for: an older
     /// timer does nothing when the queue was read since.
@@ -404,6 +407,7 @@ impl Footplate {
             declining: None,
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
+            handle: window.window_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
             ask_generation: 0,
             settings: Settings::default(),
@@ -533,6 +537,26 @@ impl Footplate {
         }
         if let Some(position) = returning_position {
             self.conversation.set_offset(position);
+        }
+        // A decision dealt with by key leaves the focus on the window, and
+        // the yard's answer comes with no window to move it by: what is
+        // typed next is for the conversation it led back to. Not under the
+        // settings, where the window holds the keys.
+        if matches!(
+            (&before_sel, &after_sel),
+            (
+                Some(Selected::Decision(_) | Selected::Decided(_, _)),
+                Some(Selected::Conversation(_)),
+            )
+        ) && !self.settings_open
+        {
+            let (handle, focus) = (self.handle, self.line.focus_handle(cx));
+            // Afterwards: the window is not to be had while a key or click
+            // that came through it is still on its way.
+            cx.defer(move |cx| {
+                // A window that is closed has no focus to move.
+                let _ = handle.update(cx, |_, window, _| window.focus(&focus));
+            });
         }
         self.turned(before_sel, cx);
         self.shown(cx);
@@ -4692,6 +4716,60 @@ mod tests {
         });
         assert_eq!(typed(&view, cx), "half a thought");
         assert_eq!(view.read_with(cx, |v, _| v.conversation.offset()), place);
+    }
+
+    /// A pick made with the window's keys leaves the focus on the window;
+    /// the conversation it leads back to has it in the line again.
+    #[gpui::test]
+    fn a_pick_by_key_leads_back_to_the_conversation_with_the_focus_in_its_line(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // One bead with one ask: the pick takes its row away.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"}
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        let open = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().and_then(|m| m.selected().cloned())
+            })
+        };
+        wait(cx, "the decision", |cx| {
+            open(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Conversation("yardmaster".into()), window, cx)
+        });
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-a".into()), window, cx)
+        });
+        cx.simulate_keystrokes("1");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the conversation again", |cx| {
+            open(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
+        });
+        cx.run_until_parked();
+        cx.simulate_input("x");
+        assert_eq!(typed(&view, cx), "x");
     }
 
     /// One bead with three open asks and one dealt with, for the buttons.
