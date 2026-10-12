@@ -1627,6 +1627,8 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
+                    // Resolve the available row width before measuring the
+                    // name, so truncate() can draw its ellipsis.
                     .flex_1()
                     .min_w_0()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("footplate"))
@@ -1742,6 +1744,7 @@ impl Footplate {
             Selected::Yard => "row yard".to_string(),
             _ => format!("row {}", row.name),
         };
+        let name = row.name.clone();
         div()
             .id(SharedString::from(id))
             .mx_1()
@@ -1762,10 +1765,14 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
+                    // Resolve the available row width before measuring the
+                    // name, so truncate() can draw its ellipsis.
+                    .flex_1()
                     .min_w_0()
                     .child(
                         div()
                             .truncate()
+                            .debug_selector(|| format!("row name {}", name))
                             .when(row.unread > 0, |el| el.font_weight(FontWeight::SEMIBOLD))
                             .child(row.name),
                     )
@@ -1781,6 +1788,7 @@ impl Footplate {
                 el.child(
                     div()
                         .flex_none()
+                        .debug_selector(|| format!("row unread {}", name))
                         .px_2()
                         .rounded_full()
                         .bg(palette.accent)
@@ -4647,6 +4655,68 @@ mod tests {
         assert_eq!(
             short.size.width, long.size.width,
             "the head's column hugs its content instead of filling the row"
+        );
+    }
+
+    /// A conversation name longer than the row ends in an ellipsis before
+    /// the unread badge, with a gap between them. The ellipsis itself is
+    /// drawn by GPUI's truncate(), which the test cannot read back; what
+    /// it pins is why the ellipsis appears. The name's column fills the
+    /// row, so a short name's column is as wide as a long name's. Sized
+    /// to its content instead, the name is measured full-width first, and
+    /// truncate() then cuts it hard, with no ellipsis.
+    #[gpui::test]
+    fn a_long_conversation_name_ends_before_the_unread_badge_with_a_gap(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // A long name and a short one, neither open, each with one unread
+        // mail; the yardmaster's conversation is open, as usual. Both
+        // badges read 1, so both rows leave the name the same width.
+        let long_name = "a-crew-member-with-a-deliberately-long-name";
+        yard.answer(
+            "Crew",
+            &json!({"result": [
+                {"name": "yardmaster", "enabled": true, "state": "running", "status": "idle"},
+                {"name": long_name, "enabled": true, "state": "running", "status": "idle"},
+                {"name": "al", "enabled": true, "state": "stopped"}
+            ]})
+            .to_string(),
+        );
+        yard.answer(
+            "UserInbox",
+            &json!({"result": {"mail": [
+                {"seq": 12, "from": long_name, "to": "jo", "text": "The first of many words.", "read": false},
+                {"seq": 13, "from": "al", "to": "jo", "text": "Short.", "read": false}
+            ], "unread": 2, "last": 13, "from": [long_name, "al"]}})
+            .to_string(),
+        );
+        yard.answer("Conversation", r#"{"result": []}"#);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the unread rows", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.unread(long_name) == 1 && m.unread("al") == 1)
+            })
+        });
+        let long = bounds_of(cx, &format!("row name {long_name}"));
+        let badge = bounds_of(cx, &format!("row unread {long_name}"));
+        assert!(
+            long.right() < badge.left(),
+            "the long name touches the badge: {long:?} {badge:?}"
+        );
+        let short = bounds_of(cx, "row name al");
+        assert_eq!(
+            short.size.width, long.size.width,
+            "the name's column hugs its content instead of filling the row"
         );
     }
 
