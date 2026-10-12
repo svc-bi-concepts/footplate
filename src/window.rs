@@ -2254,7 +2254,7 @@ impl Footplate {
                         div()
                             // Leave enough room for the operator and the
                             // local yard name at the narrowest window.
-                            .text_size(rems(0.85))
+                            .text_size(rems(0.8))
                             .text_color(palette.accent)
                             .truncate()
                             .debug_selector(|| "which yard".to_string())
@@ -6261,7 +6261,7 @@ mod tests {
             };
             window
                 .text_system()
-                .shape_line(line.clone().into(), rem * 0.85, &[run], None)
+                .shape_line(line.clone().into(), rem * 0.8, &[run], None)
                 .width
         });
         assert!(
