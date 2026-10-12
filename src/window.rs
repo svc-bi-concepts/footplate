@@ -137,10 +137,11 @@ fn divider(palette: Palette) -> impl IntoElement {
 
 /// The keys of an open card. Enter with nothing chosen and a recommendation
 /// picks it, and says so. Later and Decline are buttons beside the send
-/// button, so their keys are not listed here; they still work.
+/// button, and expand its own control below, so their keys are not listed
+/// here; they still work.
 fn decision_keys(ask: &DecisionAsk) -> String {
     if ask.options.is_empty() {
-        return "words wanted · i words · enter sends the answer · e expand".to_string();
+        return "words wanted · i words · enter sends the answer".to_string();
     }
     let n = ask.options.len();
     let enter = if ask.chosen != 0 {
@@ -150,16 +151,16 @@ fn decision_keys(ask: &DecisionAsk) -> String {
     } else {
         "enter sends words as note".to_string()
     };
-    format!("{enter} · 1-{n} pick · ↑↓ choose · i words · e expand")
+    format!("{enter} · 1-{n} pick · ↑↓ choose · i words")
 }
 
 /// The keys of a dealt with: nothing is chosen by default and Enter alone
 /// sends nothing; a number then Enter replaces the pick.
 fn decided_keys(detail: &DecidedDetail) -> String {
     if detail.options.is_empty() {
-        return "i words · enter sends · e expand".to_string();
+        return "i words · enter sends".to_string();
     }
-    format!("1-{} change your pick · e expand", detail.options.len())
+    format!("1-{} change your pick", detail.options.len())
 }
 
 /// The button that sends the chosen option with the line's words, exactly
@@ -1427,6 +1428,10 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
+                    // Fills the row: sized to its content, the head is
+                    // first measured at its full width, and truncate()
+                    // then cuts it hard, with no ellipsis.
+                    .flex_1()
                     .min_w_0()
                     .child(div().truncate().child(row.head))
                     .child(
@@ -1477,8 +1482,17 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
+                    // Fills the row: sized to its content, the head is
+                    // first measured at its full width, and truncate()
+                    // then cuts it hard, with no ellipsis.
+                    .flex_1()
                     .min_w_0()
-                    .child(div().truncate().child(row.head))
+                    .child(
+                        div()
+                            .truncate()
+                            .debug_selector(|| format!("decided head {} {}", row.bead, row.ask))
+                            .child(row.head),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -1492,6 +1506,7 @@ impl Footplate {
                     .flex_none()
                     .text_xs()
                     .text_color(palette.faint)
+                    .debug_selector(|| format!("decided id {} {}", row.bead, row.ask))
                     .child(row.short),
             )
     }
@@ -2443,7 +2458,7 @@ mod tests {
     use super::*;
     use crate::fake::Yard;
     use crate::input;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext};
     use serde_json::json;
     use std::time::Duration;
 
@@ -2452,6 +2467,32 @@ mod tests {
         let number = |at: usize| u32::from_be_bytes(ICON[at..at + 4].try_into().unwrap());
         assert_eq!(&ICON[12..16], b"IHDR");
         assert_eq!((number(16), number(20)), (1024, 1024));
+    }
+
+    /// The words-wanted keys name expand nowhere: the control under them,
+    /// "expand (e)" and "fold (e)", is where the card names it once.
+    #[test]
+    fn the_words_wanted_keys_leave_expand_to_the_control() {
+        let ask = DecisionAsk {
+            ask: 3,
+            question: "Name the release?".to_string(),
+            asker: "mayor".to_string(),
+            waits: "2h".to_string(),
+            recommend_label: String::new(),
+            context: Vec::new(),
+            options: Vec::new(),
+            recommend: 0,
+            why: String::new(),
+            chosen: 0,
+            current: true,
+            expanded: false,
+            about: Vec::new(),
+            state: "open".to_string(),
+        };
+        assert_eq!(
+            decision_keys(&ask),
+            "words wanted · i words · enter sends the answer"
+        );
     }
 
     /// The yard is followed on a thread of its own, so the test waits for
@@ -3639,6 +3680,15 @@ mod tests {
         cx.debug_bounds(at).is_some()
     }
 
+    fn bounds_of(cx: &mut VisualTestContext, selector: &str) -> Bounds<Pixels> {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        cx.debug_bounds(at)
+            .unwrap_or_else(|| panic!("nothing is drawn for {selector}"))
+    }
+
     /// Opens one dealt with: "Decided" unfolded, its row selected.
     fn open_decided(view: &Entity<Footplate>, cx: &mut VisualTestContext, bead: &str, ask: u64) {
         view.update(cx, |v, cx| {
@@ -3778,7 +3828,7 @@ mod tests {
         assert_eq!(d.words, "");
         assert_eq!(d.state_line, "you picked 1 · Switch to attention");
         assert_eq!(d.chosen, 0);
-        assert_eq!(decided_keys(&d), "1-4 change your pick · e expand");
+        assert_eq!(decided_keys(&d), "1-4 change your pick");
 
         let d = decided_detail_of(&view, cx, "bead-d", 12);
         assert_eq!(d.picked, 2);
@@ -3800,7 +3850,7 @@ mod tests {
         let d = decided_detail_of(&view, cx, "bead-d", 16);
         assert_eq!(d.picked, 0);
         assert_eq!(d.state_line, "you answered: warmly");
-        assert_eq!(decided_keys(&d), "i words · enter sends · e expand");
+        assert_eq!(decided_keys(&d), "i words · enter sends");
 
         // The Decided rows keep showing the picks.
         let subs: Vec<String> = view.read_with(cx, |v, _| {
@@ -3870,6 +3920,50 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// A decided head longer than the row ends in an ellipsis before the
+    /// bead id, with a gap between them. The ellipsis itself is drawn by
+    /// GPUI's truncate(), which the test cannot read back; what it pins
+    /// is why the ellipsis appears. The head's column fills the row, so a
+    /// short head's column is as wide as a long head's. Sized to its
+    /// content instead, the head is measured full-width first, and
+    /// truncate() then cuts it hard, with no ellipsis.
+    #[gpui::test]
+    fn a_long_decided_head_ends_before_the_bead_id_with_a_gap(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
+        yard.answer("Bead", &bead_decided());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
+            })
+        });
+        // Ask 11's head is longer than the row; ask 15's is short. Both
+        // rows end with the same id.
+        open_decided(&view, cx, "bead-d", 11);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-d"));
+        let long = bounds_of(cx, "decided head bead-d 11");
+        let id = bounds_of(cx, "decided id bead-d 11");
+        assert!(
+            long.right() < id.left(),
+            "the long head touches the id: {long:?} {id:?}"
+        );
+        let short = bounds_of(cx, "decided head bead-d 15");
+        assert_eq!(
+            short.size.width, long.size.width,
+            "the head's column hugs its content instead of filling the row"
+        );
     }
 
     /// One bead with three open asks and one dealt with, for the buttons.
@@ -3977,10 +4071,7 @@ mod tests {
                 .unwrap();
             decision_keys(&ask)
         });
-        assert_eq!(
-            keys,
-            "enter picks 1 · 1-3 pick · ↑↓ choose · i words · e expand"
-        );
+        assert_eq!(keys, "enter picks 1 · 1-3 pick · ↑↓ choose · i words");
 
         // A click on an option's line chooses it, as its number key does.
         click_on(cx, "pick bead-a 3 2");
