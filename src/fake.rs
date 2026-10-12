@@ -82,6 +82,8 @@ struct State {
     answers: HashMap<String, Reply>,
     /// Replies given once, before the standing one of `answers`.
     once: HashMap<String, VecDeque<Reply>>,
+    /// The methods a call of which is read and never answered.
+    silent: Vec<String>,
     asked: Vec<(String, Value)>,
     last_request: String,
     /// Every request that came, let in or not.
@@ -288,13 +290,17 @@ impl Yard {
             .push_back(reply);
     }
 
+    /// A call of the method is taken and the connection closed with no
+    /// reply, as by a server that went away over it, until the method is
+    /// given an answer again.
+    pub fn answer_nothing(&self, method: &str) {
+        self.shared.state.lock().unwrap().silent.push(method.into());
+    }
+
     fn set(&self, method: &str, reply: Reply) {
-        self.shared
-            .state
-            .lock()
-            .unwrap()
-            .answers
-            .insert(method.into(), reply);
+        let mut state = self.shared.state.lock().unwrap();
+        state.silent.retain(|silent| silent != method);
+        state.answers.insert(method.into(), reply);
     }
 
     /// The arguments of every call of the method so far.
@@ -541,6 +547,9 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
         let mut state = shared.state.lock().unwrap();
         let args = serde_json::from_slice(&body).unwrap_or(Value::Null);
         state.asked.push((method.clone(), args));
+        if state.silent.contains(&method) {
+            return Ok(());
+        }
         let once = state.once.get_mut(&method).and_then(VecDeque::pop_front);
         once.or_else(|| state.answers.get(&method).cloned())
             .unwrap_or_else(|| Reply {

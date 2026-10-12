@@ -89,7 +89,8 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `AnswerAsk` | Enter, on a card: the option chosen, with the line's words in the one answer; an ask with no options is answered with words |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
-| `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide" |
+| `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide"; a secret ask with none |
+| `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
 | `AckUserInbox` | a conversation showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read |
 
@@ -281,6 +282,25 @@ on it from there replaces the earlier one. The window holds the card's keys,
 `i` types the words in, `esc` holds the keys again. What is typed stays with
 its ask, as a draft stays with its conversation.
 
+**A secret ask** (`yardr bead ask --secret`) asks for a credential of a
+source, and its card has no options and no line for words. In their place
+it shows the yard's own line of what is asked for, made from the source's
+declaration and never from the asker's words, and a field that draws a mark
+for each character. `i` or a click types in it. What is pasted goes in;
+copy and cut take nothing out. Enter sends the value to the yard in
+`GiveSecret` and empties the field, whatever the yard answers; an ask for
+several names takes them one after the other and sends them together. `esc`
+leaves the field and nothing is sent. `d` declines with no words. The value
+is typed in that field and held nowhere else in the window: not in a
+draft, a setting, a notice or the clipboard, and it is gone when the card
+is left. Afterwards the card says the yard's words, which hold the names
+and the file and never the value. When the call ends with no answer it
+says "the yard did not answer. The value may be written. Give it again.",
+never that it was sent. A yard that does not serve the call to this window
+is said so, with the command that answers in a terminal on the yard's
+machine: `yardr bead answer <bead> <ask> --secret`. One that was given can
+be given again from its card under "Decided", which replaces it.
+
 | Key | Does |
 |---|---|
 | `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
@@ -295,12 +315,12 @@ its ask, as a draft stays with its conversation.
 | a click on a row | opens it |
 | a click on "Decided" | folds it open, shut |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
-| `i`, on a card | types the words in; the window holds the card's keys |
+| `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | `x`, on an open card | puts the ask aside |
-| `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them |
+| `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them. A secret ask is declined at once, with none |
 | `e`, on a card | expands it to the bead whole, or folds it again |
-| `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words |
+| `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
 | `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |

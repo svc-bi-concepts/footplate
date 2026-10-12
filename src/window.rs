@@ -186,6 +186,18 @@ fn decision_keys(ask: &DecisionAsk) -> String {
     format!("{enter} · 1-{n} pick · ↑↓ choose · i words")
 }
 
+/// What a secret ask's card says under the yard's line of what is asked
+/// for: where the value goes, in the words `yardr chat` has for it.
+const SECRET_GOES: &str = "it goes to a file only the yard's server reads; no agent is shown it";
+
+/// The keys of a secret ask's card, with the way for a person without the
+/// field: the same answer in a terminal on the yard's machine.
+fn secret_keys(bead: &str, ask: u64) -> String {
+    format!(
+        "i types it · enter sends it to the yard · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
+    )
+}
+
 /// The keys of a dealt with: nothing is chosen by default and Enter alone
 /// sends nothing; a number then Enter replaces the pick.
 fn decided_keys(detail: &DecidedDetail) -> String {
@@ -339,6 +351,15 @@ pub struct Footplate {
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
+    /// The field of a secret ask's card, which shows marks. It is another
+    /// than the line: what is typed here is in no draft and with no ask's
+    /// words, and it is gone when the card is left.
+    secret: Entity<Line>,
+    /// The values typed so far for an ask of several names, in the order
+    /// of its names: they go together, with the last.
+    secret_typed: Vec<String>,
+    /// The ask the field and those values are for.
+    secret_for: Option<(String, u64)>,
     /// The attachments that are images, by id, as they are drawn.
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
@@ -409,6 +430,9 @@ impl Footplate {
         .detach();
         cx.subscribe(&line, |this, _, _: &Emptied, cx| this.remove_last(cx))
             .detach();
+        let secret = cx.new(Line::masked);
+        cx.subscribe(&secret, |this, _, _: &Submitted, cx| this.give(cx))
+            .detach();
         // Enter in the address or the code of a pairing sends the code.
         let field = |hint: &'static str, cx: &mut Context<Self>| {
             let field = cx.new(|cx| {
@@ -458,6 +482,9 @@ impl Footplate {
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
             declining: None,
+            secret,
+            secret_typed: Vec::new(),
+            secret_for: None,
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
             handle: window.window_handle(),
@@ -497,6 +524,7 @@ impl Footplate {
         self.declining = None;
         self.back_position = None;
         self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.forget_secret(cx);
         cx.notify();
         let client = match opening {
             Ok(client) => client,
@@ -804,6 +832,62 @@ impl Footplate {
         };
         self.line
             .update(cx, |line, cx| line.set_placeholder(&to, cx));
+        // What is typed of a secret is for the ask it was typed on, and is
+        // kept for no other and for no return to this one.
+        let ask = self.open_ask();
+        if ask != self.secret_for {
+            self.forget_secret(cx);
+            self.secret_for = ask.clone();
+        }
+        // A secret ask's card draws no line for words. A focus left in
+        // the line by the conversation before it would hold the keys where
+        // nothing is drawn to take them: the window has them, and `i` or a
+        // click types in the field. Never the field at once: what was being
+        // typed for a conversation must not go on as a secret.
+        let secret_card = ask.as_ref().is_some_and(|(bead, ask)| {
+            let model = self.model.as_ref();
+            model.is_some_and(|m| m.secret(bead, *ask).is_some())
+        });
+        if secret_card && !self.settings_open {
+            let (handle, line, focus) =
+                (self.handle, self.line.focus_handle(cx), self.focus.clone());
+            // Afterwards: the window is not to be had while a key or click
+            // that came through it is still on its way.
+            cx.defer(move |cx| {
+                // A window that is closed has no focus to move.
+                let _ = handle.update(cx, |_, window, _| {
+                    if line.is_focused(window) {
+                        window.focus(&focus);
+                    }
+                });
+            });
+        }
+        let wanted = self.giving().map(|secret| {
+            let at = self.secret_typed.len();
+            let name = secret.env.get(at).cloned().unwrap_or_default();
+            let of = match secret.env.len() {
+                0 | 1 => String::new(),
+                n => format!(" ({} of {n})", at + 1),
+            };
+            format!("{name} for the source {}{of}", secret.source)
+        });
+        self.secret.update(cx, |field, cx| {
+            field.set_placeholder(&wanted.unwrap_or_default(), cx)
+        });
+    }
+
+    /// What the open card's field takes, when its ask is a secret ask that
+    /// can be given.
+    fn giving(&self) -> Option<api::Secret> {
+        let (bead, ask) = self.open_ask()?;
+        self.model.as_ref()?.giving(&bead, ask).cloned()
+    }
+
+    /// Nothing typed of a secret stays in the window: not in the field, and
+    /// not among the values of an ask of several names.
+    fn forget_secret(&mut self, cx: &mut Context<Self>) {
+        self.secret_typed.clear();
+        self.secret.update(cx, |field, cx| field.set_text("", cx));
     }
 
     /// Whether the open card's current ask wants words: it has no options.
@@ -1077,11 +1161,81 @@ impl Footplate {
         if self.settings_open {
             return None;
         }
+        self.open_ask()
+    }
+
+    /// The ask of the card that is open, in view or under the settings.
+    fn open_ask(&self) -> Option<(String, u64)> {
         match self.model.as_ref()?.selected()? {
             Selected::Decision(_) => self.model.as_ref()?.current_ask(),
             Selected::Decided(bead, ask) => Some((bead.clone(), *ask)),
             _ => None,
         }
+    }
+
+    /// Enter in the field of a secret ask: the value goes to the yard in
+    /// its own call and in nothing else. The field is emptied here, before
+    /// the yard is asked and whatever it answers, and what the window says
+    /// afterwards is the yard's words or footplate's, never the value. An
+    /// ask of several names takes them one after the other and sends them
+    /// together.
+    fn give(&mut self, cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        let Some(secret) = self.giving() else {
+            return;
+        };
+        // What is pasted often ends in a line break, which nobody sees
+        // among the marks and which the yard refuses at either end.
+        let value = self
+            .secret
+            .update(cx, |field, cx| field.take_text(cx))
+            .trim()
+            .to_string();
+        let Some(name) = secret.env.get(self.secret_typed.len()) else {
+            return self.forget_secret(cx);
+        };
+        if value.is_empty() {
+            return self.notice(format!("nothing is typed for {name}"), cx);
+        }
+        self.secret_typed.push(value);
+        self.notice(String::new(), cx);
+        if self.secret_typed.len() < secret.env.len() {
+            return self.shown(cx);
+        }
+        let values: Vec<(String, String)> = secret
+            .env
+            .into_iter()
+            .zip(std::mem::take(&mut self.secret_typed))
+            .collect();
+        self.shown(cx);
+        let call_bead = bead.clone();
+        self.ask(
+            cx,
+            move |client, me| {
+                client
+                    .give_secret(&call_bead, ask, &values, me)
+                    .map_err(|err| {
+                        let why = model::not_given(&err, &call_bead, ask);
+                        // The yard repeats no value in a refusal. Should
+                        // anything on the way do so, it is not shown.
+                        if values.iter().any(|(_, value)| why.contains(value.as_str())) {
+                            "not given: the yard refused it".to_string()
+                        } else {
+                            why
+                        }
+                    })
+            },
+            move |this, given, cx| match given {
+                Ok(given) => {
+                    this.change(cx, |m| m.gave(&bead, ask, &given.given));
+                    this.schedule_return(cx);
+                    this.notice(model::given_line(&given), cx);
+                }
+                Err(why) => this.notice(why, cx),
+            },
+        );
     }
 
     /// Enter on a card: the pick with the line's words in the one answer,
@@ -1091,6 +1245,10 @@ impl Footplate {
         let Some((bead, ask)) = self.card() else {
             return;
         };
+        // A secret ask has its own field and its own call, and no words.
+        if self.giving().is_some() {
+            return self.give(cx);
+        }
         // A decline asked for words: they go now.
         if self.declining.as_ref() == Some(&(bead.clone(), ask)) {
             let words = self.line.read(cx).text().trim().to_string();
@@ -1390,6 +1548,12 @@ impl Footplate {
         let Some((bead, ask)) = current else {
             return;
         };
+        // A secret ask is declined with no words: the yard takes none on
+        // it, since words there could be the value.
+        if self.giving().is_some() {
+            self.forget_secret(cx);
+            return self.send_decline(bead, ask, String::new(), cx);
+        }
         let words = self.line.read(cx).text().trim().to_string();
         if !words.is_empty() {
             return self.send_decline(bead, ask, words, cx);
@@ -1417,7 +1581,11 @@ impl Footplate {
         if self.card().is_none() {
             return;
         }
-        window.focus(&self.line.focus_handle(cx));
+        let field = match self.giving() {
+            Some(_) => &self.secret,
+            None => &self.line,
+        };
+        window.focus(&field.focus_handle(cx));
     }
 
     /// Esc leaves what it can: a decline asked for words, the words for
@@ -1435,6 +1603,13 @@ impl Footplate {
         let Some((bead, ask)) = self.card() else {
             return;
         };
+        // Esc in a secret's field leaves it, and nothing of it stays.
+        if self.secret.focus_handle(cx).is_focused(window) {
+            self.forget_secret(cx);
+            self.shown(cx);
+            window.focus(&self.focus.clone());
+            return;
+        }
         if self.line.focus_handle(cx).is_focused(window) {
             window.focus(&self.focus.clone());
             return;
@@ -1511,6 +1686,10 @@ impl Footplate {
     /// goes to a line that is not in view.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
+        // A card under the settings is not in view, and neither is its
+        // field: nothing typed of a secret waits there.
+        self.forget_secret(cx);
+        self.shown(cx);
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
             Some(_) if !self.settings_open => self.line.focus_handle(cx),
@@ -2845,7 +3024,9 @@ impl Footplate {
                 ),
         );
         // The asker and the recommendation.
-        let asker = if ask.recommend_label.is_empty() {
+        let asker = if ask.secret.is_some() {
+            format!("asked by {}", ask.asker)
+        } else if ask.recommend_label.is_empty() {
             format!("asked by {} · no recommendation", ask.asker)
         } else {
             format!(
@@ -2859,8 +3040,11 @@ impl Footplate {
             card = card.child(div().child(line.clone()));
         }
         // The options numbered, each with its consequence, `you decide`
-        // last as the yard lists it.
-        if ask.options.is_empty() {
+        // last as the yard lists it. A secret ask has none and wants no
+        // words: what it asks for is said in the yard's line, as it is.
+        if let Some(secret) = &ask.secret {
+            card = card.child(self.secret_lines(secret, palette));
+        } else if ask.options.is_empty() {
             card = card.child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -2912,10 +3096,20 @@ impl Footplate {
                 .child("Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."),
         );
         if current {
-            // A line for words.
-            let focus = self.line.focus_handle(cx);
+            // A line for words, or the field of a secret in its place.
+            let field = match ask.secret {
+                Some(_) => self.secret.clone(),
+                None => self.line.clone(),
+            };
+            let focus = field.focus_handle(cx);
+            let kind = if ask.secret.is_some() {
+                "secret"
+            } else {
+                "words"
+            };
             card = card.child(
                 div()
+                    .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
                     .px_3()
                     .py_2()
                     .rounded_md()
@@ -2926,7 +3120,7 @@ impl Footplate {
                         window.focus(&focus);
                         window.prevent_default();
                     })
-                    .child(self.line.clone()),
+                    .child(field),
             );
             // Under it the send button once an option is chosen, with Later
             // and Decline beside it.
@@ -2964,7 +3158,10 @@ impl Footplate {
                 div()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child(decision_keys(ask)),
+                    .child(match ask.secret {
+                        Some(_) => secret_keys(&bead_id, ask_seq),
+                        None => decision_keys(ask),
+                    }),
             );
         } else {
             let bead_click = bead_id.clone();
@@ -3005,6 +3202,22 @@ impl Footplate {
             ));
         }
         card
+    }
+
+    /// What a secret ask asks for: the yard's line, which is made from the
+    /// source's declaration and never from the asker's words, and where
+    /// the value goes.
+    fn secret_lines(&self, secret: &api::Secret, palette: Palette) -> impl IntoElement + use<> {
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| secret.line.clone())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(secret.line.clone()),
+            )
+            .child(div().text_sm().text_color(palette.faint).child(SECRET_GOES))
     }
 
     /// One dealt with: what was decided, in plain words with who and when;
@@ -3115,22 +3328,41 @@ impl Footplate {
                     );
                 }
             }
-            // A line for words with the later pick.
-            let focus = self.line.focus_handle(cx);
-            body = body.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(palette.line)
-                    .bg(palette.side)
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        window.focus(&focus);
-                        window.prevent_default();
-                    })
-                    .child(self.line.clone()),
-            );
+            // A secret ask says what it asks for in the yard's line.
+            if let Some(secret) = &detail.secret {
+                body = body.child(self.secret_lines(secret, palette));
+            }
+            // A line for words with the later pick, or the field of a
+            // secret to give it again: a declined one takes none, and no
+            // line for words stands where a value could be typed in sight.
+            let giving = model.giving(bead, ask).is_some();
+            let field = match detail.secret {
+                Some(_) => self.secret.clone(),
+                None => self.line.clone(),
+            };
+            let focus = field.focus_handle(cx);
+            let kind = if detail.secret.is_some() {
+                "secret"
+            } else {
+                "words"
+            };
+            body = body.when(detail.secret.is_none() || giving, |body| {
+                body.child(
+                    div()
+                        .debug_selector(|| format!("{kind} {bead} {ask}"))
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(palette.line)
+                        .bg(palette.side)
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            window.focus(&focus);
+                            window.prevent_default();
+                        })
+                        .child(field),
+                )
+            });
             // Under it the button that replaces the pick, once one is
             // chosen.
             if let Some(option) = detail.options.iter().find(|o| o.number == detail.chosen) {
@@ -3142,12 +3374,13 @@ impl Footplate {
                     cx,
                 ));
             }
-            body = body.child(
-                div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child(decided_keys(&detail)),
-            );
+            body = body.child(div().text_sm().text_color(palette.faint).child(
+                match detail.secret {
+                    Some(_) if giving => secret_keys(bead, ask),
+                    Some(_) => String::new(),
+                    None => decided_keys(&detail),
+                },
+            ));
             let expand_label = if detail.expanded { "fold" } else { "expand" };
             let bead_click = bead.to_string();
             body = body.child(
@@ -3290,7 +3523,8 @@ impl Render for Footplate {
             _ if self.settings_open => CONTEXT,
             Some(Selected::Conversation(_)) => CONTEXT,
             Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
-                if self.line.focus_handle(cx).is_focused(window) =>
+                if self.line.focus_handle(cx).is_focused(window)
+                    || self.secret.focus_handle(cx).is_focused(window) =>
             {
                 CONTEXT
             }
@@ -3353,7 +3587,7 @@ mod tests {
     use crate::fake::Yard;
     use crate::input;
     use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, WindowAppearance};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::time::Duration;
 
     #[test]
@@ -3394,6 +3628,7 @@ mod tests {
             expanded: false,
             about: Vec::new(),
             state: "open".to_string(),
+            secret: None,
         };
         assert_eq!(
             decision_keys(&ask),
@@ -6264,5 +6499,440 @@ mod tests {
         assert_eq!(away, Away::Stopped);
         assert_eq!(far.requests(), 0);
         assert_eq!(near.requests(), 0);
+    }
+
+    /// What the yard says a secret ask asks for.
+    const BOOKS_LINE: &str =
+        "a secret: BOOKS_TOKEN, for the source books (https://books.example.com)";
+
+    /// A value as a person has it on the clipboard.
+    const VALUE: &str = "bk-live-3f9a-7Qx";
+
+    fn secret_of(env: &[&str]) -> Value {
+        json!({"source": "books", "env": env, "line": BOOKS_LINE})
+    }
+
+    /// The secret ask 7 on bead-s as the queue lists it, open or in `state`.
+    fn queued_secret(env: &[&str], ask: u64, state: &str, given: &[&str]) -> Value {
+        let mut queued = json!({
+            "bead": "bead-s", "bead_title": "The books", "topic": "", "ask": ask,
+            "question": "The token for the books", "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z", "secret": secret_of(env)
+        });
+        if !state.is_empty() {
+            queued["state"] = json!(state);
+            queued["given"] = json!(given);
+        }
+        queued
+    }
+
+    fn bead_secret(env: &[&str], asks: &[u64]) -> String {
+        let asks: Vec<Value> = asks
+            .iter()
+            .map(|ask| {
+                json!({"ask": ask, "to": "jo", "asker": "yardmaster",
+                       "since": "2026-10-10T10:00:00Z",
+                       "question": "The token for the books",
+                       "context": ["Create one in the books' settings."],
+                       "options": [], "state": "open", "secret": secret_of(env)})
+            })
+            .collect();
+        json!({"result": {"id": "bead-s", "title": "The books", "body": "The body.",
+                          "stage": "new", "labels": [], "notes": [], "asks": asks}})
+        .to_string()
+    }
+
+    /// The window on a yard whose one open ask is the secret ask 7 on
+    /// bead-s for `env`, its card open and read, the settings kept in
+    /// `file`.
+    fn opened_on_a_secret_ask<'a>(
+        yard: &Yard,
+        env: &[&str],
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_secret(env, 7, "", &[])], "decided": []}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_secret(env, &[7]));
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(at, file, cx);
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-s".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    /// What is typed in the field of a secret, what the field draws of it,
+    /// and what it says while empty.
+    fn secret_field(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> (String, String, String) {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| {
+            let field = v.secret.read(cx);
+            let (drawn, says) = field.drawn();
+            (field.text().to_string(), drawn, says)
+        })
+    }
+
+    /// Everything the window keeps or says that is not the field of a
+    /// secret: the line, the drafts, the words of the asks, the notice,
+    /// the settings and every file beside them.
+    fn kept_outside_the_field(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        dir: &std::path::Path,
+    ) -> String {
+        fn files(dir: &std::path::Path, all: &mut String) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files(&path, all);
+                } else {
+                    all.push_str(&String::from_utf8_lossy(&std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut kept = view.read_with(cx, |v, cx| {
+            format!(
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                v.line.read(cx).text(),
+                v.line.read(cx).drawn(),
+                v.drafts,
+                v.ask_words,
+                v.model.as_ref().map(|m| m.notice.clone()),
+                v.settings,
+                v.yard_said,
+                v.down,
+                v.secret.read(cx).drawn(),
+            )
+        });
+        files(dir, &mut kept);
+        kept
+    }
+
+    /// A secret ask's card: the yard's line and a field that shows marks
+    /// in place of the words line. Paste works and nothing copies out;
+    /// Enter calls `GiveSecret` and the field is emptied whatever is
+    /// answered; a call that ends without an answer says the value may be
+    /// written; a yard without the call sends the person to a terminal.
+    /// The value is in no draft, no setting and no notice at any point.
+    #[gpui::test]
+    fn a_secret_is_typed_as_marks_given_in_its_call_and_kept_nowhere(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
+        let nowhere = |view: &Entity<Footplate>, cx: &mut VisualTestContext, when: &str| {
+            let kept = kept_outside_the_field(view, cx, dir.path());
+            assert!(!kept.contains(VALUE), "{when}: {kept}");
+        };
+        let marks = |n: usize| "\u{2022}".repeat(n);
+
+        // The window opened with the focus in the line, which this card
+        // does not draw: the window's keys have it, not a line out of
+        // sight.
+        let in_line = view.update_in(cx, |v, window, cx| {
+            v.line.focus_handle(cx).is_focused(window)
+        });
+        assert!(!in_line);
+
+        // The yard's line as it is, and the field where another card has
+        // its line for words.
+        assert!(drawn(cx, BOOKS_LINE));
+        assert!(drawn(cx, "secret bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+        assert_eq!(
+            secret_field(&view, cx),
+            (
+                String::new(),
+                String::new(),
+                "BOOKS_TOKEN for the source books".to_string()
+            )
+        );
+
+        // Typed, it is marks, and the line for words has none of it.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        let (typed_in, shown, _) = secret_field(&view, cx);
+        assert_eq!((typed_in.as_str(), shown), (VALUE, marks(VALUE.len())));
+        assert_eq!(typed(&view, cx), "");
+        nowhere(&view, cx, "typed");
+        // Nothing copies out, by copy or by cut.
+        cx.write_to_clipboard(ClipboardItem::new_string("before".to_string()));
+        cx.simulate_keystrokes("cmd-a cmd-c cmd-x");
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("before".to_string())
+        );
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        // A setting kept while it is typed keeps none of it.
+        cx.simulate_keystrokes("cmd-=");
+        cx.run_until_parked();
+        assert!(file.exists());
+        nowhere(&view, cx, "a setting kept");
+        // Leaving the card forgets it: it is in no draft of the
+        // conversation that opens, and is not back with the card.
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert_eq!(secret_field(&view, cx).0, "");
+        assert_eq!(typed(&view, cx), "");
+        nowhere(&view, cx, "the card left");
+        cx.simulate_keystrokes("shift-tab");
+        wait(cx, "the card again", |cx| drawn(cx, "secret bead-s 7"));
+        assert_eq!(secret_field(&view, cx).0, "");
+        nowhere(&view, cx, "the card again");
+
+        // Pasted, with the line break a copy often ends in. This yard does
+        // not have the call: the field is empty at once, the value went in
+        // the call without the break, and the card says where to answer.
+        cx.write_to_clipboard(ClipboardItem::new_string(format!("{VALUE}\n")));
+        cx.simulate_keystrokes("i");
+        cx.simulate_keystrokes("cmd-v");
+        assert_eq!(secret_field(&view, cx).1, marks(VALUE.len() + 1));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "the yard without the call", |cx| {
+            notice(&view, cx)
+                == "this yard takes no secret from footplate. Answer in a terminal on the yard's machine: yardr bead answer bead-s 7 --secret"
+        });
+        assert_eq!(
+            yard.asked("GiveSecret"),
+            [json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})]
+        );
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        nowhere(&view, cx, "no such call");
+
+        // The yard goes away over the call: never "sent", and not "not
+        // sent" either.
+        yard.answer_nothing("GiveSecret");
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "no answer", |cx| {
+            notice(&view, cx) == "the yard did not answer. The value may be written. Give it again."
+        });
+        assert_eq!(yard.asked("GiveSecret").len(), 2);
+        nowhere(&view, cx, "no answer");
+
+        // The yard says no, in its words.
+        yard.answer(
+            "GiveSecret",
+            r#"{"error": {"code": "error", "message": "GiveSecret is the operator's to give"}}"#,
+        );
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "refused", |cx| {
+            notice(&view, cx) == "not given: GiveSecret is the operator's to give"
+        });
+        nowhere(&view, cx, "refused");
+
+        // A refusal that repeated the value, which the yard's never does,
+        // is not shown.
+        yard.answer(
+            "GiveSecret",
+            &json!({"error": {"code": "error", "message": format!("cannot take {VALUE}")}})
+                .to_string(),
+        );
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "a refusal with the value", |cx| {
+            notice(&view, cx) == "not given: the yard refused it"
+        });
+        nowhere(&view, cx, "a refusal with the value");
+
+        // Given: the yard's words for where it is set, and the ask among
+        // the decided as one that gave the name.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [
+                queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"])
+            ]}})
+            .to_string(),
+        );
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        );
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "given", |cx| {
+            notice(&view, cx)
+                == "gave BOOKS_TOKEN · BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"
+        });
+        assert_eq!(yard.asked("GiveSecret").len(), 5);
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(detail.state_line, "you gave BOOKS_TOKEN");
+        cx.run_until_parked();
+        assert_eq!(secret_field(&view, cx).0, "");
+        nowhere(&view, cx, "given");
+        // Nothing of the value went to the yard but in that call.
+        for call in yard.calls() {
+            if call != "GiveSecret" {
+                let asked = format!("{:?}", yard.asked(&call));
+                assert!(!asked.contains(VALUE), "{call}: {asked}");
+            }
+        }
+    }
+
+    /// An ask of two names takes one after the other and sends them
+    /// together; esc leaves and nothing is sent.
+    #[gpui::test]
+    fn a_secret_of_two_names_goes_together_and_esc_forgets(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let names = ["CRM_TOKEN", "CRM_UPDATE_TOKEN"];
+        let (view, cx) = opened_on_a_secret_ask(&yard, &names, &file, cx);
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["CRM_TOKEN", "CRM_UPDATE_TOKEN"], "file": "/home/jo/.yardr/sources/books.env"}}"#,
+        );
+        let says = |view: &Entity<Footplate>, cx: &mut VisualTestContext| secret_field(view, cx).2;
+        assert_eq!(says(&view, cx), "CRM_TOKEN for the source books (1 of 2)");
+
+        // The first: nothing goes yet, and the field asks for the second.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("first-value");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            secret_field(&view, cx),
+            (
+                String::new(),
+                String::new(),
+                "CRM_UPDATE_TOKEN for the source books (2 of 2)".to_string()
+            )
+        );
+        // Enter on nothing sends nothing, and says what is wanted.
+        cx.simulate_keystrokes("enter");
+        assert_eq!(notice(&view, cx), "nothing is typed for CRM_UPDATE_TOKEN");
+        // Esc leaves: the first is forgotten with what is typed.
+        cx.simulate_input("half");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(says(&view, cx), "CRM_TOKEN for the source books (1 of 2)");
+        assert_eq!(secret_field(&view, cx).0, "");
+        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
+        let kept = kept_outside_the_field(&view, cx, dir.path());
+        assert!(
+            !kept.contains("first-value") && !kept.contains("half"),
+            "{kept}"
+        );
+
+        // Both, one after the other, in the one call.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("first-value");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("second-value");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "both given", |_| {
+            yard.asked("GiveSecret")
+                == [json!({"bead": "bead-s", "ask": 7, "actor": "jo",
+                           "values": {"CRM_TOKEN": "first-value", "CRM_UPDATE_TOKEN": "second-value"}})]
+        });
+    }
+
+    /// Decline on a secret ask goes at once and with no words, whatever is
+    /// typed in the field, which is forgotten.
+    #[gpui::test]
+    fn a_secret_ask_is_declined_at_once_with_no_words(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
+        yard.answer("DeclineAsk", "{}");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(secret_field(&view, cx).0, "");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        click_on(cx, "decline bead-s 7");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk")
+                == [json!({"bead": "bead-s", "ask": 7, "words": "", "actor": "jo"})]
+        });
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
+        let kept = kept_outside_the_field(&view, cx, dir.path());
+        assert!(!kept.contains(VALUE), "{kept}");
+    }
+
+    /// One that was given has the field to give it again, and no line for
+    /// words; one that was declined has neither.
+    #[gpui::test]
+    fn a_secret_given_is_given_again_from_its_card_and_a_declined_one_takes_none(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [
+                queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"]),
+                queued_secret(&["BOOKS_TOKEN"], 8, "declined", &[])
+            ]}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_secret(&["BOOKS_TOKEN"], &[7, 8]));
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env"}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().decided_count() == 2)
+        });
+
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        assert!(drawn(cx, BOOKS_LINE));
+        assert!(drawn(cx, "secret bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "given again", |_| {
+            yard.asked("GiveSecret")
+                == [
+                    json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"}),
+                ]
+        });
+        cx.run_until_parked();
+
+        open_decided(&view, cx, "bead-s", 8);
+        assert!(drawn(cx, BOOKS_LINE));
+        assert!(!drawn(cx, "secret bead-s 8"));
+        assert!(!drawn(cx, "words bead-s 8"));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("GiveSecret").len(), 1);
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
     }
 }

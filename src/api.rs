@@ -286,6 +286,41 @@ pub struct Notifications {
     pub last: u64,
 }
 
+/// What a secret ask asks for: the answer is a value for each name, typed
+/// into a field that does not echo and given with `GiveSecret`. Such an ask
+/// has no options and takes no words.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Secret {
+    /// The declared source the secret is the credential of.
+    #[serde(default)]
+    pub source: String,
+    /// The names to ask the person a value for.
+    #[serde(default, deserialize_with = "or_default")]
+    pub env: Vec<String>,
+    /// What the card says is asked for, in the yard's words and never the
+    /// asker's: shown as it is.
+    #[serde(default)]
+    pub line: String,
+}
+
+/// What `GiveSecret` answers: the names that were written and where, never
+/// a value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Given {
+    #[serde(default, deserialize_with = "or_default")]
+    pub given: Vec<String>,
+    /// The file they are in, on the yard's machine.
+    #[serde(default)]
+    pub file: String,
+    /// Where every variable of the source's credential is set now, in
+    /// words; absent while one is still missing.
+    #[serde(default)]
+    pub credential: String,
+    /// What the credential still wants, in words; absent when it is whole.
+    #[serde(default)]
+    pub missing: String,
+}
+
 /// One open question addressed to the user, as the queue lists it: the
 /// question in plain words, without its options or context, which the card
 /// reads with `Bead`.
@@ -307,6 +342,9 @@ pub struct OpenAsk {
     /// When the ask was written: how long it waits.
     #[serde(default)]
     pub since: String,
+    /// What a secret ask asks for; absent on any other ask.
+    #[serde(default)]
+    pub secret: Option<Secret>,
 }
 
 /// One the user dealt with: answered, put aside or declined, newest first.
@@ -340,6 +378,12 @@ pub struct DecidedAsk {
     /// When a put-aside ask comes back; absent otherwise.
     #[serde(default)]
     pub return_at: String,
+    /// What a secret ask asks for; absent on any other ask.
+    #[serde(default)]
+    pub secret: Option<Secret>,
+    /// The names a secret ask was given values for.
+    #[serde(default, deserialize_with = "or_default")]
+    pub given: Vec<String>,
 }
 
 /// The person's decisions: the open asks, oldest first, with what they
@@ -406,6 +450,12 @@ pub struct BeadAsk {
     pub words: String,
     #[serde(default)]
     pub return_at: String,
+    /// What a secret ask asks for; absent on any other ask.
+    #[serde(default)]
+    pub secret: Option<Secret>,
+    /// The names a secret ask was given values for; none until it is given.
+    #[serde(default, deserialize_with = "or_default")]
+    pub given: Vec<String>,
 }
 
 /// One of the bead's notes as a client shows them: every note but the
@@ -1005,6 +1055,28 @@ impl Client {
         self.call("AnswerAsk", args).map(drop)
     }
 
+    /// Answers a secret ask: each name of the ask with the value the person
+    /// typed. The yard writes the values to the file the source's
+    /// credential is read from and answers the names and the file. A value
+    /// is the person's secret: it is in this call's body and in nothing
+    /// else of the client, no error and no log.
+    pub fn give_secret(
+        &self,
+        bead: &str,
+        ask: u64,
+        values: &[(String, String)],
+        actor: &str,
+    ) -> Result<Given> {
+        let values: serde_json::Map<String, Value> = values
+            .iter()
+            .map(|(name, value)| (name.clone(), json!(value)))
+            .collect();
+        self.answer(
+            "GiveSecret",
+            json!({ "bead": bead, "ask": ask, "values": values, "actor": actor }),
+        )
+    }
+
     /// Puts the ask aside: it leaves the queue and comes back as the yard
     /// says.
     pub fn defer_ask(&self, bead: &str, ask: u64, actor: &str) -> Result<()> {
@@ -1427,6 +1499,123 @@ mod tests {
             let why = Address::parse(none).unwrap_err();
             assert!(why.contains("is no address of a yard"), "{none:?}: {why}");
         }
+    }
+
+    /// A secret is given in its own call, by the socket and at an address
+    /// alike: the value is in the call's body, and in nothing that comes
+    /// back of the call, whatever the yard does with it.
+    #[test]
+    fn a_secret_is_given_by_the_socket_and_at_an_address() {
+        const VALUE: &str = "bk-live-3f9a";
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            let client = yard.client();
+            let way = client.place();
+            let values = [("BOOKS_TOKEN".to_string(), VALUE.to_string())];
+            let give = || client.give_secret("yd-crm", 18, &values, "jo");
+            let without = |err: &Error| {
+                assert!(!err.to_string().contains(VALUE), "{way}: {err}");
+                assert!(!format!("{err:?}").contains(VALUE), "{way}: {err:?}");
+            };
+            // A yard that does not have the call says so, as of any method.
+            let err = give().unwrap_err();
+            assert_eq!(err.to_string(), "no such method GiveSecret", "{way}");
+            without(&err);
+            // One that has it answers the names and the file.
+            yard.answer(
+                "GiveSecret",
+                r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                    "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+            );
+            let given = give().unwrap();
+            assert_eq!(given.given, ["BOOKS_TOKEN"], "{way}");
+            assert_eq!(given.file, "/home/jo/.yardr/sources/books.env", "{way}");
+            assert!(given.credential.starts_with("BOOKS_TOKEN is set in"));
+            assert_eq!(given.missing, "", "{way}");
+            assert_eq!(
+                yard.asked("GiveSecret").last(),
+                Some(&json!({"bead": "yd-crm", "ask": 18,
+                             "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})),
+                "{way}"
+            );
+            // The value is in the body alone: no line of the request's head
+            // has it.
+            let head = yard.last_request();
+            assert!(head.contains("/call/GiveSecret"), "{way}: {head}");
+            assert!(!head.contains(VALUE), "{way}: {head}");
+            // The yard says no, in its words.
+            yard.answer(
+                "GiveSecret",
+                r#"{"error": {"code": "error", "message": "ask 18 on yd-crm is declined: it takes no secret"}}"#,
+            );
+            let err = give().unwrap_err();
+            assert!(matches!(err, Error::Refused { .. }), "{way}: {err:?}");
+            without(&err);
+            // The yard went away over the call: no reply, and no word on
+            // whether it wrote.
+            yard.answer_nothing("GiveSecret");
+            let err = give().unwrap_err();
+            assert!(
+                matches!(err, Error::Down(_) | Error::Protocol(_)),
+                "{way}: {err:?}"
+            );
+            without(&err);
+            // And what is no reply.
+            yard.answer("GiveSecret", "not json");
+            let err = give().unwrap_err();
+            assert!(matches!(err, Error::Protocol(_)), "{way}: {err:?}");
+            without(&err);
+        }
+    }
+
+    #[test]
+    fn a_secret_ask_in_the_queue_and_on_the_bead() {
+        let yard = Yard::start();
+        let secret = json!({"source": "books", "env": ["BOOKS_TOKEN"],
+            "line": "a secret: BOOKS_TOKEN, for the source books (https://books.example.com)"});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {
+                "open": [{"bead": "yd-crm", "ask": 18, "question": "The token for the books",
+                          "asker": "yardmaster", "secret": secret}],
+                "decided": [{"bead": "yd-crm", "ask": 17, "question": "The token for the books",
+                             "asker": "yardmaster", "state": "answered",
+                             "secret": secret, "given": ["BOOKS_TOKEN"]},
+                            {"bead": "yd-crm", "ask": 16, "question": "Move them now?",
+                             "asker": "yardmaster", "state": "answered", "option": 1}]
+            }})
+            .to_string(),
+        );
+        let asks = yard.client().user_asks("jo").unwrap();
+        let asked = asks.open[0].secret.as_ref().unwrap();
+        assert_eq!(asked.source, "books");
+        assert_eq!(asked.env, ["BOOKS_TOKEN"]);
+        assert!(
+            asked
+                .line
+                .starts_with("a secret: BOOKS_TOKEN, for the source books")
+        );
+        assert_eq!(asks.decided[0].given, ["BOOKS_TOKEN"]);
+        assert_eq!(asks.decided[0].secret.as_ref(), Some(asked));
+        // Any other ask has neither.
+        assert_eq!(asks.decided[1].secret, None);
+        assert!(asks.decided[1].given.is_empty());
+
+        yard.answer(
+            "Bead",
+            &json!({"result": {"id": "yd-crm", "asks": [
+                {"ask": 18, "question": "The token for the books", "options": [],
+                 "state": "open", "secret": secret},
+                {"ask": 17, "question": "The token for the books", "options": [],
+                 "state": "answered", "secret": secret, "given": ["BOOKS_TOKEN"]},
+                {"ask": 16, "question": "Move them now?", "state": "answered", "option": 1}
+            ]}})
+            .to_string(),
+        );
+        let bead = yard.client().bead("yd-crm").unwrap();
+        assert_eq!(bead.asks[0].secret.as_ref(), Some(asked));
+        assert!(bead.asks[0].given.is_empty());
+        assert_eq!(bead.asks[1].given, ["BOOKS_TOKEN"]);
+        assert_eq!(bead.asks[2].secret, None);
     }
 
     /// The same client, the same requests, the same answers, whichever way

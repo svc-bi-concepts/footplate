@@ -4,7 +4,8 @@
 //! adds that a text wider than the box goes on in the next row, that the
 //! box is as high as its rows up to a part of the window and then scrolls
 //! with the cursor, that shift+Enter breaks the line and that Enter hands
-//! the text on.
+//! the text on. A masked line is the same line for a secret: it draws a
+//! mark for each character, takes what is pasted and gives nothing out.
 
 use std::ops::Range;
 
@@ -95,7 +96,13 @@ pub struct Line {
     /// Where up and down keep the cursor, from the row they set out in.
     column: Option<Pixels>,
     is_selecting: bool,
+    /// The text is a secret: each character is drawn as [`MARK`], it is
+    /// not copied or cut out, and the input method is told none of it.
+    masked: bool,
 }
+
+/// What a masked line draws in place of each character.
+const MARK: &str = "\u{2022}";
 
 /// An image was pasted into the line. The line holds text, so it is the
 /// window's to attach.
@@ -124,7 +131,26 @@ impl Line {
             reveal: true,
             column: None,
             is_selecting: false,
+            masked: false,
         }
+    }
+
+    /// A line for a secret. It is one line: Enter hands it on and nothing
+    /// breaks it, and a line break that is pasted is a character as any
+    /// other, drawn as a mark.
+    pub fn masked(cx: &mut Context<Self>) -> Self {
+        Line {
+            masked: true,
+            ..Line::new(cx)
+        }
+    }
+
+    /// What is typed, which the line no longer has afterwards: a secret is
+    /// taken once, by what sends it.
+    pub fn take_text(&mut self, cx: &mut Context<Self>) -> String {
+        let text = self.content.to_string();
+        self.set_text("", cx);
+        text
     }
 
     pub fn text(&self) -> &str {
@@ -151,6 +177,14 @@ impl Line {
         (layout.rows.len(), shown.round() as usize)
     }
 
+    /// What the line last drew of its text, and what it says while empty.
+    #[cfg(test)]
+    pub fn drawn(&self) -> (String, String) {
+        let lines = self.last_layout.iter().flat_map(|layout| &layout.lines);
+        let lines: Vec<&str> = lines.map(|line| line.text.as_ref()).collect();
+        (lines.join("\n"), self.placeholder.to_string())
+    }
+
     pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
         if self.placeholder.as_ref() != placeholder {
             self.placeholder = placeholder.to_string().into();
@@ -163,6 +197,9 @@ impl Line {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         self.replace_text_in_range(None, "\n", window, cx)
     }
 
@@ -346,8 +383,9 @@ impl Line {
         }
     }
 
+    /// A masked line copies nothing out, and so cuts nothing.
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -355,7 +393,7 @@ impl Line {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -510,7 +548,7 @@ struct Row {
     /// Its bytes of the text.
     range: Range<usize>,
     /// The line it is of, among the shaped ones, and where that line starts
-    /// in the text.
+    /// in the text as drawn.
     line: usize,
     line_start: usize,
     /// The line goes on in the next row: the row ends where the box does,
@@ -524,10 +562,42 @@ struct Layout {
     lines: Vec<WrappedLine>,
     rows: Vec<Row>,
     line_height: Pixels,
+    /// Of a masked text, where each character starts in the text, and the
+    /// text's length last: the lines are of marks, one a character, and a
+    /// place in the text is another in what is drawn.
+    marks: Option<Vec<usize>>,
+}
+
+/// Where the place `offset` of a text is in what is drawn of it: the same
+/// place, and in a masked text, whose characters start at `marks`, after as
+/// many marks as characters are before it.
+fn drawn_at(marks: Option<&[usize]>, offset: usize) -> usize {
+    match marks {
+        Some(marks) => {
+            let before = marks.partition_point(|start| *start < offset);
+            before.min(marks.len() - 1) * MARK.len()
+        }
+        None => offset,
+    }
+}
+
+/// Where each character of `text` starts, and the text's length last.
+fn marks_of(text: &str) -> Vec<usize> {
+    text.grapheme_indices(true)
+        .map(|(start, _)| start)
+        .chain([text.len()])
+        .collect()
 }
 
 impl Layout {
-    fn new(lines: Vec<WrappedLine>, len: usize, line_height: Pixels) -> Self {
+    /// `lines` are the text's as drawn: of a masked text they are of marks,
+    /// and `marks` says where each mark's character is in the text.
+    fn new(
+        lines: Vec<WrappedLine>,
+        len: usize,
+        line_height: Pixels,
+        marks: Option<Vec<usize>>,
+    ) -> Self {
         let mut rows = Vec::new();
         let mut line_start = 0;
         for (ix, line) in lines.iter().enumerate() {
@@ -548,19 +618,41 @@ impl Layout {
             // The line break is of no row.
             line_start += line.text.len() + 1;
         }
+        let mut layout = Layout {
+            lines,
+            rows,
+            line_height,
+            marks,
+        };
+        // The rows were cut in what is drawn: their bytes are the text's.
+        if layout.marks.is_some() {
+            for ix in 0..layout.rows.len() {
+                let drawn = layout.rows[ix].range.clone();
+                layout.rows[ix].range = layout.typed(drawn.start)..layout.typed(drawn.end);
+            }
+        }
         // A text that could not be shaped is one row, drawn as nothing.
-        if rows.is_empty() {
-            rows.push(Row {
+        if layout.rows.is_empty() {
+            layout.rows.push(Row {
                 range: 0..len,
                 line: 0,
                 line_start: 0,
                 cut: false,
             });
         }
-        Layout {
-            lines,
-            rows,
-            line_height,
+        layout
+    }
+
+    /// Where the place `offset` of the text is in what is drawn.
+    fn drawn(&self, offset: usize) -> usize {
+        drawn_at(self.marks.as_deref(), offset)
+    }
+
+    /// Where the place `index` of what is drawn is in the text.
+    fn typed(&self, index: usize) -> usize {
+        match &self.marks {
+            Some(marks) => marks[(index / MARK.len()).min(marks.len() - 1)],
+            None => index,
         }
     }
 
@@ -592,7 +684,7 @@ impl Layout {
         };
         let at = |offset: usize| {
             line.unwrapped_layout
-                .x_for_index(offset.saturating_sub(row.line_start))
+                .x_for_index(self.drawn(offset).saturating_sub(row.line_start))
         };
         at(offset.clamp(row.range.start, row.range.end)) - at(row.range.start)
     }
@@ -606,9 +698,9 @@ impl Layout {
             return last;
         };
         let layout = &line.unwrapped_layout;
-        let start = layout.x_for_index(row.range.start - row.line_start);
+        let start = layout.x_for_index(self.drawn(row.range.start) - row.line_start);
         let index = row.line_start + layout.closest_index_for_x(start + x.max(px(0.)));
-        let mut index = index.clamp(row.range.start.min(last), last);
+        let mut index = self.typed(index).clamp(row.range.start.min(last), last);
         // A key may come before the frame that shapes a new text: the
         // rows are the old text's then, and the place must be one of the
         // new.
@@ -623,8 +715,8 @@ impl Layout {
     fn character_at(&self, row: usize, x: Pixels) -> Option<usize> {
         let row = &self.rows[row];
         let layout = &self.lines.get(row.line)?.unwrapped_layout;
-        let start = layout.x_for_index(row.range.start - row.line_start);
-        let index = row.line_start + layout.index_for_x(start + x)?;
+        let start = layout.x_for_index(self.drawn(row.range.start) - row.line_start);
+        let index = self.typed(row.line_start + layout.index_for_x(start + x)?);
         row.range.contains(&index).then_some(index)
     }
 
@@ -673,8 +765,16 @@ impl Line {
     /// text becomes what is drawn: a mode that draws it otherwise (a secret
     /// shown as marks) changes the text here, and the rows follow.
     fn shape(&self, width: Option<Pixels>, look: &Look, window: &Window) -> Layout {
+        // A masked text is drawn as a mark for each character, and what is
+        // shaped is never the text.
+        let marks = self.masked.then(|| marks_of(&self.content));
+        let drawn: SharedString = match &marks {
+            Some(marks) => MARK.repeat(marks.len() - 1).into(),
+            None => self.content.clone(),
+        };
+        let at = |offset: usize| drawn_at(marks.as_deref(), offset);
         let run = TextRun {
-            len: self.content.len(),
+            len: drawn.len(),
             font: look.style.font(),
             color: look.style.color,
             background_color: None,
@@ -685,11 +785,11 @@ impl Line {
         let runs = match self.marked_range.as_ref() {
             Some(marked_range) => vec![
                 TextRun {
-                    len: marked_range.start,
+                    len: at(marked_range.start),
                     ..run.clone()
                 },
                 TextRun {
-                    len: marked_range.end - marked_range.start,
+                    len: at(marked_range.end) - at(marked_range.start),
                     underline: Some(UnderlineStyle {
                         color: Some(run.color),
                         thickness: px(1.0),
@@ -698,7 +798,7 @@ impl Line {
                     ..run.clone()
                 },
                 TextRun {
-                    len: self.content.len() - marked_range.end,
+                    len: drawn.len() - at(marked_range.end),
                     ..run
                 },
             ],
@@ -706,16 +806,10 @@ impl Line {
         };
         let lines = window
             .text_system()
-            .shape_text(
-                self.content.clone(),
-                look.font_size,
-                &runs,
-                width.map(wrap_width),
-                None,
-            )
+            .shape_text(drawn, look.font_size, &runs, width.map(wrap_width), None)
             .map(|lines| lines.into_vec())
             .unwrap_or_default();
-        Layout::new(lines, self.content.len(), look.line_height)
+        Layout::new(lines, self.content.len(), look.line_height, marks)
     }
 }
 
@@ -727,6 +821,10 @@ impl EntityInputHandler for Line {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
+        // The system's input method is handed none of a secret.
+        if self.masked {
+            return None;
+        }
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
         Some(self.content[range].to_string())
@@ -1377,6 +1475,126 @@ mod tests {
         });
         assert_eq!(text(&line, cx), "one\né 日本語");
         assert_eq!(cursor(&line, cx), "one\né 日本語".len());
+    }
+
+    /// A masked line alone in a window 200 wide and 300 high, with the
+    /// focus.
+    fn opened_masked(cx: &mut TestAppContext) -> (Entity<Line>, &mut VisualTestContext) {
+        cx.update(bind_keys);
+        let (line, cx) = cx.add_window_view(|window, cx| {
+            let line = Line::masked(cx);
+            window.focus(&line.focus_handle);
+            line
+        });
+        cx.simulate_resize(size(px(200.), px(300.)));
+        drawn(cx);
+        (line, cx)
+    }
+
+    /// What the line last drew of its text.
+    fn drawn_text(line: &Entity<Line>, cx: &mut VisualTestContext) -> String {
+        drawn(cx);
+        line.read_with(cx, |line, _| line.drawn().0)
+    }
+
+    #[gpui::test]
+    fn a_masked_line_draws_a_mark_for_each_character_and_never_the_text(cx: &mut TestAppContext) {
+        let (line, cx) = opened_masked(cx);
+        // A character of several bytes, and one of several code points,
+        // are a mark each.
+        cx.simulate_input("s3cr\u{e9}t-e\u{301}");
+        assert_eq!(text(&line, cx), "s3cr\u{e9}t-e\u{301}");
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(8));
+        // The cursor is after the last mark, and a click on the first mark
+        // puts it before the first character.
+        let (bounds, row) = line.read_with(cx, |line, _| {
+            let layout = line.last_layout.as_ref().unwrap();
+            assert_eq!(
+                layout.x(0, line.content.len()),
+                layout.lines[0].unwrapped_layout.width
+            );
+            (line.last_bounds.unwrap(), f32::from(layout.line_height))
+        });
+        let at = point(bounds.left() + px(1.), bounds.top() + px(0.5 * row));
+        cx.simulate_click(at, Modifiers::default());
+        assert_eq!(cursor(&line, cx), 0);
+        // The arrows and backspace go by characters of the text.
+        cx.simulate_keystrokes("end left left backspace");
+        assert_eq!(text(&line, cx), "s3cr\u{e9}-e\u{301}");
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(7));
+        // The system's input method is handed none of it.
+        line.update_in(cx, |line, window, cx| {
+            assert_eq!(line.text_for_range(0..4, &mut None, window, cx), None);
+        });
+        // Taken, the line has it no longer.
+        let taken = line.update(cx, |line, cx| line.take_text(cx));
+        assert_eq!(taken, "s3cr\u{e9}-e\u{301}");
+        assert_eq!(text(&line, cx), "");
+        assert_eq!(drawn_text(&line, cx), "");
+    }
+
+    #[gpui::test]
+    fn a_masked_line_takes_what_is_pasted_and_copies_nothing_out(cx: &mut TestAppContext) {
+        let (line, cx) = opened_masked(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("pasted-k3y".to_string()));
+        cx.simulate_keystrokes("cmd-v");
+        assert_eq!(text(&line, cx), "pasted-k3y");
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(10));
+        // Copy and cut of all of it leave the clipboard as it was, and cut
+        // leaves the text.
+        cx.write_to_clipboard(ClipboardItem::new_string("before".to_string()));
+        cx.simulate_keystrokes("cmd-a cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        cx.simulate_keystrokes("cmd-x");
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        assert_eq!(text(&line, cx), "pasted-k3y");
+    }
+
+    #[gpui::test]
+    fn a_masked_line_is_one_line_that_wraps_and_enter_hands_it_on(cx: &mut TestAppContext) {
+        let (line, cx) = opened_masked(cx);
+        let sent = Rc::new(Cell::new(0));
+        cx.update(|_, cx| {
+            let sent = sent.clone();
+            cx.subscribe(&line, move |_, _: &Submitted, _| sent.set(sent.get() + 1))
+                .detach();
+        });
+        // Shift and Enter break no line here.
+        cx.simulate_input("one");
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(text(&line, cx), "one");
+        // A line break that is pasted is a mark as any character, in the
+        // one line.
+        cx.write_to_clipboard(ClipboardItem::new_string("\ntwo".to_string()));
+        cx.simulate_keystrokes("cmd-v");
+        assert_eq!(text(&line, cx), "one\ntwo");
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(7));
+        assert_eq!(shown(&line, cx).0, 1);
+        // A value wider than the box goes on in the next row, every row of
+        // marks, and the rows are the text's: the cursor at the end is in
+        // the last, and home is that row's.
+        let long = "k".repeat(120);
+        line.update(cx, |line, cx| line.set_text(&long, cx));
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(120));
+        let rows = shown(&line, cx).0;
+        assert!(rows > 1, "{rows} rows");
+        line.read_with(cx, |line, _| {
+            let layout = line.last_layout.as_ref().unwrap();
+            assert_eq!(layout.rows[0].range.start, 0);
+            assert_eq!(layout.rows.last().unwrap().range.end, 120);
+            for pair in layout.rows.windows(2) {
+                assert_eq!(pair[0].range.end, pair[1].range.start);
+            }
+            assert_eq!(layout.row_of(120), rows - 1);
+        });
+        cx.simulate_keystrokes("home");
+        let home = cursor(&line, cx);
+        assert!(home > 0 && home < 120, "home at {home}");
+        cx.simulate_keystrokes("up");
+        assert!(cursor(&line, cx) < home);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(sent.get(), 1);
+        assert_eq!(text(&line, cx), long);
     }
 
     #[test]

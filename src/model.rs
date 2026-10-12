@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, TimeZone};
 
 use crate::api::{
-    AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Me,
-    Notification, OpenAsk, Peer,
+    self, AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Me,
+    Notification, OpenAsk, Peer, Secret,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -253,6 +253,9 @@ pub struct DecisionAsk {
     pub about: Vec<AboutBead>,
     /// `open`, `answered`, `put aside` or `declined`.
     pub state: String,
+    /// What a secret ask asks for: its card has the yard's line and a field
+    /// that shows marks, where another has options or a line for words.
+    pub secret: Option<Secret>,
 }
 
 /// A bead's open asks, as the open row shows them: one card each.
@@ -300,6 +303,8 @@ pub struct DecidedDetail {
     pub body: String,
     pub notes: Vec<CardNote>,
     pub doc: String,
+    /// What a secret ask asks for, as on its open card.
+    pub secret: Option<Secret>,
 }
 
 /// A call the yard has to be asked, with what the model does on its answer.
@@ -725,6 +730,7 @@ impl Model {
                         expanded: self.expanded.contains(&(bead.to_string(), ask.ask)),
                         about: full.map_or(Vec::new(), |f| f.about.clone()),
                         state: full.map_or("open".to_string(), |f| f.state.clone()),
+                        secret: ask.secret.clone(),
                     }
                 })
                 .collect(),
@@ -789,6 +795,7 @@ impl Model {
             body,
             notes,
             doc,
+            secret: a.secret.clone(),
         })
     }
 
@@ -886,6 +893,11 @@ impl Model {
     /// Enter alone sends nothing, not even the recommendation.
     pub fn answer_action(&self, bead: &str, ask: u64, words: &str) -> Option<AnswerAction> {
         let full = self.bead_ask(bead, ask)?;
+        // A secret ask takes no words and no pick: its answer is typed in
+        // its own field and goes in its own call.
+        if self.secret(bead, ask).is_some() || full.secret.is_some() {
+            return None;
+        }
         let words = words.trim().to_string();
         // An ask with no options wants words: they are the answer.
         if full.options.is_empty() {
@@ -957,12 +969,83 @@ impl Model {
                     option_label: label,
                     words,
                     return_at: String::new(),
+                    secret: open.secret,
+                    given: Vec::new(),
                 },
             );
         } else {
             return Vec::new();
         }
         self.chosen.remove(&(bead.to_string(), ask));
+        let mut effects = self.reselect();
+        effects.push(Effect::Asks);
+        effects.push(Effect::Bead {
+            bead: bead.to_string(),
+        });
+        effects
+    }
+
+    /// What the ask asks for when it is a secret ask, open or dealt with.
+    pub fn secret(&self, bead: &str, ask: u64) -> Option<&Secret> {
+        let open = self.open.iter().filter(|a| a.bead == bead && a.ask == ask);
+        let decided = self
+            .decided
+            .iter()
+            .filter(|a| a.bead == bead && a.ask == ask);
+        open.map(|a| &a.secret)
+            .chain(decided.map(|a| &a.secret))
+            .next()?
+            .as_ref()
+    }
+
+    /// What a field on the ask's card takes: the secret of an ask that is
+    /// open, put aside or given already, where giving again replaces. A
+    /// declined one takes none.
+    pub fn giving(&self, bead: &str, ask: u64) -> Option<&Secret> {
+        let declined = self
+            .decided
+            .iter()
+            .any(|a| a.bead == bead && a.ask == ask && a.state == "declined");
+        self.secret(bead, ask).filter(|_| !declined)
+    }
+
+    /// The yard took the values of a secret ask and answered the names it
+    /// wrote: the ask moves to "Decided" at once, as one that `gave` them,
+    /// and the queue and the bead are read again for what the yard says.
+    pub fn gave(&mut self, bead: &str, ask: u64, names: &[String]) -> Vec<Effect> {
+        if let Some(dealt) = self
+            .decided
+            .iter_mut()
+            .find(|a| a.bead == bead && a.ask == ask)
+        {
+            dealt.state = "answered".to_string();
+            dealt.given = names.to_vec();
+            dealt.return_at.clear();
+        } else if let Some(at) = self
+            .open
+            .iter()
+            .position(|a| a.bead == bead && a.ask == ask)
+        {
+            let open = self.open.remove(at);
+            self.decided.insert(
+                0,
+                DecidedAsk {
+                    bead: open.bead,
+                    bead_title: open.bead_title,
+                    topic: open.topic,
+                    ask: open.ask,
+                    question: open.question,
+                    asker: open.asker,
+                    since: open.since,
+                    state: "answered".to_string(),
+                    secret: open.secret,
+                    given: names.to_vec(),
+                    ..DecidedAsk::default()
+                },
+            );
+        } else {
+            return Vec::new();
+        }
         let mut effects = self.reselect();
         effects.push(Effect::Asks);
         effects.push(Effect::Bead {
@@ -997,6 +1080,8 @@ impl Model {
                 option_label: String::new(),
                 words: String::new(),
                 return_at: String::new(),
+                secret: open.secret,
+                given: Vec::new(),
             },
         );
         self.chosen.remove(&(bead.to_string(), ask));
@@ -1008,10 +1093,11 @@ impl Model {
         effects
     }
 
-    /// The ask is declined with words: not a pick and not "you decide".
+    /// The ask is declined with words: not a pick and not "you decide". A
+    /// secret ask is declined with none: the yard takes no words on it.
     pub fn declined(&mut self, bead: &str, ask: u64, words: &str) -> Vec<Effect> {
         let words = words.trim().to_string();
-        if words.is_empty() {
+        if words.is_empty() && self.secret(bead, ask).is_none() {
             return Vec::new();
         }
         let Some(at) = self
@@ -1037,6 +1123,8 @@ impl Model {
                 option_label: String::new(),
                 words,
                 return_at: String::new(),
+                secret: open.secret,
+                given: Vec::new(),
             },
         );
         self.chosen.remove(&(bead.to_string(), ask));
@@ -1686,6 +1774,9 @@ fn decided_sub(ask: &DecidedAsk) -> String {
                 sub = format!("{sub} · {}", plain(&ask.words));
             }
         }
+        "answered" if !ask.given.is_empty() => {
+            sub = format!("{sub} · gave {}", ask.given.join(", "));
+        }
         "answered" => {
             sub = format!("{sub} · {}", plain(&ask.words));
         }
@@ -1712,6 +1803,9 @@ where
     Tz::Offset: std::fmt::Display,
 {
     match ask.state.as_str() {
+        // A secret ask's answer is the names, never a value.
+        "answered" if !ask.given.is_empty() => format!("you gave {}", ask.given.join(", ")),
+        "declined" if ask.secret.is_some() => "you declined".to_string(),
         "answered" if ask.option == 0 => {
             format!("you answered: {}", plain(&ask.words))
         }
@@ -1723,6 +1817,36 @@ where
         "put aside" => format!("put aside, back {}", clock(&ask.return_at, zone)),
         "declined" => format!("you declined: {}", plain(&ask.words)),
         _ => format!("{} · {}", ask.asker, plain(&ask.state)),
+    }
+}
+
+/// What the yard answered to a secret that was given, in one line: the
+/// names, and the yard's words for where the source's credential is set
+/// now or what it still wants.
+pub fn given_line(given: &api::Given) -> String {
+    let state = [&given.credential, &given.missing]
+        .into_iter()
+        .find(|words| !words.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("written to {}", given.file));
+    format!("gave {} · {state}", given.given.join(", "))
+}
+
+/// Why a secret was not given, for the card. A call that ended without an
+/// answer may have written the value all the same, so it is never said to
+/// be sent or not sent; a yard that does not have the call sends its person
+/// to a terminal. The words hold what the yard said and never a value.
+pub fn not_given(err: &api::Error, bead: &str, ask: u64) -> String {
+    match err {
+        api::Error::Down(_) | api::Error::Protocol(_) => {
+            "the yard did not answer. The value may be written. Give it again.".to_string()
+        }
+        // The yard's one answer with no code of its own: its words are
+        // read here, and when they change this is shown as any refusal.
+        api::Error::Refused { message, .. } if message.starts_with("no such method") => format!(
+            "this yard takes no secret from footplate. Answer in a terminal on the yard's machine: yardr bead answer {bead} {ask} --secret"
+        ),
+        _ => format!("not given: {err}"),
     }
 }
 
@@ -2810,6 +2934,7 @@ mod tests {
             question: question.into(),
             asker: asker.into(),
             since: since.into(),
+            secret: None,
         }
     }
 
@@ -2835,6 +2960,8 @@ mod tests {
             option_label: option_label.into(),
             words: words.into(),
             return_at: return_at.into(),
+            secret: None,
+            given: Vec::new(),
         }
     }
 
@@ -3608,6 +3735,150 @@ mod tests {
             m.selected(),
             Some(&Selected::Decided("yardr-n8ta".into(), 3))
         );
+    }
+
+    fn books() -> Secret {
+        Secret {
+            source: "books".into(),
+            env: vec!["BOOKS_TOKEN".into()],
+            line: "a secret: BOOKS_TOKEN, for the source books (https://books.example.com)".into(),
+        }
+    }
+
+    /// A yard with one secret ask open, 18 on yd-crm, and its bead read.
+    fn with_a_secret_ask() -> Model {
+        let mut state = yard(&[]);
+        state.asks.open = vec![OpenAsk {
+            secret: Some(books()),
+            ..open_ask(
+                "yd-crm",
+                "The books",
+                "",
+                18,
+                "The token for the books",
+                "yardmaster",
+                "2026-10-10T10:00:00Z",
+            )
+        }];
+        let (mut m, _) = Model::new(state, None);
+        m.bead_loaded(Bead {
+            id: "yd-crm".into(),
+            asks: vec![BeadAsk {
+                secret: Some(books()),
+                ..full_ask(18, Vec::new(), 0)
+            }],
+            ..Bead::default()
+        });
+        m
+    }
+
+    #[test]
+    fn a_secret_ask_s_card_has_the_yard_s_line_and_takes_no_words() {
+        let mut m = with_a_secret_ask();
+        let detail = m.decision_detail("yd-crm", &noon()).unwrap();
+        let card = &detail.asks[0];
+        assert_eq!(card.secret, Some(books()));
+        assert!(card.options.is_empty());
+        assert_eq!(m.giving("yd-crm", 18), Some(&books()));
+        // Enter sends no words for it, typed or not: its answer goes in its
+        // own call. An ask with no options and no secret wants them still.
+        assert_eq!(m.answer_action("yd-crm", 18, "bk-live-3f9a"), None);
+        assert_eq!(m.answer_action("yd-crm", 18, ""), None);
+
+        // Given: it is among the decided at once as one that gave the
+        // names, and the queue and the bead are read again.
+        let effects = m.gave("yd-crm", 18, &["BOOKS_TOKEN".to_string()]);
+        assert!(effects.contains(&Effect::Asks));
+        assert!(effects.contains(&Effect::Bead {
+            bead: "yd-crm".into()
+        }));
+        assert_eq!(m.decisions_count(), 0);
+        assert_eq!(m.decided_rows()[0].sub, "yardmaster · gave BOOKS_TOKEN");
+        let detail = m.decided_detail("yd-crm", 18, &chrono::Utc).unwrap();
+        assert_eq!(detail.state_line, "you gave BOOKS_TOKEN");
+        assert_eq!(detail.secret, Some(books()));
+        assert_eq!(detail.words, "");
+        // It can be given again, which replaces, and takes no words there
+        // either.
+        assert_eq!(m.giving("yd-crm", 18), Some(&books()));
+        assert_eq!(m.answer_action("yd-crm", 18, "bk-live-3f9a"), None);
+        assert_eq!(m.gave("yd-crm", 18, &["BOOKS_TOKEN".to_string()]).len(), 2);
+        assert_eq!(m.decided_count(), 1);
+    }
+
+    #[test]
+    fn a_secret_ask_is_declined_with_no_words_and_takes_none_afterwards() {
+        let mut m = with_a_secret_ask();
+        assert!(m.declined("yd-crm", 18, "").contains(&Effect::Asks));
+        assert_eq!(m.decisions_count(), 0);
+        let detail = m.decided_detail("yd-crm", 18, &chrono::Utc).unwrap();
+        assert_eq!(detail.state_line, "you declined");
+        assert_eq!(m.decided_rows()[0].sub, "yardmaster · declined");
+        assert_eq!(m.secret("yd-crm", 18), Some(&books()));
+        assert_eq!(m.giving("yd-crm", 18), None);
+        // Put aside, it is given still.
+        let mut m = with_a_secret_ask();
+        m.deferred("yd-crm", 18);
+        assert_eq!(m.giving("yd-crm", 18), Some(&books()));
+    }
+
+    #[test]
+    fn why_a_secret_was_not_given_and_what_the_yard_said_of_one_that_was() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        // No answer: the value may be written, and it is never "sent".
+        let gone = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        for err in [
+            api::Error::Down(gone),
+            api::Error::Protocol("GiveSecret: status 200, and no JSON object".into()),
+        ] {
+            let why = not_given(&err, "yd-crm", 18);
+            assert_eq!(
+                why,
+                "the yard did not answer. The value may be written. Give it again."
+            );
+        }
+        // A yard that does not have the call: the terminal on its machine.
+        assert_eq!(
+            not_given(&refused("no such method GiveSecret"), "yd-crm", 18),
+            "this yard takes no secret from footplate. Answer in a terminal on the yard's machine: yardr bead answer yd-crm 18 --secret"
+        );
+        // What the yard refuses or could not record, in its words.
+        assert_eq!(
+            not_given(
+                &refused(
+                    "BOOKS_TOKEN is written to ~/.yardr/sources/books.env, but the yard could not record it: disk full. Give it again."
+                ),
+                "yd-crm",
+                18
+            ),
+            "not given: BOOKS_TOKEN is written to ~/.yardr/sources/books.env, but the yard could not record it: disk full. Give it again."
+        );
+        assert_eq!(
+            not_given(&api::Error::NotLetIn, "yd-crm", 18),
+            "not given: this device is no longer let in"
+        );
+
+        let mut given = api::Given {
+            given: vec!["CRM_TOKEN".into(), "CRM_UPDATE_TOKEN".into()],
+            file: "/home/jo/.yardr/sources/crm.env".into(),
+            credential: "CRM_TOKEN is set in /home/jo/.yardr/sources/crm.env".into(),
+            missing: String::new(),
+        };
+        assert_eq!(
+            given_line(&given),
+            "gave CRM_TOKEN, CRM_UPDATE_TOKEN · CRM_TOKEN is set in /home/jo/.yardr/sources/crm.env"
+        );
+        given.credential.clear();
+        given.missing = "env_file /home/jo/.yardr/sources/crm.env does not set CRM_TOKEN".into();
+        assert!(
+            given_line(&given)
+                .ends_with("· env_file /home/jo/.yardr/sources/crm.env does not set CRM_TOKEN")
+        );
+        given.missing.clear();
+        assert!(given_line(&given).ends_with("· written to /home/jo/.yardr/sources/crm.env"));
     }
 
     #[test]
