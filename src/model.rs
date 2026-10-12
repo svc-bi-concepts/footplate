@@ -329,6 +329,10 @@ pub enum Effect {
     /// `Conversation` with `name` after a seq; answered to
     /// [`Model::conversation`].
     Read { name: String, after: u64 },
+    /// `Conversation` with `name`, its newest [`PAGE`] mails older than the
+    /// seq `before` (0: the newest of all); answered to [`Model::page`] or
+    /// [`Model::page_failed`].
+    Page { name: String, before: u64 },
     /// `AckUserInbox` through a seq; answered to [`Model::acked`] or
     /// [`Model::ack_failed`].
     Ack { through: u64 },
@@ -348,6 +352,21 @@ pub enum Effect {
     /// `Bead` with `bead`; answered to [`Model::bead_loaded`] or
     /// [`Model::bead_failed`].
     Bead { bead: String },
+}
+
+/// How many mails of a conversation the yard is asked for at once: the
+/// newest when it opens, and as many older each time its top is reached.
+pub const PAGE: u64 = 50;
+
+/// What stands above the oldest mail the open conversation shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Top {
+    /// The yard has not answered yet whether there is older mail.
+    Unread,
+    /// The yard has older mail: reaching the top asks for it.
+    Older,
+    /// This is the oldest mail of the conversation.
+    Start,
 }
 
 /// What a piece of news is: the settings choose which kinds the system
@@ -403,6 +422,11 @@ pub struct Model {
     /// those the yard was asked for whole.
     convo: HashMap<String, Vec<Letter>>,
     loaded: HashSet<String>,
+    /// The conversations of which the yard has older mail than the window
+    /// was given, and those an older page of which is asked for and not
+    /// answered.
+    older: HashSet<String>,
+    paging: HashSet<String>,
     /// The user's unread mail by seq. `cursor` is how far the yard has it
     /// acknowledged, `asked` how far the window has asked for.
     unread: BTreeMap<u64, Waiting>,
@@ -687,13 +711,30 @@ impl Model {
         }
     }
 
+    /// The seq from which on the row `sel` has all its mail. A row of
+    /// several conversations is read a page of each, and the pages do not
+    /// reach equally far back: what is older than the oldest mail of one
+    /// that has older still may have mail of that one missing in between,
+    /// and is not shown until it was asked for.
+    fn horizon(&self, sel: &Selected) -> u64 {
+        self.sources(sel)
+            .iter()
+            .filter(|name| self.older.contains(*name))
+            .filter_map(|name| self.convo.get(name)?.first())
+            .map(|l| l.seq)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The mail the row `sel` shows, oldest first.
     fn letters(&self, sel: &Selected) -> Vec<&Letter> {
+        let horizon = self.horizon(sel);
         let mut out: Vec<&Letter> = self
             .sources(sel)
             .iter()
             .filter_map(|name| self.convo.get(name))
             .flatten()
+            .filter(|l| l.seq >= horizon)
             .collect();
         out.sort_by_key(|l| l.seq);
         out
@@ -1601,13 +1642,18 @@ impl Model {
         self.select(order[next].clone())
     }
 
-    /// What opening a row does here: the unread mail it shows is seen, and
-    /// a conversation is the one to come back to.
-    fn opened(&mut self) {
+    /// The unread mail the open row shows is seen: that of a conversation
+    /// the yard has answered, from where the row has all its mail. Unread
+    /// mail older than the pages read was never shown, so it stays unseen,
+    /// and holds the acknowledgement back until its page is read.
+    fn see(&mut self) {
+        let horizon = self.selected.as_ref().map_or(0, |sel| self.horizon(sel));
         let shown: Vec<u64> = self
             .unread
             .iter()
-            .filter(|(_, w)| !w.seen && self.shows(&w.from))
+            .filter(|(seq, w)| {
+                !w.seen && **seq >= horizon && self.loaded.contains(&w.from) && self.shows(&w.from)
+            })
             .map(|(seq, _)| *seq)
             .collect();
         for seq in shown {
@@ -1615,23 +1661,42 @@ impl Model {
                 w.seen = true;
             }
         }
+    }
+
+    /// What opening a row does here: the unread mail it shows is seen, and
+    /// a conversation is the one to come back to.
+    fn opened(&mut self) {
+        self.see();
         if let Some(Selected::Conversation(sel)) = &self.selected {
             self.back = Some(sel.clone());
         }
     }
 
-    /// Reads the open conversation if it was not read before, with each
-    /// whose mail it shows, and acknowledges what opening it showed; the
-    /// yard row does so with its mail, and its notices need no call. A bead
-    /// and one dealt with read the bead whole when it was not read before.
+    /// Reads the open conversation if it was not read before, its newest
+    /// page, with each whose mail it shows, and acknowledges what opening
+    /// it showed; the yard row does so with its mail, whole, and its
+    /// notices need no call. A bead and one dealt with read the bead whole
+    /// when it was not read before.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
-            Some(sel @ (Selected::Conversation(_) | Selected::Yard)) => {
+            Some(sel @ Selected::Conversation(_)) => {
                 let mut effects: Vec<Effect> = self
                     .sources(&sel)
                     .iter()
                     .filter(|from| !self.loaded.contains(*from))
                     .map(|from| self.read(from))
+                    .collect();
+                effects.extend(self.ack());
+                effects
+            }
+            // The yard row has no top to reach among its notices: the mail
+            // it shows is read whole.
+            Some(sel @ Selected::Yard) => {
+                let mut effects: Vec<Effect> = self
+                    .sources(&sel)
+                    .into_iter()
+                    .filter(|from| !self.loaded.contains(from))
+                    .map(|name| Effect::Read { name, after: 0 })
                     .collect();
                 effects.extend(self.ack());
                 effects
@@ -1647,16 +1712,19 @@ impl Model {
         }
     }
 
-    /// The call for the conversation with `name` after the last mail the
-    /// window has of it.
+    /// The call for the conversation with `name`: what came after the last
+    /// mail the window has of it, or its newest page when the yard was not
+    /// asked for it before.
     fn read(&self, name: &str) -> Effect {
-        let after = match self.convo.get(name) {
-            Some(c) if self.loaded.contains(name) => c.last().map_or(0, |l| l.seq),
-            _ => 0,
-        };
-        Effect::Read {
-            name: name.to_string(),
-            after,
+        match self.convo.get(name) {
+            Some(c) if self.loaded.contains(name) => Effect::Read {
+                name: name.to_string(),
+                after: c.last().map_or(0, |l| l.seq),
+            },
+            _ => Effect::Page {
+                name: name.to_string(),
+                before: 0,
+            },
         }
     }
 
@@ -1694,7 +1762,93 @@ impl Model {
         for l in letters {
             self.add(name, l);
         }
+        self.see();
         self.ack()
+    }
+
+    /// A page of the conversation with `name` as the yard answered it, and
+    /// whether the yard has older mail of it still. A yard that knows no
+    /// pages answers all of it and says nothing of more: that is the whole
+    /// conversation then, and nothing is asked for after it. `before` is
+    /// what the page was asked with.
+    pub fn page(
+        &mut self,
+        name: &str,
+        before: u64,
+        letters: Vec<Letter>,
+        more: bool,
+    ) -> Vec<Effect> {
+        self.paging.remove(name);
+        // An older page for a conversation whose newest was not read is
+        // one asked for before the yard was lost: with it alone the
+        // conversation would stand read, and its newest mail missing.
+        if before > 0 && !self.loaded.contains(name) {
+            return Vec::new();
+        }
+        if more {
+            self.older.insert(name.to_string());
+        } else {
+            self.older.remove(name);
+        }
+        self.conversation(name, letters)
+    }
+
+    /// The yard did not answer the page: it is asked for again when the
+    /// conversation is opened or its top reached again.
+    pub fn page_failed(&mut self, name: &str, why: &str) {
+        self.paging.remove(name);
+        self.notice = format!("the conversation with {name} could not be read: {why}");
+    }
+
+    /// What stands above the oldest mail of the open conversation.
+    pub fn top(&self) -> Top {
+        let Some(sel @ Selected::Conversation(_)) = self.selected.as_ref() else {
+            return Top::Unread;
+        };
+        let sources = self.sources(sel);
+        if sources.iter().any(|name| self.older.contains(name)) {
+            Top::Older
+        } else if sources.iter().all(|name| self.loaded.contains(name)) {
+            Top::Start
+        } else {
+            Top::Unread
+        }
+    }
+
+    /// The seq of the oldest and of the newest mail the open conversation
+    /// shows.
+    pub fn span(&self) -> Option<(u64, u64)> {
+        let letters = match self.selected.as_ref() {
+            Some(sel @ Selected::Conversation(_)) => self.letters(sel),
+            _ => Vec::new(),
+        };
+        Some((letters.first()?.seq, letters.last()?.seq))
+    }
+
+    /// The top of the open conversation was reached: asks for the page
+    /// before the oldest mail it shows, of each conversation in the row
+    /// that stops there and has older. Nothing while that is asked for
+    /// already, and nothing once the yard said there is no more.
+    pub fn older(&mut self) -> Vec<Effect> {
+        let Some(sel @ Selected::Conversation(_)) = self.selected.clone() else {
+            return Vec::new();
+        };
+        let horizon = self.horizon(&sel);
+        let mut effects = Vec::new();
+        for name in self.sources(&sel) {
+            let first = self
+                .convo
+                .get(&name)
+                .and_then(|c| c.first())
+                .map_or(0, |l| l.seq);
+            if self.older.contains(&name) && first == horizon && self.paging.insert(name.clone()) {
+                effects.push(Effect::Page {
+                    name,
+                    before: first,
+                });
+            }
+        }
+        effects
     }
 
     /// Acknowledges the user's mail as far as the window has shown it:
@@ -1879,9 +2033,18 @@ impl Model {
                 .filter(|n| n.split_once('@').is_some_and(|(_, of)| of == peer))
                 .collect();
             names.sort();
-            effects.extend(names.into_iter().map(|name| Effect::Read {
-                name: name.clone(),
-                after: 0,
+            // Whole as far as the window has it: where the yard has older
+            // mail than that, from the oldest it was given on.
+            effects.extend(names.into_iter().map(|name| {
+                Effect::Read {
+                    name: name.clone(),
+                    after: self
+                        .convo
+                        .get(name)
+                        .and_then(|c| c.first())
+                        .filter(|_| self.older.contains(name))
+                        .map_or(0, |l| l.seq.saturating_sub(1)),
+                }
             }));
         }
         effects
@@ -2436,6 +2599,13 @@ mod tests {
         }
     }
 
+    fn page(name: &str, before: u64) -> Effect {
+        Effect::Page {
+            name: name.into(),
+            before,
+        }
+    }
+
     #[test]
     fn the_rows_are_the_crew_then_those_the_linked_yards_expose() {
         let (m, _) = Model::new(yard(&[]), None);
@@ -2509,7 +2679,7 @@ mod tests {
     fn it_opens_on_the_yardmaster_and_reads_that_conversation() {
         let (m, effects) = Model::new(yard(&[]), None);
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
-        assert_eq!(effects, [read("yardmaster", 0)]);
+        assert_eq!(effects, [page("yardmaster", 0)]);
         assert!(m.rows()[1].selected);
         assert!(!m.rows()[0].selected);
     }
@@ -2530,7 +2700,7 @@ mod tests {
         );
         // The user's own row and the yard row stand whatever the yard has.
         assert_eq!(m.selected_conversation(), Some("jo"));
-        assert_eq!(effects, [read("jo", 0)]);
+        assert_eq!(effects, [page("jo", 0)]);
         assert_eq!(m.target(), Some(Target::Crew("jo".into())));
         // The yard row reads the mail the yard itself sent.
         assert_eq!(m.step(1), [read("yard", 0)]);
@@ -2558,7 +2728,7 @@ mod tests {
         let (mut m, _) = Model::new(yard(&[]), None);
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
-            [read("assembly", 0)]
+            [page("assembly", 0)]
         );
         assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(
@@ -2618,7 +2788,13 @@ mod tests {
     fn opening_a_conversation_acknowledges_the_mail_it_shows() {
         let (mut m, effects) = Model::new(yard(&[(6, "yardmaster"), (7, "yardmaster")]), None);
         // The yardmaster's is open from the start.
-        assert_eq!(effects, [read("yardmaster", 0), Effect::Ack { through: 7 }]);
+        assert_eq!(effects, [page("yardmaster", 0)]);
+        // Nothing of it is shown before the yard answers the conversation.
+        assert_eq!(m.unread("yardmaster"), 2);
+        assert_eq!(
+            m.page("yardmaster", 0, vec![], false),
+            [Effect::Ack { through: 7 }]
+        );
         // It was shown: it counts no longer, whenever the yard answers.
         assert_eq!(m.unread("yardmaster"), 0);
         m.acked(7);
@@ -2646,10 +2822,13 @@ mod tests {
         // Opening the conversation shows 6 and 9; 7 holds back 9.
         assert_eq!(
             m.select(Selected::Conversation("clerk@north".into())),
-            [read("clerk@north", 0), Effect::Ack { through: 6 }]
+            [page("clerk@north", 0)]
+        );
+        assert_eq!(
+            m.conversation("clerk@north", vec![]),
+            [Effect::Ack { through: 6 }]
         );
         assert_eq!(m.unread("clerk@north"), 0);
-        m.conversation("clerk@north", vec![]);
         m.acked(6);
         assert_eq!(m.unread("clerk@north"), 0);
         // More of it arrives while it is open: shown, and no badge.
@@ -2659,18 +2838,18 @@ mod tests {
 
         // The yard row shows the yard's mail: it is read there, and what
         // it held back is acknowledged with it.
+        assert_eq!(m.select(Selected::Yard), [read("yard", 0)]);
         assert_eq!(
-            m.select(Selected::Yard),
-            [read("yard", 0), Effect::Ack { through: 21 }]
+            m.conversation(
+                "yard",
+                vec![
+                    letter(7, "yard", "jo", "not delivered to mac: rate_limited"),
+                    letter(8, "yard", "jo", "not delivered to mac: rate_limited"),
+                ],
+            ),
+            [Effect::Ack { through: 21 }]
         );
         assert_eq!(m.yard_row().unread, 0);
-        m.conversation(
-            "yard",
-            vec![
-                letter(7, "yard", "jo", "not delivered to mac: rate_limited"),
-                letter(8, "yard", "jo", "not delivered to mac: rate_limited"),
-            ],
-        );
         let mail = m.yard_mail();
         assert_eq!(mail.len(), 2);
         assert_eq!(mail[0].text, "not delivered to mac: rate_limited");
@@ -2703,6 +2882,7 @@ mod tests {
         assert_eq!(m.yard_unread(), 2);
         // Opening reads the mail; the notice waits for its key.
         m.select(Selected::Yard);
+        m.conversation("yard", vec![letter(6, "yard", "jo", "unread")]);
         assert_eq!(m.yard_unread(), 1);
         assert_eq!(m.dismiss(), [Effect::AckNotifications { through: 10 }]);
     }
@@ -2724,13 +2904,14 @@ mod tests {
         // back the yardmaster's 8.
         let unread = [(6, "yardmaster"), (7, "ada"), (8, "yardmaster")];
         let (mut m, _) = Model::new(yard(&unread), None);
+        m.conversation("yardmaster", vec![]);
         m.select(Selected::Conversation("assembly".into()));
         assert_eq!(m.unread("yardmaster"), 0);
         // The yard was lost before it took the acknowledgement of 6.
         let (m, effects) = m.resumed(yard(&unread));
         assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(m.unread("yardmaster"), 0);
-        assert_eq!(effects, [read("assembly", 0), Effect::Ack { through: 6 }]);
+        assert_eq!(effects, [page("assembly", 0), Effect::Ack { through: 6 }]);
         assert_eq!(m.yard_unread(), 1);
     }
 
@@ -2740,15 +2921,23 @@ mod tests {
             yard(&[(6, "yardmaster"), (7, "assembly"), (8, "yardmaster")]),
             None,
         );
+        assert_eq!(effects, [page("yardmaster", 0)]);
         // 8 was shown, but 7 was not: only 6 is acknowledged.
-        assert_eq!(effects, [read("yardmaster", 0), Effect::Ack { through: 6 }]);
+        assert_eq!(
+            m.conversation("yardmaster", vec![]),
+            [Effect::Ack { through: 6 }]
+        );
         m.acked(6);
         // 8 was shown and does not count, though it is not acknowledged.
         assert_eq!((m.unread("yardmaster"), m.unread("assembly")), (0, 1));
         // Opening assembly's shows 7, and 8 was seen before.
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
-            [read("assembly", 0), Effect::Ack { through: 8 }]
+            [page("assembly", 0)]
+        );
+        assert_eq!(
+            m.conversation("assembly", vec![]),
+            [Effect::Ack { through: 8 }]
         );
         m.acked(8);
         assert_eq!((m.unread("yardmaster"), m.unread("assembly")), (0, 0));
@@ -2757,6 +2946,10 @@ mod tests {
     #[test]
     fn nothing_is_acknowledged_twice() {
         let (mut m, _) = Model::new(yard(&[(6, "yardmaster")]), None);
+        assert_eq!(
+            m.conversation("yardmaster", vec![letter(6, "yardmaster", "jo", "x")]),
+            [Effect::Ack { through: 6 }]
+        );
         // Asked through 6 already, and not answered yet.
         assert_eq!(
             m.conversation("yardmaster", vec![letter(6, "yardmaster", "jo", "x")]),
@@ -2765,13 +2958,14 @@ mod tests {
         m.acked(6);
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
-            [read("assembly", 0)]
+            [page("assembly", 0)]
         );
     }
 
     #[test]
     fn an_acknowledgement_the_yard_did_not_take_is_asked_again() {
         let (mut m, _) = Model::new(yard(&[(6, "yardmaster")]), None);
+        m.conversation("yardmaster", vec![]);
         m.ack_failed("the yard does not answer");
         assert!(
             m.notice.contains("could not be marked read"),
@@ -2824,7 +3018,11 @@ mod tests {
         assert_eq!(m.event(&mail_to_jo(23, "yardmaster")), []);
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
-            [read("assembly", 0), Effect::Ack { through: 21 }]
+            [page("assembly", 0)]
+        );
+        assert_eq!(
+            m.conversation("assembly", vec![]),
+            [Effect::Ack { through: 21 }]
         );
     }
 
@@ -2891,15 +3089,193 @@ mod tests {
         assert_eq!(seqs, [12, 21, 22]);
     }
 
+    /// The mails `seqs` of `from` to jo, oldest first.
+    fn letters(seqs: std::ops::RangeInclusive<u64>, from: &str) -> Vec<Letter> {
+        seqs.map(|seq| letter(seq, from, "jo", "x")).collect()
+    }
+
+    fn seqs(m: &Model) -> Vec<u64> {
+        m.entries().iter().map(|e| e.seq).collect()
+    }
+
+    #[test]
+    fn a_conversation_opens_on_its_newest_page_and_its_top_asks_for_the_page_before() {
+        let (mut m, effects) = Model::new(yard(&[]), None);
+        assert_eq!(effects, [page("yardmaster", 0)]);
+        // The yard has not said yet whether there is older mail.
+        assert_eq!(m.top(), Top::Unread);
+        assert_eq!(m.older(), []);
+        m.page("yardmaster", 0, letters(451..=500, "yardmaster"), true);
+        assert_eq!(m.span(), Some((451, 500)));
+        assert_eq!(m.top(), Top::Older);
+
+        // The top asks for the page before the oldest shown, once.
+        assert_eq!(m.older(), [page("yardmaster", 451)]);
+        assert_eq!(m.older(), []);
+        m.page("yardmaster", 451, letters(401..=450, "yardmaster"), true);
+        assert_eq!(m.span(), Some((401, 500)));
+        assert_eq!(m.entries().len(), 100);
+        assert_eq!(m.older(), [page("yardmaster", 401)]);
+
+        // New mail still arrives below, and what is read after a send is
+        // what is newer than it.
+        m.event(&mail_to_jo(501, "yardmaster"));
+        assert_eq!(m.span(), Some((401, 501)));
+        assert_eq!(m.sent("yardmaster"), [read("yardmaster", 501)]);
+
+        // The last page says there is no more: the top says so, and
+        // nothing is asked for again.
+        m.page("yardmaster", 401, letters(1..=400, "yardmaster"), false);
+        assert_eq!(m.top(), Top::Start);
+        assert_eq!(m.older(), []);
+        assert_eq!(m.entries().len(), 501);
+        // Opened again it was read: nothing is asked.
+        m.select(Selected::Conversation("assembly".into()));
+        assert_eq!(m.select(Selected::Conversation("yardmaster".into())), []);
+    }
+
+    #[test]
+    fn a_page_the_yard_did_not_answer_is_asked_for_again() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true);
+        assert_eq!(m.older(), [page("yardmaster", 51)]);
+        m.page_failed("yardmaster", "the yard does not answer");
+        assert!(m.notice.contains("could not be read"), "{}", m.notice);
+        assert_eq!(m.top(), Top::Older);
+        assert_eq!(m.older(), [page("yardmaster", 51)]);
+    }
+
+    #[test]
+    fn a_yard_that_knows_no_pages_answers_all_and_is_asked_no_more() {
+        let (mut m, effects) = Model::new(yard(&[]), None);
+        assert_eq!(effects, [page("yardmaster", 0)]);
+        // All five hundred to a call for fifty, and no word of more.
+        m.page("yardmaster", 0, letters(1..=500, "yardmaster"), false);
+        assert_eq!(m.entries().len(), 500);
+        assert_eq!(m.top(), Top::Start);
+        assert_eq!(m.older(), []);
+    }
+
+    #[test]
+    fn unread_mail_older_than_the_pages_read_is_not_acknowledged_until_it_is_shown() {
+        let (mut m, _) = Model::new(yard(&[(8, "yardmaster"), (60, "yardmaster")]), None);
+        // The newest page shows 60 and not 8, which holds 60 back.
+        assert_eq!(
+            m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true),
+            []
+        );
+        assert_eq!(m.unread("yardmaster"), 1);
+        // New mail on the open row is seen, and held back as well.
+        assert_eq!(m.event(&mail_to_jo(101, "yardmaster")), []);
+        assert_eq!(m.unread("yardmaster"), 1);
+        // The page with 8 shows it: all of it is acknowledged.
+        assert_eq!(m.older(), [page("yardmaster", 51)]);
+        assert_eq!(
+            m.page("yardmaster", 51, letters(1..=50, "yardmaster"), false),
+            [Effect::Ack { through: 101 }]
+        );
+        assert_eq!(m.unread("yardmaster"), 0);
+    }
+
+    #[test]
+    fn a_row_of_two_conversations_shows_no_mail_older_than_where_one_of_them_stops() {
+        let mut state = yard(&[(10, "jo@airy"), (460, "jo")]);
+        state.peers.push(airy());
+        let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo".into())));
+        // The user's own notes go further back than a page; the trusted
+        // name wrote twice, long ago and lately.
+        m.page("jo", 0, letters(451..=500, "jo"), true);
+        let airy = vec![
+            letter(10, "jo@airy", "jo", "long ago"),
+            letter(470, "jo@airy", "jo", "lately"),
+        ];
+        assert_eq!(m.page("jo@airy", 0, airy, false), []);
+        // 10 stands before notes that were not read: it is not shown, nor
+        // seen, and the images of such mail are not asked for.
+        assert_eq!(m.span(), Some((451, 500)));
+        assert_eq!(m.entries().len(), 51);
+        assert_eq!(m.unread("jo"), 1);
+        assert_eq!(m.top(), Top::Older);
+        // The top asks the one that stops there, and no other.
+        assert_eq!(m.older(), [page("jo", 451)]);
+        assert_eq!(
+            m.page("jo", 451, letters(1..=450, "jo"), false),
+            [Effect::Ack { through: 460 }]
+        );
+        assert_eq!(seqs(&m)[..11], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10]);
+        assert_eq!(m.top(), Top::Start);
+        assert_eq!(m.unread("jo"), 0);
+    }
+
+    #[test]
+    fn the_images_of_mail_that_was_not_read_are_not_asked_for() {
+        let mut state = yard(&[]);
+        state.peers.push(airy());
+        let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo".into())));
+        let picture = |seq: u64, from: &str, hash: &str| Letter {
+            files: vec![BlobRef {
+                hash: hash.into(),
+                ..BlobRef::default()
+            }],
+            ..letter(seq, from, "jo", "see")
+        };
+        m.page("jo", 0, vec![picture(450, "jo", "aa")], true);
+        m.page(
+            "jo@airy",
+            0,
+            vec![picture(10, "jo@airy", "bb"), picture(470, "jo@airy", "cc")],
+            false,
+        );
+        assert_eq!(m.images(), ["aa", "cc"]);
+        m.page("jo", 450, vec![picture(5, "jo", "dd")], false);
+        assert_eq!(m.images(), ["dd", "bb", "aa", "cc"]);
+    }
+
+    #[test]
+    fn an_older_page_of_a_conversation_not_read_since_the_yard_was_back_is_left() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true);
+        assert_eq!(m.older(), [page("yardmaster", 51)]);
+        // The yard was lost and is back: the page asked for before is
+        // answered to a model that has not read the conversation's newest.
+        let (mut m, effects) = m.resumed(yard(&[]));
+        assert_eq!(effects, [page("yardmaster", 0)]);
+        assert_eq!(
+            m.page("yardmaster", 51, letters(1..=50, "yardmaster"), false),
+            []
+        );
+        assert_eq!(m.entries(), []);
+        assert_eq!(m.top(), Top::Unread);
+        // Its newest page is: the conversation stands on that.
+        m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true);
+        assert_eq!(m.span(), Some((51, 100)));
+    }
+
+    #[test]
+    fn a_conversation_with_a_linked_yard_is_read_again_from_the_oldest_mail_it_has() {
+        let (mut m, _) = Model::new(
+            yard(&[]),
+            Some(Selected::Conversation("clerk@north".into())),
+        );
+        m.page("clerk@north", 0, letters(51..=100, "clerk@north"), true);
+        let effects = m.event(&event(
+            101,
+            "peer_message_sent",
+            "yard",
+            json!({"peer": "north"}),
+        ));
+        assert_eq!(effects, [Effect::Peers, read("clerk@north", 50)]);
+    }
+
     #[test]
     fn after_a_send_only_what_is_new_is_read() {
         let (mut m, _) = Model::new(yard(&[]), None);
         m.conversation("yardmaster", vec![letter(12, "yardmaster", "jo", "first")]);
         assert_eq!(m.sent("yardmaster"), [read("yardmaster", 12)]);
-        // A conversation never read whole is read whole, whatever the
-        // stream put into it.
+        // A conversation the yard was never asked for is read from its
+        // newest page, whatever the stream put into it.
         m.event(&mail_to_jo(30, "assembly"));
-        assert_eq!(m.sent("assembly"), [read("assembly", 0)]);
+        assert_eq!(m.sent("assembly"), [page("assembly", 0)]);
     }
 
     #[test]
@@ -2974,7 +3350,7 @@ mod tests {
         let (mut m, _) = Model::new(yard(&[]), None);
         assert_eq!(
             m.select(Selected::Conversation("clerk@north".into())),
-            [read("clerk@north", 0)]
+            [page("clerk@north", 0)]
         );
         assert_eq!(
             m.target(),
@@ -3170,7 +3546,11 @@ mod tests {
         let (mut m, _) = Model::new(yard(&[(6, "assembly")]), None);
         let effects = m.listed(21, vec![member("assembly", "running", "idle")]);
         assert_eq!(m.selected_conversation(), Some("assembly"));
-        assert_eq!(effects, [read("assembly", 0), Effect::Ack { through: 6 }]);
+        assert_eq!(effects, [page("assembly", 0)]);
+        assert_eq!(
+            m.conversation("assembly", vec![]),
+            [Effect::Ack { through: 6 }]
+        );
 
         let (mut m, _) = Model::new(
             yard(&[]),
@@ -3180,7 +3560,7 @@ mod tests {
             m.event(&event(21, "peer_said", "", json!({"peer": "north"}))),
             [Effect::Peers]
         );
-        assert_eq!(m.linked(&[]), [read("assembly", 0)]);
+        assert_eq!(m.linked(&[]), [page("assembly", 0)]);
         assert_eq!(names(&m), ["assembly", "yardmaster", "jo"]);
         // One that is still there stays open.
         assert_eq!(m.linked(&[north()]), []);
@@ -3238,12 +3618,15 @@ mod tests {
         // Another user is read and written to as a crew member is.
         assert_eq!(
             m.select(Selected::Conversation("ada".into())),
-            [read("ada", 0), Effect::Ack { through: 6 }]
+            [page("ada", 0)]
         );
         assert_eq!(m.about(), ["a person of this yard"]);
         assert_eq!(m.target(), Some(Target::Crew("ada".into())));
         assert!(m.can_write("ada"));
-        m.conversation("ada", vec![letter(6, "ada", "jo", "hello")]);
+        assert_eq!(
+            m.conversation("ada", vec![letter(6, "ada", "jo", "hello")]),
+            [Effect::Ack { through: 6 }]
+        );
         assert_eq!(m.sent("ada"), [read("ada", 6)]);
         m.event(&event(
             21,
@@ -3298,7 +3681,8 @@ mod tests {
         // The yardmaster's mail is shown: no row counts it, and nothing is
         // acknowledged, since 6 and 7 are not seen.
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
-        assert_eq!(effects, [read("yardmaster", 0)]);
+        assert_eq!(effects, [page("yardmaster", 0)]);
+        assert_eq!(m.conversation("yardmaster", vec![]), []);
         assert_eq!(m.unread("yardmaster"), 0);
         // What is unseen has a row that says so: the user's own. The name
         // trusted as them has no row of its own.
@@ -3318,16 +3702,18 @@ mod tests {
         // Opening it shows both and acknowledges all there is.
         assert_eq!(
             m.select(Selected::Conversation("jo".into())),
-            [
-                read("jo", 0),
-                read("jo@airy", 0),
-                Effect::Ack { through: 27 }
-            ]
+            [page("jo", 0), page("jo@airy", 0)]
         );
-        m.conversation("jo", vec![letter(7, "jo", "jo", "works")]);
-        m.conversation(
-            "jo@airy",
-            vec![letter(6, "jo@airy", "jo", "testing messaging myself")],
+        assert_eq!(
+            m.conversation("jo", vec![letter(7, "jo", "jo", "works")]),
+            []
+        );
+        assert_eq!(
+            m.conversation(
+                "jo@airy",
+                vec![letter(6, "jo@airy", "jo", "testing messaging myself")],
+            ),
+            [Effect::Ack { through: 27 }]
         );
         assert_eq!(
             m.entries()
@@ -3401,7 +3787,7 @@ mod tests {
         );
         assert!(m.about()[0].ends_with("what you write goes to jo@airy, who wrote last"));
         // What was sent there is read from there, and stands in this row.
-        assert_eq!(m.sent("jo"), [read("jo", 0), read("jo@airy", 0)]);
+        assert_eq!(m.sent("jo"), [page("jo", 0), page("jo@airy", 0)]);
         m.event(&event(
             22,
             "mail",
@@ -3430,8 +3816,9 @@ mod tests {
         assert_eq!(m.take_news(), []);
         assert_eq!(
             m.select(Selected::Conversation("jo".into())),
-            [read("jo", 0), Effect::Ack { through: 21 }]
+            [page("jo", 0)]
         );
+        assert_eq!(m.conversation("jo", vec![]), [Effect::Ack { through: 21 }]);
         m.acked(21);
         // Written in the open row it is seen as it arrives.
         assert_eq!(
@@ -3464,22 +3851,28 @@ mod tests {
             ]),
             None,
         );
-        assert_eq!(effects, [read("yardmaster", 0)]);
+        assert_eq!(effects, [page("yardmaster", 0)]);
+        assert_eq!(m.conversation("yardmaster", vec![]), []);
         assert_eq!(m.yard_row().unread, 3);
         assert!(!m.can_write("bead-agent"));
         assert_eq!(
             m.select(Selected::Yard),
-            [
-                read("yard", 0),
-                read("bead-agent", 0),
-                read("zed@south", 0),
-                Effect::Ack { through: 9 }
-            ]
+            [read("yard", 0), read("bead-agent", 0), read("zed@south", 0)]
+        );
+        // Each is acknowledged as the yard answers it, in the inbox's order.
+        assert_eq!(
+            m.conversation("zed@south", vec![letter(7, "zed@south", "jo", "z")]),
+            []
+        );
+        assert_eq!(
+            m.conversation("bead-agent", vec![letter(6, "bead-agent", "jo", "b")]),
+            [Effect::Ack { through: 7 }]
+        );
+        assert_eq!(
+            m.conversation("yard", vec![letter(8, "yard", "jo", "y")]),
+            [Effect::Ack { through: 9 }]
         );
         assert_eq!(m.yard_row().unread, 0);
-        m.conversation("zed@south", vec![letter(7, "zed@south", "jo", "z")]);
-        m.conversation("bead-agent", vec![letter(6, "bead-agent", "jo", "b")]);
-        m.conversation("yard", vec![letter(8, "yard", "jo", "y")]);
         assert_eq!(
             m.yard_mail()
                 .iter()
@@ -3527,10 +3920,8 @@ mod tests {
         state.peers.push(untrusted);
         let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo@airy".into())));
         assert_eq!(m.selected_conversation(), Some("jo@airy"));
-        assert_eq!(
-            m.linked(&[north(), airy()]),
-            [read("jo", 0), read("jo@airy", 0)]
-        );
+        m.conversation("jo@airy", vec![]);
+        assert_eq!(m.linked(&[north(), airy()]), [page("jo", 0)]);
         // Its mail was seen in the row it had, and counts on neither.
         assert_eq!(m.unread("jo"), 0);
         assert_eq!(m.selected_conversation(), Some("jo"));
@@ -3551,15 +3942,14 @@ mod tests {
         assert_eq!(m.unread("jo@airy"), 0);
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
-            [
-                read("assembly", 0),
-                read("jo@airy", 0),
-                Effect::Ack { through: 6 }
-            ]
+            [page("assembly", 0), page("jo@airy", 0)]
         );
-        m.conversation(
-            "jo@airy",
-            vec![letter(6, "jo@airy", "jo", "hello from airy")],
+        assert_eq!(
+            m.conversation(
+                "jo@airy",
+                vec![letter(6, "jo@airy", "jo", "hello from airy")],
+            ),
+            [Effect::Ack { through: 6 }]
         );
         assert_eq!(
             m.entries()
@@ -4159,7 +4549,7 @@ mod tests {
         assert_eq!(
             effects,
             [
-                read("yardmaster", 0),
+                page("yardmaster", 0),
                 Effect::Asks,
                 Effect::Bead {
                     bead: "yardr-n8ta".into()
@@ -4826,7 +5216,7 @@ mod tests {
         // A conversation opens with no bead read.
         assert_eq!(
             m.select(Selected::Conversation("yardmaster".into()))[0],
-            read("yardmaster", 0)
+            page("yardmaster", 0)
         );
         // Back: the bead is here, so nothing is asked.
         assert_eq!(m.select(Selected::Decision("yardr-n8ta".into())), []);

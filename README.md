@@ -283,6 +283,13 @@ where it stands (`read`, `sent; yardmaster is idle`, `queued for north:
 …`) and the line to write in; the notices, oldest first; or a bead's open
 asks, each as its card.
 
+A conversation opens on its newest fifty mails. Towards its top the fifty
+before are read and put in above, and the mail in view stays where it is;
+the top says `Loading older mail…` until the conversation starts there.
+Unread mail older than what was read stays unread, and counts on the row,
+until its page is shown. A yard built before `Conversation` had pages
+answers the whole conversation at once.
+
 A card shows, in this order: the question; the asker and the recommendation;
 the context; the options numbered, each with its consequence, `you decide`
 last; the recommended one with its why; a line for words; the keys. A number

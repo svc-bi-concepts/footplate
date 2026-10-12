@@ -9,8 +9,8 @@ use std::thread;
 
 use gpui::{
     Action, AnyWindowHandle, App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle,
-    Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle,
-    SharedString, Task, Window, actions, div, img, prelude::*, px, relative, rems,
+    Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, Pixels,
+    ScrollHandle, SharedString, Task, Window, actions, div, img, prelude::*, px, relative, rems,
 };
 
 use crate::api::{self, Address, BlobRef, Client};
@@ -18,7 +18,7 @@ use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, DecidedDetail, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow,
-    Effect, Entry, Kind, Model, Row, Selected, Target,
+    Effect, Entry, Kind, Model, Row, Selected, Target, Top,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -371,6 +371,15 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// A mail of the open conversation to keep in place while older mail is
+/// put in above it: its place among the children of what scrolls, and how
+/// far its top stood off the top of the view.
+#[derive(Debug, Clone, Copy)]
+struct Anchor {
+    item: usize,
+    off: Pixels,
+}
+
 /// Whether a yard that is away is asked again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Away {
@@ -411,6 +420,15 @@ pub struct Footplate {
     /// put it there yet: the jump control stays out of the frame before
     /// it, whose scroll offset is the old view's.
     bottom_pending: bool,
+    /// Older mail was put in above the view: the mail to keep where it
+    /// stood, and whether the layout has put it at the top of the view
+    /// yet. See [`Footplate::keep_place`].
+    anchor: Option<(Anchor, bool)>,
+    /// Where the open conversation stood when its older mail was last
+    /// asked for: the conversation, its oldest mail and the scroll offset.
+    /// Standing there still asks for nothing again, so a page the yard
+    /// did not answer is not asked for with every frame.
+    older_at: Option<(String, u64, Pixels)>,
     /// The conversation's position when it was left for a decision, so
     /// dealing with that decision can return to the same place.
     back_position: Option<(String, gpui::Point<gpui::Pixels>)>,
@@ -582,6 +600,8 @@ impl Footplate {
             conversation: ScrollHandle::new(),
             new_below: 0,
             bottom_pending: false,
+            anchor: None,
+            older_at: None,
             back_position: None,
             decision: ScrollHandle::new(),
             selection,
@@ -886,7 +906,7 @@ impl Footplate {
         let before_sel = model.selected().cloned();
         let before_position = matches!(&before_sel, Some(Selected::Conversation(_)))
             .then(|| self.conversation.offset());
-        let before_entries = model.entries().len();
+        let before_span = model.span();
         let before_notices = model.notices().len() + model.yard_mail().len();
         let effects = f(model);
         let after_sel = model.selected().cloned();
@@ -921,15 +941,28 @@ impl Footplate {
         } else {
             match &after_sel {
                 Some(Selected::Conversation(_)) => {
-                    let after_entries = model.entries().len();
-                    if after_entries != before_entries {
+                    // What is older than the oldest shown before was put in
+                    // above it, what is newer than the newest below.
+                    let entries = model.entries();
+                    let (above, below) = match before_span {
+                        Some((oldest, newest)) => (
+                            entries.iter().filter(|e| e.seq < oldest).count(),
+                            entries.iter().filter(|e| e.seq > newest).count(),
+                        ),
+                        None => (0, entries.len()),
+                    };
+                    if above + below > 0 {
                         if self.bottom_pending || self.at_bottom() {
                             self.scroll_to_newest();
                         } else {
                             // New mail below a view that stands scrolled
                             // up: the view does not move by itself, and
                             // the jump control carries how many arrived.
-                            self.new_below += after_entries.saturating_sub(before_entries);
+                            // Nor does it move for older mail above it.
+                            if above > 0 {
+                                self.keep_place(above);
+                            }
+                            self.new_below += below;
                         }
                     }
                 }
@@ -1000,18 +1033,101 @@ impl Footplate {
     fn scroll_to_newest(&mut self) {
         self.conversation.scroll_to_bottom();
         self.bottom_pending = true;
+        self.anchor = None;
+    }
+
+    /// `above` mails were put in above the view of the open conversation:
+    /// the mail at the top of the view stays where it stood. The scroll
+    /// offset is counted from the top of the conversation, and how high
+    /// the new mails are is known only once they are laid out. So the
+    /// layout of the next frame puts that mail at the top of the view, and
+    /// the frame after it moves the view by what the mail stood off the
+    /// top ([`Footplate::reconcile_scroll`]).
+    fn keep_place(&mut self, above: usize) {
+        let anchor = match self.anchor.take() {
+            // More was put in before the last was laid out.
+            Some((kept, _)) => Anchor {
+                item: kept.item + above,
+                off: kept.off,
+            },
+            None => {
+                // The first child is the line above the oldest mail, which
+                // stays the first: at the very top the oldest mail is kept.
+                let item = self.conversation.logical_scroll_top().0.max(1);
+                let off = self
+                    .conversation
+                    .bounds_for_item(item)
+                    .map_or(px(0.), |bounds| {
+                        bounds.top() + self.conversation.offset().y
+                            - self.conversation.bounds().top()
+                    });
+                Anchor {
+                    item: item + above,
+                    off,
+                }
+            }
+        };
+        self.conversation.scroll_to_top_of_item(anchor.item);
+        self.anchor = Some((anchor, false));
     }
 
     /// The scroll handle moves outside any model change: the wheel moves
     /// it, and the layout applies a jump to the newest. What the window
     /// keeps of it is brought up to date whenever it draws, before it
     /// decides on the jump control.
-    fn reconcile_scroll(&mut self) {
+    fn reconcile_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.anchor.take() {
+            // The layout of the frame before put the kept mail at the top
+            // of the view: now it goes back to where it stood.
+            Some((anchor, true)) => {
+                let mut at = self.conversation.offset();
+                at.y = (at.y + anchor.off).min(px(0.));
+                self.conversation.set_offset(at);
+            }
+            Some((anchor, false)) => {
+                self.anchor = Some((anchor, true));
+                window.request_animation_frame();
+                return;
+            }
+            None => {}
+        }
         if self.bottom_pending {
             self.bottom_pending = false;
-        } else if self.at_bottom() {
+            return;
+        }
+        if self.at_bottom() {
             self.new_below = 0;
         }
+        self.reach_top(cx);
+    }
+
+    /// Asks for the older mail of the open conversation when its view
+    /// stands within half its height of the top, and the yard has older:
+    /// before the top is reached, so that reading upwards rarely waits
+    /// there.
+    fn reach_top(&mut self, cx: &mut Context<Self>) {
+        if self.settings_open {
+            return;
+        }
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let (Some(name), Some((oldest, _)), Top::Older) =
+            (model.selected_conversation(), model.span(), model.top())
+        else {
+            return;
+        };
+        let at = self.conversation.offset().y;
+        if at + self.conversation.bounds().size.height / 2. < px(0.) {
+            return;
+        }
+        let here = (name.to_string(), oldest, at);
+        if self.older_at.as_ref() == Some(&here) {
+            return;
+        }
+        self.older_at = Some(here);
+        let effects = model.older();
+        self.run(effects, cx);
     }
 
     /// Puts `shown` at its newest at once: the offset is set, not
@@ -1381,6 +1497,24 @@ impl Footplate {
                             format!("the conversation with {name} could not be read: {err}"),
                             cx,
                         ),
+                    },
+                ),
+                Effect::Page { name, before } => self.ask(
+                    cx,
+                    {
+                        let name = name.clone();
+                        move |client, me| client.conversation_page(me, &name, model::PAGE, before)
+                    },
+                    move |this, page, cx| match page {
+                        Ok(page) => {
+                            this.change(cx, |m| m.page(&name, before, page.letters, page.more))
+                        }
+                        Err(err) => {
+                            if let Some(model) = this.model.as_mut() {
+                                model.page_failed(&name, &err.to_string());
+                            }
+                            cx.notify();
+                        }
                     },
                 ),
                 Effect::Ack { through } => self.ask(
@@ -3354,7 +3488,24 @@ impl Footplate {
                     }),
             )
         } else {
-            mail.children(entries.into_iter().map(|entry| self.entry(entry, palette)))
+            // The line above the oldest mail is always the first child:
+            // a mail keeps its place among the children but for the mails
+            // put in above it.
+            let top = match model.top() {
+                Top::Older => "Loading older mail…",
+                Top::Start => "The conversation starts here.",
+                Top::Unread => "",
+            };
+            mail.child(
+                div()
+                    .debug_selector(|| "conversation top".to_string())
+                    .flex()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(top),
+            )
+            .children(entries.into_iter().map(|entry| self.entry(entry, palette)))
         };
         // The jump control stands over the mail, at its bottom right,
         // while the view is above its newest.
@@ -4195,7 +4346,7 @@ impl Focusable for Footplate {
 
 impl Render for Footplate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.reconcile_scroll();
+        self.reconcile_scroll(window, cx);
         // The one place the text size is set: every size that goes with the
         // text is in rems, and the text itself is seven eighths of one.
         window.set_rem_size(self.settings.rem());
@@ -4276,7 +4427,7 @@ mod tests {
     use super::*;
     use crate::fake::Yard;
     use crate::input;
-    use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, WindowAppearance};
+    use gpui::{Bounds, TestAppContext, VisualTestContext, WindowAppearance};
     use serde_json::{Value, json};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -5036,7 +5187,7 @@ mod tests {
         });
         assert_eq!(
             yard.asked("Conversation")[0],
-            json!({"a": "jo", "b": "yardmaster", "after": 0})
+            json!({"a": "jo", "b": "yardmaster", "limit": 50})
         );
 
         // What is typed is mail to the open conversation, from the user.
@@ -5261,7 +5412,7 @@ mod tests {
         // Past the linked yard's row and ada's to the user's own: it shows
         // both, and all the mail there is is acknowledged.
         let read_with = |with: &str| {
-            yard.asked("Conversation").last() == Some(&json!({"a": "jo", "b": with, "after": 0}))
+            yard.asked("Conversation").last() == Some(&json!({"a": "jo", "b": with, "limit": 50}))
         };
         yard.answer("Conversation", r#"{"result": []}"#);
         cx.simulate_keystrokes("tab");
@@ -9074,6 +9225,231 @@ mod tests {
         cx.run_until_parked();
         assert!(at_bottom(&view, cx));
         assert!(!shows_jump(&view, cx));
+    }
+
+    /// The yardmaster's conversation is the mails 1 to `n`, each of three
+    /// lines so that a page of them is several views high, and none of
+    /// them unread. The yard holds it, and answers it in pages.
+    fn long_conversation(yard: &Yard, n: u64) {
+        yard.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+        );
+        yard.converse(
+            "yardmaster",
+            (1..=n)
+                .map(|seq| {
+                    json!({"seq": seq, "at": "2026-10-08T09:30:00Z", "from": "yardmaster",
+                        "to": "jo", "read": true, "text": format!("Mail {seq}\nof the shed\nand the fence.")})
+                })
+                .collect(),
+        );
+    }
+
+    /// The window on `yard`, once the yardmaster's conversation shows `n`
+    /// mails and is drawn at its newest.
+    fn opened_on<'a>(
+        yard: &Yard,
+        n: usize,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx).len() == n
+        });
+        frames(cx);
+        (view, cx)
+    }
+
+    /// Draws until what the layout of one frame leaves to the next is done.
+    fn frames(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+    }
+
+    /// Stands the open conversation `down` pixels below its top, as a
+    /// reader that scrolled up there.
+    fn scroll_to(view: &Entity<Footplate>, cx: &mut VisualTestContext, down: f32) {
+        view.read_with(cx, |v, _| {
+            let mut at = v.conversation.offset();
+            at.y = px(0.) - px(down);
+            v.conversation.set_offset(at);
+        });
+        frames(cx);
+    }
+
+    fn top_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Top {
+        view.read_with(cx, |v, _| v.model.as_ref().unwrap().top())
+    }
+
+    /// A long conversation opens on its newest page alone. Reaching its
+    /// top asks for the page before, and the mail that stood in view
+    /// stands where it stood once the older mails are in above it; new
+    /// mail still arrives below.
+    #[gpui::test]
+    fn a_long_conversation_loads_its_newest_page_and_older_ones_at_its_top(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        long_conversation(&yard, 500);
+        let (view, cx) = opened_on(&yard, 50, cx);
+        let first = json!({"a": "jo", "b": "yardmaster", "limit": 50});
+        assert_eq!(yard.asked("Conversation"), std::slice::from_ref(&first));
+        assert!(at_bottom(&view, cx));
+        assert_eq!(top_of(&view, cx), Top::Older);
+        let entries = view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries());
+        assert_eq!((entries[0].seq, entries[49].seq), (451, 500));
+        // A page is several views high: at its newest nothing is asked.
+        let view_height = view.read_with(cx, |v, _| v.conversation.bounds().size.height);
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > view_height, "a page is no view high: {over:?}");
+
+        // Above the top half of a view nothing is asked either.
+        let half: f32 = (view_height / 2.).into();
+        scroll_to(&view, cx, half + 40.);
+        assert_eq!(yard.asked("Conversation").len(), 1);
+        let far = [451, 452, 453].map(|seq| text_bounds(cx, seq));
+
+        // Near the top, with a mail cut by the top of the view, the page
+        // before is asked for, and that mail and those below it stand
+        // where the view put them: as far below where they stood as the
+        // view went up, with the older mails above them or without.
+        scroll_to(&view, cx, 100.);
+        let stood = far.map(|mut bounds| {
+            bounds.origin.y += px(half + 40. - 100.);
+            bounds
+        });
+        wait(cx, "the page before", |cx| texts(&view, cx).len() == 100);
+        frames(cx);
+        assert_eq!(
+            yard.asked("Conversation"),
+            [
+                first.clone(),
+                json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 451})
+            ]
+        );
+        assert_eq!([451, 452, 453].map(|seq| text_bounds(cx, seq)), stood);
+        assert!(!at_bottom(&view, cx));
+        // The older mails are no mail that arrived below.
+        assert_eq!(new_below(&view, cx), 0);
+        assert_eq!(yard.asked("Conversation").len(), 2);
+
+        // At the very top the oldest mail is the one that stays.
+        scroll_to(&view, cx, 0.);
+        wait(cx, "the third page", |cx| texts(&view, cx).len() == 150);
+        frames(cx);
+        // 401 was the oldest, at the top of the view where 451 would
+        // have stood there: it stands there still, under the mails before.
+        let mut at_top = far[0];
+        at_top.origin.y += px(half + 40.);
+        assert_eq!(text_bounds(cx, 401), at_top);
+        assert_eq!(
+            yard.asked("Conversation").last(),
+            Some(&json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 401}))
+        );
+
+        // New mail still arrives below, and does not move the view.
+        let place = offset_of(&view, cx);
+        yard.emit(
+            &json!({"seq": 501, "kind": "mail", "actor": "yardmaster",
+                "at": "2026-10-08T09:31:00Z",
+                "data": {"to": "jo", "to_user": true, "text": "Landed."}})
+            .to_string(),
+        );
+        wait(cx, "the mail below", |cx| texts(&view, cx).len() == 151);
+        frames(cx);
+        assert_eq!(texts(&view, cx).last().map(String::as_str), Some("Landed."));
+        assert_eq!(offset_of(&view, cx), place);
+        assert_eq!(new_below(&view, cx), 1);
+
+        assert_eq!(top_of(&view, cx), Top::Older);
+        assert_eq!(yard.asked("Conversation").len(), 3);
+    }
+
+    /// At the oldest mail of a conversation its top says that it starts
+    /// there, and standing there asks for nothing more.
+    #[gpui::test]
+    fn the_top_of_a_conversation_says_where_it_starts_and_asks_no_more(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        long_conversation(&yard, 120);
+        let (view, cx) = opened_on(&yard, 50, cx);
+        assert_eq!(top_of(&view, cx), Top::Older);
+        for shown in [100, 120] {
+            scroll_to(&view, cx, 0.);
+            wait(cx, "a page before", |cx| texts(&view, cx).len() == shown);
+            frames(cx);
+        }
+        // The third page was the twenty that were left, and the last.
+        assert_eq!(
+            yard.asked("Conversation"),
+            [
+                json!({"a": "jo", "b": "yardmaster", "limit": 50}),
+                json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 71}),
+                json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 21}),
+            ]
+        );
+        assert_eq!(top_of(&view, cx), Top::Start);
+        scroll_to(&view, cx, 0.);
+        scroll_to(&view, cx, 10.);
+        scroll_to(&view, cx, 0.);
+        assert_eq!(yard.asked("Conversation").len(), 3);
+        assert_eq!(texts(&view, cx).len(), 120);
+        assert!(drawn(cx, "conversation top"));
+    }
+
+    /// A yard built before the conversation had pages still shows all of
+    /// it: one that refuses the page is asked for the conversation whole,
+    /// one that answers everything to it is taken at that, and neither is
+    /// asked again at the top.
+    #[gpui::test]
+    fn a_yard_without_pages_shows_the_whole_conversation_and_is_not_asked_again(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        long_conversation(&yard, 120);
+        yard.old();
+        let (view, cx) = opened_on(&yard, 120, cx);
+        let asked = [
+            json!({"a": "jo", "b": "yardmaster", "limit": 50}),
+            json!({"a": "jo", "b": "yardmaster", "after": 0}),
+        ];
+        assert_eq!(yard.asked("Conversation"), asked);
+        assert_eq!(top_of(&view, cx), Top::Start);
+        scroll_to(&view, cx, 0.);
+        scroll_to(&view, cx, 10.);
+        assert_eq!(yard.asked("Conversation"), asked);
+        assert_eq!(texts(&view, cx).len(), 120);
+    }
+
+    #[gpui::test]
+    fn a_yard_that_answers_all_to_a_page_is_asked_once(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let full = ["A long enough letter to make the conversation scroll."; 120];
+        mails(&yard, &full);
+        let (view, cx) = opened(&yard, &full, cx);
+        frames(cx);
+        scroll_to(&view, cx, 0.);
+        scroll_to(&view, cx, 10.);
+        assert_eq!(
+            yard.asked("Conversation"),
+            [json!({"a": "jo", "b": "yardmaster", "limit": 50})]
+        );
+        assert_eq!(top_of(&view, cx), Top::Start);
     }
 
     fn card_offset_of(

@@ -96,6 +96,13 @@ struct State {
     /// The images the yard holds, by hash, and every hash asked for.
     blobs: HashMap<String, Vec<u8>>,
     blobs_asked: Vec<String>,
+    /// The conversations the yard holds, by whom they are with: a call of
+    /// `Conversation` with that party is answered from its letters, by the
+    /// call's `after`, `limit` and `before`.
+    conversations: HashMap<String, Vec<Value>>,
+    /// A yard built before `Conversation` had pages: it refuses `limit`
+    /// and `before` as arguments the call does not have.
+    old: bool,
     /// At an address: the tokens the yard lets in.
     devices: Vec<String>,
     /// The pairing that is open: its code, and the wrong codes so far.
@@ -366,6 +373,25 @@ impl Yard {
             .insert(hash.into(), bytes.to_vec());
     }
 
+    /// The yard holds the conversation with `with`, these letters oldest
+    /// first, and answers `Conversation` from it as docs/api.md says: what
+    /// `after` and `before` leave, the newest `limit` of that, and `more`
+    /// when the limit left older ones out.
+    pub fn converse(&self, with: &str, letters: Vec<Value>) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .conversations
+            .insert(with.into(), letters);
+    }
+
+    /// The yard is one built before `Conversation` had pages: a call with
+    /// `limit` or `before` is refused, as any argument it does not have.
+    pub fn old(&self) {
+        self.shared.state.lock().unwrap().old = true;
+    }
+
     /// The hash of every image asked for so far.
     pub fn blobs_asked(&self) -> Vec<String> {
         self.shared.state.lock().unwrap().blobs_asked.clone()
@@ -570,12 +596,16 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
             .iter()
             .find(|((m, arg, is), _)| *m == method && args[arg.as_str()] == is.as_str())
             .map(|(_, reply)| reply.clone());
-        state.asked.push((method.clone(), args));
+        state.asked.push((method.clone(), args.clone()));
         if state.silent.contains(&method) {
             return Ok(());
         }
         let once = state.once.get_mut(&method).and_then(VecDeque::pop_front);
+        let held = (method == "Conversation")
+            .then(|| conversation(&state, &args))
+            .flatten();
         once.or(by_arg)
+            .or(held)
             .or_else(|| state.answers.get(&method).cloned())
             .unwrap_or_else(|| Reply {
                 status: 200,
@@ -607,6 +637,46 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
         }
     }
     conn.flush()
+}
+
+/// The answer to `Conversation` from a conversation the yard holds, none
+/// when it holds none with that party.
+fn conversation(state: &State, args: &Value) -> Option<Reply> {
+    let reply = |body: String| Reply {
+        status: 200,
+        body,
+        chunk: None,
+    };
+    let paged = ["limit", "before"]
+        .into_iter()
+        .find(|name| !args[*name].is_null());
+    if let Some(name) = paged.filter(|_| state.old) {
+        return Some(reply(
+            serde_json::json!({"error": {"code": "error", "message": format!(
+                "argument \"{name}\": Conversation has none of that name (it takes a, b, after)"
+            )}})
+            .to_string(),
+        ));
+    }
+    let letters = state.conversations.get(args["b"].as_str()?)?;
+    let number = |name: &str| args[name].as_u64().unwrap_or(0);
+    let (after, limit, before) = (number("after"), number("limit"), number("before"));
+    let left: Vec<&Value> = letters
+        .iter()
+        .filter(|l| {
+            let seq = l["seq"].as_u64().unwrap_or(0);
+            seq > after && (before == 0 || seq < before)
+        })
+        .collect();
+    let cut = match limit as usize {
+        0 => 0,
+        limit => left.len().saturating_sub(limit),
+    };
+    let mut body = serde_json::json!({ "result": left[cut..] });
+    if cut > 0 {
+        body["more"] = Value::Bool(true);
+    }
+    Some(reply(body.to_string()))
 }
 
 /// The stream: the events with a seq after `after`, then every one as the

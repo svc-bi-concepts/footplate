@@ -214,6 +214,14 @@ pub struct RosterEntry {
     pub mail: bool,
 }
 
+/// A part of a conversation, oldest first, and whether the yard has older
+/// mail of it than this.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Page {
+    pub letters: Vec<Letter>,
+    pub more: bool,
+}
+
 /// One mail, of an inbox or a conversation.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Letter {
@@ -557,6 +565,9 @@ impl Event {
 struct Reply {
     #[serde(default)]
     result: Option<Value>,
+    /// Beside a part of a list: there is more of the list.
+    #[serde(default)]
+    more: bool,
     #[serde(default)]
     error: Option<Refusal>,
 }
@@ -1177,6 +1188,44 @@ impl Client {
         self.list("Conversation", json!({ "a": a, "b": b, "after": after }))
     }
 
+    /// The newest `limit` mails between the user `a` and `b` that are older
+    /// than the seq `before` (0: the newest of all), oldest first, and
+    /// whether there are older ones still.
+    ///
+    /// A yard built before it had pages has no such arguments. One refuses
+    /// them, and is asked for the conversation whole instead; one that
+    /// answers everything to them says nothing of more. Either way the
+    /// page is all there is, so nothing is asked for after it.
+    pub fn conversation_page(&self, a: &str, b: &str, limit: u64, before: u64) -> Result<Page> {
+        let mut args = json!({ "a": a, "b": b, "limit": limit });
+        if before > 0 {
+            args["before"] = json!(before);
+        }
+        match self.reply("Conversation", args) {
+            Ok(reply) => {
+                let letters: Option<Vec<Letter>> =
+                    serde_json::from_value(reply.result.unwrap_or(Value::Null))
+                        .map_err(|err| Error::Protocol(format!("Conversation: {err}")))?;
+                Ok(Page {
+                    letters: letters.unwrap_or_default(),
+                    more: reply.more,
+                })
+            }
+            // The code says no more than that the call was refused, and the
+            // message is not to be read: whatever it was, the call without
+            // the new arguments is refused for it again.
+            Err(Error::Refused { code, .. }) if code == "error" => {
+                let mut letters = self.conversation(a, b, 0)?;
+                letters.retain(|l| before == 0 || l.seq < before);
+                Ok(Page {
+                    letters,
+                    more: false,
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// The stream of events after a seq: those the yard still has, then
     /// every one as it happens. It ends when the server goes away.
     pub fn events(&self, after: u64) -> Result<Events> {
@@ -1212,6 +1261,11 @@ impl Client {
     /// is replacing itself did not run the call: it is made again, also
     /// through the moment in which nothing listens between the two builds.
     fn call(&self, method: &str, args: Value) -> Result<Option<Value>> {
+        self.reply(method, args).map(|reply| reply.result)
+    }
+
+    /// As [`Client::call`], with what the reply says beside its result.
+    fn reply(&self, method: &str, args: Value) -> Result<Reply> {
         let mut replacing: Option<Instant> = None;
         loop {
             let reply = self.call_once(method, &args);
@@ -1228,7 +1282,7 @@ impl Client {
         }
     }
 
-    fn call_once(&self, method: &str, args: &Value) -> Result<Option<Value>> {
+    fn call_once(&self, method: &str, args: &Value) -> Result<Reply> {
         let body = args.to_string();
         let (status, mut reply) = self.send(
             "POST",
@@ -1260,7 +1314,7 @@ impl Client {
         if status != 200 {
             return Err(Error::Protocol(format!("{method}: status {status}")));
         }
-        Ok(reply.result)
+        Ok(reply)
     }
 }
 
@@ -2508,6 +2562,98 @@ mod tests {
             (letters[1].to.as_str(), letters[1].delivery.as_str()),
             ("clerk@north", "queued")
         );
+    }
+
+    /// A yard that holds the conversation with the yardmaster, the mails
+    /// 1 to `n`.
+    fn long_conversation(n: u64) -> Yard {
+        let yard = Yard::start();
+        yard.converse(
+            "yardmaster",
+            (1..=n)
+                .map(|seq| json!({"seq": seq, "from": "yardmaster", "to": "jo", "text": "x"}))
+                .collect(),
+        );
+        yard
+    }
+
+    #[test]
+    fn a_conversation_is_read_from_its_newest_end_a_page_at_a_time() {
+        let yard = long_conversation(120);
+        let client = yard.client();
+        let newest = client.conversation_page("jo", "yardmaster", 50, 0).unwrap();
+        assert_eq!(
+            (newest.letters.len(), newest.letters[0].seq, newest.more),
+            (50, 71, true)
+        );
+        let before = client
+            .conversation_page("jo", "yardmaster", 50, 71)
+            .unwrap();
+        assert_eq!(
+            (before.letters[0].seq, before.letters[49].seq, before.more),
+            (21, 70, true)
+        );
+        let oldest = client
+            .conversation_page("jo", "yardmaster", 50, 21)
+            .unwrap();
+        assert_eq!((oldest.letters.len(), oldest.more), (20, false));
+        assert_eq!(
+            yard.asked("Conversation"),
+            vec![
+                json!({"a": "jo", "b": "yardmaster", "limit": 50}),
+                json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 71}),
+                json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 21}),
+            ]
+        );
+        // What is new is read after a seq, as ever.
+        assert_eq!(
+            client.conversation("jo", "yardmaster", 118).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_yard_that_refuses_pages_is_asked_for_the_conversation_whole() {
+        let yard = long_conversation(120);
+        yard.old();
+        let page = yard
+            .client()
+            .conversation_page("jo", "yardmaster", 50, 0)
+            .unwrap();
+        assert_eq!((page.letters.len(), page.more), (120, false));
+        assert_eq!(
+            yard.asked("Conversation"),
+            vec![
+                json!({"a": "jo", "b": "yardmaster", "limit": 50}),
+                json!({"a": "jo", "b": "yardmaster", "after": 0}),
+            ]
+        );
+        // What it refuses whole as well is the refusal that is told.
+        yard.answer(
+            "Conversation",
+            r#"{"error": {"code": "error", "message": "user nobody: not found"}}"#,
+        );
+        let err = yard
+            .client()
+            .conversation_page("jo", "nobody", 50, 0)
+            .unwrap_err();
+        assert!(err.to_string().contains("user nobody"), "{err}");
+        assert_eq!(yard.asked("Conversation").len(), 4);
+    }
+
+    #[test]
+    fn a_yard_that_answers_all_to_a_page_has_no_more() {
+        let yard = Yard::start();
+        let letters: Vec<Value> = (1..=120)
+            .map(|seq| json!({"seq": seq, "from": "yardmaster", "to": "jo", "text": "x"}))
+            .collect();
+        yard.answer("Conversation", &json!({ "result": letters }).to_string());
+        let page = yard
+            .client()
+            .conversation_page("jo", "yardmaster", 50, 0)
+            .unwrap();
+        assert_eq!((page.letters.len(), page.more), (120, false));
+        assert_eq!(yard.asked("Conversation").len(), 1);
     }
 
     #[test]
