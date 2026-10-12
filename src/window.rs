@@ -3783,6 +3783,7 @@ mod tests {
             expanded: false,
             about: Vec::new(),
             state: "open".to_string(),
+            secret: None,
         };
         assert_eq!(
             decision_keys(&ask, false, true),
