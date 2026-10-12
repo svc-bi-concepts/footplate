@@ -317,6 +317,8 @@ be given again from its card under "Decided", which replaces it.
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
 | a click on the arrow at a scrolled-up conversation's bottom right, `cmd+end` (`ctrl+end` on Linux) | jumps to the newest message; the arrow carries how many mails arrived below |
+| `pageup`, `pagedown` | scroll the open conversation, card or yard row by a page, with the focus anywhere |
+| `cmd+home` (`ctrl+home` on Linux) | the oldest loaded message; the newest is `cmd+end`, on a card or the yard row too |
 | a click on "Decided" | folds it open, shut |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
 | `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |

@@ -58,7 +58,10 @@ actions!(
         Smaller,
         UsualSize,
         NextLook,
-        JumpNewest
+        JumpNewest,
+        JumpOldest,
+        PageUp,
+        PageDown
     ]
 );
 
@@ -290,6 +293,14 @@ pub fn bind_keys(cx: &mut App) {
             // The jump control's key works while words are typed: the
             // line has no binding for it.
             KeyBinding::new("secondary-end", JumpNewest, Some(context)),
+            // Home and End with the modifier are the oldest loaded and
+            // the newest: plain they are the line's caret keys, for the
+            // row's ends.
+            KeyBinding::new("secondary-home", JumpOldest, Some(context)),
+            // A page up or down scrolls what is shown, with the focus
+            // anywhere: the line has no binding for these keys.
+            KeyBinding::new("pageup", PageUp, Some(context)),
+            KeyBinding::new("pagedown", PageDown, Some(context)),
         ]);
     }
     // Where no line is typed in: one key marks one notice read, and on a
@@ -964,6 +975,15 @@ impl Footplate {
         }
     }
 
+    /// Puts `shown` at its newest at once: the offset is set, not
+    /// asked for on the next frame.
+    fn to_newest(shown: &ScrollHandle) {
+        let max = shown.max_offset();
+        let mut at = shown.offset();
+        at.y = px(0.) - max.height;
+        shown.set_offset(at);
+    }
+
     /// Jumps the open conversation to its newest message: the control
     /// and its key. The offset is set at once, so the control is gone in
     /// the frame that follows, and the line keeps the keys.
@@ -976,17 +996,77 @@ impl Footplate {
         {
             return;
         }
-        let max = self.conversation.max_offset();
-        let mut at = self.conversation.offset();
-        at.y = px(0.) - max.height;
-        self.conversation.set_offset(at);
+        Self::to_newest(&self.conversation);
         self.new_below = 0;
         window.focus(&self.line.focus_handle(cx));
         cx.notify();
     }
 
+    /// The scroll of what is shown: the open conversation's, the open
+    /// card's, or the yard row's, which is the conversation's. None
+    /// under the settings, where none of those is shown, and none with
+    /// nothing open.
+    fn scrolled(&self) -> Option<&ScrollHandle> {
+        if self.settings_open {
+            return None;
+        }
+        match self.model.as_ref()?.selected() {
+            Some(Selected::Conversation(_) | Selected::Yard) => Some(&self.conversation),
+            Some(Selected::Decision(_) | Selected::Decided(_, _)) => Some(&self.decision),
+            None => None,
+        }
+    }
+
+    /// Moves what is shown by a page: down towards the newest, or up
+    /// towards the oldest. A page is the height of the view less two
+    /// lines, so the eye keeps its place; at an end the view stops.
+    fn page(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(shown) = self.scrolled() else {
+            return;
+        };
+        let line = window.line_height();
+        let step = (shown.bounds().size.height - line - line).max(px(0.));
+        let max = shown.max_offset();
+        let mut at = shown.offset();
+        if down {
+            at.y -= step;
+        } else {
+            at.y += step;
+        }
+        at.y = at.y.clamp(px(0.) - max.height, px(0.));
+        shown.set_offset(at);
+        cx.notify();
+    }
+
+    /// Puts what is shown at its oldest: the first loaded mail, the
+    /// card's top, the yard row's first notice. The focus stays where
+    /// it is: unlike the jump to the newest, this is no return to
+    /// writing.
+    fn jump_oldest(&mut self, _: &JumpOldest, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(shown) = self.scrolled() else {
+            return;
+        };
+        let mut at = shown.offset();
+        at.y = px(0.);
+        shown.set_offset(at);
+        cx.notify();
+    }
+
+    /// The jump key: on a conversation the control and its key do the
+    /// same thing; on the yard row or a card it puts the view at its
+    /// newest too.
     fn jump_newest(&mut self, _: &JumpNewest, window: &mut Window, cx: &mut Context<Self>) {
-        self.jump(window, cx);
+        if self
+            .model
+            .as_ref()
+            .and_then(|m| m.selected_conversation())
+            .is_some()
+        {
+            self.jump(window, cx);
+        } else if let Some(shown) = self.scrolled() {
+            Self::to_newest(shown);
+            cx.notify();
+        }
     }
 
     /// Asks the yard for the images of the open conversation it was not
@@ -4040,6 +4120,9 @@ impl Render for Footplate {
             .on_action(cx.listener(Self::focus_words))
             .on_action(cx.listener(Self::leave))
             .on_action(cx.listener(Self::jump_newest))
+            .on_action(cx.listener(Self::jump_oldest))
+            .on_action(cx.listener(|this, _: &PageUp, window, cx| this.page(false, window, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, window, cx| this.page(true, window, cx)))
             // Files dropped anywhere on the window are for the draft of the
             // open conversation.
             .on_drop(
@@ -8302,5 +8385,294 @@ mod tests {
         cx.run_until_parked();
         assert!(at_bottom(&view, cx));
         assert!(!shows_jump(&view, cx));
+    }
+
+    fn card_offset_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Point<gpui::Pixels> {
+        view.read_with(cx, |v, _| v.decision.offset())
+    }
+
+    /// Page Up and Page Down move the open conversation by a page — the
+    /// height of the view less two lines — and stop at its ends, with
+    /// the focus in the line; with the modifier, Home and End go to the
+    /// oldest loaded and the newest message. Typing is unchanged, and
+    /// plain Home and End are still the caret's.
+    #[gpui::test]
+    fn page_keys_move_the_conversation_by_a_page_and_stop_at_its_ends(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let full = ["A long enough letter to make the conversation scroll."; 60];
+        mails(&yard, &full);
+        let (view, cx) = opened(&yard, &full, cx);
+        // Sixty mails overflow the pane twice over: there is more than
+        // a page above to stand.
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > px(40.), "the conversation does not scroll: {over:?}");
+        assert!(at_bottom(&view, cx));
+        let in_line = view.update_in(cx, |v, window, cx| {
+            v.line.focus_handle(cx).is_focused(window)
+        });
+        assert!(in_line);
+
+        // A page is the view less two lines: smaller than what stands
+        // above, so one key moves by exactly it.
+        let viewport = view.read_with(cx, |v, _| v.conversation.bounds().size.height);
+        let line = cx.update(|window, _| window.line_height());
+        let page = viewport - line - line;
+        assert!(
+            page > px(0.) && page < over,
+            "no page to move by: {page:?} of {over:?}"
+        );
+
+        // What is typed stays through the paging, and typing goes on.
+        cx.simulate_input("hello");
+        assert_eq!(typed(&view, cx), "hello");
+        cx.simulate_keystrokes("pageup");
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.) - over + page);
+        assert!(shows_jump(&view, cx));
+        assert_eq!(typed(&view, cx), "hello");
+        cx.simulate_input(" world");
+        assert_eq!(typed(&view, cx), "hello world");
+
+        // Up to the oldest loaded, where further keys stop; down to the
+        // newest, where they stop too.
+        for _ in 0..20 {
+            cx.simulate_keystrokes("pageup");
+        }
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.));
+        for _ in 0..20 {
+            cx.simulate_keystrokes("pagedown");
+        }
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+
+        // With the modifier, Home is the oldest loaded and End the
+        // newest, as the jump control's key.
+        cx.simulate_keystrokes("secondary-home");
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.));
+        assert!(shows_jump(&view, cx));
+        cx.simulate_keystrokes("secondary-end");
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+        assert_eq!(new_below(&view, cx), 0);
+
+        // Plain Home and End are still the caret's: the view stands, and
+        // what is typed stays.
+        cx.simulate_keystrokes("secondary-home");
+        cx.run_until_parked();
+        let place = offset_of(&view, cx);
+        cx.simulate_keystrokes("home");
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx), place);
+        assert_eq!(typed(&view, cx), "hello world");
+    }
+
+    /// One open ask, for a card that stands alone.
+    fn asks_one() -> String {
+        json!({"result": {"open": [
+            {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+             "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+             "since": "2026-10-10T10:00:00Z"},
+        ], "decided": []}})
+        .to_string()
+    }
+
+    /// The bead of that ask, with `n` notes: expanded, the card scrolls.
+    fn bead_of_notes(n: usize) -> String {
+        let notes: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                json!({"seq": i as u64 + 2, "kind": "note", "author": "yardmaster",
+                       "text": format!("note {i} of the evening's work"),
+                       "at": "2026-10-10T09:30:00Z"})
+            })
+            .collect();
+        json!({"result": {
+            "id": "bead-a", "title": "Move the links",
+            "body": "The body of bead-a.",
+            "stage": "new", "labels": ["topic:linear-out"],
+            "notes": notes,
+            "asks": [{
+                "ask": 3, "to": "jo", "asker": "yardmaster",
+                "since": "2026-10-10T10:00:00Z",
+                "question": "Move them now?",
+                "context": ["The links file declares the new source."],
+                "options": [
+                    {"label": "Move them now", "consequence": "all 64 links point tonight"},
+                    {"label": "You decide", "consequence": "leave it to yardmaster"}
+                ],
+                "recommend": 1, "why": "the test passed",
+                "state": "open"
+            }]
+        }})
+        .to_string()
+    }
+
+    /// On a card the page keys move the card by a page and stop at its
+    /// ends, with the focus in the line or in the window's keys; with
+    /// the modifier, Home and End go to its top and its end.
+    #[gpui::test]
+    fn page_keys_move_the_open_card_by_a_page(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_one());
+        yard.answer("Bead", &bead_of_notes(60));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        cx.run_until_parked();
+
+        // Expanded over sixty notes the card scrolls.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let over = view.read_with(cx, |v, _| v.decision.max_offset().height);
+        assert!(
+            over > px(40.),
+            "the expanded card does not scroll: {over:?}"
+        );
+
+        // A page is the view less two lines, and two of them stand above:
+        // one key after another moves by exactly it.
+        let viewport = view.read_with(cx, |v, _| v.decision.bounds().size.height);
+        let line = cx.update(|window, _| window.line_height());
+        let page = viewport - line - line;
+        assert!(
+            page > px(0.) && page + page < over,
+            "no two pages to move by: {page:?} of {over:?}"
+        );
+
+        // The card starts at its top; one page down moves by a page,
+        // with the window's keys held.
+        assert_eq!(card_offset_of(&view, cx).y, px(0.));
+        cx.simulate_keystrokes("pagedown");
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(0.) - page);
+
+        // And with the focus in the line for words.
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+        let in_line = view.update_in(cx, |v, window, cx| {
+            v.line.focus_handle(cx).is_focused(window)
+        });
+        assert!(in_line);
+        cx.simulate_keystrokes("pagedown");
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(0.) - page - page);
+
+        // Down to its end, where further keys stop; with the modifier,
+        // Home and End go to its top and its end.
+        for _ in 0..20 {
+            cx.simulate_keystrokes("pagedown");
+        }
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(0.) - over);
+        cx.simulate_keystrokes("secondary-home");
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(0.));
+        cx.simulate_keystrokes("secondary-end");
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(0.) - over);
+    }
+
+    /// Sixty notices, for a yard row that scrolls.
+    fn notices_many(n: usize) -> String {
+        let notices: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                json!({"seq": i as u64 + 10, "kind": "created", "bead": "yd-shed",
+                       "text": format!("notice {i} of the evening's work"), "read": false})
+            })
+            .collect();
+        json!({"result": {"notifications": notices, "unread": n, "last": n as u64 + 10}})
+            .to_string()
+    }
+
+    /// On the yard row the page keys move the notices by a page and
+    /// stop at their ends; with the modifier, Home and End go to the
+    /// first notice and the newest.
+    #[gpui::test]
+    fn page_keys_move_the_yard_row_by_a_page(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserNotifications", &notices_many(60));
+        mails(&yard, &["Hello."]);
+        let (view, cx) = opened(&yard, &["Hello."], cx);
+        view.update_in(cx, |v, window, cx| v.select(Selected::Yard, window, cx));
+        wait(cx, "the yard row", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Yard))
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        // Sixty notices overflow the pane; the row opens at its newest.
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > px(40.), "the yard row does not scroll: {over:?}");
+        assert!(at_bottom(&view, cx));
+
+        // A page is the view less two lines: smaller than what stands
+        // above, so one key moves by exactly it.
+        let viewport = view.read_with(cx, |v, _| v.conversation.bounds().size.height);
+        let line = cx.update(|window, _| window.line_height());
+        let page = viewport - line - line;
+        assert!(
+            page > px(0.) && page < over,
+            "no page to move by: {page:?} of {over:?}"
+        );
+
+        // The window holds the keys on the yard row; one page up moves
+        // by a page, and paging stops at both ends.
+        let in_line = view.update_in(cx, |v, window, cx| {
+            v.line.focus_handle(cx).is_focused(window)
+        });
+        assert!(!in_line);
+        cx.simulate_keystrokes("pageup");
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.) - over + page);
+        for _ in 0..20 {
+            cx.simulate_keystrokes("pageup");
+        }
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.));
+        for _ in 0..20 {
+            cx.simulate_keystrokes("pagedown");
+        }
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+
+        // With the modifier, Home is the first notice and End the newest.
+        cx.simulate_keystrokes("secondary-home");
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.));
+        cx.simulate_keystrokes("secondary-end");
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
     }
 }
