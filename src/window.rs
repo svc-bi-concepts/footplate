@@ -1428,12 +1428,16 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
-                    // Fills the row: sized to its content, the head is
-                    // first measured at its full width, and truncate()
-                    // then cuts it hard, with no ellipsis.
+                    // Resolve the available row width before measuring the
+                    // head, so truncate() can draw its ellipsis.
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().child(row.head))
+                    .child(
+                        div()
+                            .truncate()
+                            .debug_selector(|| format!("decision head {}", row.bead))
+                            .child(row.head),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -1447,6 +1451,7 @@ impl Footplate {
                     .flex_none()
                     .text_xs()
                     .text_color(palette.faint)
+                    .debug_selector(|| format!("decision id {}", row.bead))
                     .child(row.short),
             )
     }
@@ -1482,9 +1487,8 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
-                    // Fills the row: sized to its content, the head is
-                    // first measured at its full width, and truncate()
-                    // then cuts it hard, with no ellipsis.
+                    // Resolve the available row width before measuring the
+                    // head, so truncate() can draw its ellipsis.
                     .flex_1()
                     .min_w_0()
                     .child(
@@ -3960,6 +3964,54 @@ mod tests {
             "the long head touches the id: {long:?} {id:?}"
         );
         let short = bounds_of(cx, "decided head bead-d 15");
+        assert_eq!(
+            short.size.width, long.size.width,
+            "the head's column hugs its content instead of filling the row"
+        );
+    }
+
+    /// An open decision row has the same width constraint as a decided row:
+    /// its head must be measured at the space left before the bead id.
+    #[gpui::test]
+    fn a_long_decision_head_ends_before_the_bead_id_with_a_gap(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "A deliberately long question that must be cut before the id", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"},
+                {"bead": "bead-b", "bead_title": "Short", "topic": "topic:linear-out",
+                 "ask": 4, "question": "Name it?", "asker": "yardmaster",
+                 "since": "2026-10-10T11:00:00Z"}
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decisions", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decisions_count() == 2)
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+
+        let long = bounds_of(cx, "decision head bead-a");
+        let id = bounds_of(cx, "decision id bead-a");
+        let short = bounds_of(cx, "decision head bead-b");
+        assert!(
+            long.right() < id.left(),
+            "the long head touches the id: {long:?} {id:?}"
+        );
         assert_eq!(
             short.size.width, long.size.width,
             "the head's column hugs its content instead of filling the row"
