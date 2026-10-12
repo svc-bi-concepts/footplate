@@ -56,7 +56,8 @@ actions!(
         Larger,
         Smaller,
         UsualSize,
-        NextLook
+        NextLook,
+        JumpNewest
     ]
 );
 
@@ -285,6 +286,9 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("up", ChoiceUp, Some(context)),
             KeyBinding::new("down", ChoiceDown, Some(context)),
             KeyBinding::new("escape", Leave, Some(context)),
+            // The jump control's key works while words are typed: the
+            // line has no binding for it.
+            KeyBinding::new("secondary-end", JumpNewest, Some(context)),
         ]);
     }
     // Where no line is typed in: one key marks one notice read, and on a
@@ -353,6 +357,13 @@ pub struct Footplate {
     said: Option<api::Me>,
     line: Entity<Line>,
     conversation: ScrollHandle,
+    /// How many mails arrived in the open conversation below its view
+    /// while it stood scrolled up: what the jump control carries.
+    new_below: usize,
+    /// The conversation was told to its newest and the layout has not
+    /// put it there yet: the jump control stays out of the frame before
+    /// it, whose scroll offset is the old view's.
+    bottom_pending: bool,
     /// The conversation's position when it was left for a decision, so
     /// dealing with that decision can return to the same place.
     back_position: Option<(String, gpui::Point<gpui::Pixels>)>,
@@ -496,6 +507,8 @@ impl Footplate {
             said: None,
             line,
             conversation: ScrollHandle::new(),
+            new_below: 0,
+            bottom_pending: false,
             back_position: None,
             decision: ScrollHandle::new(),
             selection,
@@ -663,7 +676,8 @@ impl Footplate {
                 self.model = Some(model);
                 self.down = None;
                 self.turned(open, cx);
-                self.conversation.scroll_to_bottom();
+                self.new_below = 0;
+                self.scroll_to_newest();
                 self.decision.scroll_to_item(0);
                 // What the yard did not give while it was away is asked for
                 // again.
@@ -725,18 +739,30 @@ impl Footplate {
                 _ if returning_position.is_some() => {}
                 _ => {
                     self.back_position = None;
-                    self.conversation.scroll_to_bottom();
+                    self.new_below = 0;
+                    self.scroll_to_newest();
                 }
             }
         } else {
             match &after_sel {
-                Some(Selected::Conversation(_)) if model.entries().len() != before_entries => {
-                    self.conversation.scroll_to_bottom();
+                Some(Selected::Conversation(_)) => {
+                    let after_entries = model.entries().len();
+                    if after_entries != before_entries {
+                        if self.bottom_pending || self.at_bottom() {
+                            self.scroll_to_newest();
+                        } else {
+                            // New mail below a view that stands scrolled
+                            // up: the view does not move by itself, and
+                            // the jump control carries how many arrived.
+                            self.new_below += after_entries.saturating_sub(before_entries);
+                        }
+                    }
                 }
                 Some(Selected::Yard)
                     if model.notices().len() + model.yard_mail().len() != before_notices =>
                 {
-                    self.conversation.scroll_to_bottom();
+                    self.scroll_to_newest();
+                }
                 }
                 _ => {}
             }
@@ -769,6 +795,73 @@ impl Footplate {
         self.pictures(cx);
         self.run(effects, cx);
         cx.notify();
+    }
+
+    /// Whether the conversation stands at its newest: its scroll offset
+    /// is at the bottom, within a pixel.
+    fn at_bottom(&self) -> bool {
+        let offset = self.conversation.offset();
+        let max = self.conversation.max_offset();
+        offset.y + max.height <= px(1.)
+    }
+
+    /// Whether the jump control stands over the open conversation: one
+    /// is open, the settings are not over it, and its view is above its
+    /// newest.
+    fn shows_jump(&self) -> bool {
+        !self.bottom_pending
+            && !self.settings_open
+            && self
+                .model
+                .as_ref()
+                .and_then(|m| m.selected_conversation())
+                .is_some()
+            && !self.at_bottom()
+    }
+
+    /// Puts the conversation at its newest on the next frame: the layout
+    /// applies it, and the jump control stays out of the frame before
+    /// it.
+    fn scroll_to_newest(&mut self) {
+        self.conversation.scroll_to_bottom();
+        self.bottom_pending = true;
+    }
+
+    /// The scroll handle moves outside any model change: the wheel moves
+    /// it, and the layout applies a jump to the newest. What the window
+    /// keeps of it is brought up to date whenever it draws, before it
+    /// decides on the jump control.
+    fn reconcile_scroll(&mut self) {
+        if self.bottom_pending {
+            self.bottom_pending = false;
+        } else if self.at_bottom() {
+            self.new_below = 0;
+        }
+    }
+
+    /// Jumps the open conversation to its newest message: the control
+    /// and its key. The offset is set at once, so the control is gone in
+    /// the frame that follows, and the line keeps the keys.
+    fn jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .model
+            .as_ref()
+            .and_then(|m| m.selected_conversation())
+            .is_none()
+        {
+            return;
+        }
+        let max = self.conversation.max_offset();
+        let mut at = self.conversation.offset();
+        at.y = px(0.) - max.height;
+        self.conversation.set_offset(at);
+        self.new_below = 0;
+        window.focus(&self.line.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn jump_newest(&mut self, _: &JumpNewest, window: &mut Window, cx: &mut Context<Self>) {
+        self.jump(window, cx);
     }
 
     /// Asks the yard for the images of the open conversation it was not
@@ -2787,6 +2880,45 @@ impl Footplate {
         }
     }
 
+    /// The control that jumps to the newest message: an arrow over the
+    /// mail, with how many mails arrived below while the view stood
+    /// scrolled up, in the unread count's colours when there are any.
+    fn jump_button(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let marked = self.new_below > 0;
+        let label = match marked {
+            true => format!("↓ {}", self.new_below),
+            false => "↓".to_string(),
+        };
+        div()
+            .id("jump newest")
+            .debug_selector(|| "jump newest".to_string())
+            .absolute()
+            .bottom(rems(0.75))
+            .right(rems(0.75))
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.ground)
+            .when(marked, |el| {
+                el.bg(palette.accent)
+                    .text_color(palette.on_accent)
+                    .border_color(palette.accent)
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+            .when(!marked, |el| el.hover(|style| style.bg(palette.hover)))
+            .cursor_pointer()
+            .child(
+                div()
+                    .when(marked, |el| {
+                        el.debug_selector(|| "jump newest count".to_string())
+                    })
+                    .child(label),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.jump(window, cx)))
+    }
+
     fn talk_conversation(
         &self,
         model: &Model,
@@ -2834,6 +2966,18 @@ impl Footplate {
         } else {
             mail.children(entries.into_iter().map(|entry| self.entry(entry, palette)))
         };
+        // The jump control stands over the mail, at its bottom right,
+        // while the view is above its newest.
+        let mail = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(mail)
+            .when(self.shows_jump(), |el| {
+                el.child(self.jump_button(palette, cx))
+            });
 
         let (others, from) = model.others();
         let focus = self.line.focus_handle(cx);
@@ -3631,6 +3775,7 @@ impl Focusable for Footplate {
 
 impl Render for Footplate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.reconcile_scroll();
         // The one place the text size is set: every size that goes with the
         // text is in rems, and the text itself is seven eighths of one.
         window.set_rem_size(self.settings.rem());
@@ -3674,6 +3819,7 @@ impl Render for Footplate {
             .on_action(cx.listener(Self::expand))
             .on_action(cx.listener(Self::focus_words))
             .on_action(cx.listener(Self::leave))
+            .on_action(cx.listener(Self::jump_newest))
             // Files dropped anywhere on the window are for the draft of the
             // open conversation.
             .on_drop(
@@ -7503,5 +7649,162 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("GiveSecret").len(), 1);
         assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+    }
+
+    /// Whether the jump control stands over the open conversation.
+    fn shows_jump(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
+        view.read_with(cx, |v, _| v.shows_jump())
+    }
+
+    fn at_bottom(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
+        view.read_with(cx, |v, _| v.at_bottom())
+    }
+
+    fn new_below(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> usize {
+        view.read_with(cx, |v, _| v.new_below)
+    }
+
+    fn offset_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Point<gpui::Pixels> {
+        view.read_with(cx, |v, _| v.conversation.offset())
+    }
+
+    /// Stands the open conversation forty pixels above its newest, as a
+    /// reader that scrolled up: the layout keeps the offset, and the next
+    /// frame draws the conversation there.
+    fn scroll_up(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        view.read_with(cx, |v, _| {
+            let mut at = v.conversation.offset();
+            at.y += px(40.);
+            v.conversation.set_offset(at);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// Stands the open conversation at its newest by hand, as a reader
+    /// that scrolled down to it.
+    fn scroll_down(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        view.read_with(cx, |v, _| {
+            let max = v.conversation.max_offset();
+            let mut at = v.conversation.offset();
+            at.y = px(0.) - max.height;
+            v.conversation.set_offset(at);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// Scrolled up, a control over the conversation jumps to its newest
+    /// message on a click or its key; at the newest it is gone; new mail
+    /// while scrolled up does not move the view and marks the control.
+    /// That the control is gone is the window's own word: gpui's test
+    /// keeps the bounds of what an earlier frame drew.
+    #[gpui::test]
+    fn scrolled_up_a_control_jumps_to_the_newest_and_marks_new_mail_below(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let full = ["A long enough letter to make the conversation scroll."; 30];
+        mails(&yard, &full);
+        let (view, cx) = opened(&yard, &full, cx);
+        // Thirty mails overflow the pane: there is further up to stand.
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > px(40.), "the conversation does not scroll: {over:?}");
+
+        // At the newest the control is nowhere.
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+        assert!(!drawn(cx, "jump newest"));
+
+        // Forty pixels above it the control stands over the text,
+        // unmarked: no mail arrived below.
+        scroll_up(&view, cx);
+        assert!(!at_bottom(&view, cx));
+        assert!(shows_jump(&view, cx));
+        assert!(drawn(cx, "jump newest"));
+        assert!(!drawn(cx, "jump newest count"));
+
+        // One click puts the newest message in view, and the control is
+        // gone.
+        click_on(cx, "jump newest");
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+        assert_eq!(new_below(&view, cx), 0);
+
+        // Its key does the same from above again.
+        scroll_up(&view, cx);
+        assert!(shows_jump(&view, cx));
+        cx.simulate_keystrokes("secondary-end");
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+
+        // New mail while scrolled up does not move the view, and marks
+        // the control with how many arrived below.
+        scroll_up(&view, cx);
+        let place = offset_of(&view, cx);
+        for seq in [42, 43] {
+            yard.emit(
+                &json!({"seq": seq, "kind": "mail", "actor": "yardmaster",
+                    "at": "2026-10-08T09:31:00Z",
+                    "data": {"to": "jo", "to_user": true, "text": "Landed."}})
+                .to_string(),
+            );
+        }
+        wait(cx, "the mail below", |cx| texts(&view, cx).len() == 32);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx), place);
+        assert!(!at_bottom(&view, cx));
+        assert_eq!(new_below(&view, cx), 2);
+        assert!(shows_jump(&view, cx));
+        assert!(drawn(cx, "jump newest count"));
+
+        // Reaching the newest by hand clears the mark too: what arrived
+        // below was seen.
+        scroll_down(&view, cx);
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+        assert_eq!(new_below(&view, cx), 0);
+
+        // Marked again, the control's click takes the view to the newest
+        // of them.
+        scroll_up(&view, cx);
+        yard.emit(
+            &json!({"seq": 44, "kind": "mail", "actor": "yardmaster",
+                "at": "2026-10-08T09:32:00Z",
+                "data": {"to": "jo", "to_user": true, "text": "And moored."}})
+            .to_string(),
+        );
+        wait(cx, "the mail below", |cx| texts(&view, cx).len() == 33);
+        assert_eq!(new_below(&view, cx), 1);
+        click_on(cx, "jump newest");
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+        assert_eq!(texts(&view, cx).len(), 33);
+        assert_eq!(new_below(&view, cx), 0);
+        assert!(!shows_jump(&view, cx));
+
+        // At the newest new mail moves the view with it, as before.
+        yard.emit(
+            &json!({"seq": 45, "kind": "mail", "actor": "yardmaster",
+                "at": "2026-10-08T09:33:00Z",
+                "data": {"to": "jo", "to_user": true, "text": "All fast."}})
+            .to_string(),
+        );
+        wait(cx, "the mail at the newest", |cx| {
+            texts(&view, cx).len() == 34
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
     }
 }

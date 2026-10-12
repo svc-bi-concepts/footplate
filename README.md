@@ -261,7 +261,8 @@ the linked yards expose, each with what they are there (a crew member or a
 person) and their role line, and on every row the number of mails from it
 you have not seen. Below them the `yard` row with the number of the yard's
 notices you have not read. Right, what is open: a conversation, oldest at
-the top and the newest in view, with a line under your own mail that says
+the top and the newest in view, an arrow at its bottom right back to the
+newest when scrolled up, with a line under your own mail that says
 where it stands (`read`, `sent; yardmaster is idle`, `queued for north:
 …`) and the line to write in; the notices, oldest first; or a bead's open
 asks, each as its card.
@@ -313,6 +314,7 @@ be given again from its card under "Decided", which replaces it.
 | `backspace` in an empty line | removes the last attachment |
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
+| a click on the arrow at a scrolled-up conversation's bottom right, `cmd+end` (`ctrl+end` on Linux) | jumps to the newest message; the arrow carries how many mails arrived below |
 | a click on "Decided" | folds it open, shut |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
 | `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |
