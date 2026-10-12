@@ -4324,10 +4324,8 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let short = "```\ncargo test\n```";
-        // What the window holds has no tab: the model renders one as a
-        // space before the message is drawn, so the block keeps spaces.
         let code = format!(
-            "  deploy --all\n    echo done\n\n{}",
+            "  deploy --all\n\techo done\n\n{}",
             "echo a very long line that wraps in the window ".repeat(20)
         );
         let long = format!("```sh\n{code}\n```");
@@ -4351,8 +4349,8 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
 
         // Each block's control copies its own block byte for byte: the
-        // indentation, the empty line and the long wrapped line, without
-        // the fences or the language word.
+        // tab, indentation, empty line and long wrapped line, without the
+        // fences or the language word.
         let chip = |cx: &mut VisualTestContext, seq: u64, ix: usize| {
             view.read_with(cx, |v, cx| v.selection.read(cx).chips_in(seq))[ix]
                 .1

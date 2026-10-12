@@ -1548,14 +1548,13 @@ impl Model {
     }
 }
 
-/// Text as it reaches the window: letters and line breaks, and no other
-/// control character. What another yard or a crew member wrote is shown as
-/// text and nothing else.
+/// Text as it reaches the window: letters, line breaks and tabs, and no
+/// other control character. What another yard or a crew member wrote is
+/// shown as text and nothing else.
 pub fn plain(text: &str) -> String {
     text.chars()
         .filter_map(|c| match c {
-            '\n' => Some('\n'),
-            '\t' => Some(' '),
+            '\n' | '\t' => Some(c),
             c if c.is_control() => None,
             c => Some(c),
         })
@@ -2505,7 +2504,7 @@ mod tests {
     fn text_reaches_the_window_as_letters_and_line_breaks() {
         assert_eq!(
             plain("one\ntwo\tthree\r\n\u{1b}[31mred\u{7}"),
-            "one\ntwo three\n[31mred"
+            "one\ntwo\tthree\n[31mred"
         );
         let (mut m, _) = Model::new(yard(&[]), None);
         m.conversation(
