@@ -68,6 +68,12 @@ impl Burst {
         self.0.len() == 1
     }
 
+    /// Drops news that was waiting when the person changed what they want
+    /// told of. The window also invalidates that batch's timer.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
     /// All there is as one notification, or none when there is nothing. It
     /// leads to the row of the first.
     pub fn take(&mut self) -> Option<Telling> {

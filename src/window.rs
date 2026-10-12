@@ -430,6 +430,8 @@ pub struct Footplate {
     _heeding: Task<()>,
     /// What arrived and is told of when the burst it came in is over.
     burst: Burst,
+    /// A settings change invalidates timers for any batch already waiting.
+    burst_generation: u64,
     /// Whether the window is the one in front.
     front: bool,
 }
@@ -558,6 +560,7 @@ impl Footplate {
             permission: None,
             _heeding: heeding,
             burst: Burst::default(),
+            burst_generation: 0,
             front: window.is_window_active(),
         }
     }
@@ -619,10 +622,13 @@ impl Footplate {
         for news in model.take_news() {
             let wanted = notify::wanted(&self.settings.notifications, &news, in_view);
             if wanted && self.burst.add(news) {
+                let generation = self.burst_generation;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(notify::BURST).await;
                     this.update(cx, |this, _| {
-                        if let Some(telling) = this.burst.take() {
+                        if this.burst_generation == generation
+                            && let Some(telling) = this.burst.take()
+                        {
                             this.system.show(&telling);
                         }
                     })
@@ -2004,6 +2010,10 @@ impl Footplate {
     fn set(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if settings == self.settings {
             return;
+        }
+        if settings.notifications != self.settings.notifications {
+            self.burst.clear();
+            self.burst_generation = self.burst_generation.wrapping_add(1);
         }
         // The line and the messages take their colours from this.
         cx.set_global(settings.look);
@@ -7259,25 +7269,36 @@ mod tests {
             )]
         );
 
+        // Turning notifications off during a pending burst cancels it.
+        yard.emit(&mail_event(23, "assembly", "This should not arrive."));
+        wait(cx, "the pending mail", |cx| {
+            unread_of(&view, cx, "assembly") == 2
+        });
+        cx.simulate_keystrokes("cmd-,");
+        click_on(cx, "notify off");
+        assert_eq!(told.shown(cx), []);
+        click_on(cx, "notify on");
+        click_on(cx, "settings back");
+
         // In front on that conversation it is read where it stands.
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.front));
-        yard.emit(&mail_event(23, "yardmaster", "And pushed."));
+        yard.emit(&mail_event(24, "yardmaster", "And pushed."));
         wait(cx, "the mail", |cx| texts(&view, cx).len() == 3);
         assert_eq!(told.shown(cx), []);
         // With the settings where the conversation would be, it is not.
         cx.simulate_keystrokes("cmd-,");
-        yard.emit(&mail_event(24, "yardmaster", "Shall I go on?"));
+        yard.emit(&mail_event(25, "yardmaster", "Shall I go on?"));
         wait(cx, "the mail", |cx| texts(&view, cx).len() == 4);
         assert_eq!(told.shown(cx).len(), 1);
         cx.simulate_keystrokes("cmd-,");
 
         // In front on another conversation: a burst is one notification.
-        for (seq, text) in [(25, "One."), (26, "Two."), (27, "Three.")] {
+        for (seq, text) in [(26, "One."), (27, "Two."), (28, "Three.")] {
             yard.emit(&mail_event(seq, "assembly", text));
         }
-        wait(cx, "the burst", |cx| unread_of(&view, cx, "assembly") == 4);
+        wait(cx, "the burst", |cx| unread_of(&view, cx, "assembly") == 5);
         assert_eq!(
             told.shown(cx),
             [(
@@ -7287,13 +7308,13 @@ mod tests {
             )]
         );
         // And the next after it is one of its own.
-        yard.emit(&mail_event(28, "assembly", "Four."));
-        wait(cx, "the mail", |cx| unread_of(&view, cx, "assembly") == 5);
+        yard.emit(&mail_event(29, "assembly", "Four."));
+        wait(cx, "the mail", |cx| unread_of(&view, cx, "assembly") == 6);
         assert_eq!(told.shown(cx).len(), 1);
 
         // What the person wrote, here or elsewhere, tells of nothing.
         cx.deactivate_window();
-        yard.emit(r#"{"seq": 29, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "Go on."}, "at": "2026-10-08T09:31:00Z"}"#);
+        yard.emit(r#"{"seq": 30, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "Go on."}, "at": "2026-10-08T09:31:00Z"}"#);
         wait(cx, "the user's own mail", |cx| texts(&view, cx).len() == 5);
         assert_eq!(told.shown(cx), []);
 
@@ -7304,7 +7325,7 @@ mod tests {
                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
                 "since": "2026-10-10T10:00:00Z"}], "decided": []}}"#,
         );
-        yard.emit(r#"{"seq": 30, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 3}, "at": "2026-10-08T09:31:00Z"}"#);
+        yard.emit(r#"{"seq": 31, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 3}, "at": "2026-10-08T09:31:00Z"}"#);
         wait(cx, "the decision", |cx| {
             view.read_with(cx, |v, _| v.model.as_ref().unwrap().decisions_count() == 1)
         });
