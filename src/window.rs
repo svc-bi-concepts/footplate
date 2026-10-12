@@ -2720,7 +2720,11 @@ impl Footplate {
                         .text_color(palette.faint)
                         .child("body"),
                 )
-                .child(div().child(body.to_string()));
+                .child(select::text(
+                    select::key(("body", body)),
+                    body.to_string(),
+                    &self.selection,
+                ));
         }
         if !notes.is_empty() {
             out = out.child(
@@ -2730,8 +2734,24 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child("notes"),
             );
-            for note in notes {
-                out = out.child(div().child(format!("{}: {}", note.author, note.text)));
+            // Who wrote a note stands over it and not before it: a note's
+            // first line may be a heading or an item, which begin a line.
+            for (ix, note) in notes.iter().enumerate() {
+                out = out.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(note.author.clone()),
+                        )
+                        .child(select::text(
+                            select::key(("note", ix, &note.text)),
+                            note.text.clone(),
+                            &self.selection,
+                        )),
+                );
             }
         }
         if !about.is_empty() {
@@ -3731,6 +3751,91 @@ mod tests {
         // Only http and https are links.
         click(cx, 13, two, 40, 1.);
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/b"));
+    }
+
+    #[gpui::test]
+    fn a_link_inside_a_list_item_still_opens(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let item = format!("- {LINK}");
+        mails(&yard, &[&item]);
+        let (view, cx) = opened(&yard, &[&item], cx);
+
+        // The item's words are drawn without its marker, set in from the
+        // edge of the text.
+        let indent = px(16. * select::ITEM_INDENT);
+        let at = |cx: &mut VisualTestContext, index: usize, by: f32| {
+            let at = place(cx, 12, LINK, index, by);
+            gpui::point(at.x + indent, at.y)
+        };
+        // Beside the link, and where the marker is: nothing opens.
+        let beside = at(cx, 1, 1.);
+        cx.simulate_click(beside, gpui::Modifiers::default());
+        let marker = gpui::point(text_bounds(cx, 12).left() + px(4.), beside.y);
+        cx.simulate_click(marker, gpui::Modifiers::default());
+        assert_eq!(cx.opened_url(), None);
+        let on = at(cx, 10, 1.);
+        cx.simulate_click(on, gpui::Modifiers::default());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/a"));
+        assert_eq!(selected(&view, cx), None);
+
+        // What is selected of the item is of the text as it was written.
+        let (from, to) = (at(cx, 4, 1.), at(cx, 25, -1.));
+        drag(cx, from, to);
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("https://example.org/a")
+        );
+    }
+
+    #[gpui::test]
+    fn a_selection_across_a_code_block_is_copied_as_it_was_written(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let text = "## Run **this**:\n\n```sh\n  ls **/*.rs\n1. kept\n```\n- then `wait`\n- https://example.org/a";
+        mails(&yard, &[text]);
+        let (view, cx) = opened(&yard, &[text], cx);
+
+        // From the first block to the last, over the heading, the code and
+        // the items: none of their marks is drawn, and all are copied.
+        let all = text_bounds(cx, 12);
+        let (top, bottom) = (
+            gpui::point(all.left(), all.top() + px(2.)),
+            gpui::point(all.right() - px(2.), all.bottom() - px(2.)),
+        );
+        drag(cx, top, bottom);
+        // The heading's marks stand before its first letter: a selection
+        // begins after them, and has every mark after that.
+        let copied = &text["## ".len()..];
+        assert_eq!(selected(&view, cx).as_deref(), Some(copied));
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(clipboard(cx).as_deref(), Some(copied));
+        drag(cx, bottom, top);
+        assert_eq!(selected(&view, cx).as_deref(), Some(copied));
+    }
+
+    #[gpui::test]
+    fn a_line_of_code_wider_than_the_window_is_wrapped(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let short = "```\ncargo test\n```";
+        let long = format!("```\n{}\n```", "cargo test --locked ".repeat(60));
+        mails(&yard, &[short, &long]);
+        let (view, cx) = opened(&yard, &[short, &long], cx);
+
+        // It goes on in the rows under it, where its mark is drawn, and
+        // nothing of it is past the edge.
+        let (one, wrapped) = (text_bounds(cx, 12), text_bounds(cx, 13));
+        assert!(wrapped.size.height > one.size.height * 2., "{wrapped:?}");
+        assert_eq!(wrapped.size.width, one.size.width);
+        // All of it is still one line when it is copied.
+        drag(
+            cx,
+            gpui::point(wrapped.left(), wrapped.top() + px(2.)),
+            gpui::point(wrapped.right() - px(2.), wrapped.bottom() - px(2.)),
+        );
+        let code = &long["```\n".len()..long.len() - "\n```".len()];
+        assert_eq!(selected(&view, cx).as_deref(), Some(code));
     }
 
     #[gpui::test]

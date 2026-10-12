@@ -8,6 +8,7 @@ mod draft;
 #[cfg(test)]
 mod fake;
 mod input;
+mod markdown;
 mod model;
 mod select;
 mod session;

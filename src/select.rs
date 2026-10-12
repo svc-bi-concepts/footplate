@@ -3,18 +3,28 @@
 //! a time, so it is kept beside the texts and not in each of them; a text
 //! draws its part of it and changes it with the mouse. A link in the text is
 //! drawn as one, and a click on it opens it.
+//!
+//! The text is drawn as the blocks its light Markdown makes of it, one
+//! under the other and without their marks. What is selected is still a
+//! stretch of the text as it was written: a copy has the marks.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 
+use std::rc::Rc;
+use std::sync::OnceLock;
+
 use gpui::{
-    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
-    TextLayout, UnderlineStyle, Window, combine_highlights, px,
+    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, FontStyle,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Style,
+    StyledText, TextLayout, TextRun, TextStyle, TextStyleRefinement, UnderlineStyle, Window, fill,
+    point, px, rems,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::input::next_boundary;
+use crate::markdown::{self, Block, Kind};
 use crate::theme::Palette;
 
 /// What is selected in the talk, if anything is.
@@ -27,12 +37,14 @@ struct Selected {
     /// The text it is in, and that text as it was when it was pressed on.
     key: u64,
     text: SharedString,
-    /// What the press selected: a place, or a word. A drag selects from it.
+    /// What the press was on: a word, or a place. A place is empty, or the
+    /// marks that stand there and are not drawn. A drag selects from it.
     anchor: Range<usize>,
+    word: bool,
     range: Range<usize>,
     /// The link the press was on, until the pointer selects something: a
     /// release on it then is a click.
-    link: Option<Range<usize>>,
+    link: Option<SharedString>,
     /// The button is still down.
     selecting: bool,
 }
@@ -64,40 +76,60 @@ impl Selection {
             .is_some_and(|at| at.key == key && at.selecting)
     }
 
-    /// A press on the text `key` at `index`: what was selected is dropped,
+    /// A press on the text `key` at `place`: what was selected is dropped,
     /// wherever it was. A second press selects the word there. `link` is
     /// the link under the pointer.
     fn press(
         &mut self,
         key: u64,
         text: SharedString,
-        index: usize,
-        link: Option<Range<usize>>,
+        place: Range<usize>,
+        link: Option<SharedString>,
         clicks: usize,
         cx: &mut Context<Self>,
     ) {
-        let anchor = if clicks == 2 {
-            word_at(&text, index)
+        let word = clicks == 2;
+        // The word after the marks that stand there.
+        let anchor = if word {
+            word_at(&text, place.end)
         } else {
-            index..index
+            place
         };
         self.at = Some(Selected {
             key,
             text,
             // The first press of the two has opened it already.
             link: link.filter(|_| clicks == 1),
-            range: anchor.clone(),
+            range: anchor.start..if word { anchor.end } else { anchor.start },
             anchor,
+            word,
             selecting: true,
         });
         cx.notify();
     }
 
-    fn drag(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// The pointer is at `place` with the button down. What is selected
+    /// goes from where the press was to there, and has the marks between
+    /// the two and none at its ends: bold words selected alone are copied
+    /// as the words, and with what is around them as they were written.
+    fn drag(&mut self, place: Range<usize>, cx: &mut Context<Self>) {
         let Some(at) = self.at.as_mut() else {
             return;
         };
-        let range = at.anchor.start.min(index)..at.anchor.end.max(index);
+        let (from, to) = if at.word {
+            (at.anchor.start, at.anchor.end)
+        } else {
+            (at.anchor.end, at.anchor.start)
+        };
+        let range = if place.start >= at.anchor.end {
+            from..place.start
+        } else if place.end <= at.anchor.start {
+            place.end..to
+        } else if at.word {
+            at.anchor.clone()
+        } else {
+            at.anchor.start..at.anchor.start
+        };
         if at.range != range {
             at.range = range;
             // A drag selects, also when it comes back to where it began.
@@ -111,8 +143,7 @@ impl Selection {
     fn release(&mut self) -> Option<SharedString> {
         let at = self.at.as_mut()?;
         at.selecting = false;
-        let link = at.link.take()?;
-        Some(at.text[link].to_string().into())
+        at.link.take()
     }
 
     /// A press that was not on the text `key`: what is selected in it is
@@ -162,17 +193,6 @@ pub fn links(text: &str) -> Vec<Range<usize>> {
     links
 }
 
-/// The link of `links` that the pointer at `position` is over: the
-/// character under it counts here, not the closest boundary.
-fn link_at(
-    layout: &TextLayout,
-    links: &[Range<usize>],
-    position: Point<Pixels>,
-) -> Option<Range<usize>> {
-    let index = layout.index_for_position(position).ok()?;
-    links.iter().find(|link| link.contains(&index)).cloned()
-}
-
 /// Where in `text` a pointer at `position` is: the boundary between two
 /// characters that is closest to it, as in the typed line. Above the text
 /// that is its start, below it its end.
@@ -201,23 +221,273 @@ fn index_at(layout: &TextLayout, text: &str, position: Point<Pixels>) -> usize {
     index
 }
 
+/// A block of a text, as it is drawn.
+struct Shown {
+    block: Block,
+    /// The block's text, as gpui takes it, and the links in it.
+    text: SharedString,
+    links: Vec<Range<usize>>,
+}
+
 /// The text `text` of the talk, which `selection` may be in. `key` tells it
 /// from the other texts.
 pub fn text(key: u64, text: impl Into<SharedString>, selection: &Entity<Selection>) -> Text {
     let text = text.into();
+    let blocks = markdown::blocks(&text)
+        .into_iter()
+        .map(|block| Shown {
+            text: block.text.clone().into(),
+            links: links(&block.text),
+            block,
+        })
+        .collect();
     Text {
         key,
-        links: links(&text),
         text,
+        blocks,
         selection: selection.clone(),
+    }
+}
+
+/// A key for a text that has no number of its own, from what it is: a
+/// mail's is its number in the yard.
+pub fn key(of: impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    of.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// How far an item's words stand in from the edge of the text, in rems: the
+/// marker is in that space. An item under another stands in twice as far.
+pub const ITEM_INDENT: f32 = 1.5;
+/// Between a marker and its item's words.
+const MARKER_GAP: f32 = 0.4;
+/// Around the lines of a code block, inside its ground. The left is wider:
+/// the mark of a line that was wrapped stands there.
+const CODE_LEFT: f32 = 1.;
+const CODE_RIGHT: f32 = 0.625;
+const CODE_ABOVE: f32 = 0.375;
+/// Above a block that a blank line stood before, and above one that is a
+/// heading or beside code.
+const APART: f32 = 0.6;
+const NEAR: f32 = 0.3;
+/// The mark before the rest of a line of code that did not fit the width:
+/// code is wrapped and not scrolled, and the mark says the break is not one
+/// of the code's own.
+const WRAPPED: &str = "↪";
+
+/// A monospaced face this machine has, for code: the first of these.
+const MONO: [&str; 7] = [
+    "Menlo",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Ubuntu Mono",
+    "Consolas",
+    "Courier New",
+];
+
+/// The face code is drawn in. Without one of them it is the text's face,
+/// and its ground alone tells it from the text.
+fn mono(cx: &App) -> Option<SharedString> {
+    static FACE: OnceLock<Option<&'static str>> = OnceLock::new();
+    FACE.get_or_init(|| {
+        let names = cx.text_system().all_font_names();
+        MONO.into_iter()
+            .find(|face| names.iter().any(|name| name == face))
+    })
+    .map(SharedString::new_static)
+}
+
+/// The face a block of `kind` is drawn in, where the text's is `base`: a
+/// heading is bold and a little larger than the text, the first level the
+/// most, and code is in `mono`. All of it goes with the text's size.
+fn face(kind: &Kind, base: &TextStyle, mono: Option<&SharedString>, rem: Pixels) -> TextStyle {
+    let mut face = base.clone();
+    match kind {
+        Kind::Heading(level) => {
+            let larger = match level {
+                1 => 1.25,
+                2 => 1.15,
+                _ => 1.05,
+            };
+            face.font_size = (base.font_size.to_pixels(rem) * larger).into();
+            face.font_weight = FontWeight::BOLD;
+        }
+        Kind::Code => {
+            if let Some(mono) = mono {
+                face.font_family = mono.clone();
+            }
+        }
+        Kind::Text | Kind::Item { .. } => {}
+    }
+    face
+}
+
+/// The runs `block` is drawn in, in the face `face` of its kind: bold,
+/// italic and inline code as its marks say, with a quiet ground under the
+/// code; a link as one; and `selected` of it on the selection's ground. A
+/// selection may begin or end inside a link or a mark: the runs do not
+/// overlap.
+fn runs(
+    block: &Block,
+    face: &TextStyle,
+    palette: &Palette,
+    mono: Option<&SharedString>,
+    links: &[Range<usize>],
+    selected: Option<Range<usize>>,
+) -> Vec<TextRun> {
+    let selected = selected.filter(|selected| !selected.is_empty());
+    let mut cuts = vec![0, block.text.len()];
+    let marked = block.marks.iter().map(|(range, _)| range);
+    for range in marked.chain(links).chain(&selected) {
+        cuts.extend([range.start, range.end]);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let within = |range: &Range<usize>, at: usize| range.start <= at && at < range.end;
+    let mut runs = Vec::new();
+    for cut in cuts.windows(2) {
+        let (start, end) = (cut[0], cut[1]);
+        let mut run = face.to_run(end - start);
+        if let Some((_, marks)) = block.marks.iter().find(|(range, _)| within(range, start)) {
+            if marks.bold {
+                run.font.weight = FontWeight::BOLD;
+            }
+            if marks.italic {
+                run.font.style = FontStyle::Italic;
+            }
+            if marks.code {
+                if let Some(mono) = mono {
+                    run.font.family = mono.clone();
+                }
+                run.background_color = Some(palette.code.into());
+            }
+        }
+        if links.iter().any(|link| within(link, start)) {
+            run.color = palette.accent.into();
+            run.underline = Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(palette.accent.into()),
+                wavy: false,
+            });
+        }
+        if selected.as_ref().is_some_and(|s| within(s, start)) {
+            run.background_color = Some(palette.selection.into());
+        }
+        runs.push(run);
+    }
+    // An empty text is one empty run, as gpui makes it.
+    if runs.is_empty() {
+        runs.push(face.to_run(0));
+    }
+    runs
+}
+
+/// The space around `block`, which stands under one of kind `before`: the
+/// room above it, an item's indent, and the inside of a code block's
+/// ground.
+fn frame(block: &Block, before: Option<&Kind>) -> Style {
+    let mut style = Style::default();
+    if let Some(before) = before {
+        let heading = matches!(block.kind, Kind::Heading(_));
+        let above = if block.apart || heading {
+            APART
+        } else if block.kind == Kind::Code || *before == Kind::Code {
+            NEAR
+        } else {
+            0.
+        };
+        style.margin.top = rems(above).into();
+    }
+    match &block.kind {
+        Kind::Code => {
+            style.padding.left = rems(CODE_LEFT).into();
+            style.padding.right = rems(CODE_RIGHT).into();
+            style.padding.top = rems(CODE_ABOVE).into();
+            style.padding.bottom = rems(CODE_ABOVE).into();
+        }
+        Kind::Item { depth, .. } => {
+            style.padding.left = rems(ITEM_INDENT * f32::from(depth + 1)).into();
+        }
+        Kind::Text | Kind::Heading(_) => {}
+    }
+    style
+}
+
+/// Where the rows begin that a line of the code `text` goes on in, after
+/// its first: a line that did not fit the width.
+fn wrapped_rows(layout: &TextLayout, text: &str) -> Vec<Point<Pixels>> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        if let (Some(at), Some(wrapped)) = (
+            layout.position_for_index(start),
+            layout.line_layout_for_index(start),
+        ) {
+            for row in 1..=wrapped.wrap_boundaries.len() {
+                rows.push(point(at.x, at.y + layout.line_height() * row as f32));
+            }
+        }
+        start += line.len() + 1;
+    }
+    rows
+}
+
+/// The blocks of a text where they are drawn: what the mouse goes by.
+#[derive(Clone)]
+struct Drawn {
+    blocks: Rc<[Shown]>,
+    layouts: Rc<[TextLayout]>,
+}
+
+impl Drawn {
+    /// The block the pointer at `position` is in. Between two blocks it is
+    /// the lower one, whose start is closest, and under the last the last.
+    fn block_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let last = self.layouts.len().checked_sub(1)?;
+        let under = |layout: &TextLayout| position.y < layout.bounds().bottom();
+        Some(self.layouts.iter().position(under).unwrap_or(last))
+    }
+
+    /// Where in the text as it was written the pointer is: a place, with
+    /// the marks that stand there and are not drawn.
+    fn place_at(&self, position: Point<Pixels>) -> Range<usize> {
+        let Some(ix) = self.block_at(position) else {
+            return 0..0;
+        };
+        let shown = &self.blocks[ix];
+        let index = index_at(&self.layouts[ix], &shown.text, position);
+        shown.block.source_at(index)
+    }
+
+    /// The link the pointer is over: the character under it counts here,
+    /// not the closest boundary.
+    fn link_at(&self, position: Point<Pixels>) -> Option<SharedString> {
+        let ix = self.block_at(position)?;
+        let shown = &self.blocks[ix];
+        let index = self.layouts[ix].index_for_position(position).ok()?;
+        let link = shown.links.iter().find(|link| link.contains(&index))?;
+        Some(shown.text[link.clone()].to_string().into())
     }
 }
 
 pub struct Text {
     key: u64,
+    /// The text as it was written: what is selected is a stretch of this.
     text: SharedString,
-    links: Vec<Range<usize>>,
+    blocks: Rc<[Shown]>,
     selection: Entity<Selection>,
+}
+
+/// A block of a text where it is laid out.
+pub struct Laid {
+    /// gpui's own text: it shapes, wraps and draws.
+    styled: StyledText,
+    text: LayoutId,
+    /// The space around the text, and where it is once that is known.
+    frame: LayoutId,
+    bounds: Bounds<Pixels>,
 }
 
 impl IntoElement for Text {
@@ -229,8 +499,7 @@ impl IntoElement for Text {
 }
 
 impl Element for Text {
-    /// gpui's own text: it shapes, wraps and draws.
-    type RequestLayoutState = StyledText;
+    type RequestLayoutState = Vec<Laid>;
     type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
@@ -249,28 +518,43 @@ impl Element for Text {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let palette = Palette::now(window, cx);
-        let link = HighlightStyle {
-            color: Some(palette.accent.into()),
-            underline: Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(palette.accent.into()),
-                wavy: false,
-            }),
-            ..Default::default()
-        };
-        let selected_style = HighlightStyle {
-            background_color: Some(palette.selection.into()),
-            ..Default::default()
-        };
+        let (base, rem, mono) = (window.text_style(), window.rem_size(), mono(cx));
         let selected = self.selection.read(cx).range_in(self.key, &self.text);
-        // A selection may begin or end inside a link: the two are merged
-        // into runs that do not overlap.
-        let mut styled = StyledText::new(self.text.clone()).with_highlights(combine_highlights(
-            self.links.iter().cloned().map(|range| (range, link)),
-            selected.map(|range| (range, selected_style)),
-        ));
-        let (layout, ()) = styled.request_layout(None, None, window, cx);
-        (layout, styled)
+        let mut laid = Vec::with_capacity(self.blocks.len());
+        let mut before = None;
+        for shown in self.blocks.iter() {
+            let block = &shown.block;
+            let face = face(&block.kind, &base, mono.as_ref(), rem);
+            let selected = selected.clone().map(|selected| block.shown(selected));
+            let runs = runs(
+                block,
+                &face,
+                &palette,
+                mono.as_ref(),
+                &shown.links,
+                selected,
+            );
+            let mut styled = StyledText::new(shown.text.clone()).with_runs(runs);
+            // gpui takes the size of the lines from the window, not from
+            // the runs.
+            let size = TextStyleRefinement {
+                font_size: Some(face.font_size),
+                ..Default::default()
+            };
+            let (text, ()) = window.with_text_style(Some(size), |window| {
+                styled.request_layout(None, None, window, cx)
+            });
+            let frame = window.request_layout(frame(block, before), [text], cx);
+            before = Some(&block.kind);
+            laid.push(Laid {
+                styled,
+                text,
+                frame,
+                bounds: Bounds::default(),
+            });
+        }
+        let frames: Vec<LayoutId> = laid.iter().map(|laid| laid.frame).collect();
+        (window.request_layout(Style::default(), frames, cx), laid)
     }
 
     fn prepaint(
@@ -278,11 +562,15 @@ impl Element for Text {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        styled: &mut Self::RequestLayoutState,
+        laid: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        styled.prepaint(None, None, bounds, &mut (), window, cx);
+        for laid in laid.iter_mut() {
+            let text = window.layout_bounds(laid.text);
+            laid.styled.prepaint(None, None, text, &mut (), window, cx);
+            laid.bounds = window.layout_bounds(laid.frame);
+        }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
@@ -290,21 +578,70 @@ impl Element for Text {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        styled: &mut Self::RequestLayoutState,
+        _: Bounds<Pixels>,
+        laid: &mut Self::RequestLayoutState,
         hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        styled.paint(None, None, bounds, &mut (), &mut (), window, cx);
+        let palette = Palette::now(window, cx);
+        let (base, rem) = (window.text_style(), window.rem_size());
+        let size = base.font_size.to_pixels(rem);
+        // What stands beside a block's text and is no part of it: it is
+        // not selected, and a copy has what was written there.
+        let beside = |text: &'static str, color: gpui::Rgba, window: &mut Window| {
+            let mut run = base.to_run(text.len());
+            run.color = color.into();
+            window
+                .text_system()
+                .shape_line(text.into(), size, &[run], None)
+        };
+        for (laid, shown) in laid.iter_mut().zip(self.blocks.iter()) {
+            let layout = laid.styled.layout().clone();
+            let text = layout.bounds();
+            match &shown.block.kind {
+                Kind::Code => {
+                    window.paint_quad(fill(laid.bounds, palette.code).corner_radii(rem * 0.25));
+                    let rows = wrapped_rows(&layout, &shown.text);
+                    if !rows.is_empty() {
+                        let mark = beside(WRAPPED, palette.faint, window);
+                        let left = text.left() - (rem * CODE_LEFT + mark.width) / 2.;
+                        for row in rows {
+                            let at = point(left, row.y);
+                            let _ = mark.paint(at, layout.line_height(), window, cx);
+                        }
+                    }
+                }
+                Kind::Item { marker, .. } => {
+                    let mut run = base.to_run(marker.len());
+                    run.color = palette.faint.into();
+                    let marker =
+                        window
+                            .text_system()
+                            .shape_line(marker.clone().into(), size, &[run], None);
+                    let at = point(text.left() - rem * MARKER_GAP - marker.width, text.top());
+                    let _ = marker.paint(at, layout.line_height(), window, cx);
+                }
+                Kind::Text | Kind::Heading(_) => {}
+            }
+            laid.styled
+                .paint(None, None, text, &mut (), &mut (), window, cx);
+        }
+
+        let drawn = Drawn {
+            blocks: self.blocks.clone(),
+            layouts: laid
+                .iter()
+                .map(|laid| laid.styled.layout().clone())
+                .collect(),
+        };
         // The link under the pointer, where the text is not covered.
         let over = {
-            let (layout, hitbox, links) =
-                (styled.layout().clone(), hitbox.clone(), self.links.clone());
+            let (drawn, hitbox) = (drawn.clone(), hitbox.clone());
             move |position: Point<Pixels>, window: &Window| {
                 hitbox
                     .is_hovered(window)
-                    .then(|| link_at(&layout, &links, position))
+                    .then(|| drawn.link_at(position))
                     .flatten()
             }
         };
@@ -319,16 +656,16 @@ impl Element for Text {
         let key = self.key;
         window.on_mouse_event({
             let (selection, text) = (self.selection.clone(), self.text.clone());
-            let (layout, hitbox, over) = (styled.layout().clone(), hitbox.clone(), over.clone());
+            let (drawn, hitbox, over) = (drawn.clone(), hitbox.clone(), over.clone());
             move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                     return;
                 }
                 if hitbox.is_hovered(window) {
-                    let index = index_at(&layout, &text, event.position);
+                    let place = drawn.place_at(event.position);
                     let link = over(event.position, window);
                     selection.update(cx, |selection, cx| {
-                        selection.press(key, text.clone(), index, link, event.click_count, cx)
+                        selection.press(key, text.clone(), place, link, event.click_count, cx)
                     });
                 } else {
                     selection.update(cx, |selection, cx| selection.pressed_outside(key, cx));
@@ -338,8 +675,7 @@ impl Element for Text {
         // A drag goes on outside the text, so these are the window's events
         // and not those of the place the text is drawn in.
         window.on_mouse_event({
-            let (selection, text) = (self.selection.clone(), self.text.clone());
-            let (layout, over) = (styled.layout().clone(), over.clone());
+            let (selection, drawn, over) = (self.selection.clone(), drawn, over.clone());
             move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
@@ -358,12 +694,12 @@ impl Element for Text {
                     selection.update(cx, |selection, _| selection.release());
                     return;
                 }
-                let index = index_at(&layout, &text, event.position);
-                selection.update(cx, |selection, cx| selection.drag(index, cx));
+                let place = drawn.place_at(event.position);
+                selection.update(cx, |selection, cx| selection.drag(place, cx));
             }
         });
         window.on_mouse_event({
-            let (selection, text) = (self.selection.clone(), self.text.clone());
+            let selection = self.selection.clone();
             move |event: &MouseUpEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble
                     || event.button != MouseButton::Left
@@ -374,9 +710,8 @@ impl Element for Text {
                 // A click on a link: pressed and released on it, and
                 // nothing dragged between the two.
                 let pressed = selection.update(cx, |selection, _| selection.release());
-                let released = over(event.position, window).map(|link| &text[link]);
                 if let Some(url) = pressed
-                    && released == Some(url.as_ref())
+                    && over(event.position, window).as_ref() == Some(&url)
                 {
                     cx.open_url(&url);
                 }
@@ -400,6 +735,313 @@ mod tests {
         assert_eq!(&text[word_at(text, 16)], "José");
         // Past the end there is none.
         assert_eq!(word_at(text, text.len()), text.len()..text.len());
+    }
+
+    /// The one block `text` is drawn as.
+    fn one(text: &str) -> Block {
+        let mut blocks = markdown::blocks(text);
+        assert_eq!(blocks.len(), 1, "{text:?}");
+        blocks.remove(0)
+    }
+
+    fn dark() -> Palette {
+        Palette::of(crate::theme::Look::Dark, gpui::WindowAppearance::Dark)
+    }
+
+    /// The text's own style, as the window sets it: seven eighths of a rem.
+    fn base() -> TextStyle {
+        TextStyle {
+            font_size: rems(0.875).into(),
+            ..Default::default()
+        }
+    }
+
+    fn mono_face() -> SharedString {
+        "Menlo".into()
+    }
+
+    /// The runs of the one block of `text`, as (what is drawn, the run).
+    fn drawn(text: &str, selected: Option<Range<usize>>) -> Vec<(String, TextRun)> {
+        let block = one(text);
+        let (base, mono) = (base(), mono_face());
+        let face = face(&block.kind, &base, Some(&mono), px(16.));
+        let links = links(&block.text);
+        let selected = selected.map(|selected| block.shown(selected));
+        let mut at = 0;
+        runs(&block, &face, &dark(), Some(&mono), &links, selected)
+            .into_iter()
+            .map(|run| {
+                let words = block.text[at..at + run.len].to_string();
+                at += run.len;
+                (words, run)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_text_without_a_mark_has_the_runs_it_had_before_there_were_marks() {
+        let text = "see https://example.org/a now";
+        let (block, base, palette) = (one(text), base(), dark());
+        assert_eq!((&block.kind, block.text.as_str()), (&Kind::Text, text));
+        let face = face(&block.kind, &base, Some(&mono_face()), px(16.));
+        assert_eq!(face, base);
+
+        // What gpui made of the link and the selection, when the text was
+        // handed to it with the two as highlights.
+        let link = gpui::HighlightStyle {
+            color: Some(palette.accent.into()),
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(palette.accent.into()),
+                wavy: false,
+            }),
+            ..Default::default()
+        };
+        let selection = gpui::HighlightStyle {
+            background_color: Some(palette.selection.into()),
+            ..Default::default()
+        };
+        let before = |highlights: Vec<(Range<usize>, gpui::HighlightStyle)>| {
+            let mut runs = Vec::new();
+            let mut at = 0;
+            for (range, highlight) in gpui::combine_highlights(highlights, None) {
+                if at < range.start {
+                    runs.push(base.to_run(range.start - at));
+                }
+                runs.push(base.clone().highlight(highlight).to_run(range.len()));
+                at = range.end;
+            }
+            if at < text.len() {
+                runs.push(base.to_run(text.len() - at));
+            }
+            runs
+        };
+        let now = |selected| runs(&block, &face, &palette, None, &links(text), selected);
+
+        assert_eq!(now(None), before(vec![(4..25, link)]));
+        assert_eq!(now(None).len(), 3);
+        // A selection that begins before the link and ends in it.
+        assert_eq!(
+            now(Some(2..10)),
+            before(vec![(4..25, link), (2..10, selection)])
+        );
+        assert_eq!(now(Some(2..10)).len(), 5);
+        // Nothing in it: one run, the text's own.
+        let plain = one("Land it today.");
+        assert_eq!(
+            runs(&plain, &base, &palette, None, &[], None),
+            [base.to_run(14)]
+        );
+        assert_eq!(
+            runs(&one(""), &base, &palette, None, &[], None),
+            [base.to_run(0)]
+        );
+    }
+
+    #[test]
+    fn code_is_in_a_monospaced_face_on_a_quiet_ground() {
+        let (base, mono, palette) = (base(), mono_face(), dark());
+        let quiet = Some(palette.code.into());
+
+        // A block: the face is the block's, and its ground is drawn under
+        // all of it, not under each run.
+        let mut blocks = markdown::blocks("Run:\n```sh\n  ls -la\n1. kept\n```");
+        let code = blocks.remove(1);
+        assert_eq!(
+            (&code.kind, code.text.as_str()),
+            (&Kind::Code, "  ls -la\n1. kept")
+        );
+        let face = face(&code.kind, &base, Some(&mono), px(16.));
+        assert_eq!(face.font_family, mono);
+        assert_eq!(face.font_size, base.font_size);
+        assert_eq!(face.font_weight, base.font_weight);
+        let all = runs(&code, &face, &palette, Some(&mono), &[], None);
+        assert_eq!(all, [face.to_run(code.text.len())]);
+        assert_eq!(
+            (&all[0].font.family, all[0].background_color),
+            (&mono, None)
+        );
+        let inside = frame(&code, Some(&Kind::Text)).padding;
+        assert_eq!(inside.left, rems(CODE_LEFT).into());
+        assert_eq!(inside.top, rems(CODE_ABOVE).into());
+
+        // Inline: the run alone is in the face and on the ground.
+        let all = drawn("run `yardr prime` now", None);
+        let words: Vec<&str> = all.iter().map(|(words, _)| words.as_str()).collect();
+        assert_eq!(words, ["run ", "yardr prime", " now"]);
+        let mut code = base.to_run(11);
+        code.font.family = mono.clone();
+        code.background_color = quiet;
+        assert_eq!(all[0].1, base.to_run(4));
+        assert_eq!(all[1].1, code);
+        assert_eq!(all[2].1, base.to_run(4));
+
+        // A machine without one of the faces has the ground alone.
+        let block = one("run `yardr prime` now");
+        let all = runs(&block, &base, &palette, None, &[], None);
+        assert_eq!(all[1].font, base.to_run(0).font);
+        assert_eq!(all[1].background_color, quiet);
+    }
+
+    #[test]
+    fn a_heading_is_bold_and_a_little_larger_than_the_text() {
+        let (base, mono) = (base(), mono_face());
+        let mut larger = Vec::new();
+        for (text, level) in [("# One", 1), ("## Two", 2), ("### Three", 3)] {
+            let block = one(text);
+            assert_eq!(block.kind, Kind::Heading(level));
+            let face = face(&block.kind, &base, Some(&mono), px(16.));
+            assert_eq!(face.font_weight, FontWeight::BOLD);
+            assert_eq!(face.font_family, base.font_family);
+            let all = runs(&block, &face, &dark(), Some(&mono), &[], None);
+            assert_eq!(all, [face.to_run(block.text.len())]);
+            assert_eq!(all[0].font.weight, FontWeight::BOLD);
+            larger.push(face.font_size.to_pixels(px(16.)));
+        }
+        // The text is 14 pixels at a rem of 16: never "extremely large".
+        let text = px(14.);
+        assert_eq!(larger, [text * 1.25, text * 1.15, text * 1.05]);
+    }
+
+    #[test]
+    fn the_text_size_scales_a_heading_with_the_text() {
+        let (base, heading) = (base(), Kind::Heading(1));
+        for rem in [px(13.), px(16.), px(20.)] {
+            let text = base.font_size.to_pixels(rem);
+            let face = face(&heading, &base, None, rem);
+            assert_eq!(face.font_size.to_pixels(rem), text * 1.25);
+        }
+        // What is around a block is in rems, and so goes with it too.
+        let item = one("- one");
+        let indent = gpui::DefiniteLength::from(rems(ITEM_INDENT));
+        assert_eq!(frame(&item, None).padding.left, indent);
+    }
+
+    #[test]
+    fn bold_and_italic_are_runs_of_the_text_s_face() {
+        let base = base();
+        let all = drawn("a **bold** and an *italic* and ***both***", None);
+        let words: Vec<&str> = all.iter().map(|(words, _)| words.as_str()).collect();
+        assert_eq!(words, ["a ", "bold", " and an ", "italic", " and ", "both"]);
+        let mut bold = base.to_run(4);
+        bold.font.weight = FontWeight::BOLD;
+        let mut italic = base.to_run(6);
+        italic.font.style = FontStyle::Italic;
+        let mut both = bold.clone();
+        both.font.style = FontStyle::Italic;
+        assert_eq!(all[0].1, base.to_run(2));
+        assert_eq!(all[1].1, bold);
+        assert_eq!(all[2].1, base.to_run(8));
+        assert_eq!(all[3].1, italic);
+        assert_eq!(all[5].1, both);
+    }
+
+    #[test]
+    fn an_item_is_text_set_in_with_its_link_and_its_marks() {
+        let (base, palette) = (base(), dark());
+        let text = "- see **https://example.org/a** now";
+        let block = one(text);
+        let marker = "•".to_string();
+        assert_eq!(block.kind, Kind::Item { marker, depth: 0 });
+        assert_eq!(face(&block.kind, &base, None, px(16.)), base);
+        // The link is found in what is drawn, without the stars after it.
+        assert_eq!(linked(&block.text), ["https://example.org/a"]);
+        let all = drawn(text, None);
+        let words: Vec<&str> = all.iter().map(|(words, _)| words.as_str()).collect();
+        assert_eq!(words, ["see ", "https://example.org/a", " now"]);
+        let link = &all[1].1;
+        assert_eq!(link.font.weight, FontWeight::BOLD);
+        assert_eq!(link.color, palette.accent.into());
+        assert!(link.underline.is_some());
+
+        // An item under another stands in twice as far, and the words of
+        // both hang: the indent is the block's, not the first line's.
+        let blocks = markdown::blocks("1. one\n   - under");
+        let left = |ix: usize| frame(&blocks[ix], None).padding.left;
+        assert_eq!(left(0), rems(ITEM_INDENT).into());
+        assert_eq!(left(1), rems(2. * ITEM_INDENT).into());
+    }
+
+    #[test]
+    fn what_is_selected_is_drawn_without_the_marks_it_has() {
+        let palette = dark();
+        // All of it, as it was written: the stars are not drawn.
+        let text = "a **bold** b";
+        let all = drawn(text, Some(0..text.len()));
+        assert!(
+            all.iter()
+                .all(|(_, run)| run.background_color == Some(palette.selection.into()))
+        );
+        let words: String = all.iter().map(|(words, _)| words.as_str()).collect();
+        assert_eq!(words, "a bold b");
+        // From inside the bold word on: the selection's ground is over the
+        // code's.
+        let all = drawn("`code` b", Some(3..8));
+        let grounds: Vec<(&str, Option<gpui::Hsla>)> = all
+            .iter()
+            .map(|(words, run)| (words.as_str(), run.background_color))
+            .collect();
+        assert_eq!(
+            grounds,
+            [
+                ("co", Some(palette.code.into())),
+                ("de", Some(palette.selection.into())),
+                (" b", Some(palette.selection.into())),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_selection_has_the_marks_between_its_ends_and_none_at_them(cx: &mut gpui::TestAppContext) {
+        let src = "one\n```sh\nls -la\n```\na **bold** b";
+        let blocks = markdown::blocks(src);
+        let (code, last) = (&blocks[1], &blocks[2]);
+        assert_eq!(last.text, "a bold b");
+        use gpui::AppContext as _;
+        let selection = cx.new(|_| Selection::default());
+        let mut selected = |from: Range<usize>, to: Range<usize>, clicks: usize| {
+            selection.update(cx, |selection, cx| {
+                selection.press(1, src.into(), from, None, clicks, cx);
+                selection.drag(to, cx);
+                selection.text().map(str::to_string)
+            })
+        };
+
+        // The bold word alone, either way: the word.
+        let (start, end) = (last.source_at(2), last.source_at(6));
+        assert_eq!(
+            selected(start.clone(), end.clone(), 1).as_deref(),
+            Some("bold")
+        );
+        assert_eq!(
+            selected(end.clone(), start.clone(), 1).as_deref(),
+            Some("bold")
+        );
+        // With what is around it: as it was written.
+        let (first, after) = (last.source_at(0), last.source_at(8));
+        assert_eq!(
+            selected(first.clone(), after.clone(), 1).as_deref(),
+            Some("a **bold** b")
+        );
+        // The code alone is the code, a command as it is typed.
+        let (top, bottom) = (code.source_at(0), code.source_at(6));
+        assert_eq!(
+            selected(top.clone(), bottom.clone(), 1).as_deref(),
+            Some("ls -la")
+        );
+        assert_eq!(selected(bottom, top, 1).as_deref(), Some("ls -la"));
+        // Across the code block, from the text before it to the text after
+        // it: the fences and the language are in it.
+        assert_eq!(selected(0..0, after.clone(), 1).as_deref(), Some(src));
+        assert_eq!(selected(after, 0..0, 1).as_deref(), Some(src));
+        // A second press on the bold word selects it.
+        assert_eq!(selected(start.clone(), start, 2).as_deref(), Some("bold"));
+        // A press and no drag selects nothing.
+        let none = selection.update(cx, |selection, cx| {
+            selection.press(1, src.into(), 2..4, None, 1, cx);
+            selection.text().map(str::to_string)
+        });
+        assert_eq!(none, None);
     }
 
     fn linked(text: &str) -> Vec<&str> {
