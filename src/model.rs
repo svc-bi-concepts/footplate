@@ -618,7 +618,7 @@ impl Model {
     /// row of its own, as in `yardr chat`: it is how the user spoke.
     fn folded(&self, address: &str) -> Option<&str> {
         let user = self.trust.get(address)?;
-        self.people().any(|u| u == user).then_some(user.as_str())
+        (self.member(user).is_some() || self.people().any(|u| u == user)).then_some(user.as_str())
     }
 
     /// The conversation that shows the mail `from` sent: their own row, or
@@ -3485,6 +3485,46 @@ mod tests {
         assert_eq!(m.unread("jo"), 0);
         assert_eq!(m.selected_conversation(), Some("jo"));
         assert!(!names(&m).contains(&"jo@airy".to_string()));
+    }
+
+    #[test]
+    fn a_name_trusted_as_a_crew_user_is_folded_into_the_crew_row() {
+        let mut state = yard(&[(6, "assembly@airy")]);
+        state.users.push(user("assembly"));
+        let mut peer = airy();
+        peer.trust.insert("jo".into(), "assembly".into());
+        state.peers.push(peer);
+
+        let (mut m, _) = Model::new(state, None);
+        assert!(!names(&m).contains(&"jo@airy".to_string()));
+        assert_eq!(m.unread("assembly"), 1);
+        assert_eq!(m.unread("jo@airy"), 0);
+        assert_eq!(
+            m.select(Selected::Conversation("assembly".into())),
+            [
+                read("assembly", 0),
+                read("jo@airy", 0),
+                Effect::Ack { through: 6 }
+            ]
+        );
+        m.conversation(
+            "jo@airy",
+            vec![letter(6, "jo@airy", "jo", "hello from airy")],
+        );
+        assert_eq!(
+            m.entries()
+                .iter()
+                .map(|e| e.from.as_str())
+                .collect::<Vec<_>>(),
+            ["jo@airy"]
+        );
+        assert_eq!(
+            m.target(),
+            Some(Target::Peer {
+                name: "jo".into(),
+                peer: "airy".into()
+            })
+        );
     }
 
     #[test]
