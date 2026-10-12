@@ -2252,7 +2252,9 @@ impl Footplate {
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("footplate"))
                     .child(
                         div()
-                            .text_sm()
+                            // Leave enough room for the operator and the
+                            // local yard name at the narrowest window.
+                            .text_size(rems(0.85))
                             .text_color(palette.accent)
                             .truncate()
                             .debug_selector(|| "which yard".to_string())
@@ -6245,10 +6247,9 @@ mod tests {
         );
         // Whole: the line as shaped fits where it is drawn. Shaped as the
         // window shapes it (place()).
-        let line = view.read_with(cx, |v, _| {
-            let model = v.model.as_ref().unwrap();
-            format!("{} · {}", model.me(), v.which_yard_short())
-        });
+        // The fixture's short login would not catch the real operator name
+        // that exposed this line's last-glyph truncation.
+        let line = view.read_with(cx, |v, _| format!("mckean · {}", v.which_yard_short()));
         let width = cx.update(|window, _| {
             let run = gpui::TextRun {
                 len: line.len(),
@@ -6260,7 +6261,7 @@ mod tests {
             };
             window
                 .text_system()
-                .shape_line(line.clone().into(), rem * 0.875, &[run], None)
+                .shape_line(line.clone().into(), rem * 0.85, &[run], None)
                 .width
         });
         assert!(
