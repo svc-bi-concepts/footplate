@@ -318,6 +318,12 @@ impl Model {
         m.selected = selected
             .filter(|s| order.contains(s))
             .or_else(|| {
+                order
+                    .iter()
+                    .find(|s| matches!(s, Selected::Decision(_)))
+                    .cloned()
+            })
+            .or_else(|| {
                 order.iter().find_map(|s| match s {
                     Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
                     _ => None,
@@ -2153,6 +2159,17 @@ mod tests {
             groups[0].rows[1].head,
             "Send yardr-3msx and yardr-vgjp to build?"
         );
+    }
+
+    #[test]
+    fn first_open_decision_is_selected_before_the_yardmaster_conversation() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (m, _) = Model::new(state, None);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+
+        let (m, _) = Model::new(yard(&[]), None);
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
     }
 
     #[test]
