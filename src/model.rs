@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, TimeZone};
 
 use crate::api::{
-    Asks, BlobRef, CrewMember, DecidedAsk, Event, Letter, Notification, OpenAsk, Peer,
+    AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Notification,
+    OpenAsk, Peer,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -150,6 +151,16 @@ pub enum Selected {
     Yard,
 }
 
+/// What Enter sends for an ask with the line's words.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnswerAction {
+    /// A pick with the words in the one answer; option 0 answers an ask
+    /// with no options with words.
+    Answer { option: u64, words: String },
+    /// Words with no option chosen go as a plain note; the ask stays open.
+    Note { words: String },
+}
+
 /// One bead's row among the decisions: the question in plain words, or the
 /// bead's title with how many it asks.
 #[derive(Debug, Clone, PartialEq)]
@@ -196,28 +207,68 @@ pub struct Notice {
     pub read: bool,
 }
 
-/// A bead's open asks, as the open row shows them: read-only text.
+/// One option of a card, numbered from 1, `you decide` last.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DecisionDetail {
-    pub bead: String,
-    pub title: String,
-    pub topic: String,
-    pub asks: Vec<DecisionAsk>,
+pub struct CardOption {
+    pub number: u64,
+    pub label: String,
+    pub consequence: String,
 }
 
+/// One note of the bead's body, as the expanded card shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardNote {
+    pub author: String,
+    pub text: String,
+}
+
+/// One ask of a bead's open row, as its card shows it: the question,
+/// the asker and the recommendation, the context, the numbered options,
+/// the recommended one with its why, and whether the card stands expanded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionAsk {
     pub ask: u64,
     pub question: String,
     pub asker: String,
     pub waits: String,
+    /// The recommended option's label; empty when nothing is recommended.
+    pub recommend_label: String,
+    pub context: Vec<String>,
+    pub options: Vec<CardOption>,
+    /// The recommended option's number; 0 when none.
+    pub recommend: u64,
+    pub why: String,
+    /// The option chosen with a number key or the arrows; 0 when none.
+    pub chosen: u64,
+    /// Whether this ask is the bead's current one: the keys act on it.
+    pub current: bool,
+    pub expanded: bool,
+    pub about: Vec<AboutBead>,
+    /// `open`, `answered`, `put aside` or `declined`.
+    pub state: String,
 }
 
-/// One dealt with, as the open row shows it: read-only text.
+/// A bead's open asks, as the open row shows them: one card each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionDetail {
+    pub bead: String,
+    pub title: String,
+    pub topic: String,
+    pub body: String,
+    pub notes: Vec<CardNote>,
+    /// A design bead's document, named by path and branch, not fetched;
+    /// empty otherwise.
+    pub doc: String,
+    pub asks: Vec<DecisionAsk>,
+}
+
+/// One dealt with, as the open row shows it: the card with its pick, and
+/// the same options to pick again from there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecidedDetail {
     pub bead: String,
     pub title: String,
+    pub ask: u64,
     pub question: String,
     pub asker: String,
     /// `answered`, `put aside` or `declined`.
@@ -227,6 +278,17 @@ pub struct DecidedDetail {
     pub words: String,
     /// When a put-aside ask comes back, empty otherwise.
     pub return_at: String,
+    pub recommend_label: String,
+    pub context: Vec<String>,
+    pub options: Vec<CardOption>,
+    pub recommend: u64,
+    pub why: String,
+    pub chosen: u64,
+    pub expanded: bool,
+    pub about: Vec<AboutBead>,
+    pub body: String,
+    pub notes: Vec<CardNote>,
+    pub doc: String,
 }
 
 /// A call the yard has to be asked, with what the model does on its answer.
@@ -249,6 +311,9 @@ pub enum Effect {
     AckNotifications { through: u64 },
     /// `UserAsks`; answered to [`Model::asks`].
     Asks,
+    /// `Bead` with `bead`; answered to [`Model::bead_loaded`] or
+    /// [`Model::bead_failed`].
+    Bead { bead: String },
 }
 
 /// One unread mail to the user: who sent it, and whether the window has
@@ -281,8 +346,17 @@ pub struct Model {
     decided: Vec<DecidedAsk>,
     /// Whether the folded "Decided" stands open.
     decided_expanded: bool,
+    /// One bead whole, by id, as the cards show it: read when a decision
+    /// row opens, and again on every event whose bead is one shown.
+    beads: HashMap<String, Bead>,
+    /// The option chosen with a number key or the arrows, by bead and ask.
+    chosen: HashMap<(String, u64), u64>,
+    /// The asks whose card stands expanded, by bead and ask.
+    expanded: HashSet<(String, u64)>,
+    /// Which ask of a bead with several the keys act on, by bead.
+    current: HashMap<String, u64>,
     /// The seq of the last `crew_status` applied to each crew member: a
-    /// read of the crew that is older does not put an older status back.
+    /// read of the yard that is older does not put an older status back.
     status_at: HashMap<String, u64>,
     /// What went wrong last, in words; empty when nothing.
     pub notice: String,
@@ -515,7 +589,25 @@ impl Model {
             .collect()
     }
 
-    /// A bead's open asks, oldest first, as read-only text.
+    /// One bead whole, as the cards read it, when it was read.
+    fn bead_ask(&self, bead: &str, ask: u64) -> Option<&BeadAsk> {
+        self.beads
+            .get(bead)
+            .and_then(|b| b.asks.iter().find(|a| a.ask == ask))
+    }
+
+    /// Which ask of the bead the keys act on: the one chosen with a click,
+    /// else the oldest open one.
+    fn current_of(&self, bead: &str, asks: &[&OpenAsk]) -> u64 {
+        let first = asks.first().map(|a| a.ask).unwrap_or(0);
+        self.current
+            .get(bead)
+            .copied()
+            .filter(|seq| asks.iter().any(|a| a.ask == *seq))
+            .unwrap_or(first)
+    }
+
+    /// A bead's open asks, oldest first, each as its card.
     pub fn decision_detail<Tz: TimeZone>(
         &self,
         bead: &str,
@@ -526,37 +618,359 @@ impl Model {
     {
         let (_, asks) = self.decision_beads().into_iter().find(|(b, _)| b == bead)?;
         let first = asks[0];
+        let current = self.current_of(bead, &asks);
+        let cached = self.beads.get(bead);
+        let (body, notes, doc) = match cached {
+            Some(b) => (
+                plain(&b.body),
+                b.notes
+                    .iter()
+                    .map(|n| CardNote {
+                        author: n.author.clone(),
+                        text: plain(&n.text),
+                    })
+                    .collect(),
+                design_doc(&b.id, &b.body, &b.notes),
+            ),
+            None => (String::new(), Vec::new(), String::new()),
+        };
         Some(DecisionDetail {
             bead: bead.to_string(),
             title: first.bead_title.clone(),
             topic: display_topic(&first.topic),
+            body,
+            notes,
+            doc,
             asks: asks
                 .iter()
-                .map(|ask| DecisionAsk {
-                    ask: ask.ask,
-                    question: plain(&ask.question),
-                    asker: ask.asker.clone(),
-                    waits: waits(&ask.since, now),
+                .map(|ask| {
+                    let full = self.bead_ask(bead, ask.ask);
+                    DecisionAsk {
+                        ask: ask.ask,
+                        question: plain(&ask.question),
+                        asker: ask.asker.clone(),
+                        waits: waits(&ask.since, now),
+                        recommend_label: full.map(recommend_label).unwrap_or_default(),
+                        context: full
+                            .map_or(Vec::new(), |f| f.context.iter().map(|c| plain(c)).collect()),
+                        options: full.map_or(Vec::new(), card_options),
+                        recommend: full.map_or(0, |f| f.recommend),
+                        why: full.map_or(String::new(), |f| plain(&f.why)),
+                        chosen: self
+                            .chosen
+                            .get(&(bead.to_string(), ask.ask))
+                            .copied()
+                            .unwrap_or(0),
+                        current: ask.ask == current,
+                        expanded: self.expanded.contains(&(bead.to_string(), ask.ask)),
+                        about: full.map_or(Vec::new(), |f| f.about.clone()),
+                        state: full.map_or("open".to_string(), |f| f.state.clone()),
+                    }
                 })
                 .collect(),
         })
     }
 
-    /// One dealt with, as read-only text.
+    /// One dealt with, as its card: the pick with the same options to pick
+    /// again from there.
     pub fn decided_detail(&self, bead: &str, ask: u64) -> Option<DecidedDetail> {
-        self.decided
+        let a = self
+            .decided
             .iter()
+            .find(|a| a.bead == bead && a.ask == ask)?;
+        let full = self.bead_ask(bead, ask);
+        let cached = self.beads.get(bead);
+        let (body, notes, doc) = match cached {
+            Some(b) => (
+                plain(&b.body),
+                b.notes
+                    .iter()
+                    .map(|n| CardNote {
+                        author: n.author.clone(),
+                        text: plain(&n.text),
+                    })
+                    .collect(),
+                design_doc(&b.id, &b.body, &b.notes),
+            ),
+            None => (String::new(), Vec::new(), String::new()),
+        };
+        Some(DecidedDetail {
+            bead: a.bead.clone(),
+            title: a.bead_title.clone(),
+            ask: a.ask,
+            question: plain(&a.question),
+            asker: a.asker.clone(),
+            state: a.state.clone(),
+            pick: a.option_label.clone(),
+            words: plain(&a.words),
+            return_at: a.return_at.clone(),
+            recommend_label: full.map(recommend_label).unwrap_or_default(),
+            context: full.map_or(Vec::new(), |f| f.context.iter().map(|c| plain(c)).collect()),
+            options: full.map_or(Vec::new(), card_options),
+            recommend: full.map_or(0, |f| f.recommend),
+            why: full.map_or(String::new(), |f| plain(&f.why)),
+            chosen: self
+                .chosen
+                .get(&(bead.to_string(), ask))
+                .copied()
+                .unwrap_or(0),
+            expanded: self.expanded.contains(&(bead.to_string(), ask)),
+            about: full.map_or(Vec::new(), |f| f.about.clone()),
+            body,
+            notes,
+            doc,
+        })
+    }
+
+    /// Makes `ask` the bead's current one: the keys act on it. An ask that
+    /// is not open on the bead changes nothing.
+    pub fn select_ask(&mut self, bead: &str, ask: u64) {
+        if self.open.iter().any(|a| a.bead == bead && a.ask == ask) {
+            self.current.insert(bead.to_string(), ask);
+        }
+    }
+
+    /// The bead's current ask, when a decision row is open.
+    pub fn current_ask(&self) -> Option<(String, u64)> {
+        let Selected::Decision(bead) = self.selected.as_ref()? else {
+            return None;
+        };
+        Some((bead.clone(), self.current_for(bead)?))
+    }
+
+    /// Which ask of the bead the keys act on, when it has open asks.
+    pub fn current_for(&self, bead: &str) -> Option<u64> {
+        let (_, asks) = self.decision_beads().into_iter().find(|(b, _)| b == bead)?;
+        Some(self.current_of(bead, &asks))
+    }
+
+    /// Chooses an option with a number key. One past the last changes
+    /// nothing, as does an ask the bead does not show.
+    pub fn choose(&mut self, bead: &str, ask: u64, option: u64) {
+        if option == 0 {
+            return;
+        }
+        let last = match self.bead_ask(bead, ask) {
+            Some(full) => full.options.len() as u64,
+            None => return,
+        };
+        if option <= last {
+            self.chosen.insert((bead.to_string(), ask), option);
+        }
+    }
+
+    /// Leaves the pick: nothing is chosen.
+    pub fn clear_choice(&mut self, bead: &str, ask: u64) {
+        self.chosen.remove(&(bead.to_string(), ask));
+    }
+
+    /// Moves the chosen option with the arrows, around the ends: down from
+    /// none chooses the first, up from none the last.
+    pub fn move_choice(&mut self, bead: &str, ask: u64, by: isize) {
+        let last = match self.bead_ask(bead, ask) {
+            Some(full) => full.options.len() as u64,
+            None => return,
+        };
+        if last == 0 {
+            return;
+        }
+        let key = (bead.to_string(), ask);
+        let at = self.chosen.get(&key).copied().unwrap_or(0) as isize;
+        let next = if at == 0 {
+            if by >= 0 { 1 } else { last as isize }
+        } else {
+            (at - 1 + by).rem_euclid(last as isize) + 1
+        };
+        self.chosen.insert(key, next as u64);
+    }
+
+    /// Expands the card in place to the bead's body, notes and about-beads,
+    /// or folds it again.
+    pub fn toggle_expand(&mut self, bead: &str, ask: u64) {
+        let key = (bead.to_string(), ask);
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
+    }
+
+    /// One bead whole, as read. What is no longer open or dealt with leaves
+    /// the cards it kept.
+    pub fn bead_loaded(&mut self, bead: Bead) {
+        self.beads.insert(bead.id.clone(), bead);
+    }
+
+    /// Whether the bead was read: the card reads its options with it.
+    pub fn has_bead(&self, bead: &str) -> bool {
+        self.beads.contains_key(bead)
+    }
+
+    /// The bead could not be read: the card says why.
+    pub fn bead_failed(&mut self, bead: &str, why: &str) {
+        self.notice = format!("the bead {bead} could not be read: {why}");
+    }
+
+    /// What Enter sends for the ask with the line's words: the option
+    /// chosen, or the recommended one when none is, or words alone. `None`
+    /// sends nothing: neither an option, a recommendation, nor words.
+    pub fn answer_action(&self, bead: &str, ask: u64, words: &str) -> Option<AnswerAction> {
+        let full = self.bead_ask(bead, ask)?;
+        let words = words.trim().to_string();
+        // An ask with no options wants words: they are the answer.
+        if full.options.is_empty() {
+            return (!words.is_empty()).then_some(AnswerAction::Answer { option: 0, words });
+        }
+        let chosen = self
+            .chosen
+            .get(&(bead.to_string(), ask))
+            .copied()
+            .unwrap_or(0);
+        if chosen != 0 {
+            return Some(AnswerAction::Answer {
+                option: chosen,
+                words,
+            });
+        }
+        if full.recommend != 0 {
+            return Some(AnswerAction::Answer {
+                option: full.recommend,
+                words,
+            });
+        }
+        (!words.is_empty()).then_some(AnswerAction::Note { words })
+    }
+
+    /// A pick is answered: the ask moves to "Decided" at once, and a later
+    /// pick on it from there replaces the earlier one for display. Answers
+    /// the calls that read the queue and the bead again, for what the yard
+    /// says.
+    pub fn picked(&mut self, bead: &str, ask: u64, option: u64, words: &str) -> Vec<Effect> {
+        let words = words.trim().to_string();
+        let label = self
+            .bead_ask(bead, ask)
+            .and_then(|full| full.options.get(option.saturating_sub(1) as usize))
+            .map(|o| o.label.clone())
+            .unwrap_or_default();
+        // A later pick on a dealt with replaces the earlier one.
+        if let Some(dealt) = self
+            .decided
+            .iter_mut()
             .find(|a| a.bead == bead && a.ask == ask)
-            .map(|a| DecidedDetail {
-                bead: a.bead.clone(),
-                title: a.bead_title.clone(),
-                question: plain(&a.question),
-                asker: a.asker.clone(),
-                state: a.state.clone(),
-                pick: a.option_label.clone(),
-                words: plain(&a.words),
-                return_at: a.return_at.clone(),
-            })
+        {
+            dealt.state = "answered".to_string();
+            dealt.option = option;
+            dealt.option_label = label;
+            dealt.words = words;
+            dealt.return_at.clear();
+        } else if let Some(at) = self
+            .open
+            .iter()
+            .position(|a| a.bead == bead && a.ask == ask)
+        {
+            let open = self.open.remove(at);
+            self.decided.insert(
+                0,
+                DecidedAsk {
+                    bead: open.bead,
+                    bead_title: open.bead_title,
+                    topic: open.topic,
+                    ask: open.ask,
+                    question: open.question,
+                    asker: open.asker,
+                    since: open.since,
+                    state: "answered".to_string(),
+                    option,
+                    option_label: label,
+                    words,
+                    return_at: String::new(),
+                },
+            );
+        } else {
+            return Vec::new();
+        }
+        self.chosen.remove(&(bead.to_string(), ask));
+        let mut effects = self.reselect();
+        effects.push(Effect::Asks);
+        effects.push(Effect::Bead {
+            bead: bead.to_string(),
+        });
+        effects
+    }
+
+    /// The ask is put aside: it leaves the list and returns as the yard
+    /// says.
+    pub fn deferred(&mut self, bead: &str, ask: u64) -> Vec<Effect> {
+        let Some(at) = self
+            .open
+            .iter()
+            .position(|a| a.bead == bead && a.ask == ask)
+        else {
+            return Vec::new();
+        };
+        let open = self.open.remove(at);
+        self.decided.insert(
+            0,
+            DecidedAsk {
+                bead: open.bead,
+                bead_title: open.bead_title,
+                topic: open.topic,
+                ask: open.ask,
+                question: open.question,
+                asker: open.asker,
+                since: open.since,
+                state: "put aside".to_string(),
+                option: 0,
+                option_label: String::new(),
+                words: String::new(),
+                return_at: String::new(),
+            },
+        );
+        self.chosen.remove(&(bead.to_string(), ask));
+        let mut effects = self.reselect();
+        effects.push(Effect::Asks);
+        effects.push(Effect::Bead {
+            bead: bead.to_string(),
+        });
+        effects
+    }
+
+    /// The ask is declined with words: not a pick and not "you decide".
+    pub fn declined(&mut self, bead: &str, ask: u64, words: &str) -> Vec<Effect> {
+        let words = words.trim().to_string();
+        if words.is_empty() {
+            return Vec::new();
+        }
+        let Some(at) = self
+            .open
+            .iter()
+            .position(|a| a.bead == bead && a.ask == ask)
+        else {
+            return Vec::new();
+        };
+        let open = self.open.remove(at);
+        self.decided.insert(
+            0,
+            DecidedAsk {
+                bead: open.bead,
+                bead_title: open.bead_title,
+                topic: open.topic,
+                ask: open.ask,
+                question: open.question,
+                asker: open.asker,
+                since: open.since,
+                state: "declined".to_string(),
+                option: 0,
+                option_label: String::new(),
+                words,
+                return_at: String::new(),
+            },
+        );
+        self.chosen.remove(&(bead.to_string(), ask));
+        let mut effects = self.reselect();
+        effects.push(Effect::Asks);
+        effects.push(Effect::Bead {
+            bead: bead.to_string(),
+        });
+        effects
     }
 
     /// The `yard` row below the conversations, with its own unread count.
@@ -734,18 +1148,28 @@ impl Model {
     }
 
     /// Reads the open conversation if it was not read before, and
-    /// acknowledges what opening it showed. A bead, one dealt with and the
-    /// yard row need no call to open.
+    /// acknowledges what opening it showed. A bead and one dealt with read
+    /// the bead whole when it was not read before; the yard row needs no
+    /// call to open.
     fn open(&mut self) -> Vec<Effect> {
-        let Some(Selected::Conversation(sel)) = self.selected.clone() else {
-            return Vec::new();
-        };
-        let mut effects = Vec::new();
-        if !self.loaded.contains(&sel) {
-            effects.push(self.read(&sel));
+        match self.selected.clone() {
+            Some(Selected::Conversation(sel)) => {
+                let mut effects = Vec::new();
+                if !self.loaded.contains(&sel) {
+                    effects.push(self.read(&sel));
+                }
+                effects.extend(self.ack());
+                effects
+            }
+            Some(Selected::Decision(bead)) | Some(Selected::Decided(bead, _)) => {
+                if self.beads.contains_key(&bead) {
+                    Vec::new()
+                } else {
+                    vec![Effect::Bead { bead }]
+                }
+            }
+            _ => Vec::new(),
         }
-        effects.extend(self.ack());
-        effects
     }
 
     /// The call for the conversation with `name` after the last mail the
@@ -830,7 +1254,8 @@ impl Model {
         self.notice = format!("your mail could not be marked read: {why}");
     }
 
-    /// Applies one event of the stream.
+    /// Applies one event of the stream. Mail and notices never cover or
+    /// move the open card: only the queue leaving its bead moves it.
     pub fn event(&mut self, e: &Event) -> Vec<Effect> {
         // An event that became a notification for the user carries less
         // than what changed: the notices are read again.
@@ -884,6 +1309,13 @@ impl Model {
             kind if kind.starts_with("peer_") => self.link(e),
             _ => Vec::new(),
         });
+        // A bead shown is read again on every event whose bead it is: the
+        // card's options, recommendation and state may have changed.
+        if !e.bead.is_empty() && self.beads.contains_key(&e.bead) {
+            effects.push(Effect::Bead {
+                bead: e.bead.clone(),
+            });
+        }
         effects
     }
 
@@ -1011,11 +1443,35 @@ impl Model {
     }
 
     /// The queue as read again. When the open bead or the open dealt with
-    /// is gone the first row from the top is opened.
+    /// is gone the first row from the top is opened. A bead no longer in
+    /// the queue leaves what the cards kept of it; the open bead is read
+    /// when it is not yet.
     pub fn asks(&mut self, asks: Asks) -> Vec<Effect> {
         self.open = asks.open;
         self.decided = asks.decided;
-        self.reselect()
+        let mut keep = HashSet::new();
+        for bead in self
+            .open
+            .iter()
+            .map(|a| &a.bead)
+            .chain(self.decided.iter().map(|a| &a.bead))
+        {
+            keep.insert(bead.clone());
+        }
+        self.beads.retain(|bead, _| keep.contains(bead));
+        self.chosen.retain(|(bead, _), _| keep.contains(bead));
+        self.expanded.retain(|(bead, _)| keep.contains(bead));
+        self.current.retain(|bead, _| keep.contains(bead));
+        let effects = self.reselect();
+        if !effects.is_empty() {
+            return effects;
+        }
+        // The open bead stayed: it is newly in the queue, or newly without
+        // a read bead. It is read when it is not yet.
+        match self.selected.as_ref() {
+            Some(Selected::Decision(_) | Selected::Decided(_, _)) => self.open(),
+            _ => Vec::new(),
+        }
     }
 
     /// When a put-aside ask comes back next, if one waits: the window reads
@@ -1134,6 +1590,59 @@ fn decided_sub(ask: &DecidedAsk) -> String {
     sub
 }
 
+/// An ask's options as the card numbers them, from 1, `you decide` last
+/// as the yard lists it.
+fn card_options(ask: &BeadAsk) -> Vec<CardOption> {
+    ask.options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| CardOption {
+            number: i as u64 + 1,
+            label: plain(&o.label),
+            consequence: plain(&o.consequence),
+        })
+        .collect()
+}
+
+/// The recommended option's label; empty when nothing is recommended.
+fn recommend_label(ask: &BeadAsk) -> String {
+    if ask.recommend == 0 {
+        return String::new();
+    }
+    ask.options
+        .get(ask.recommend.saturating_sub(1) as usize)
+        .map(|o| plain(&o.label))
+        .unwrap_or_default()
+}
+
+/// A design bead's document, named by path and branch, not fetched: the
+/// first `docs/design/…` the body or a note names, on the bead's branch.
+/// Empty when none is named.
+fn design_doc(bead: &str, body: &str, notes: &[crate::api::BeadNote]) -> String {
+    const PREFIX: &str = "docs/design/";
+    let mut texts = vec![body];
+    texts.extend(notes.iter().map(|n| n.text.as_str()));
+    for text in texts {
+        let Some(at) = text.find(PREFIX) else {
+            continue;
+        };
+        let rest = &text[at..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\''))
+            .unwrap_or(rest.len());
+        let mut path = rest[..end].trim_end_matches([',', ';', ':']).to_string();
+        // `Doc: <path>.` ends the sentence past the path's `.md`.
+        if path.ends_with(".md.") {
+            path.pop();
+        }
+        path = path.trim_end_matches('.').to_string();
+        if path.len() > PREFIX.len() {
+            return format!("{path} on branch yard/{bead}");
+        }
+    }
+    String::new()
+}
+
 /// How long an ask waits, from its `since` to now: `now`, `5m`, `2h`, `3d`.
 /// Nothing for a time that cannot be read.
 pub fn waits<Tz: TimeZone>(since: &str, now: &DateTime<Tz>) -> String
@@ -1212,7 +1721,7 @@ pub fn size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{RosterEntry, Said};
+    use crate::api::{AboutBead, AskOption, BeadNote, RosterEntry, Said};
     use serde_json::{Value, json};
 
     fn member(name: &str, state: &str, status: &str) -> CrewMember {
@@ -2467,5 +2976,395 @@ mod tests {
             decided: vec![],
         });
         assert_eq!(m.selected_conversation(), Some("assembly"));
+    }
+
+    fn option(label: &str, consequence: &str) -> AskOption {
+        AskOption {
+            label: label.into(),
+            consequence: consequence.into(),
+        }
+    }
+
+    fn full_ask(ask: u64, options: Vec<AskOption>, recommend: u64) -> BeadAsk {
+        BeadAsk {
+            ask,
+            to: "jo".into(),
+            asker: "yardmaster".into(),
+            since: "2026-10-10T10:00:00Z".into(),
+            question: "Move this yard's 64 links to the declared source now?".into(),
+            context: vec![
+                "The links file declares the new source.".into(),
+                "The move was tested on a copy and passed.".into(),
+            ],
+            options,
+            recommend,
+            why: if recommend == 0 {
+                String::new()
+            } else {
+                "the test passed".into()
+            },
+            about: vec![AboutBead {
+                id: "yd-train".into(),
+                title: "Release train".into(),
+                stage: "new".into(),
+            }],
+            state: "open".into(),
+            ..BeadAsk::default()
+        }
+    }
+
+    fn links_options() -> Vec<AskOption> {
+        vec![
+            option(
+                "Move them now",
+                "all 64 links point at the new source tonight",
+            ),
+            option(
+                "After Friday",
+                "keep the old source until the release is out",
+            ),
+            option("You decide", "leave it to yardmaster"),
+        ]
+    }
+
+    fn links_bead() -> Bead {
+        Bead {
+            id: "yardr-n8ta".into(),
+            title: "Move the links".into(),
+            body: "The links file declares the new source.".into(),
+            stage: "new".into(),
+            labels: vec!["topic:linear-out".into()],
+            notes: vec![BeadNote {
+                seq: 2,
+                kind: "note".into(),
+                author: "yardmaster".into(),
+                text: "the test passed on a copy".into(),
+                at: "2026-10-10T09:30:00Z".into(),
+            }],
+            asks: vec![full_ask(3, links_options(), 1)],
+        }
+    }
+
+    fn words_bead() -> Bead {
+        Bead {
+            id: "yardr-7h11".into(),
+            title: "Sketch".into(),
+            body: "The sketch landed yesterday.".into(),
+            stage: "new".into(),
+            labels: vec![],
+            notes: vec![],
+            asks: vec![BeadAsk {
+                ask: 6,
+                to: "jo".into(),
+                asker: "yardmaster".into(),
+                since: "2026-10-10T11:30:00Z".into(),
+                question: "Close sketch PR #3?".into(),
+                context: vec!["the sketch landed yesterday.".into()],
+                options: vec![],
+                state: "open".into(),
+                ..BeadAsk::default()
+            }],
+        }
+    }
+
+    fn evening_with_links() -> Model {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, None);
+        m.bead_loaded(links_bead());
+        m
+    }
+
+    #[test]
+    fn the_card_carries_context_options_and_the_recommended_why() {
+        let m = evening_with_links();
+        let detail = m.decision_detail("yardr-n8ta", &noon()).unwrap();
+        assert_eq!(detail.title, "Move the links");
+        assert_eq!(detail.body, "The links file declares the new source.");
+        assert_eq!(detail.notes.len(), 1);
+        assert_eq!(detail.notes[0].author, "yardmaster");
+        let card = &detail.asks[0];
+        assert_eq!(
+            card.question,
+            "Move this yard's 64 links to the declared source now?"
+        );
+        assert_eq!(card.asker, "yardmaster");
+        assert_eq!(card.recommend_label, "Move them now");
+        assert_eq!(card.context.len(), 2);
+        assert_eq!(card.options.len(), 3);
+        assert_eq!(card.options[0].number, 1);
+        assert_eq!(card.options[0].label, "Move them now");
+        assert_eq!(
+            card.options[0].consequence,
+            "all 64 links point at the new source tonight"
+        );
+        // `you decide` last, as the yard lists it.
+        assert_eq!(card.options[2].label, "You decide");
+        assert_eq!((card.recommend, card.why.as_str()), (1, "the test passed"));
+        assert_eq!(card.about[0].id, "yd-train");
+        assert!(card.current);
+        assert!(!card.expanded);
+        assert_eq!(card.chosen, 0);
+    }
+
+    #[test]
+    fn a_number_key_or_the_arrows_choose_an_option() {
+        let mut m = evening_with_links();
+        m.choose("yardr-n8ta", 3, 2);
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert_eq!(card.chosen, 2);
+        // Past the last changes nothing.
+        m.choose("yardr-n8ta", 3, 9);
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert_eq!(card.chosen, 2);
+        // The arrows move around the ends.
+        m.move_choice("yardr-n8ta", 3, 1);
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert_eq!(card.chosen, 3);
+        m.move_choice("yardr-n8ta", 3, 1);
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert_eq!(card.chosen, 1);
+        m.move_choice("yardr-n8ta", 3, -1);
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert_eq!(card.chosen, 3);
+    }
+
+    #[test]
+    fn enter_sends_the_pick_with_the_words_or_the_recommendation() {
+        let mut m = evening_with_links();
+        // Nothing chosen: the recommendation, with the line's words.
+        assert_eq!(
+            m.answer_action("yardr-n8ta", 3, "move them tonight"),
+            Some(AnswerAction::Answer {
+                option: 1,
+                words: "move them tonight".into()
+            })
+        );
+        // Chosen beats the recommendation.
+        m.choose("yardr-n8ta", 3, 2);
+        assert_eq!(
+            m.answer_action("yardr-n8ta", 3, "after the release"),
+            Some(AnswerAction::Answer {
+                option: 2,
+                words: "after the release".into()
+            })
+        );
+        // A pick alone sends no words.
+        assert_eq!(
+            m.answer_action("yardr-n8ta", 3, "  "),
+            Some(AnswerAction::Answer {
+                option: 2,
+                words: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn words_with_no_option_chosen_go_as_a_note_and_the_ask_stays_open() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, None);
+        // No recommendation: words alone are a note.
+        let mut bead = links_bead();
+        bead.asks[0].recommend = 0;
+        bead.asks[0].why.clear();
+        m.bead_loaded(bead);
+        assert_eq!(
+            m.answer_action("yardr-n8ta", 3, "what about the docs links?"),
+            Some(AnswerAction::Note {
+                words: "what about the docs links?".into()
+            })
+        );
+        // Nothing chosen and nothing typed sends nothing.
+        assert_eq!(m.answer_action("yardr-n8ta", 3, "  "), None);
+    }
+
+    #[test]
+    fn an_ask_with_no_options_wants_words_as_the_answer() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, None);
+        m.bead_loaded(words_bead());
+        let detail = m.decision_detail("yardr-7h11", &noon()).unwrap();
+        assert!(detail.asks[0].options.is_empty());
+        assert_eq!(
+            m.answer_action("yardr-7h11", 6, "warmly"),
+            Some(AnswerAction::Answer {
+                option: 0,
+                words: "warmly".into()
+            })
+        );
+        assert_eq!(m.answer_action("yardr-7h11", 6, "  "), None);
+    }
+
+    #[test]
+    fn a_pick_moves_the_ask_to_decided_at_once_and_a_later_pick_replaces_it() {
+        let mut m = evening_with_links();
+        assert_eq!(m.decisions_count(), 4);
+        let effects = m.picked("yardr-n8ta", 3, 1, "move them tonight");
+        assert!(effects.contains(&Effect::Asks));
+        assert!(effects.contains(&Effect::Bead {
+            bead: "yardr-n8ta".into()
+        }));
+        // At once, before the yard says: out of the open, into Decided.
+        assert_eq!(m.decisions_count(), 3);
+        assert_eq!(m.decided_count(), 1);
+        let rows = m.decided_rows();
+        assert_eq!(
+            rows[0].head,
+            "Move this yard's 64 links to the declared source now?"
+        );
+        assert_eq!(
+            rows[0].sub,
+            "yardmaster · Move them now · move them tonight"
+        );
+        // The open bead is gone: the next decision is open.
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+
+        // A later pick on it from Decided replaces the earlier one.
+        m.toggle_decided();
+        m.select(Selected::Decided("yardr-n8ta".into(), 3));
+        m.picked("yardr-n8ta", 3, 2, "after all, Friday");
+        assert_eq!(m.decided_count(), 1);
+        let detail = m.decided_detail("yardr-n8ta", 3).unwrap();
+        assert_eq!(detail.state, "answered");
+        assert_eq!(detail.pick, "After Friday");
+        assert_eq!(detail.words, "after all, Friday");
+        assert_eq!(
+            m.selected(),
+            Some(&Selected::Decided("yardr-n8ta".into(), 3))
+        );
+    }
+
+    #[test]
+    fn later_leaves_the_list_and_decline_needs_words() {
+        let mut m = evening_with_links();
+        let effects = m.deferred("yardr-n8ta", 3);
+        assert!(effects.contains(&Effect::Asks));
+        assert_eq!(m.decisions_count(), 3);
+        assert_eq!(m.decided_count(), 1);
+        assert_eq!(m.decided_rows()[0].sub, "yardmaster · put aside");
+
+        // Decline without words changes nothing: it asks for words.
+        assert_eq!(m.declined("yardr-3msx", 4, "  "), Vec::new());
+        assert_eq!(m.decisions_count(), 3);
+        m.declined("yardr-3msx", 4, "not mine to take");
+        assert_eq!(m.decisions_count(), 2);
+        let detail = m.decided_detail("yardr-3msx", 4).unwrap();
+        assert_eq!(detail.state, "declined");
+        assert_eq!(detail.words, "not mine to take");
+        assert_eq!(detail.pick, "");
+    }
+
+    #[test]
+    fn one_key_expands_the_card_to_the_bead_whole() {
+        let mut m = evening_with_links();
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert!(!card.expanded);
+        m.toggle_expand("yardr-n8ta", 3);
+        let detail = m.decision_detail("yardr-n8ta", &noon()).unwrap();
+        assert!(detail.asks[0].expanded);
+        assert!(!detail.body.is_empty());
+        assert!(!detail.notes.is_empty());
+        assert!(!detail.asks[0].about.is_empty());
+        m.toggle_expand("yardr-n8ta", 3);
+        let card = &m.decision_detail("yardr-n8ta", &noon()).unwrap().asks[0];
+        assert!(!card.expanded);
+    }
+
+    #[test]
+    fn a_design_bead_s_document_is_named_by_path_and_branch_not_fetched() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, None);
+        let mut bead = links_bead();
+        bead.notes[0].text = "Doc: docs/design/2026-10-11-yardr-me78-depot-rules.md.".into();
+        m.bead_loaded(bead);
+        let detail = m.decision_detail("yardr-n8ta", &noon()).unwrap();
+        assert_eq!(
+            detail.doc,
+            "docs/design/2026-10-11-yardr-me78-depot-rules.md on branch yard/yardr-n8ta"
+        );
+        // None named: nothing stands.
+        let m = evening_with_links();
+        let detail = m.decision_detail("yardr-n8ta", &noon()).unwrap();
+        assert_eq!(detail.doc, "");
+    }
+
+    #[test]
+    fn the_open_bead_is_read_when_it_opens_and_again_on_its_events() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, effects) = Model::new(state, None);
+        // The oldest decision opens, and its bead is read.
+        assert_eq!(
+            effects,
+            [Effect::Bead {
+                bead: "yardr-n8ta".into()
+            }]
+        );
+        m.bead_loaded(links_bead());
+        // A conversation opens with no bead read.
+        assert_eq!(
+            m.select(Selected::Conversation("yardmaster".into()))[0],
+            read("yardmaster", 0)
+        );
+        // Back: the bead is here, so nothing is asked.
+        assert_eq!(m.select(Selected::Decision("yardr-n8ta".into())), []);
+        // An event whose bead is one shown reads it again, with the queue
+        // on a note.
+        assert_eq!(
+            m.event(&event(21, "noted", "yardmaster", json!({"note": 1}))),
+            [Effect::Asks]
+        );
+        let mut noted = event(22, "noted", "yardmaster", json!({"note": 2}));
+        noted.bead = "yardr-n8ta".into();
+        assert_eq!(
+            m.event(&noted),
+            [
+                Effect::Asks,
+                Effect::Bead {
+                    bead: "yardr-n8ta".into()
+                }
+            ]
+        );
+        // A bead's other events, whose kinds are yardr's own, read it too.
+        let mut moved = event(23, "advanced", "yard", json!({}));
+        moved.bead = "yardr-n8ta".into();
+        assert_eq!(
+            m.event(&moved),
+            [Effect::Bead {
+                bead: "yardr-n8ta".into()
+            }]
+        );
+        // One that is shown nowhere reads nothing.
+        let mut elsewhere = event(24, "noted", "yardmaster", json!({"note": 3}));
+        elsewhere.bead = "yd-elsewhere".into();
+        assert_eq!(m.event(&elsewhere), [Effect::Asks]);
+    }
+
+    #[test]
+    fn mail_and_notices_arriving_never_move_the_open_card() {
+        let mut m = evening_with_links();
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        m.event(&mail_to_jo(21, "assembly"));
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        m.event(&event(
+            22,
+            "created",
+            "yard",
+            json!({"notified": {"jo": "all"}}),
+        ));
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        m.notifications(vec![notification(10, "yd-shed", "yd-shed created", false)]);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        // The queue leaving its bead does: the next row opens.
+        let mut open = evening();
+        open.remove(0);
+        m.asks(Asks {
+            open,
+            decided: vec![],
+        });
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
     }
 }

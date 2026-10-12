@@ -16,7 +16,10 @@ use gpui::{
 use crate::api::{self, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
-use crate::model::{self, DecidedRow, DecisionRow, Effect, Entry, Model, Row, Selected, Target};
+use crate::model::{
+    self, AnswerAction, DecidedDetail, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow,
+    Effect, Entry, Model, Row, Selected, Target,
+};
 use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::theme::Palette;
@@ -24,11 +27,19 @@ use crate::theme::Palette;
 /// The application's icon, from the 1024px master in assets/icon.png.
 pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
-actions!(footplate, [Next, Previous, Dismiss]);
+actions!(
+    footplate,
+    [
+        Next, Previous, Dismiss, Pick1, Pick2, Pick3, Pick4, Pick5, Pick6, Pick7, Pick8, Pick9,
+        ChoiceUp, ChoiceDown, Decide, Decline, Expand, FocusWords, Leave
+    ]
+);
 
 const CONTEXT: &str = "Footplate";
-/// Where no line is typed in: the yard row and the decisions. `x` marks
-/// one notice read here; with a conversation open it is the line's text.
+/// Where no line is typed in: the yard row, and a decision with the window
+/// focused, where a number key picks and `x` puts aside. With a
+/// conversation open, or a decision with the line focused to type words in,
+/// those keys are the line's text.
 const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 
 /// How high an image of a mail stands in the conversation, whatever its own
@@ -124,7 +135,43 @@ fn divider(palette: Palette) -> impl IntoElement {
     div().mx_3().my_1().h(px(1.)).bg(palette.line)
 }
 
-/// The keys of the window, as `yardr chat` has them.
+/// The keys of an open card. Enter with nothing chosen and a recommendation
+/// picks it, and says so.
+fn decision_keys(ask: &DecisionAsk) -> String {
+    if ask.options.is_empty() {
+        return "words wanted · i words · enter sends the answer · x later · d decline · e expand"
+            .to_string();
+    }
+    let n = ask.options.len();
+    let enter = if ask.chosen != 0 {
+        format!("enter picks {}", ask.chosen)
+    } else if ask.recommend != 0 {
+        format!("enter picks {}", ask.recommend)
+    } else {
+        "enter sends words as note".to_string()
+    };
+    format!("{enter} · 1-{n} pick · ↑↓ choose · i words · x later · d decline · e expand")
+}
+
+/// The keys of a dealt with: the same pick again, and the same full bead.
+fn decided_keys(detail: &DecidedDetail) -> String {
+    if detail.options.is_empty() {
+        return "words wanted · i words · enter sends · e expand".to_string();
+    }
+    let n = detail.options.len();
+    let enter = if detail.chosen != 0 {
+        format!("enter picks {}", detail.chosen)
+    } else if detail.recommend != 0 {
+        format!("enter picks {}", detail.recommend)
+    } else {
+        "enter sends".to_string()
+    };
+    format!("{enter} · 1-{n} pick · ↑↓ choose · i words · e expand")
+}
+
+/// The keys of the window, as `yardr chat` has them, with the card's:
+/// a number key or the arrows choose an option, Enter sends the pick with
+/// the line's words, `x` puts aside, `d` declines, `e` expands.
 pub fn bind_keys(cx: &mut App) {
     for context in [CONTEXT, NO_LINE_CONTEXT] {
         cx.bind_keys([
@@ -133,10 +180,32 @@ pub fn bind_keys(cx: &mut App) {
             // The line's own binding is the deeper one: with the focus in
             // the line it copies the line's selection, as before.
             KeyBinding::new("secondary-c", input::Copy, Some(context)),
+            // The arrows choose even while words are typed: the line keeps
+            // left and right for its cursor.
+            KeyBinding::new("up", ChoiceUp, Some(context)),
+            KeyBinding::new("down", ChoiceDown, Some(context)),
+            KeyBinding::new("escape", Leave, Some(context)),
         ]);
     }
-    // One key marks one notice read, where no line is typed in.
-    cx.bind_keys([KeyBinding::new("x", Dismiss, Some(NO_LINE_CONTEXT))]);
+    // Where no line is typed in: one key marks one notice read, and on a
+    // card the same keys pick, put aside, decline and expand. With the
+    // line focused those keys are the line's text.
+    cx.bind_keys([
+        KeyBinding::new("x", Dismiss, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("1", Pick1, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("2", Pick2, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("3", Pick3, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("4", Pick4, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("5", Pick5, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("6", Pick6, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("7", Pick7, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("8", Pick8, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("9", Pick9, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("enter", Decide, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("d", Decline, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("i", FocusWords, Some(NO_LINE_CONTEXT)),
+    ]);
 }
 
 pub struct Footplate {
@@ -148,6 +217,8 @@ pub struct Footplate {
     down: Option<String>,
     line: Entity<Line>,
     conversation: ScrollHandle,
+    /// The open card's own scroll: mail and notices arriving never move it.
+    decision: ScrollHandle,
     /// What is selected of the open conversation's messages.
     selection: Entity<Selection>,
     /// The images of the conversations that were open, by hash: an image
@@ -156,6 +227,12 @@ pub struct Footplate {
     /// What is attached and not sent, for each conversation, and the text
     /// typed in those that are not open; the open one's is in the line.
     drafts: Drafts,
+    /// The words typed for each ask that is not the open one, by bead and
+    /// ask; the open one's are in the line.
+    ask_words: HashMap<(String, u64), String>,
+    /// The ask decline was pressed on with an empty line: the next Enter
+    /// sends the typed words as the decline, and esc leaves it.
+    declining: Option<(String, u64)>,
     /// The attachments that are images, by id, as they are drawn.
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
@@ -213,9 +290,12 @@ impl Footplate {
             }),
             line,
             conversation: ScrollHandle::new(),
+            decision: ScrollHandle::new(),
             selection,
             images: HashMap::new(),
             drafts: Drafts::default(),
+            ask_words: HashMap::new(),
+            declining: None,
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
@@ -237,6 +317,7 @@ impl Footplate {
                 self.down = None;
                 self.turned(open, cx);
                 self.conversation.scroll_to_bottom();
+                self.decision.scroll_to_item(0);
                 // What the yard did not give while it was away is asked for
                 // again.
                 self.images
@@ -252,28 +333,37 @@ impl Footplate {
         cx.notify();
     }
 
-    /// Changes the model and does what the change asks for. When what is
-    /// open is another or has more in it, its newest comes in view.
+    /// Changes the model and does what the change asks for. A conversation
+    /// shows its newest, and the yard its notices; the open card never moves
+    /// for mail or notices arriving.
     fn change(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Model) -> Vec<Effect>) {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let before = (
-            model.selected().cloned(),
-            model.entries().len(),
-            model.notices().len(),
-        );
+        let before_sel = model.selected().cloned();
+        let before_entries = model.entries().len();
+        let before_notices = model.notices().len();
         let effects = f(model);
-        if before
-            != (
-                model.selected().cloned(),
-                model.entries().len(),
-                model.notices().len(),
-            )
-        {
-            self.conversation.scroll_to_bottom();
+        let after_sel = model.selected().cloned();
+        if before_sel != after_sel {
+            match &after_sel {
+                Some(Selected::Decision(_)) | Some(Selected::Decided(_, _)) => {
+                    self.decision.scroll_to_item(0);
+                }
+                _ => self.conversation.scroll_to_bottom(),
+            }
+        } else {
+            match &after_sel {
+                Some(Selected::Conversation(_)) if model.entries().len() != before_entries => {
+                    self.conversation.scroll_to_bottom();
+                }
+                Some(Selected::Yard) if model.notices().len() != before_notices => {
+                    self.conversation.scroll_to_bottom();
+                }
+                _ => {}
+            }
         }
-        self.turned(before.0, cx);
+        self.turned(before_sel, cx);
         self.shown(cx);
         self.pictures(cx);
         self.run(effects, cx);
@@ -310,8 +400,8 @@ impl Footplate {
     }
 
     /// What `from` was open. When another is now, what is typed stays
-    /// with the conversation it was typed in, and the line has what was
-    /// typed in the one that is open, if one is.
+    /// with the conversation or the ask it was typed in, and the line has
+    /// what was typed in the one that is open, if one is.
     fn turned(&mut self, from: Option<Selected>, cx: &mut Context<Self>) {
         let to = self.model.as_ref().and_then(|m| m.selected().cloned());
         let Some(from) = from.filter(|from| Some(from) != to.as_ref()) else {
@@ -320,27 +410,78 @@ impl Footplate {
         // What was selected is of the conversation that is no longer shown.
         self.selection
             .update(cx, |selection, cx| selection.clear(cx));
+        self.declining = None;
         let typed = self.line.read(cx).text().to_string();
-        if let Selected::Conversation(name) = &from {
-            self.drafts.put_text(name, typed);
+        match &from {
+            Selected::Conversation(name) => self.drafts.put_text(name, typed),
+            Selected::Decision(bead) => {
+                if let Some(ask) = self.model.as_ref().and_then(|m| m.current_for(bead)) {
+                    self.ask_words.insert((bead.clone(), ask), typed);
+                }
+            }
+            Selected::Decided(bead, ask) => {
+                self.ask_words.insert((bead.clone(), *ask), typed);
+            }
+            Selected::Yard => {}
         }
         let text = match &to {
             Some(Selected::Conversation(name)) => self.drafts.take_text(name),
+            Some(Selected::Decision(_)) => self
+                .model
+                .as_ref()
+                .and_then(|m| m.current_ask())
+                .and_then(|(bead, ask)| self.ask_words.remove(&(bead, ask)))
+                .unwrap_or_default(),
+            Some(Selected::Decided(bead, ask)) => self
+                .ask_words
+                .remove(&(bead.clone(), *ask))
+                .unwrap_or_default(),
             _ => String::new(),
         };
         self.line.update(cx, |line, cx| line.set_text(&text, cx));
     }
 
-    /// The line says whom it writes to, when a conversation is open.
+    /// The line says whom it writes to, or what words on a card do.
     fn shown(&mut self, cx: &mut Context<Self>) {
-        let to = self
-            .model
-            .as_ref()
-            .and_then(|m| m.selected_conversation())
-            .map(|s| format!("Write to {s}"))
-            .unwrap_or_default();
+        let to = match self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            Some(Selected::Conversation(name)) => format!("Write to {name}"),
+            Some(Selected::Decision(_)) => {
+                let asking = self
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.current_ask())
+                    .is_some_and(|current| Some(&current) == self.declining.as_ref());
+                if asking {
+                    "Why decline? Enter sends, esc leaves".to_string()
+                } else if self.current_options_empty() {
+                    "Words wanted: Enter sends the answer".to_string()
+                } else {
+                    "Words with the pick, or alone as a note".to_string()
+                }
+            }
+            Some(Selected::Decided(_, _)) => "Words with the pick".to_string(),
+            _ => String::new(),
+        };
         self.line
             .update(cx, |line, cx| line.set_placeholder(&to, cx));
+    }
+
+    /// Whether the open card's current ask wants words: it has no options.
+    fn current_options_empty(&self) -> bool {
+        let Some(model) = self.model.as_ref() else {
+            return false;
+        };
+        let now = chrono::Utc::now();
+        match model.selected() {
+            Some(Selected::Decision(bead)) => model
+                .decision_detail(bead, &now)
+                .and_then(|d| d.asks.into_iter().find(|a| a.current))
+                .is_some_and(|a| a.options.is_empty()),
+            Some(Selected::Decided(bead, ask)) => model
+                .decided_detail(bead, *ask)
+                .is_some_and(|d| d.options.is_empty()),
+            _ => false,
+        }
     }
 
     /// Reads the queue again when the next put-aside ask comes back, which
@@ -491,6 +632,23 @@ impl Footplate {
                         }
                     },
                 ),
+                Effect::Bead { bead } => self.ask(
+                    cx,
+                    {
+                        let bead = bead.clone();
+                        move |client, _| client.bead(&bead)
+                    },
+                    move |this, answered, cx| match answered {
+                        Ok(bead) => this.change(cx, |m| {
+                            m.bead_loaded(bead);
+                            Vec::new()
+                        }),
+                        Err(err) => this.change(cx, |m| {
+                            m.bead_failed(&bead, &err.to_string());
+                            Vec::new()
+                        }),
+                    },
+                ),
             }
         }
     }
@@ -503,7 +661,12 @@ impl Footplate {
 
     /// Sends the draft of the open conversation as one mail: what is typed,
     /// and what is attached. A draft with a marked attachment is not sent.
+    /// On a card Enter sends the pick with the line's words, or the words
+    /// alone.
     fn send(&mut self, cx: &mut Context<Self>) {
+        if self.open().is_none() {
+            return self.decide(cx);
+        }
         let Some((to, target)) = self.open() else {
             return;
         };
@@ -562,6 +725,151 @@ impl Footplate {
             self.drafts.unsend(to, unsent.text);
         }
         self.notice(format!("not sent to {to}: {}", unsent.why), cx);
+    }
+
+    /// The open card's ask: the current one of a decision, or the dealt
+    /// with itself.
+    fn card(&self) -> Option<(String, u64)> {
+        match self.model.as_ref()?.selected()? {
+            Selected::Decision(_) => self.model.as_ref()?.current_ask(),
+            Selected::Decided(bead, ask) => Some((bead.clone(), *ask)),
+            _ => None,
+        }
+    }
+
+    /// Enter on a card: the pick with the line's words in the one answer,
+    /// or the words alone. Enter with nothing chosen and a recommendation
+    /// picks the recommended option.
+    fn decide(&mut self, cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        // A decline asked for words: they go now.
+        if self.declining.as_ref() == Some(&(bead.clone(), ask)) {
+            let words = self.line.read(cx).text().trim().to_string();
+            if words.is_empty() {
+                return self.notice("decline needs words: why you will not decide it".into(), cx);
+            }
+            return self.send_decline(bead, ask, words, cx);
+        }
+        let words = self.line.read(cx).text().to_string();
+        let action = self
+            .model
+            .as_ref()
+            .and_then(|m| m.answer_action(&bead, ask, &words));
+        match action {
+            Some(AnswerAction::Answer { option, words }) => {
+                self.send_answer(bead, ask, option, words, cx);
+            }
+            Some(AnswerAction::Note { words }) => self.send_note(bead, ask, words, cx),
+            None => {}
+        }
+    }
+
+    /// Picks an option with words alongside: the ask moves to "Decided" at
+    /// once, and the queue and the bead are read again for what the yard
+    /// says. What the yard refuses is back in the line, with its words.
+    fn send_answer(
+        &mut self,
+        bead: String,
+        ask: u64,
+        option: u64,
+        words: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.ask_words.remove(&(bead.clone(), ask));
+        self.notice(String::new(), cx);
+        let (call_bead, call_words) = (bead.clone(), words.clone());
+        self.ask(
+            cx,
+            move |client, me| client.answer_ask(&call_bead, ask, option, &call_words, me),
+            move |this, answered, cx| match answered {
+                Ok(()) => {
+                    this.change(cx, |m| m.picked(&bead, ask, option, &words));
+                    this.schedule_return(cx);
+                }
+                Err(err) => {
+                    this.line.update(cx, |line, cx| {
+                        let back = draft::rejoin(words.clone(), line.text().to_string());
+                        line.set_text(&back, cx);
+                    });
+                    this.notice(format!("not answered: {err}"), cx);
+                }
+            },
+        );
+    }
+
+    /// Words with no option chosen go as a plain note; the ask stays open.
+    fn send_note(&mut self, bead: String, ask: u64, words: String, cx: &mut Context<Self>) {
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.ask_words.remove(&(bead.clone(), ask));
+        self.notice(String::new(), cx);
+        let (call_bead, call_words) = (bead.clone(), words.clone());
+        self.ask(
+            cx,
+            move |client, me| client.add_note(&call_bead, &call_words, me),
+            move |this, noted, cx| match noted {
+                Ok(()) => {
+                    // The note arrives as a `noted` event, which reads the
+                    // queue and the bead again.
+                }
+                Err(err) => {
+                    this.line.update(cx, |line, cx| {
+                        let back = draft::rejoin(words.clone(), line.text().to_string());
+                        line.set_text(&back, cx);
+                    });
+                    this.notice(format!("not noted: {err}"), cx);
+                }
+            },
+        );
+    }
+
+    /// Puts the ask aside with `x`: it leaves the list and returns as the
+    /// yard says.
+    fn send_later(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.ask_words.remove(&(bead.clone(), ask));
+        self.declining = None;
+        self.notice(String::new(), cx);
+        let call_bead = bead.clone();
+        self.ask(
+            cx,
+            move |client, me| client.defer_ask(&call_bead, ask, me),
+            move |this, deferred, cx| match deferred {
+                Ok(()) => {
+                    this.change(cx, |m| m.deferred(&bead, ask));
+                    this.schedule_return(cx);
+                }
+                Err(err) => this.notice(format!("not put aside: {err}"), cx),
+            },
+        );
+    }
+
+    /// Declines the ask with words: not a pick and not "you decide".
+    fn send_decline(&mut self, bead: String, ask: u64, words: String, cx: &mut Context<Self>) {
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.ask_words.remove(&(bead.clone(), ask));
+        self.declining = None;
+        self.notice(String::new(), cx);
+        let (call_bead, call_words) = (bead.clone(), words.clone());
+        self.ask(
+            cx,
+            move |client, me| client.decline_ask(&call_bead, ask, &call_words, me),
+            move |this, declined, cx| match declined {
+                Ok(()) => {
+                    this.change(cx, |m| m.declined(&bead, ask, &words));
+                    this.schedule_return(cx);
+                }
+                Err(err) => {
+                    this.line.update(cx, |line, cx| {
+                        let back = draft::rejoin(words.clone(), line.text().to_string());
+                        line.set_text(&back, cx);
+                    });
+                    this.notice(format!("not declined: {err}"), cx);
+                }
+            },
+        );
     }
 
     /// Attaches what was pasted or dropped to the draft for `with`. An
@@ -676,9 +984,161 @@ impl Footplate {
         window.focus(&focus);
     }
 
-    /// One key marks one notice read, on the open yard row.
+    /// One key marks one notice read, on the open yard row; on a card `x`
+    /// puts the ask aside.
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
-        self.change(cx, |m| m.dismiss());
+        if self.model.as_ref().and_then(|m| m.selected()) == Some(&Selected::Yard) {
+            self.change(cx, |m| m.dismiss());
+            return;
+        }
+        // Later takes no words: only an open ask, never one dealt with.
+        let current = self.model.as_ref().and_then(|m| m.current_ask());
+        if let Some((bead, ask)) = current {
+            self.send_later(bead, ask, cx);
+        }
+    }
+
+    /// A number key chooses an option of the open card.
+    fn pick(&mut self, option: u64, cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        self.declining = None;
+        self.change(cx, |m| {
+            m.choose(&bead, ask, option);
+            Vec::new()
+        });
+    }
+
+    /// The arrows choose an option of the open card, around the ends.
+    fn choice(&mut self, by: isize, cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        self.declining = None;
+        self.change(cx, |m| {
+            m.move_choice(&bead, ask, by);
+            Vec::new()
+        });
+    }
+
+    /// Decline asks for words and sends them: not a pick and not
+    /// "you decide". With words already typed they go at once; else the
+    /// next Enter sends what is typed, and esc leaves it.
+    fn decline(&mut self, _: &Decline, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.model.as_ref().and_then(|m| m.current_ask());
+        let Some((bead, ask)) = current else {
+            return;
+        };
+        let words = self.line.read(cx).text().trim().to_string();
+        if !words.is_empty() {
+            return self.send_decline(bead, ask, words, cx);
+        }
+        self.declining = Some((bead, ask));
+        self.shown(cx);
+        window.focus(&self.line.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// One key expands the card in place to the bead's body, notes and
+    /// about-beads, or folds it again.
+    fn expand(&mut self, _: &Expand, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        self.change(cx, |m| {
+            m.toggle_expand(&bead, ask);
+            Vec::new()
+        });
+    }
+
+    /// The line has the words: `i` types them in, where a number key picks.
+    fn focus_words(&mut self, _: &FocusWords, window: &mut Window, cx: &mut Context<Self>) {
+        if self.card().is_none() {
+            return;
+        }
+        window.focus(&self.line.focus_handle(cx));
+    }
+
+    /// Esc leaves what it can: a decline asked for words, the words for
+    /// the card's keys, the pick, then the words.
+    fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
+        if self.declining.take().is_some() {
+            self.shown(cx);
+            window.focus(&self.focus.clone());
+            cx.notify();
+            return;
+        }
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        if self.line.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus.clone());
+            return;
+        }
+        // The window holds the keys: first the pick, then the words.
+        let chosen = self
+            .model
+            .as_ref()
+            .and_then(|m| {
+                let now = chrono::Utc::now();
+                match m.selected() {
+                    Some(Selected::Decision(b)) => m
+                        .decision_detail(b, &now)
+                        .and_then(|d| d.asks.into_iter().find(|a| a.ask == ask))
+                        .map(|a| a.chosen),
+                    Some(Selected::Decided(b, a)) => m.decided_detail(b, *a).map(|d| d.chosen),
+                    _ => None,
+                }
+            })
+            .unwrap_or(0);
+        if chosen != 0 {
+            self.change(cx, |m| {
+                m.clear_choice(&bead, ask);
+                Vec::new()
+            });
+        } else if !self.line.read(cx).text().is_empty() {
+            self.line.update(cx, |line, cx| line.set_text("", cx));
+            self.ask_words.remove(&(bead, ask));
+        }
+    }
+
+    /// Makes the ask the bead's current one: the keys act on it. What is
+    /// typed stays with the ask it was typed in.
+    fn select_ask(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        let old = self.model.as_ref().and_then(|m| m.current_for(&bead));
+        if old == Some(ask) {
+            return;
+        }
+        let typed = self.line.read(cx).text().to_string();
+        if let Some(old) = old {
+            self.ask_words.insert((bead.clone(), old), typed);
+        }
+        self.change(cx, |m| {
+            m.select_ask(&bead, ask);
+            Vec::new()
+        });
+        let text = self.ask_words.remove(&(bead, ask)).unwrap_or_default();
+        self.line.update(cx, |line, cx| line.set_text(&text, cx));
+        self.declining = None;
+        self.shown(cx);
+    }
+
+    /// Clicks an option of any card of the open bead: it becomes current,
+    /// and the option is chosen.
+    fn pick_for(&mut self, bead: String, ask: u64, option: u64, cx: &mut Context<Self>) {
+        if self.model.as_ref().and_then(|m| m.current_for(&bead)) != Some(ask) {
+            self.select_ask(bead.clone(), ask, cx);
+        }
+        self.pick(option, cx);
+    }
+
+    /// Clicks a card's expand: the bead's body, notes and about-beads.
+    fn expand_for(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        self.change(cx, |m| {
+            m.toggle_expand(&bead, ask);
+            Vec::new()
+        });
     }
 
     fn toggle_decided(&mut self, cx: &mut Context<Self>) {
@@ -1130,11 +1590,11 @@ impl Footplate {
                 .talk_conversation(model, with, palette, cx)
                 .into_any_element(),
             Some(Selected::Yard) => self.talk_yard(model, palette).into_any_element(),
-            Some(Selected::Decision(bead)) => {
-                self.talk_decision(model, bead, palette).into_any_element()
-            }
+            Some(Selected::Decision(bead)) => self
+                .talk_decision(model, bead, palette, cx)
+                .into_any_element(),
             Some(Selected::Decided(bead, ask)) => self
-                .talk_decided(model, bead, *ask, palette)
+                .talk_decided(model, bead, *ask, palette, cx)
                 .into_any_element(),
             None => div()
                 .flex_1()
@@ -1354,7 +1814,17 @@ impl Footplate {
 
     /// A bead with open asks, as read-only text: the picking is the next
     /// bead's.
-    fn talk_decision(&self, model: &Model, bead: &str, palette: Palette) -> impl IntoElement {
+    /// A bead's open asks, each as its card: the question, the asker and
+    /// the recommendation, the context, the numbered options, the
+    /// recommended one with its why, a line for words, and the keys. One key
+    /// expands the card to the bead whole.
+    fn talk_decision(
+        &self,
+        model: &Model,
+        bead: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let now = chrono::Utc::now();
         let Some(detail) = model.decision_detail(bead, &now) else {
@@ -1386,23 +1856,21 @@ impl Footplate {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .track_scroll(&self.conversation)
+            .track_scroll(&self.decision)
             .p_4()
             .flex()
             .flex_col()
-            .gap_3()
-            .children(detail.asks.into_iter().map(|ask| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(ask.question))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(palette.faint)
-                            .child(format!("{} · {} waits", ask.asker, ask.waits)),
-                    )
-            }));
+            .gap_4();
+        let list = if !model.has_bead(bead) {
+            list.child(div().text_color(palette.faint).child("Reading the bead."))
+        } else {
+            list.children(
+                detail
+                    .asks
+                    .iter()
+                    .map(|ask| self.decision_card(&detail, ask, palette, cx)),
+            )
+        };
         pane.child(head)
             .child(list)
             .when(!model.notice.is_empty(), |el| {
@@ -1417,13 +1885,185 @@ impl Footplate {
             })
     }
 
-    /// One dealt with, as read-only text.
+    /// One card of an open bead, in the order the bead asks for: the
+    /// question; the asker and the recommendation; the context; the numbered
+    /// options; the recommended one with its why; a line for words; the
+    /// keys. Only the current one takes the keys and the line.
+    fn decision_card(
+        &self,
+        detail: &DecisionDetail,
+        ask: &DecisionAsk,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bead_id = detail.bead.clone();
+        let ask_seq = ask.ask;
+        let current = ask.current;
+        let mut card = div().flex().flex_col().gap_2();
+        // The question, with the bead small and how long it waits.
+        let short = detail
+            .bead
+            .rsplit('-')
+            .next()
+            .unwrap_or(detail.bead.as_str());
+        card = card.child(
+            div()
+                .flex()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(ask.question.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child(format!("{short} · {}", ask.waits)),
+                ),
+        );
+        // The asker and the recommendation.
+        let asker = if ask.recommend_label.is_empty() {
+            format!("asked by {} · no recommendation", ask.asker)
+        } else {
+            format!(
+                "asked by {} · recommends: {}",
+                ask.asker, ask.recommend_label
+            )
+        };
+        card = card.child(div().text_sm().text_color(palette.faint).child(asker));
+        // The context lines.
+        for line in &ask.context {
+            card = card.child(div().child(line.clone()));
+        }
+        // The options numbered, each with its consequence, `you decide`
+        // last as the yard lists it.
+        if ask.options.is_empty() {
+            card = card.child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("words wanted"),
+            );
+        } else {
+            for option in &ask.options {
+                let marker = if option.number == ask.chosen {
+                    "●"
+                } else {
+                    "○"
+                };
+                let text = format!(
+                    "{} {}. {} — {}",
+                    marker, option.number, option.label, option.consequence
+                );
+                let n = option.number;
+                let bead_click = bead_id.clone();
+                card = card.child(
+                    div()
+                        .id(SharedString::from(format!("pick {bead_id} {ask_seq} {n}")))
+                        .cursor_pointer()
+                        .rounded_md()
+                        .when(n == ask.chosen, |el| el.bg(palette.open))
+                        .when(n != ask.chosen, |el| {
+                            el.hover(|style| style.bg(palette.hover))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pick_for(bead_click.clone(), ask_seq, n, cx)
+                        }))
+                        .child(text),
+                );
+            }
+            // The recommended one with its why.
+            if ask.recommend != 0 {
+                card = card.child(
+                    div()
+                        .text_sm()
+                        .child(format!("recommended: {}, {}", ask.recommend, ask.why)),
+                );
+            }
+        }
+        // Decline is not a pick, and not "you decide".
+        card = card.child(
+            div()
+                .text_sm()
+                .text_color(palette.faint)
+                .child("Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."),
+        );
+        if current {
+            // A line for words.
+            let focus = self.line.focus_handle(cx);
+            card = card.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        window.focus(&focus);
+                        window.prevent_default();
+                    })
+                    .child(self.line.clone()),
+            );
+            // The keys. Enter with nothing chosen and a recommendation picks
+            // it, and says so.
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(decision_keys(ask)),
+            );
+        } else {
+            let bead_click = bead_id.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("current {bead_id} {ask_seq}")))
+                    .text_sm()
+                    .text_color(palette.accent)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_ask(bead_click.clone(), ask_seq, cx)
+                    }))
+                    .child("decide this one"),
+            );
+        }
+        // One key expands the card in place.
+        let expand_label = if ask.expanded { "fold" } else { "expand" };
+        let bead_click = bead_id.clone();
+        card = card.child(
+            div()
+                .id(SharedString::from(format!("expand {bead_id} {ask_seq}")))
+                .text_sm()
+                .text_color(palette.faint)
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.expand_for(bead_click.clone(), ask_seq, cx)
+                }))
+                .child(format!("{expand_label} (e)")),
+        );
+        if ask.expanded {
+            card = card.child(self.expanded_body(
+                &detail.body,
+                &detail.notes,
+                &ask.about,
+                &detail.doc,
+                palette,
+            ));
+        }
+        card
+    }
+
+    /// One dealt with: the pick with the same options to pick again from
+    /// there, and the same full bead one key away.
     fn talk_decided(
         &self,
         model: &Model,
         bead: &str,
         ask: u64,
         palette: Palette,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let Some(detail) = model.decided_detail(bead, ask) else {
@@ -1455,11 +2095,13 @@ impl Footplate {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .track_scroll(&self.conversation)
+            .track_scroll(&self.decision)
             .p_4()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_2();
+        // The question, and whose it was with what was decided.
+        body = body
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -1483,6 +2125,99 @@ impl Footplate {
                 model::clock(&detail.return_at, &chrono::Local)
             )));
         }
+        if !model.has_bead(bead) {
+            body = body.child(div().text_color(palette.faint).child("Reading the bead."));
+        } else {
+            // The context, the options to pick again, the recommendation.
+            for line in &detail.context {
+                body = body.child(div().child(line.clone()));
+            }
+            if detail.options.is_empty() {
+                body = body.child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("words wanted"),
+                );
+            } else {
+                for option in &detail.options {
+                    let marker = if option.number == detail.chosen {
+                        "●"
+                    } else {
+                        "○"
+                    };
+                    let text = format!(
+                        "{} {}. {} — {}",
+                        marker, option.number, option.label, option.consequence
+                    );
+                    let n = option.number;
+                    let bead_click = bead.to_string();
+                    body = body.child(
+                        div()
+                            .id(SharedString::from(format!("pick {bead} {ask} {n}")))
+                            .cursor_pointer()
+                            .rounded_md()
+                            .when(n == detail.chosen, |el| el.bg(palette.open))
+                            .when(n != detail.chosen, |el| {
+                                el.hover(|style| style.bg(palette.hover))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| this.pick(n, cx)))
+                            .child(text),
+                    );
+                    let _ = bead_click;
+                }
+                if detail.recommend != 0 {
+                    body = body.child(
+                        div()
+                            .text_sm()
+                            .child(format!("recommended: {}, {}", detail.recommend, detail.why)),
+                    );
+                }
+            }
+            // A line for words with the later pick.
+            let focus = self.line.focus_handle(cx);
+            body = body.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        window.focus(&focus);
+                        window.prevent_default();
+                    })
+                    .child(self.line.clone()),
+            );
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(decided_keys(&detail)),
+            );
+            let expand_label = if detail.expanded { "fold" } else { "expand" };
+            let bead_click = bead.to_string();
+            body = body.child(
+                div()
+                    .id(SharedString::from(format!("expand {bead} {ask}")))
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.expand_for(bead_click.clone(), ask, cx)
+                    }))
+                    .child(format!("{expand_label} (e)")),
+            );
+            if detail.expanded {
+                body = body.child(self.expanded_body(
+                    &detail.body,
+                    &detail.notes,
+                    &detail.about,
+                    &detail.doc,
+                    palette,
+                ));
+            }
+        }
         pane.child(head)
             .child(body)
             .when(!model.notice.is_empty(), |el| {
@@ -1496,6 +2231,68 @@ impl Footplate {
                 )
             })
     }
+
+    /// The bead whole, expanded in place: its body, notes and about-beads.
+    /// A design bead's document is named by path and branch, not fetched.
+    fn expanded_body(
+        &self,
+        body: &str,
+        notes: &[model::CardNote],
+        about: &[crate::api::AboutBead],
+        doc: &str,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let mut out = div().flex().flex_col().gap_2();
+        if !body.is_empty() {
+            out = out
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(palette.faint)
+                        .child("body"),
+                )
+                .child(div().child(body.to_string()));
+        }
+        if !notes.is_empty() {
+            out = out.child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette.faint)
+                    .child("notes"),
+            );
+            for note in notes {
+                out = out.child(div().child(format!("{}: {}", note.author, note.text)));
+            }
+        }
+        if !about.is_empty() {
+            out = out.child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette.faint)
+                    .child("about"),
+            );
+            for bead in about {
+                let line = if bead.title.is_empty() {
+                    format!("{} · {}", bead.id, bead.stage)
+                } else {
+                    format!("{} · {} · {}", bead.id, bead.title, bead.stage)
+                };
+                out = out.child(div().child(line));
+            }
+        }
+        if !doc.is_empty() {
+            out = out.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(format!("document: {doc}")),
+            );
+        }
+        out
+    }
 }
 
 impl Focusable for Footplate {
@@ -1507,9 +2304,16 @@ impl Focusable for Footplate {
 impl Render for Footplate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(window.appearance());
-        let context = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
-            Some(_) => CONTEXT,
-            None => NO_LINE_CONTEXT,
+        // On a card the window holds the keys to pick with, and the line to
+        // type words in: with the focus in the line those keys are text.
+        let context = match self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            Some(Selected::Conversation(_)) => CONTEXT,
+            Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
+                if self.line.focus_handle(cx).is_focused(window) =>
+            {
+                CONTEXT
+            }
+            _ => NO_LINE_CONTEXT,
         };
         let root = div()
             .key_context(context)
@@ -1518,6 +2322,22 @@ impl Render for Footplate {
             .on_action(cx.listener(|this, _: &Previous, window, cx| this.step(-1, window, cx)))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(|this, _: &Pick1, _, cx| this.pick(1, cx)))
+            .on_action(cx.listener(|this, _: &Pick2, _, cx| this.pick(2, cx)))
+            .on_action(cx.listener(|this, _: &Pick3, _, cx| this.pick(3, cx)))
+            .on_action(cx.listener(|this, _: &Pick4, _, cx| this.pick(4, cx)))
+            .on_action(cx.listener(|this, _: &Pick5, _, cx| this.pick(5, cx)))
+            .on_action(cx.listener(|this, _: &Pick6, _, cx| this.pick(6, cx)))
+            .on_action(cx.listener(|this, _: &Pick7, _, cx| this.pick(7, cx)))
+            .on_action(cx.listener(|this, _: &Pick8, _, cx| this.pick(8, cx)))
+            .on_action(cx.listener(|this, _: &Pick9, _, cx| this.pick(9, cx)))
+            .on_action(cx.listener(|this, _: &ChoiceUp, _, cx| this.choice(-1, cx)))
+            .on_action(cx.listener(|this, _: &ChoiceDown, _, cx| this.choice(1, cx)))
+            .on_action(cx.listener(|this, _: &Decide, _, cx| this.decide(cx)))
+            .on_action(cx.listener(Self::decline))
+            .on_action(cx.listener(Self::expand))
+            .on_action(cx.listener(Self::focus_words))
+            .on_action(cx.listener(Self::leave))
             // Files dropped anywhere on the window are for the draft of the
             // open conversation.
             .on_drop(
@@ -2461,5 +3281,260 @@ mod tests {
         cx.simulate_keystrokes("cmd-a cmd-c");
         assert_eq!(clipboard(cx).as_deref(), Some("Land it today."));
         assert_eq!(selected(&view, cx).as_deref(), Some("see"));
+    }
+
+    /// One bead with three open asks, oldest first: 3 and 4 with a
+    /// recommendation, 5 with none, for words alone.
+    fn asks_three() -> String {
+        json!({"result": {"open": [
+            {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+             "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+             "since": "2026-10-10T10:00:00Z"},
+            {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+             "ask": 4, "question": "Send them to build?", "asker": "yardmaster",
+             "since": "2026-10-10T11:00:00Z"},
+            {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+             "ask": 5, "question": "Close sketch PR #3?", "asker": "assembly",
+             "since": "2026-10-10T11:30:00Z"}
+        ], "decided": []}})
+        .to_string()
+    }
+
+    fn bead_three() -> String {
+        let three = json!({
+            "ask": 3, "to": "jo", "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z",
+            "question": "Move them now?",
+            "context": ["The links file declares the new source.", "The move was tested."],
+            "options": [
+                {"label": "Move them now", "consequence": "all 64 links point tonight"},
+                {"label": "After Friday", "consequence": "keep the old source"},
+                {"label": "You decide", "consequence": "leave it to yardmaster"}
+            ],
+            "recommend": 1, "why": "the test passed",
+            "about": [{"id": "yd-train", "title": "Release train", "stage": "new"}],
+            "state": "open"
+        });
+        let four = json!({
+            "ask": 4, "to": "jo", "asker": "yardmaster",
+            "since": "2026-10-10T11:00:00Z",
+            "question": "Send them to build?",
+            "context": ["Both beads are shaped."],
+            "options": [
+                {"label": "Send them", "consequence": "both beads move tonight"},
+                {"label": "You decide", "consequence": "leave it to yardmaster"}
+            ],
+            "recommend": 1, "why": "both are shaped",
+            "state": "open"
+        });
+        let five = json!({
+            "ask": 5, "to": "jo", "asker": "assembly",
+            "since": "2026-10-10T11:30:00Z",
+            "question": "Close sketch PR #3?",
+            "context": ["The sketch landed yesterday."],
+            "options": [
+                {"label": "Close it", "consequence": "PR #3 closes"},
+                {"label": "You decide", "consequence": "leave it to assembly"}
+            ],
+            "state": "open"
+        });
+        json!({"result": {
+            "id": "bead-a", "title": "Move the links",
+            "body": "The body of bead-a.",
+            "stage": "new", "labels": ["topic:linear-out"],
+            "notes": [{"seq": 2, "kind": "note", "author": "yardmaster",
+                       "text": "the test passed", "at": "2026-10-10T09:30:00Z"}],
+            "asks": [three, four, five]
+        }})
+        .to_string()
+    }
+
+    fn chosen_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        bead: &str,
+        ask: u64,
+    ) -> u64 {
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let now = chrono::Utc::now();
+            model
+                .decision_detail(bead, &now)
+                .unwrap()
+                .asks
+                .into_iter()
+                .find(|a| a.ask == ask)
+                .unwrap()
+                .chosen
+        })
+    }
+
+    fn has_bead(view: &Entity<Footplate>, cx: &mut VisualTestContext, bead: &str) -> bool {
+        view.read_with(cx, |v, _| v.model.as_ref().unwrap().has_bead(bead))
+    }
+
+    fn expanded_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        bead: &str,
+        ask: u64,
+    ) -> bool {
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let now = chrono::Utc::now();
+            model
+                .decision_detail(bead, &now)
+                .unwrap()
+                .asks
+                .into_iter()
+                .find(|a| a.ask == ask)
+                .unwrap()
+                .expanded
+        })
+    }
+
+    fn current_ask_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> u64 {
+        view.read_with(cx, |v, _| {
+            v.model.as_ref().unwrap().current_ask().unwrap().1
+        })
+    }
+
+    #[gpui::test]
+    fn the_card_picks_with_words_puts_aside_declines_and_expands(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        yard.answer("AddNote", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        // The bead opens on its oldest ask, and the bead is read.
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        assert_eq!(current_ask_of(&view, cx), 3);
+        cx.run_until_parked();
+
+        // A number key chooses; Enter sends the pick. The line starts
+        // focused, so esc holds the window's keys first.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("2");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pick", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-a", "ask": 3, "option": 2, "actor": "jo"})]
+        });
+        // The ask moves to Decided at once in the model; the queue's next
+        // read is the yard's stale answer in this test, which brings it
+        // back. What matters here is the write.
+        cx.run_until_parked();
+
+        // A pick with words on the next ask: choose, type them in, Enter
+        // sends the one answer.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 4, cx));
+        assert_eq!(current_ask_of(&view, cx), 4);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("1");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 4), 1);
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("send them tonight");
+        assert_eq!(typed(&view, cx), "send them tonight");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pick with words", |_| {
+            yard.asked("AnswerAsk").last()
+                == Some(&json!({"bead": "bead-a", "ask": 4, "option": 1,
+                                "words": "send them tonight", "actor": "jo"}))
+        });
+        assert_eq!(typed(&view, cx), "");
+        cx.run_until_parked();
+
+        // Words with no option chosen and no recommendation go as a plain
+        // note; the ask stays open.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 5, cx));
+        assert_eq!(current_ask_of(&view, cx), 5);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("what about the docs links?");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the note", |_| {
+            yard.asked("AddNote")
+                == [json!({"bead": "bead-a", "text": "what about the docs links?", "actor": "jo"})]
+        });
+        assert_eq!(current_ask_of(&view, cx), 5);
+        assert_eq!(typed(&view, cx), "");
+
+        // `x` puts it aside.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("x");
+        wait(cx, "put aside", |_| {
+            yard.asked("DeferAsk") == [json!({"bead": "bead-a", "ask": 5, "actor": "jo"})]
+        });
+        cx.run_until_parked();
+
+        // Decline with words already typed goes at once.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("not mine to take");
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("d");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk")
+                == [json!({"bead": "bead-a", "ask": 3, "words": "not mine to take", "actor": "jo"})]
+        });
+        cx.run_until_parked();
+
+        // Decline with an empty line asks for words: the next Enter sends
+        // them.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 4, cx));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("d");
+        cx.simulate_input("the greeting can wait");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "declined after asking", |_| {
+            yard.asked("DeclineAsk").last()
+                == Some(
+                    &json!({"bead": "bead-a", "ask": 4, "words": "the greeting can wait", "actor": "jo"}),
+                )
+        });
+        cx.run_until_parked();
+
+        // One key expands the card to the bead whole, and folds it again.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        assert!(!expanded_of(&view, cx, "bead-a", 3));
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        // The window draws the expanded card and stays.
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("e");
+        assert!(!expanded_of(&view, cx, "bead-a", 3));
+
+        // The arrows choose around the ends, even while words are typed.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("tonight?");
+        cx.simulate_keystrokes("down");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 1);
+        cx.simulate_keystrokes("up");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 3);
+        assert_eq!(typed(&view, cx), "tonight?");
     }
 }

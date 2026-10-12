@@ -64,6 +64,7 @@ JSON object a line. `src/api.rs` is the whole client.
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
 | `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
+| `Bead` | the open bead whole: each ask's options, recommendation and words, the body, notes and about-beads |
 | `Conversation` | the mail both ways with the one whose row is open |
 | `GET /blobs/<hash>` | an image a mail of the open conversation carries, once for each hash |
 
@@ -72,15 +73,20 @@ JSON object a line. `src/api.rs` is the whole client.
 | `Mail` | Enter, in a conversation with a crew member |
 | `PutBlob` for each image, then `Mail` with their hashes | Enter, when images are attached to the draft |
 | `MailPeer` | Enter, in a conversation with one of a linked yard; after `PutBlob` for each image, with their hashes |
+| `AnswerAsk` | Enter, on a card: the option chosen, with the line's words in the one answer; an ask with no options is answered with words |
+| `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
+| `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
+| `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide" |
 | `AckUserInbox` | a conversation showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read |
 
 It follows the stream and asks nothing of the yard in a loop: `mail`,
 `mail_read`, `notifications_read` and `crew_status` are applied as they
 come, the crew is read again on the other `crew_*` events, the linked
-yards on `peer_*`, the notices on an event that notified the user, and
-the queue on every `noted` event and once more at each put-aside ask's
-return.
+yards on `peer_*`, the notices on an event that notified the user, the
+queue on every `noted` event and once more at each put-aside ask's
+return, and a bead shown on every event whose bead it is. Mail and
+notices arriving never cover or move the open card.
 
 **Who you are** is not typed. The window acts as `yardr chat` does: as the
 user named in `$YARDR_ACTOR`, else as your login name, when the yard has a
@@ -158,11 +164,27 @@ notices you have not read. Right, what is open: a conversation, oldest at
 the top and the newest in view, with a line under your own mail that says
 where it stands (`read`, `sent; yardmaster is idle`, `queued for north:
 …`) and the line to write in; the notices, oldest first; or a bead's open
-asks as read-only text, the picking still to come.
+asks, each as its card.
+
+A card shows, in this order: the question; the asker and the recommendation;
+the context; the options numbered, each with its consequence, `you decide`
+last; the recommended one with its why; a line for words; the keys. A number
+key or the arrows choose an option; Enter sends the pick with the line's
+words in the one answer, or the recommended option when none is chosen, as
+the keys say. Words with no option chosen and none recommended go as a plain
+note, and the ask stays open; an ask with no options says "words wanted",
+and Enter sends the words as the answer. `x` puts the ask aside, to come
+back as the yard says. `d` declines it with words, which is not a pick and
+not "you decide". `e` expands the card in place to the bead's body, notes
+and about-beads; a design bead's document is named by path and branch, not
+fetched. After a pick the ask moves to "Decided" at once, and a later pick
+on it from there replaces the earlier one. The window holds the card's keys,
+`i` types the words in, `esc` holds the keys again. What is typed stays with
+its ask, as a draft stays with its conversation.
 
 | Key | Does |
 |---|---|
-| `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open |
+| `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
 | `cmd+v` (`ctrl+v` on Linux) | pastes text into the line; an image is attached to the draft |
 | a drag over a message's text, a double click on a word | selects it; one selection at a time, within one message |
 | `cmd+c` (`ctrl+c` on Linux) | copies what is selected: of a message, or of the line while you type in it |
@@ -171,15 +193,21 @@ asks as read-only text, the picking still to come.
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
 | a click on "Decided" | folds it open, shut |
+| `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed |
+| `i`, on a card | types the words in; the window holds the card's keys |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
+| `x`, on an open card | puts the ask aside |
+| `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them |
+| `e`, on a card | expands it to the bead whole, or folds it again |
+| `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words |
+| a click on an option, on "decide this one" | chooses it; makes the ask current |
 | `cmd+q` (`ctrl+q` on Linux) | quits; so does closing the window |
 
-Not in this slice, and in `yardr chat`: picking an option, putting aside
-and declining (the open row shows the questions as read-only text), a crew
-member's pane, and a text of several lines or longer than one mail (4096
-bytes): the line is one line, and a longer text is refused with its size,
-not split. Nor here: saving an image to disk, resizing one that is over
-the cap, or sending files that are no image.
+Not in this slice, and in `yardr chat`: a crew member's pane, and a text
+of several lines or longer than one mail (4096 bytes): the line is one
+line, and a longer text is refused with its size, not split. Nor here:
+saving an image to disk, resizing one that is over the cap, or sending
+files that are no image.
 
 ## The icon
 

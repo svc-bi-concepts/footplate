@@ -326,6 +326,97 @@ pub struct Asks {
     pub decided: Vec<DecidedAsk>,
 }
 
+/// One option of an ask, in order, `you decide` last.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct AskOption {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub consequence: String,
+}
+
+/// One bead an ask is about, a step away from the card.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct AboutBead {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub stage: String,
+}
+
+/// One of the bead's asks with its options, recommendation and state.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct BeadAsk {
+    #[serde(default)]
+    pub ask: u64,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub asker: String,
+    #[serde(default)]
+    pub since: String,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub context: Vec<String>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub options: Vec<AskOption>,
+    /// The recommended option's number; 0 when nothing is recommended.
+    #[serde(default)]
+    pub recommend: u64,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub about: Vec<AboutBead>,
+    /// `open`, `answered`, `put aside` or `declined`.
+    #[serde(default)]
+    pub state: String,
+    /// The picked option's number; 0 until one is picked.
+    #[serde(default)]
+    pub option: u64,
+    #[serde(default)]
+    pub words: String,
+    #[serde(default)]
+    pub return_at: String,
+}
+
+/// One of the bead's notes as a client shows them: every note but the
+/// asks and answers, which [`BeadAsk`] carries folded into their ask.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct BeadNote {
+    #[serde(default)]
+    pub seq: u64,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub at: String,
+}
+
+/// One bead whole: body, stage, labels, notes and its asks.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Bead {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub labels: Vec<String>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub notes: Vec<BeadNote>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub asks: Vec<BeadAsk>,
+}
+
 /// One event of the stream. `data` depends on the kind, and a client passes
 /// over a kind or a field it does not know.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -492,6 +583,59 @@ impl Client {
     /// dealt with beside them.
     pub fn user_asks(&self, name: &str) -> Result<Asks> {
         self.answer("UserAsks", json!({ "name": name }))
+    }
+
+    /// One bead whole: body, stage, labels, notes, its asks with their
+    /// options, recommendation and state, and the about-beads.
+    pub fn bead(&self, bead: &str) -> Result<Bead> {
+        self.answer("Bead", json!({ "bead": bead }))
+    }
+
+    /// Picks an option with words alongside, or answers an ask with no
+    /// options with words (`option` 0). Words alone on an ask with options
+    /// are refused, and go as a plain note instead.
+    pub fn answer_ask(
+        &self,
+        bead: &str,
+        ask: u64,
+        option: u64,
+        words: &str,
+        actor: &str,
+    ) -> Result<()> {
+        let mut args = json!({ "bead": bead, "ask": ask, "option": option, "actor": actor });
+        if !words.is_empty() {
+            args["words"] = json!(words);
+        }
+        self.call("AnswerAsk", args).map(drop)
+    }
+
+    /// Puts the ask aside: it leaves the queue and comes back as the yard
+    /// says.
+    pub fn defer_ask(&self, bead: &str, ask: u64, actor: &str) -> Result<()> {
+        self.call(
+            "DeferAsk",
+            json!({ "bead": bead, "ask": ask, "actor": actor }),
+        )
+        .map(drop)
+    }
+
+    /// Ends the ask with no option picked: the person will not decide it.
+    pub fn decline_ask(&self, bead: &str, ask: u64, words: &str, actor: &str) -> Result<()> {
+        self.call(
+            "DeclineAsk",
+            json!({ "bead": bead, "ask": ask, "words": words, "actor": actor }),
+        )
+        .map(drop)
+    }
+
+    /// Puts a plain note on the bead. Words about a question with no
+    /// option chosen go here, and leave the ask open.
+    pub fn add_note(&self, bead: &str, text: &str, actor: &str) -> Result<()> {
+        self.call(
+            "AddNote",
+            json!({ "bead": bead, "text": text, "actor": actor }),
+        )
+        .map(drop)
     }
 
     /// Sends mail to a crew member or a user of this yard, with the images
@@ -1058,6 +1202,119 @@ mod tests {
             ("answered", 1, "Send them")
         );
         assert_eq!(asks.decided[1].return_at, "2026-10-10T09:30:00Z");
+    }
+
+    #[test]
+    fn bead_whole_with_options_recommendation_and_state() {
+        let yard = Yard::start();
+        yard.answer(
+            "Bead",
+            r#"{"result": {
+                "id": "yd-links", "title": "Move the links",
+                "body": "The links file declares the new source.",
+                "stage": "new", "labels": ["topic:linear-out"],
+                "notes": [
+                    {"seq": 2, "kind": "note", "author": "yardmaster",
+                     "text": "the test passed on a copy", "at": "2026-10-08T09:30:00Z"}
+                ],
+                "asks": [
+                    {"ask": 3, "to": "jo", "asker": "yardmaster",
+                     "since": "2026-10-08T09:30:00Z",
+                     "question": "Move this yard's links to the declared source now?",
+                     "context": ["The links file declares the new source."],
+                     "options": [
+                        {"label": "Move them now", "consequence": "all 64 links point at the new source tonight"},
+                        {"label": "You decide", "consequence": "leave it to yardmaster"}
+                     ],
+                     "recommend": 1, "why": "the test passed",
+                     "about": [{"id": "yd-train", "title": "Release train", "stage": "new"}],
+                     "state": "open"},
+                    {"ask": 5, "to": "jo", "asker": "yardmaster",
+                     "since": "2026-10-08T09:30:00Z",
+                     "question": "What tone?", "context": ["the greeting is new."],
+                     "options": [], "state": "open"}
+                ]}}"#,
+        );
+        let bead = yard.client().bead("yd-links").unwrap();
+        assert_eq!(yard.asked("Bead"), vec![json!({"bead": "yd-links"})]);
+        assert_eq!(
+            (bead.id.as_str(), bead.title.as_str()),
+            ("yd-links", "Move the links")
+        );
+        assert_eq!(bead.labels, ["topic:linear-out"]);
+        assert_eq!(bead.notes.len(), 1);
+        assert_eq!(bead.notes[0].author, "yardmaster");
+        assert_eq!(bead.asks.len(), 2);
+        let ask = &bead.asks[0];
+        assert_eq!(ask.options.len(), 2);
+        assert_eq!(ask.options[1].label, "You decide");
+        assert_eq!((ask.recommend, ask.why.as_str()), (1, "the test passed"));
+        assert_eq!(ask.about[0].id, "yd-train");
+        assert_eq!(ask.state, "open");
+        // An ask with no options wants words.
+        assert!(bead.asks[1].options.is_empty());
+        assert_eq!(bead.asks[1].recommend, 0);
+    }
+
+    #[test]
+    fn null_where_a_bead_lists_are_promised_is_no_lists() {
+        let yard = Yard::start();
+        yard.answer(
+            "Bead",
+            r#"{"result": {"id": "yd-links", "title": "t", "body": "", "stage": "new",
+                "labels": null, "notes": null, "asks": null}}"#,
+        );
+        let bead = yard.client().bead("yd-links").unwrap();
+        assert_eq!(bead.labels, Vec::<String>::new());
+        assert_eq!(bead.notes, vec![]);
+        assert_eq!(bead.asks, vec![]);
+    }
+
+    #[test]
+    fn answer_defer_decline_and_note_write_what_they_are_given() {
+        let yard = Yard::start();
+        yard.answer("AnswerAsk", "{}");
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        yard.answer("AddNote", "{}");
+        let client = yard.client();
+        // A pick with words in the one answer.
+        client
+            .answer_ask("yd-links", 3, 1, "move them tonight", "jo")
+            .unwrap();
+        // A pick alone sends no words.
+        client.answer_ask("yd-links", 3, 2, "", "jo").unwrap();
+        // Words answer an ask with no options.
+        client.answer_ask("yd-greet", 5, 0, "warmly", "jo").unwrap();
+        assert_eq!(
+            yard.asked("AnswerAsk"),
+            vec![
+                json!({"bead": "yd-links", "ask": 3, "option": 1, "words": "move them tonight", "actor": "jo"}),
+                json!({"bead": "yd-links", "ask": 3, "option": 2, "actor": "jo"}),
+                json!({"bead": "yd-greet", "ask": 5, "option": 0, "words": "warmly", "actor": "jo"}),
+            ]
+        );
+        client.defer_ask("yd-links", 4, "jo").unwrap();
+        assert_eq!(
+            yard.asked("DeferAsk"),
+            vec![json!({"bead": "yd-links", "ask": 4, "actor": "jo"})]
+        );
+        client
+            .decline_ask("yd-greet", 5, "the greeting can wait", "jo")
+            .unwrap();
+        assert_eq!(
+            yard.asked("DeclineAsk"),
+            vec![
+                json!({"bead": "yd-greet", "ask": 5, "words": "the greeting can wait", "actor": "jo"})
+            ]
+        );
+        client
+            .add_note("yd-greet", "the newcomer arrives Monday", "jo")
+            .unwrap();
+        assert_eq!(
+            yard.asked("AddNote"),
+            vec![json!({"bead": "yd-greet", "text": "the newcomer arrives Monday", "actor": "jo"})]
+        );
     }
 
     #[test]
