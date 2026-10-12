@@ -3495,7 +3495,7 @@ mod tests {
         peer.trust.insert("jo".into(), "assembly".into());
         state.peers.push(peer);
 
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Some(Selected::Conversation("yardmaster".into())));
         assert!(!names(&m).contains(&"jo@airy".to_string()));
         assert_eq!(m.unread("assembly"), 1);
         assert_eq!(m.unread("jo@airy"), 0);
