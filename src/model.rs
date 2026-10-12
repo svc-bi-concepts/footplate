@@ -338,6 +338,10 @@ pub struct Model {
     crew: Vec<CrewMember>,
     parties: Vec<Party>,
     selected: Option<Selected>,
+    /// The conversation that was open last: the one opened again when the
+    /// open row is gone, so that a decision dealt with leads back to where
+    /// it was opened from.
+    back: Option<String>,
     /// The conversations by whom they are with, each in order of seq, and
     /// those the yard was asked for whole.
     convo: HashMap<String, Vec<Letter>>,
@@ -414,6 +418,17 @@ impl Model {
             .or_else(|| order.into_iter().next());
         m.opened();
         let effects = m.open();
+        (m, effects)
+    }
+
+    /// The model of a state read again after the yard was lost: what was
+    /// open stays open as in [`Model::new`], and the conversation to come
+    /// back to from a decision stays that one.
+    pub fn resumed(&self, state: State) -> (Model, Vec<Effect>) {
+        let (mut m, effects) = Model::new(state, self.selected.clone());
+        if m.back.is_none() {
+            m.back = self.back.clone();
+        }
         (m, effects)
     }
 
@@ -1160,7 +1175,8 @@ impl Model {
         self.select(order[next].clone())
     }
 
-    /// What opening a conversation does here: the unread mail in it is seen.
+    /// What opening a conversation does here: the unread mail in it is
+    /// seen, and it is the one to come back to.
     fn opened(&mut self) {
         let Some(Selected::Conversation(sel)) = &self.selected else {
             return;
@@ -1168,6 +1184,7 @@ impl Model {
         for w in self.unread.values_mut().filter(|w| &w.from == sel) {
             w.seen = true;
         }
+        self.back = Some(sel.clone());
     }
 
     /// Reads the open conversation if it was not read before, and
@@ -1414,8 +1431,8 @@ impl Model {
     }
 
     /// The crew as read at `head`. A status the stream told of since is
-    /// newer than the read and stays. When the open row is gone the first
-    /// from the top is opened.
+    /// newer than the read and stays. When the open row is gone the
+    /// conversation open last is opened, else the first from the top.
     pub fn listed(&mut self, head: u64, mut crew: Vec<CrewMember>) -> Vec<Effect> {
         for r in crew.iter_mut().filter(|r| r.state == "running") {
             if let Some(old) = self.member(&r.name)
@@ -1466,7 +1483,8 @@ impl Model {
     }
 
     /// The queue as read again. When the open bead or the open dealt with
-    /// is gone the first row from the top is opened. A bead no longer in
+    /// is gone the conversation open last is opened, else the first row
+    /// from the top. A bead no longer in
     /// the queue leaves what the cards kept of it; the open bead is read
     /// when it is not yet.
     pub fn asks(&mut self, asks: Asks) -> Vec<Effect> {
@@ -1507,12 +1525,21 @@ impl Model {
             .min()
     }
 
+    /// When the open row is gone, opens the conversation that was open
+    /// last: a decision picked, put aside, declined or answered elsewhere
+    /// leads back to where it was opened from. With none before it, or
+    /// when that one is gone too, the first row from the top is opened.
     fn reselect(&mut self) -> Vec<Effect> {
         let order = self.order();
         if self.selected.as_ref().is_some_and(|s| order.contains(s)) {
             return Vec::new();
         }
-        self.selected = order.into_iter().next();
+        self.selected = self
+            .back
+            .clone()
+            .map(Selected::Conversation)
+            .filter(|s| order.contains(s))
+            .or_else(|| order.into_iter().next());
         self.opened();
         self.open()
     }
@@ -3025,6 +3052,126 @@ mod tests {
             decided: vec![],
         });
         assert_eq!(m.selected_conversation(), Some("assembly"));
+    }
+
+    /// The evening's asks with the window opened on a conversation, as
+    /// after the yard was lost and is back.
+    fn evening_from(conversation: &str) -> Model {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (m, _) = Model::new(state, Some(Selected::Conversation(conversation.into())));
+        assert_eq!(m.selected_conversation(), Some(conversation));
+        m
+    }
+
+    #[test]
+    fn a_decision_dealt_with_leads_back_to_the_conversation_open_before_it() {
+        // Picked: `yardmaster` is not the first row, nor the first
+        // conversation; the next decision is.
+        let mut m = evening_from("yardmaster");
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        let effects = m.picked("yardr-n8ta", 3, 1, "");
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+        // The conversation is read as any that is opened, then the queue
+        // and the bead as after every pick.
+        assert_eq!(
+            effects,
+            [
+                read("yardmaster", 0),
+                Effect::Asks,
+                Effect::Bead {
+                    bead: "yardr-n8ta".into()
+                }
+            ]
+        );
+
+        // Put aside, and declined.
+        m.select(Selected::Decision("yardr-3msx".into()));
+        m.deferred("yardr-3msx", 4);
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+        m.select(Selected::Decision("yardr-9f2c".into()));
+        m.declined("yardr-9f2c", 5, "not mine to take");
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+
+        // Answered in another yard or by someone else: the queue read
+        // again no longer has the open bead.
+        m.select(Selected::Decision("yardr-7h11".into()));
+        m.asks(Asks {
+            open: vec![],
+            decided: vec![],
+        });
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+    }
+
+    #[test]
+    fn from_one_decision_after_another_it_is_the_conversation_before_the_first() {
+        let mut m = evening_from("yardmaster");
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        // By click, then by key to the next: neither is a conversation.
+        m.select(Selected::Decision("yardr-9f2c".into()));
+        m.step(-1);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+        m.picked("yardr-3msx", 4, 1, "");
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+
+        // The yard row and one dealt with in between are no conversation
+        // either.
+        m.select(Selected::Yard);
+        m.toggle_decided();
+        m.select(Selected::Decided("yardr-3msx".into(), 4));
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        m.deferred("yardr-n8ta", 3);
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+
+        // A conversation opened later is the one to come back to.
+        m.select(Selected::Conversation("clerk@north".into()));
+        m.select(Selected::Decision("yardr-9f2c".into()));
+        m.declined("yardr-9f2c", 5, "no");
+        assert_eq!(m.selected_conversation(), Some("clerk@north"));
+    }
+
+    #[test]
+    fn a_bead_with_an_ask_left_stays_open_after_a_pick() {
+        let mut state = yard(&[]);
+        let mut open = evening();
+        open[1].bead = "yardr-n8ta".into();
+        state.asks.open = open;
+        let (mut m, _) = Model::new(state, Some(Selected::Conversation("yardmaster".into())));
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        m.picked("yardr-n8ta", 3, 1, "");
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        m.picked("yardr-n8ta", 4, 1, "");
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+    }
+
+    #[test]
+    fn with_no_conversation_to_go_back_to_the_first_row_is_opened() {
+        // The window opened on a decision: the next decision is first.
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
+        m.picked("yardr-n8ta", 3, 1, "");
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+
+        // The conversation it was opened from is gone meanwhile.
+        let mut m = evening_from("clerk@north");
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        assert_eq!(m.linked(&[]), []);
+        m.picked("yardr-n8ta", 3, 1, "");
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+    }
+
+    #[test]
+    fn the_conversation_to_come_back_to_is_kept_when_the_yard_is_back() {
+        let mut m = evening_from("yardmaster");
+        m.select(Selected::Decision("yardr-3msx".into()));
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = m.resumed(state);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
+        m.picked("yardr-3msx", 4, 1, "");
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
     }
 
     fn option(label: &str, consequence: &str) -> AskOption {

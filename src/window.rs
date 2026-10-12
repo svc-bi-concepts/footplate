@@ -450,7 +450,10 @@ impl Footplate {
         match update {
             Update::Up(state) => {
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
-                let (model, effects) = Model::new(*state, open.clone());
+                let (model, effects) = match self.model.as_ref() {
+                    Some(before) => before.resumed(*state),
+                    None => Model::new(*state, None),
+                };
                 self.model = Some(model);
                 self.down = None;
                 self.turned(open, cx);
@@ -4363,6 +4366,62 @@ mod tests {
             short.size.width, long.size.width,
             "the head's column hugs its content instead of filling the row"
         );
+    }
+
+    #[gpui::test]
+    fn a_pick_leads_back_to_the_conversation_with_what_was_typed_in_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // One bead with one ask: the pick takes its row away.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"}
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        let open = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().and_then(|m| m.selected().cloned())
+            })
+        };
+        wait(cx, "the decision", |cx| {
+            open(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+
+        // The yardmaster's conversation is not the first row: assembly's is.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Conversation("yardmaster".into()), window, cx)
+        });
+        cx.simulate_input("half a thought");
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-a".into()), window, cx)
+        });
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("1");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pick", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-a", "ask": 3, "option": 1, "actor": "jo"})]
+        });
+        wait(cx, "the conversation again", |cx| {
+            open(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
+        });
+        assert_eq!(typed(&view, cx), "half a thought");
     }
 
     /// One bead with three open asks and one dealt with, for the buttons.
