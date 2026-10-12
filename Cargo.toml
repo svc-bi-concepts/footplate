@@ -24,6 +24,12 @@ async-channel = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Where a character ends, for the line that is typed in.
 unicode-segmentation = "1"
+# A yard that is not on this machine is reached over TLS, trusted by the
+# system's roots; socket2 sets the keepalive std has no call for. All three
+# are in gpui's tree already, rustls with ring as it is built there.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+socket2 = "0.6"
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on.

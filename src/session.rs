@@ -25,6 +25,9 @@ pub enum Update {
     Event(Event),
     /// It is not there, or not for this person: why, in words.
     Down(String),
+    /// It is there and does not let this device in: why, in words. The
+    /// yard is not asked again; the thread has ended.
+    Out(String),
 }
 
 /// Why there is nothing to show.
@@ -34,11 +37,31 @@ pub enum Trouble {
     /// The name the window runs as is no user of the yard, and the yard
     /// names no operator that is one.
     NoUser(String),
+    /// The yard at an address answered 401: the device was removed, or its
+    /// token is not that yard's. Trying again changes nothing.
+    NotLetIn,
+    /// Nothing answers at the yard's address.
+    Unreached(std::io::Error),
 }
 
 impl From<api::Error> for Trouble {
     fn from(err: api::Error) -> Self {
-        Trouble::Yard(err)
+        match err {
+            api::Error::NotLetIn => Trouble::NotLetIn,
+            err => Trouble::Yard(err),
+        }
+    }
+}
+
+impl Trouble {
+    /// The trouble as it is with the yard behind `client`: one at an
+    /// address has no socket, and no yardr command of this machine starts
+    /// it.
+    fn with(self, client: &Client) -> Trouble {
+        match self {
+            Trouble::Yard(api::Error::Down(err)) if client.is_remote() => Trouble::Unreached(err),
+            trouble => trouble,
+        }
     }
 }
 
@@ -51,6 +74,9 @@ impl fmt::Display for Trouble {
                     "No yard: nothing answers at the yard's socket ({err}). Any yardr command that reads the yard starts its server: yardr status"
                 )
             }
+            Trouble::Yard(api::Error::NoDevice) => f.write_str(
+                "Nothing of a yard is under /user/ at this address: the yard has no device any more, or the address is not a yard's listener. Pair this device again, with a code the yard's operator opens: yardr user device pair <user> <device>",
+            ),
             Trouble::Yard(err) => {
                 write!(f, "The yard is there, but footplate cannot read it: {err}")
             }
@@ -58,6 +84,15 @@ impl fmt::Display for Trouble {
                 write!(
                     f,
                     "{name} is no user of this yard, and the yard names no operator. The operator adds one: yardr user add {name}"
+                )
+            }
+            Trouble::NotLetIn => f.write_str(
+                "This device is no longer let in: the yard refuses its token. Its operator removed the device, or the token is not this yard's. Pair it again, with a code the operator opens: yardr user device pair <user> <device>",
+            ),
+            Trouble::Unreached(err) => {
+                write!(
+                    f,
+                    "No yard: nothing answers at the yard's address ({err}). Its listener, and what stands in front of it, are the yard's operator's to start."
                 )
             }
         }
@@ -102,7 +137,16 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     let head = client.head()?;
     let crew = client.crew()?;
     let peers = client.peers()?;
-    let user = who(client, name)?;
+    // At an address the token says who the window is for, and no name of
+    // this machine is asked after.
+    let yard = match client.is_remote() {
+        true => Some(client.me()?),
+        false => None,
+    };
+    let user = match &yard {
+        Some(me) => client.get_user(&me.user)?,
+        None => who(client, name)?,
+    };
     // The count first, then that many: a user's inbox lists the unread
     // before the read, and the read are not wanted here.
     let mut inbox = client.user_inbox(&user.name, 1)?;
@@ -122,13 +166,15 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         notification_cursor: user.notification_cursor,
         notifications,
         asks,
+        yard,
     })
 }
 
 /// Follows the yard until `tell` answers false (the window is gone): the
 /// state, then every event after it. When the stream ends the state is read
 /// again, so nothing in between is lost; when that fails the window is told
-/// why, and the yard is tried again after `retry`.
+/// why, and the yard is tried again after `retry`. A yard that does not let
+/// the device in is not tried again: the window is told, and this returns.
 pub fn follow(client: &Client, name: &str, retry: Duration, mut tell: impl FnMut(Update) -> bool) {
     loop {
         let trouble = match load(client, name) {
@@ -155,7 +201,11 @@ pub fn follow(client: &Client, name: &str, retry: Duration, mut tell: impl FnMut
                 thread::sleep(if heard { REPLACING_PAUSE } else { retry });
                 continue;
             }
-            Err(trouble) => trouble.to_string(),
+            Err(Trouble::NotLetIn) => {
+                tell(Update::Out(Trouble::NotLetIn.to_string()));
+                return;
+            }
+            Err(trouble) => trouble.with(client).to_string(),
         };
         if !tell(Update::Down(trouble)) {
             return;
@@ -296,6 +346,103 @@ mod tests {
         assert_eq!(yard.asked("UserAsks"), vec![json!({"name": "jo"})]);
     }
 
+    /// A yard at an address: the window is for the user its token is of,
+    /// nothing answering is said as it is there, and a device that is
+    /// removed is told once and never asked after again.
+    #[test]
+    fn a_device_that_is_removed_is_told_so_and_the_yard_is_not_asked_again() {
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn({
+            let client = yard.client();
+            // The login name of this machine is nobody there.
+            move || {
+                follow(&client, "mac-login", Duration::from_millis(20), |update| {
+                    tx.send(update).is_ok()
+                })
+            }
+        });
+        let wait = Duration::from_secs(10);
+        let Update::Up(state) = rx.recv_timeout(wait).unwrap() else {
+            panic!("the yard is there")
+        };
+        assert_eq!(state.me, "jo");
+        assert_eq!(state.yard.as_ref().unwrap().said_by, "laptop");
+        assert_eq!(yard.asked("GetUser"), vec![json!({"name": "jo"})]);
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        assert!(matches!(rx.recv_timeout(wait).unwrap(), Update::Event(_)));
+
+        // The operator removes the device, one of two: its stream ends, and
+        // the next request is answered 401.
+        yard.add_device("yardr-dev-phone");
+        yard.remove_device(crate::fake::TOKEN);
+        let why = loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Out(why) => break why,
+                Update::Down(why) => panic!("it is there, and says no: {why}"),
+                Update::Up(_) | Update::Event(_) => continue,
+            }
+        };
+        assert!(why.starts_with("This device is no longer let in"), "{why}");
+        assert!(why.contains("yardr user device pair"), "{why}");
+        // The thread has ended with the window still there, and many of its
+        // 20 milliseconds later nothing more was asked.
+        follower.join().unwrap();
+        let asked = yard.requests();
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(yard.requests(), asked);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The yard's last device removed: it answers 404 then, to a token as
+    /// to none. That is said as what it is, and asked again, since an
+    /// address that is no yard's answers the same.
+    #[test]
+    fn a_yard_with_no_device_left_is_said_so() {
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        let client = yard.client();
+        yard.remove_device(crate::fake::TOKEN);
+        let trouble = load(&client, "jo").unwrap_err();
+        assert!(
+            matches!(trouble, Trouble::Yard(api::Error::NoDevice)),
+            "{trouble:?}"
+        );
+        let why = trouble.to_string();
+        assert!(
+            why.starts_with("Nothing of a yard is under /user/"),
+            "{why}"
+        );
+        assert!(why.contains("yardr user device pair"), "{why}");
+    }
+
+    #[test]
+    fn nothing_answering_at_an_address_is_said_as_it_is_there_and_tried_again() {
+        let yard = Yard::start_tcp();
+        let client = yard.client();
+        yard.stop();
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn(move || {
+            follow(&client, "jo", Duration::from_millis(20), |update| {
+                tx.send(update).is_ok()
+            })
+        });
+        let wait = Duration::from_secs(10);
+        for _ in 0..2 {
+            let Update::Down(why) = rx.recv_timeout(wait).unwrap() else {
+                panic!("the yard is not there")
+            };
+            assert!(
+                why.starts_with("No yard: nothing answers at the yard's address"),
+                "{why}"
+            );
+            assert!(!why.contains("socket"), "{why}");
+        }
+        drop(rx);
+        follower.join().unwrap();
+    }
+
     #[test]
     fn no_yard_is_said_in_words_and_tried_again_until_it_is_there() {
         let dir = tempfile::tempdir().unwrap();
@@ -332,6 +479,7 @@ mod tests {
                 Update::Down(_) => continue,
                 Update::Up(state) => break state,
                 Update::Event(e) => panic!("an event before the state: {e:?}"),
+                Update::Out(why) => panic!("the socket lets everyone in: {why}"),
             }
         };
         assert_eq!((state.me.as_str(), state.head), ("jo", 20));
@@ -347,6 +495,7 @@ mod tests {
                 Update::Down(why) => break why,
                 // The state may be read once more as the stream ends.
                 Update::Up(_) | Update::Event(_) => continue,
+                Update::Out(why) => panic!("the socket lets everyone in: {why}"),
             }
         };
         assert!(why.starts_with("No yard"), "{why}");

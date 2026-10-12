@@ -1,5 +1,5 @@
-//! What a person set and the window keeps between runs: the text size and
-//! the look. One small JSON file where the platform has a program's own
+//! What a person set and the window keeps between runs: the text size, the
+//! look, and which yard it shows. One small JSON file where the platform has a program's own
 //! configuration: `~/Library/Application Support/footplate/settings.json`
 //! on macOS, `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere
 //! (`~/.config` when that is not set). It is footplate's to write, on every
@@ -24,12 +24,23 @@ pub const TEXT: u8 = 14;
 pub const TEXT_MIN: u8 = 11;
 pub const TEXT_MAX: u8 = 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The size of the window's text, in pixels.
     pub text: u8,
     pub look: Look,
+    /// The window shows the yard at `address`, not this machine's. Both
+    /// are left out of the file while they say nothing, so the file of a
+    /// person who never chose is as it was.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub remote: bool,
+    /// The address of the yard at an address that was last paired with. It
+    /// is kept when this machine's yard is chosen again, to go back by.
+    /// The device's token is never here: it has a file of its own
+    /// (yard.rs).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub address: String,
 }
 
 impl Default for Settings {
@@ -37,6 +48,8 @@ impl Default for Settings {
         Settings {
             text: TEXT,
             look: Look::Auto,
+            remote: false,
+            address: String::new(),
         }
     }
 }
@@ -66,6 +79,12 @@ impl Settings {
     }
 
     /// The text `by` steps larger, or smaller, within the ends.
+    /// The address of the yard at an address the settings choose, if they
+    /// choose one.
+    pub fn chosen(&self) -> Option<&str> {
+        Some(self.address.as_str()).filter(|address| self.remote && !address.is_empty())
+    }
+
     pub fn sized(self, by: i8) -> Settings {
         let text = self.text.saturating_add_signed(by);
         Settings {
@@ -123,6 +142,7 @@ mod tests {
         let set = Settings {
             text: 17,
             look: Look::Dark,
+            ..Settings::default()
         };
         set.write(&file).unwrap();
         assert_eq!(Settings::read(&file), set);
@@ -139,6 +159,7 @@ mod tests {
         let today = Settings {
             text: 14,
             look: Look::Auto,
+            ..Settings::default()
         };
         assert_eq!(Settings::read(&file), today);
         for damaged in [
@@ -165,7 +186,8 @@ mod tests {
             Settings::read(&file),
             Settings {
                 text: 14,
-                look: Look::Light
+                look: Look::Light,
+                ..Settings::default()
             }
         );
         fs::write(&file, "{\"text\": 3, \"later\": true}").unwrap();
@@ -177,11 +199,11 @@ mod tests {
     #[test]
     fn the_size_steps_by_a_pixel_and_stops_at_the_ends() {
         let set = Settings::default();
-        assert_eq!(set.sized(1).text, 15);
-        assert_eq!(set.sized(-1).text, 13);
-        assert_eq!(set.sized(1).look, set.look);
-        let mut large = set;
-        let mut small = set;
+        assert_eq!(set.clone().sized(1).text, 15);
+        assert_eq!(set.clone().sized(-1).text, 13);
+        assert_eq!(set.clone().sized(1).look, set.look);
+        let mut large = set.clone();
+        let mut small = set.clone();
         for _ in 0..40 {
             large = large.sized(1);
             small = small.sized(-1);
@@ -191,6 +213,38 @@ mod tests {
         // set nothing.
         assert_eq!(set.rem(), px(16.));
         assert!(small.rem() < set.rem() && set.rem() < large.rem());
+    }
+
+    #[test]
+    fn the_yard_that_was_chosen_is_kept_and_never_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = Settings {
+            remote: true,
+            address: "https://mac.example.net".into(),
+            ..Settings::default()
+        };
+        assert_eq!(set.chosen(), Some("https://mac.example.net"));
+        set.write(&file).unwrap();
+        assert_eq!(Settings::read(&file), set);
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"remote\": true,\n  \"address\": \"https://mac.example.net\"\n}\n"
+        );
+        // This machine's yard again: the address stays, to go back by.
+        let near = Settings {
+            remote: false,
+            ..set
+        };
+        assert_eq!(near.chosen(), None);
+        near.write(&file).unwrap();
+        assert_eq!(Settings::read(&file).address, "https://mac.example.net");
+        // Remote with no address chooses nothing.
+        let none = Settings {
+            remote: true,
+            ..Settings::default()
+        };
+        assert_eq!(none.chosen(), None);
     }
 
     #[test]

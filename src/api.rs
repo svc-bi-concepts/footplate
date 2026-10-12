@@ -3,13 +3,19 @@
 //! `POST /call/<Method>` with its arguments as a JSON object, the stream a
 //! `GET /events?after=<seq>` of one JSON event a line.
 //!
+//! A yard that is not on this machine is reached at its listener instead,
+//! as that page's "Over the network" has it: the same requests under
+//! `/user/`, over TCP with TLS, each with the device's token.
+//!
 //! Only the calls and fields that page lists are read here. The few lines of
 //! HTTP are written out, since a call is one request on one connection and
 //! neither needs a runtime nor a client library with a unix connector.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use std::{env, fmt, thread};
 
@@ -25,6 +31,14 @@ const CLIENT: &str = concat!("footplate/", env!("CARGO_PKG_VERSION"));
 /// How long a call may take to answer. The stream has no such limit: it is
 /// silent while nothing happens.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a yard's address may take to be connected to.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A stream over the network is silent while nothing happens, and a link
+/// that went away says nothing either: the system asks the other end after
+/// this long a silence, so that a dead stream ends and is opened again.
+const KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// A server that replaces itself with a newer build refuses calls meanwhile;
 /// yardr makes the call again after this long, for up to that long.
@@ -49,6 +63,14 @@ pub enum Error {
     Refused { code: String, message: String },
     /// What came back is not what docs/api.md says.
     Protocol(String),
+    /// The yard's listener answered 401: the token is not a device's, or
+    /// the device was removed. It is no fault that passes, so nothing is
+    /// asked again until the device has a token again.
+    NotLetIn,
+    /// At the yard's address nothing is under `/user/`: 404 to a call. A
+    /// yard answers so while it has no device at all, with a token or
+    /// without, and so does an address that is no yard's listener.
+    NoDevice,
 }
 
 impl Error {
@@ -66,6 +88,10 @@ impl fmt::Display for Error {
             Error::Refused { message, .. } => f.write_str(message),
             Error::Protocol(what) => {
                 write!(f, "the yard answered what footplate cannot read: {what}")
+            }
+            Error::NotLetIn => f.write_str("this device is no longer let in"),
+            Error::NoDevice => {
+                f.write_str("the yard has no device, or the address is not a yard's")
             }
         }
     }
@@ -503,21 +529,391 @@ fn socket_under(yardr_home: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
     }
 }
 
-/// A client of one yard. It holds no connection: every call opens its own.
-#[derive(Debug, Clone)]
-pub struct Client {
-    socket: PathBuf,
+/// The address of a yard that is not reached by its socket: its listener,
+/// or what stands in front of it with TLS. `https://`, or `http://` for a
+/// host that is this machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Address {
+    tls: bool,
+    /// The host that is connected to, and with the port, when one was
+    /// given, as the request's `Host` names it.
+    host: String,
+    authority: String,
+    port: u16,
+    /// What stands before `/user/`, with no slash at its end.
+    path: String,
 }
 
-impl Client {
-    pub fn new(socket: impl Into<PathBuf>) -> Self {
-        Client {
-            socket: socket.into(),
+impl Address {
+    /// Reads an address as `yardr user device pair` prints it. Plain HTTP
+    /// is refused off this machine: the yard does no TLS and cannot tell
+    /// whether anything in front of it does, so the rule is the client's.
+    pub fn parse(text: &str) -> std::result::Result<Address, String> {
+        let text = text.trim();
+        let (tls, rest) = if let Some(rest) = text.strip_prefix("https://") {
+            (true, rest)
+        } else if let Some(rest) = text.strip_prefix("http://") {
+            (false, rest)
+        } else {
+            return Err(format!(
+                "{text:?} is no address of a yard: one starts with https://, or with http:// for a yard on this machine"
+            ));
+        };
+        // The address goes into the head of every request as it is.
+        if rest
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '?' | '#' | '@'))
+        {
+            return Err(format!(
+                "{text:?} is no address of a yard: it has no space, no query, no # and no name before an @"
+            ));
+        }
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        let no_host = || format!("{text:?} is no address of a yard: it names no host");
+        let (host, port) = match authority.strip_prefix('[') {
+            // "[::1]:8790"
+            Some(v6) => {
+                let (host, port) = v6.split_once(']').ok_or_else(no_host)?;
+                (host, port.strip_prefix(':'))
+            }
+            None => match authority.rsplit_once(':') {
+                Some((host, port)) => (host, Some(port)),
+                None => (authority, None),
+            },
+        };
+        if host.is_empty() || host.contains(':') && !authority.starts_with('[') {
+            return Err(no_host());
+        }
+        let port = match port {
+            Some(port) => port
+                .parse()
+                .map_err(|_| format!("{text:?} is no address of a yard: {port:?} is no port"))?,
+            None if tls => 443,
+            None => 80,
+        };
+        let here = host.eq_ignore_ascii_case("localhost")
+            || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        if !tls && !here {
+            return Err(format!(
+                "{text} is refused: plain http is for a yard on this machine alone (127.0.0.1, ::1, localhost). The token would cross the network for anyone to read. Give the https:// address of what stands in front of the yard's listener."
+            ));
+        }
+        Ok(Address {
+            tls,
+            host: host.to_string(),
+            authority: authority.to_string(),
+            port,
+            path: path.trim_end_matches('/').to_string(),
+        })
+    }
+
+    fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
+        let mut last = io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} names no address", self.host),
+        );
+        let mut tcp = None;
+        for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+                Ok(conn) => {
+                    tcp = Some(conn);
+                    break;
+                }
+                Err(err) => last = err,
+            }
+        }
+        let Some(tcp) = tcp else {
+            return Err(last);
+        };
+        tcp.set_read_timeout(timeout)?;
+        tcp.set_write_timeout(Some(CALL_TIMEOUT))?;
+        socket2::SockRef::from(&tcp)
+            .set_tcp_keepalive(&socket2::TcpKeepalive::new().with_time(KEEPALIVE))?;
+        if !self.tls {
+            return Ok(Conn::Tcp(tcp));
+        }
+        let name = rustls::pki_types::ServerName::try_from(self.host.clone())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+        let session = rustls::ClientConnection::new(tls()?, name).map_err(io::Error::other)?;
+        Ok(Conn::Tls(Box::new(rustls::StreamOwned::new(session, tcp))))
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scheme = if self.tls { "https" } else { "http" };
+        write!(f, "{scheme}://{}{}", self.authority, self.path)
+    }
+}
+
+/// How a server is trusted: by the roots this system trusts, read once.
+/// yardr does no TLS itself, so what answers is the operator's proxy or
+/// tunnel, with a certificate as any site has one.
+fn tls() -> io::Result<Arc<rustls::ClientConfig>> {
+    static CONFIG: OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>> =
+        OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            let found = rustls_native_certs::load_native_certs();
+            roots.add_parsable_certificates(found.certs);
+            if roots.is_empty() {
+                let why: Vec<String> = found.errors.iter().map(ToString::to_string).collect();
+                return Err(format!(
+                    "this system's root certificates could not be read: {}",
+                    why.join("; ")
+                ));
+            }
+            // The provider is named, not the process's default: gpui's tree
+            // may bring another, and rustls then has no default to take.
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let mut config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|err| err.to_string())?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            // The requests are written out as HTTP/1.1.
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            Ok(Arc::new(config))
+        })
+        .clone()
+        .map_err(io::Error::other)
+}
+
+/// One connection to a yard, whichever way it is reached.
+enum Conn {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl Read for Conn {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Conn::Unix(conn) => conn.read(buf),
+            Conn::Tcp(conn) => conn.read(buf),
+            Conn::Tls(conn) => conn.read(buf),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Conn::Unix(conn) => conn.write(buf),
+            Conn::Tcp(conn) => conn.write(buf),
+            Conn::Tls(conn) => conn.write(buf),
         }
     }
 
-    pub fn socket(&self) -> &Path {
-        &self.socket
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Conn::Unix(conn) => conn.flush(),
+            Conn::Tcp(conn) => conn.flush(),
+            Conn::Tls(conn) => conn.flush(),
+        }
+    }
+}
+
+/// Who a device's token is, as `GET /user/me` answers: in place of the
+/// name a client on the yard's machine takes.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Me {
+    /// The user every call is made as.
+    pub user: String,
+    /// The device's name.
+    #[serde(default)]
+    pub said_by: String,
+    /// The yard's name.
+    #[serde(default)]
+    pub yard: String,
+}
+
+/// What a yard answers a pairing code with: the device's token, the one
+/// time it is anywhere, and what `/user/me` says of it from then on.
+#[derive(Clone, Deserialize)]
+pub struct Paired {
+    pub token: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub yard: String,
+}
+
+/// Whether `token` can stand in a request's head: one line of visible
+/// characters, as a device's token is.
+pub fn is_token(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// Redeems a pairing code at a yard's address: one request with no token,
+/// answered with the device's. The code is sent as it was typed; the yard
+/// reads it without its dash and in either case.
+pub fn pair(address: &Address, code: &str) -> Result<Paired> {
+    let body = json!({ "code": code }).to_string();
+    let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+    conn.write_all(
+        format!(
+            "POST {}/user/pair HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            address.path,
+            address.authority,
+            body.len()
+        )
+        .as_bytes(),
+    )?;
+    conn.flush()?;
+    let (status, mut reply) = respond(conn)?;
+    let refused = |code: &str, message: &str| Error::Refused {
+        code: code.to_string(),
+        message: message.to_string(),
+    };
+    match status {
+        200 => {
+            let mut bytes = Vec::new();
+            reply.read_to_end(&mut bytes)?;
+            let paired: Paired = serde_json::from_slice(&bytes)
+                .map_err(|err| Error::Protocol(format!("the pairing: {err}")))?;
+            if !is_token(&paired.token) {
+                return Err(Error::Protocol(
+                    "the pairing: no token in the answer".into(),
+                ));
+            }
+            Ok(paired)
+        }
+        403 => Err(refused(
+            "wrong_code",
+            "That is not the code. The yard counts a wrong one, and the fifth ends the pairing.",
+        )),
+        409 => Err(refused(
+            "not_added",
+            "The code was right and is used up, but the yard could not add the device. Its operator opens another pairing.",
+        )),
+        400 => Err(refused(
+            "no_code",
+            "That is no code: a code is eight letters and digits, as the yard printed them.",
+        )),
+        401 | 404 => Err(refused(
+            "no_pairing",
+            "No pairing is open at this yard: none was opened, or the code was used, ran out or was ended. Its operator opens one: yardr user device pair <user> <device>",
+        )),
+        _ => Err(Error::Protocol(format!("the pairing: status {status}"))),
+    }
+}
+
+/// How a yard is reached: by the socket of this machine's, or by the
+/// address of another's listener with a device's token.
+#[derive(Clone)]
+enum Way {
+    Socket(PathBuf),
+    Listener { address: Address, token: String },
+}
+
+/// A client of one yard. It holds no connection: every call opens its own.
+#[derive(Clone)]
+pub struct Client {
+    way: Way,
+}
+
+/// Without the token: a client is printed where a test fails.
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Client({})", self.place())
+    }
+}
+
+impl Client {
+    /// The yard of this machine, by its socket.
+    pub fn new(socket: impl Into<PathBuf>) -> Self {
+        Client {
+            way: Way::Socket(socket.into()),
+        }
+    }
+
+    /// A yard at an address, as the device `token` is of.
+    pub fn remote(address: Address, token: impl Into<String>) -> Self {
+        Client {
+            way: Way::Listener {
+                address,
+                token: token.into(),
+            },
+        }
+    }
+
+    /// Whether the yard is reached at an address, and not by its socket.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.way, Way::Listener { .. })
+    }
+
+    /// Where the yard is looked for, in words: the socket's path or the
+    /// address.
+    pub fn place(&self) -> String {
+        match &self.way {
+            Way::Socket(socket) => format!("The socket: {}", socket.display()),
+            Way::Listener { address, .. } => format!("The yard: {address}"),
+        }
+    }
+
+    /// Who the token is: the user every call is made as, the device and
+    /// the yard. Of a yard at an address only; the socket has no such path.
+    pub fn me(&self) -> Result<Me> {
+        let (status, mut body) = self.send("GET", "/me", "", "", Some(CALL_TIMEOUT))?;
+        match status {
+            200 => {}
+            404 => return Err(Error::NoDevice),
+            _ => {
+                return Err(Error::Protocol(format!(
+                    "who this device is: status {status}"
+                )));
+            }
+        }
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|err| Error::Protocol(format!("who this device is: {err}")))
+    }
+
+    /// Sends one request on a connection of its own and reads the answer's
+    /// head. `path` is as docs/api.md has it on the socket; at an address
+    /// it stands under `/user/`, with the token beside it. `headers` are
+    /// whole lines. A call's answer is waited for `timeout` long.
+    fn send(
+        &self,
+        verb: &str,
+        path: &str,
+        headers: &str,
+        body: &str,
+        timeout: Option<Duration>,
+    ) -> Result<(u16, Body)> {
+        let (mut conn, head) = match &self.way {
+            Way::Socket(socket) => {
+                let conn = UnixStream::connect(socket)?;
+                conn.set_read_timeout(timeout)?;
+                conn.set_write_timeout(Some(CALL_TIMEOUT))?;
+                (
+                    Conn::Unix(conn),
+                    format!("{verb} {path} HTTP/1.1\r\nHost: yard\r\n"),
+                )
+            }
+            Way::Listener { address, token } => (
+                address.connect(timeout)?,
+                format!(
+                    "{verb} {}/user{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n",
+                    address.path, address.authority
+                ),
+            ),
+        };
+        // In one write: over TLS each write is a record of its own.
+        conn.write_all(
+            format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes(),
+        )?;
+        conn.flush()?;
+        let (status, body) = respond(conn)?;
+        if status == 401 {
+            return Err(Error::NotLetIn);
+        }
+        Ok((status, body))
     }
 
     /// The seq of the newest event.
@@ -662,14 +1058,13 @@ impl Client {
         if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Ok(None);
         }
-        let mut conn = UnixStream::connect(&self.socket)?;
-        conn.set_read_timeout(Some(CALL_TIMEOUT))?;
-        conn.set_write_timeout(Some(CALL_TIMEOUT))?;
-        write!(
-            conn,
-            "GET /blobs/{hash} HTTP/1.1\r\nHost: yard\r\nX-Yardr-Client: {CLIENT}\r\nConnection: close\r\n\r\n"
+        let (status, mut body) = self.send(
+            "GET",
+            &format!("/blobs/{hash}"),
+            "Connection: close\r\n",
+            "",
+            Some(CALL_TIMEOUT),
         )?;
-        let (status, mut body) = respond(conn)?;
         match status {
             200 => {
                 let mut bytes = Vec::new();
@@ -710,12 +1105,13 @@ impl Client {
     /// The stream of events after a seq: those the yard still has, then
     /// every one as it happens. It ends when the server goes away.
     pub fn events(&self, after: u64) -> Result<Events> {
-        let mut conn = UnixStream::connect(&self.socket)?;
-        write!(
-            conn,
-            "GET /events?after={after} HTTP/1.1\r\nHost: yard\r\nX-Yardr-Client: {CLIENT}\r\nAccept: application/x-ndjson\r\n\r\n"
+        let (status, body) = self.send(
+            "GET",
+            &format!("/events?after={after}"),
+            "Accept: application/x-ndjson\r\n",
+            "",
+            None,
         )?;
-        let (status, body) = respond(conn)?;
         if status != 200 {
             return Err(Error::Protocol(format!(
                 "the stream answered status {status}"
@@ -758,16 +1154,22 @@ impl Client {
     }
 
     fn call_once(&self, method: &str, args: &Value) -> Result<Option<Value>> {
-        let mut conn = UnixStream::connect(&self.socket)?;
-        conn.set_read_timeout(Some(CALL_TIMEOUT))?;
-        conn.set_write_timeout(Some(CALL_TIMEOUT))?;
         let body = args.to_string();
-        write!(
-            conn,
-            "POST /call/{method} HTTP/1.1\r\nHost: yard\r\nX-Yardr-Client: {CLIENT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
+        let (status, mut reply) = self.send(
+            "POST",
+            &format!("/call/{method}"),
+            &format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            ),
+            &body,
+            Some(CALL_TIMEOUT),
         )?;
-        let (status, mut reply) = respond(conn)?;
+        // No call is answered 404 by a yard: at an address it is the answer
+        // of one with nothing under /user/.
+        if status == 404 && self.is_remote() {
+            return Err(Error::NoDevice);
+        }
         let mut bytes = Vec::new();
         reply.read_to_end(&mut bytes)?;
         // An error has its status with it (200, or 503 while replacing), so
@@ -815,7 +1217,7 @@ impl Iterator for Events {
 }
 
 /// Reads the status and the headers of a response, and gives its body.
-fn respond(conn: UnixStream) -> Result<(u16, Body)> {
+fn respond(conn: Conn) -> Result<(u16, Body)> {
     let mut conn = BufReader::new(conn);
     let mut line = String::new();
     conn.read_line(&mut line)?;
@@ -860,7 +1262,7 @@ fn respond(conn: UnixStream) -> Result<(u16, Body)> {
 /// The body of a response, as the server frames it. Go's server sends a
 /// short reply with its length and a long or a streamed one in chunks.
 struct Body {
-    conn: BufReader<UnixStream>,
+    conn: BufReader<Conn>,
     framing: Framing,
 }
 
@@ -938,7 +1340,7 @@ impl Read for Body {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake::Yard;
+    use crate::fake::{TOKEN, Yard};
 
     #[test]
     fn socket_is_under_yardr_home_else_the_home() {
@@ -954,6 +1356,353 @@ mod tests {
             socket_under(Some("".into()), Some("/h".into())),
             PathBuf::from("/h/.yardr/yard.sock")
         );
+    }
+
+    #[test]
+    fn an_address_is_https_or_this_machine_s() {
+        let address = Address::parse(" https://mac.example.net/ ").unwrap();
+        assert_eq!(address.to_string(), "https://mac.example.net");
+        assert_eq!(
+            (address.tls, address.host.as_str(), address.port),
+            (true, "mac.example.net", 443)
+        );
+        // A port and a path of its own, as a proxy may have them.
+        let address = Address::parse("https://mac.example.net:8443/yard/").unwrap();
+        assert_eq!(address.to_string(), "https://mac.example.net:8443/yard");
+        assert_eq!(
+            (
+                address.port,
+                address.authority.as_str(),
+                address.path.as_str()
+            ),
+            (8443, "mac.example.net:8443", "/yard")
+        );
+        for (here, host, port) in [
+            ("http://127.0.0.1:8790", "127.0.0.1", 8790),
+            ("http://localhost", "localhost", 80),
+            ("http://LOCALHOST:1", "LOCALHOST", 1),
+            ("http://[::1]:8790", "::1", 8790),
+            ("http://127.8.9.10", "127.8.9.10", 80),
+        ] {
+            let address = Address::parse(here).unwrap();
+            assert_eq!(
+                (address.tls, address.host.as_str(), address.port),
+                (false, host, port),
+                "{here}"
+            );
+            assert_eq!(address.to_string(), here);
+        }
+        // Plain HTTP off this machine: the token would be read on the way.
+        for far in [
+            "http://mac.example.net",
+            "http://192.168.1.20:8790",
+            "http://100.64.0.7",
+            "http://[fd7a::1]:8790",
+            "http://localhost.example.net",
+            "http://0.0.0.0:8790",
+        ] {
+            let why = Address::parse(far).unwrap_err();
+            assert!(
+                why.starts_with(&format!("{far} is refused: plain http")),
+                "{why}"
+            );
+        }
+        // What is no address, and what would be more lines of a request.
+        for none in [
+            "",
+            "mac.example.net",
+            "ftp://mac.example.net",
+            "https://",
+            "https:///user",
+            "https://mac.example.net:port",
+            "https://mac.example.net:99999",
+            "https://::1",
+            "https://[::1",
+            "https://jo@mac.example.net",
+            "https://mac.example.net/?a=b",
+            "https://mac.example.net#K7QM-2XPD",
+            "https://mac.example.net/a b",
+            "https://mac.example.net\r\nX-User: jo",
+        ] {
+            let why = Address::parse(none).unwrap_err();
+            assert!(why.contains("is no address of a yard"), "{none:?}: {why}");
+        }
+    }
+
+    /// The same client, the same requests, the same answers, whichever way
+    /// the yard is reached.
+    #[test]
+    fn a_call_an_image_and_the_stream_by_the_socket_and_at_an_address() {
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            let client = yard.client();
+            let way = client.place();
+            // A call, its result and what it was asked with.
+            yard.answer(
+                "GetUser",
+                r#"{"result": {"name": "jo", "cursor": 3, "notification_cursor": 0}}"#,
+            );
+            assert_eq!(client.get_user("jo").unwrap().cursor, 3, "{way}");
+            assert_eq!(yard.asked("GetUser"), vec![json!({"name": "jo"})], "{way}");
+            // One that answers nothing, a list, and null for a list.
+            yard.answer("AckUserInbox", "{}");
+            client.ack_user_inbox("jo", 12).unwrap();
+            yard.answer("Crew", r#"{"result": null}"#);
+            assert_eq!(client.crew().unwrap(), vec![], "{way}");
+            // The yard says no, in its words.
+            yard.answer(
+                "Mail",
+                r#"{"error": {"code": "error", "message": "mail is 1 to 4096 bytes"}}"#,
+            );
+            let err = client.mail("yardmaster", "", "jo", &[]).unwrap_err();
+            assert_eq!(err.to_string(), "mail is 1 to 4096 bytes", "{way}");
+            // What is no reply.
+            yard.answer_status("Head", 500, "{}");
+            assert!(matches!(client.head(), Err(Error::Protocol(_))), "{way}");
+            // A server that replaces itself is asked again.
+            yard.answer("Head", r#"{"result": 4}"#);
+            yard.answer_once_status(
+                "Head",
+                503,
+                r#"{"error": {"code": "replacing", "message": "the server is replacing itself"}}"#,
+            );
+            assert_eq!(client.head().unwrap(), 4, "{way}");
+            assert_eq!(yard.asked("Head").len(), 3, "{way}");
+            // A long reply in chunks.
+            let text = "x".repeat(4000);
+            let letters: Vec<Value> = (1..=20)
+                .map(|seq| json!({"seq": seq, "from": "yardmaster", "to": "jo", "text": text}))
+                .collect();
+            yard.answer_chunked(
+                "Conversation",
+                &json!({ "result": letters }).to_string(),
+                1000,
+            );
+            let got = client.conversation("jo", "yardmaster", 0).unwrap();
+            assert_eq!((got.len(), got[19].text.as_str()), (20, text.as_str()));
+            // An image: bytes that are no text, and the one that is gone.
+            let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+            yard.blob(HASH, &bytes);
+            assert_eq!(client.blob(HASH).unwrap(), Some(bytes), "{way}");
+            assert_eq!(client.blob(&"00".repeat(32)).unwrap(), None, "{way}");
+            // An image to the yard, larger than one write.
+            yard.answer(
+                "PutBlob",
+                &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+            );
+            let large = vec![7u8; 300_000];
+            assert_eq!(client.put_blob(&large).unwrap().hash, HASH, "{way}");
+            assert_eq!(
+                yard.asked("PutBlob"),
+                vec![json!({"data": BASE64.encode(&large)})],
+                "{way}"
+            );
+            // The stream: what is after the seq, then what happens, until
+            // the server goes away.
+            yard.emit(r#"{"seq": 3, "kind": "mail"}"#);
+            yard.emit(r#"{"seq": 4, "kind": "mail", "data": {"text": "four"}}"#);
+            let mut events = client.events(3).unwrap();
+            assert_eq!(events.next().unwrap().unwrap().text("text"), "four");
+            yard.emit(r#"{"seq": 5, "kind": "crew_started"}"#);
+            assert_eq!(events.next().unwrap().unwrap().seq, 5, "{way}");
+            assert_eq!(yard.streams_asked(), vec![3], "{way}");
+            yard.stop();
+            assert!(events.next().is_none(), "{way}");
+            // And nothing listens.
+            assert!(matches!(client.head(), Err(Error::Down(_))), "{way}");
+            assert!(matches!(client.events(0), Err(Error::Down(_))), "{way}");
+            assert!(matches!(client.blob(HASH), Err(Error::Down(_))), "{way}");
+        }
+    }
+
+    #[test]
+    fn at_an_address_a_request_stands_under_user_with_the_token() {
+        let yard = Yard::start_tcp();
+        let client = yard.client();
+        let host = yard.address().strip_prefix("http://").unwrap().to_string();
+        assert!(client.is_remote());
+        assert_eq!(client.place(), format!("The yard: {}", yard.address()));
+        // The token is in no word a client says of itself.
+        assert!(!format!("{client:?}").contains(TOKEN));
+
+        yard.answer("Head", r#"{"result": 12}"#);
+        assert_eq!(client.head().unwrap(), 12);
+        let request = yard.last_request();
+        assert!(
+            request.starts_with("POST /user/call/Head HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(request.contains(&format!("Host: {host}\r\n")), "{request}");
+        assert!(
+            request.contains(&format!("Authorization: Bearer {TOKEN}\r\n")),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!(
+                "X-Yardr-Client: footplate/{}\r\n",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{request}"
+        );
+
+        yard.blob(HASH, b"png");
+        client.blob(HASH).unwrap();
+        assert!(
+            yard.last_request()
+                .starts_with(&format!("GET /user/blobs/{HASH} HTTP/1.1\r\n"))
+        );
+        let _stream = client.events(7).unwrap();
+        assert!(
+            yard.last_request()
+                .starts_with("GET /user/events?after=7 HTTP/1.1\r\n")
+        );
+
+        // Who the token is.
+        assert_eq!(
+            client.me().unwrap(),
+            Me {
+                user: "jo".into(),
+                said_by: "laptop".into(),
+                yard: "south".into()
+            }
+        );
+        assert!(yard.last_request().starts_with("GET /user/me HTTP/1.1\r\n"));
+
+        // By the socket no request has a token to carry.
+        let near = Yard::start();
+        near.answer("Head", r#"{"result": 0}"#);
+        near.client().head().unwrap();
+        assert!(
+            !near
+                .last_request()
+                .to_ascii_lowercase()
+                .contains("authorization"),
+            "{}",
+            near.last_request()
+        );
+    }
+
+    #[test]
+    fn a_token_the_yard_does_not_know_is_not_let_in_and_nothing_is_asked_twice() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let stranger = yard.client_with("yardr-dev-unknown");
+        let before = yard.requests();
+        let err = stranger.head().unwrap_err();
+        assert!(matches!(err, Error::NotLetIn), "{err:?}");
+        assert_eq!(err.to_string(), "this device is no longer let in");
+        // One request: a 401 is no fault that passes.
+        assert_eq!(yard.requests(), before + 1);
+        assert!(matches!(stranger.me(), Err(Error::NotLetIn)));
+        assert!(matches!(stranger.blob(HASH), Err(Error::NotLetIn)));
+        assert!(matches!(stranger.events(0), Err(Error::NotLetIn)));
+        assert_eq!(yard.requests(), before + 4);
+        // The call never reached the yard's store.
+        assert_eq!(yard.asked("Head"), Vec::<Value>::new());
+
+        // A device that is removed: its stream is closed, and its token is
+        // refused from then on.
+        let client = yard.client();
+        assert_eq!(client.head().unwrap(), 12);
+        let mut events = client.events(0).unwrap();
+        yard.add_device("yardr-dev-phone");
+        yard.remove_device(TOKEN);
+        assert!(events.next().is_none());
+        assert!(matches!(client.head(), Err(Error::NotLetIn)));
+
+        // A yard with no device at all has nothing under /user/, with a
+        // token or without: 404, which is said as what it is.
+        yard.remove_device("yardr-dev-phone");
+        for err in [client.me().unwrap_err(), client.head().unwrap_err()] {
+            assert!(matches!(err, Error::NoDevice), "{err:?}");
+        }
+        // An image that is gone is 404 too, and is no such thing.
+        yard.add_device(TOKEN);
+        assert_eq!(client.blob(HASH).unwrap(), None);
+    }
+
+    #[test]
+    fn a_code_is_answered_with_the_device_s_token_once() {
+        let yard = Yard::start_tcp();
+        let address = Address::parse(yard.address()).unwrap();
+        let refused = |code: &str| match pair(&address, code) {
+            Err(Error::Refused { code, message }) => (code, message),
+            Err(err) => panic!("{err:?}"),
+            Ok(_) => panic!("{code} was taken"),
+        };
+        // No pairing is open: the path is as any other without a token.
+        assert_eq!(refused("K7QM-2XPD").0, "no_pairing");
+
+        // The operator opens one. The code as it is typed: small letters,
+        // no dash.
+        yard.pair("K7QM-2XPD");
+        let request_before = yard.requests();
+        let paired = pair(&address, "k7qm2xpd").unwrap();
+        assert_eq!(yard.requests(), request_before + 1);
+        let request = yard.last_request();
+        assert!(
+            request.starts_with("POST /user/pair HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
+        assert_eq!(
+            (
+                paired.user.as_str(),
+                paired.device.as_str(),
+                paired.yard.as_str()
+            ),
+            ("jo", "laptop", "south")
+        );
+        assert!(yard.devices().contains(&paired.token));
+        // The token is the device's from then on.
+        assert_eq!(yard.client_with(&paired.token).me().unwrap().user, "jo");
+        // The code is good once.
+        assert_eq!(refused("K7QM-2XPD").0, "no_pairing");
+
+        // A wrong code is counted, and the fifth ends the pairing: the
+        // right one comes too late then.
+        yard.pair("ABCD-EFGH");
+        // What is no code is no try.
+        assert_eq!(refused("ABCD").0, "no_code");
+        for _ in 0..5 {
+            let (code, message) = refused("WXYZ-2345");
+            assert_eq!(code, "wrong_code");
+            assert!(message.starts_with("That is not the code."), "{message}");
+        }
+        assert!(!yard.pairing_open());
+        assert_eq!(refused("ABCD-EFGH").0, "no_pairing");
+        assert_eq!(yard.devices().len(), 2);
+
+        // A yard with no device and no pairing has no such path at all.
+        for token in yard.devices() {
+            yard.remove_device(&token);
+        }
+        assert_eq!(refused("ABCD-EFGH").0, "no_pairing");
+        // And one with a pairing open for its first device has.
+        yard.pair("ABCD-EFGH");
+        assert!(pair(&address, "ABCD-EFGH").is_ok());
+        yard.stop();
+        assert!(matches!(pair(&address, "ABCD-EFGH"), Err(Error::Down(_))));
+    }
+
+    /// The handshake, the system's roots and a call's answer through them:
+    /// against a site of the internet, since the fake yard speaks no TLS.
+    /// Run by hand: `cargo test tls -- --ignored`.
+    #[test]
+    #[ignore = "asks a site of the internet"]
+    fn tls_reaches_a_site_and_reads_its_answer() {
+        let client = Client::remote(Address::parse("https://example.com").unwrap(), TOKEN);
+        // No yard: its 404 is an HTTP answer read over TLS.
+        let err = client.me().unwrap_err();
+        assert!(matches!(err, Error::NoDevice), "{err:?}");
+        // A name the certificate is not for is no yard to talk to.
+        let wrong = Client::remote(
+            Address::parse("https://wrong.host.badssl.com").unwrap(),
+            TOKEN,
+        );
+        assert!(matches!(wrong.me(), Err(Error::Down(_))));
     }
 
     #[test]
@@ -1590,7 +2339,7 @@ mod tests {
         // The file is there and nothing listens: the server is down.
         let yard = Yard::start();
         let client = yard.client();
-        let socket = client.socket().to_path_buf();
+        let socket = yard.socket().to_path_buf();
         yard.stop_listening();
         assert!(socket.exists());
         assert!(matches!(client.head(), Err(Error::Down(_))));

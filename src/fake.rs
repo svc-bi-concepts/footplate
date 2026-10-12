@@ -1,9 +1,12 @@
 //! A yard for the tests: a unix socket in a temp dir that answers calls
 //! with the JSON a test gives it, as docs/api.md of the yardr repository
-//! shows it, and serves the stream.
+//! shows it, and serves the stream. Or the same yard at its listener, a
+//! TCP port of this machine: the calls under `/user/` for a device's
+//! token, `/user/me`, and a pairing that gives a token for a code.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,7 +15,59 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::api::Client;
+use crate::api::{Address, Client};
+
+/// The token of the device a yard at an address starts with, and who
+/// `/user/me` says it is.
+pub const TOKEN: &str = "yardr-dev-fake";
+const ME: &str = r#"{"user": "jo", "said_by": "laptop", "yard": "south"}"#;
+
+/// A connection to the yard, by its socket or its listener.
+enum Wire {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Wire {
+    fn try_clone(&self) -> io::Result<Wire> {
+        Ok(match self {
+            Wire::Unix(conn) => Wire::Unix(conn.try_clone()?),
+            Wire::Tcp(conn) => Wire::Tcp(conn.try_clone()?),
+        })
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        match self {
+            Wire::Unix(conn) => conn.set_nonblocking(nonblocking),
+            Wire::Tcp(conn) => conn.set_nonblocking(nonblocking),
+        }
+    }
+}
+
+impl Read for Wire {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Wire::Unix(conn) => conn.read(buf),
+            Wire::Tcp(conn) => conn.read(buf),
+        }
+    }
+}
+
+impl Write for Wire {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Wire::Unix(conn) => conn.write(buf),
+            Wire::Tcp(conn) => conn.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Wire::Unix(conn) => conn.flush(),
+            Wire::Tcp(conn) => conn.flush(),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Reply {
@@ -29,11 +84,19 @@ struct State {
     once: HashMap<String, VecDeque<Reply>>,
     asked: Vec<(String, Value)>,
     last_request: String,
+    /// Every request that came, let in or not.
+    requests: usize,
     events: Vec<String>,
     streams: Vec<u64>,
     /// The images the yard holds, by hash, and every hash asked for.
     blobs: HashMap<String, Vec<u8>>,
     blobs_asked: Vec<String>,
+    /// At an address: the tokens the yard lets in.
+    devices: Vec<String>,
+    /// The pairing that is open: its code, and the wrong codes so far.
+    pairing: Option<(String, u32)>,
+    /// How many devices were paired: each has a token of its own.
+    paired: u32,
     stopped: bool,
 }
 
@@ -47,6 +110,8 @@ pub struct Yard {
     #[allow(dead_code)]
     dir: Option<tempfile::TempDir>,
     socket: PathBuf,
+    /// Of a yard at its listener: `http://127.0.0.1:<port>`.
+    address: Option<String>,
     shared: Arc<Shared>,
     accept: Mutex<Option<JoinHandle<()>>>,
 }
@@ -66,36 +131,117 @@ impl Yard {
         let _ = std::fs::remove_file(socket);
         let listener = UnixListener::bind(socket).unwrap();
         listener.set_nonblocking(true).unwrap();
+        // The listener goes with the thread; the socket's file stays, as
+        // that of a server that was killed does.
+        Yard::run(socket.to_path_buf(), None, move || {
+            listener.accept().map(|(conn, _)| Wire::Unix(conn))
+        })
+    }
+
+    /// A yard at its listener, on a free port of this machine, with one
+    /// device: the one whose token is [`TOKEN`].
+    pub fn start_tcp() -> Yard {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let yard = Yard::run(PathBuf::new(), Some(address), move || {
+            listener.accept().map(|(conn, _)| Wire::Tcp(conn))
+        });
+        yard.shared.state.lock().unwrap().devices = vec![TOKEN.to_string()];
+        yard
+    }
+
+    fn run(
+        socket: PathBuf,
+        address: Option<String>,
+        accept: impl Fn() -> io::Result<Wire> + Send + 'static,
+    ) -> Yard {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
         });
+        let listener = address.is_some();
         let accept = thread::spawn({
             let shared = shared.clone();
             move || {
                 while !shared.state.lock().unwrap().stopped {
-                    match listener.accept() {
-                        Ok((conn, _)) => {
+                    match accept() {
+                        Ok(conn) => {
                             let shared = shared.clone();
-                            thread::spawn(move || serve(conn, &shared));
+                            thread::spawn(move || serve(conn, &shared, listener));
                         }
                         Err(_) => thread::sleep(Duration::from_millis(2)),
                     }
                 }
-                // The listener goes here; the socket's file stays, as that
-                // of a server that was killed does.
             }
         });
         Yard {
             dir: None,
-            socket: socket.to_path_buf(),
+            socket,
+            address,
             shared,
             accept: Mutex::new(Some(accept)),
         }
     }
 
+    /// A client of the yard: by its socket, or at its address as the
+    /// device it started with.
     pub fn client(&self) -> Client {
-        Client::new(&self.socket)
+        match &self.address {
+            Some(_) => self.client_with(TOKEN),
+            None => Client::new(&self.socket),
+        }
+    }
+
+    /// A client at the yard's address with a token of the test's.
+    pub fn client_with(&self, token: &str) -> Client {
+        Client::remote(Address::parse(self.address()).unwrap(), token)
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// The address of a yard at its listener.
+    pub fn address(&self) -> &str {
+        self.address.as_deref().expect("a yard at its listener")
+    }
+
+    /// The operator opens a pairing: the next right code is answered with
+    /// a token, once.
+    pub fn pair(&self, code: &str) {
+        self.shared.state.lock().unwrap().pairing = Some((code.to_string(), 0));
+    }
+
+    pub fn pairing_open(&self) -> bool {
+        self.shared.state.lock().unwrap().pairing.is_some()
+    }
+
+    /// The tokens the yard lets in.
+    pub fn devices(&self) -> Vec<String> {
+        self.shared.state.lock().unwrap().devices.clone()
+    }
+
+    /// The operator adds a device by hand, with this token.
+    pub fn add_device(&self, token: &str) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .devices
+            .push(token.to_string());
+    }
+
+    /// The operator removes a device: its token is refused from now on,
+    /// and the streams it holds are closed.
+    pub fn remove_device(&self, token: &str) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .devices
+            .retain(|device| device != token);
+        self.shared.changed.notify_all();
     }
 
     /// What the yard answers to a call of the method from now on.
@@ -168,6 +314,11 @@ impl Yard {
         state.asked.iter().map(|(m, _)| m.clone()).collect()
     }
 
+    /// How many requests came so far, those that were not let in too.
+    pub fn requests(&self) -> usize {
+        self.shared.state.lock().unwrap().requests
+    }
+
     /// The head of the last request, as it came.
     pub fn last_request(&self) -> String {
         self.shared.state.lock().unwrap().last_request.clone()
@@ -221,17 +372,70 @@ impl Drop for Yard {
     }
 }
 
-fn serve(conn: UnixStream, shared: &Shared) {
+fn serve(conn: Wire, shared: &Shared, listener: bool) {
     // A client that hangs up mid-reply is no failure of the test.
-    let _ = serve_one(conn, shared);
+    let _ = serve_one(conn, shared, listener);
 }
 
-fn serve_one(conn: UnixStream, shared: &Shared) -> std::io::Result<()> {
+/// An answer that is no call's: its status, and a body.
+fn plain(conn: &mut Wire, status: &str, kind: &str, body: &str) -> io::Result<()> {
+    write!(
+        conn,
+        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    conn.flush()
+}
+
+/// A code as the yard reads it: without its dash and spaces, in capitals.
+fn code_of(typed: &str) -> String {
+    typed
+        .chars()
+        .filter(|c| !matches!(c, '-' | ' '))
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// `POST /user/pair`: a token for the right code, once. A wrong code is
+/// counted, and the fifth ends the pairing.
+fn pair(conn: &mut Wire, shared: &Shared, body: &[u8]) -> io::Result<()> {
+    const JSON: &str = "application/json";
+    let typed = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body["code"].as_str().map(code_of))
+        .unwrap_or_default();
+    if typed.len() != 8 {
+        return plain(conn, "400 Bad Request", "text/plain", "no code\n");
+    }
+    let mut state = shared.state.lock().unwrap();
+    let Some((code, wrong)) = state.pairing.as_mut() else {
+        unreachable!("the path is there while a pairing is open")
+    };
+    if code_of(code) != typed {
+        *wrong += 1;
+        if *wrong == 5 {
+            state.pairing = None;
+        }
+        drop(state);
+        return plain(conn, "403 Forbidden", JSON, r#"{"refused": "wrong_code"}"#);
+    }
+    state.pairing = None;
+    state.paired += 1;
+    let token = format!("yardr-dev-paired-{}", state.paired);
+    state.devices.push(token.clone());
+    drop(state);
+    let answer =
+        format!(r#"{{"token": "{token}", "user": "jo", "device": "laptop", "yard": "south"}}"#);
+    plain(conn, "200 OK", JSON, &answer)
+}
+
+fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
     conn.set_nonblocking(false)?;
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut conn = conn;
     let mut head = String::new();
     let mut length = 0usize;
+    let mut token = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -241,25 +445,69 @@ fn serve_one(conn: UnixStream, shared: &Shared) -> std::io::Result<()> {
         if line == "\r\n" {
             break;
         }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap_or(0);
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("authorization") {
+                token = value.trim().strip_prefix("Bearer ").map(str::to_string);
+            }
         }
     }
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
-    let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
-    shared.state.lock().unwrap().last_request = head.clone();
+    let mut target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.last_request = head.clone();
+        state.requests += 1;
+    }
+
+    // At the listener everything is under /user/, for a device's token:
+    // 404 in a yard with no device, 401 for whatever else is not let in,
+    // whatever was asked for. The pairing alone takes a code instead.
+    if listener {
+        let (pairing, devices, known) = {
+            let state = shared.state.lock().unwrap();
+            let known = token.as_ref().is_some_and(|t| state.devices.contains(t));
+            (state.pairing.is_some(), state.devices.len(), known)
+        };
+        if target == "/user/pair" && pairing {
+            return pair(&mut conn, shared, &body);
+        }
+        if devices == 0 {
+            return plain(
+                &mut conn,
+                "404 Not Found",
+                "text/plain",
+                "404 page not found\n",
+            );
+        }
+        let under = target.strip_prefix("/user").map(str::to_string);
+        match under {
+            Some(path) if known => target = path,
+            _ => {
+                return plain(
+                    &mut conn,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "Unauthorized\n",
+                );
+            }
+        }
+        if target == "/me" {
+            return plain(&mut conn, "200 OK", "application/json", ME);
+        }
+    }
+    // The stream of a device ends when the device is removed.
+    let token = token.filter(|_| listener);
 
     if let Some(query) = target.strip_prefix("/events") {
         let after: u64 = query
             .strip_prefix("?after=")
             .and_then(|n| n.parse().ok())
             .unwrap_or(0);
-        return stream(conn, shared, after);
+        return stream(conn, shared, after, token);
     }
-
     if let Some(hash) = target.strip_prefix("/blobs/") {
         let blob = {
             let mut state = shared.state.lock().unwrap();
@@ -329,7 +577,12 @@ fn serve_one(conn: UnixStream, shared: &Shared) -> std::io::Result<()> {
 
 /// The stream: the events with a seq after `after`, then every one as the
 /// test emits it, until the yard stops.
-fn stream(mut conn: UnixStream, shared: &Shared, after: u64) -> std::io::Result<()> {
+fn stream(
+    mut conn: Wire,
+    shared: &Shared,
+    after: u64,
+    device: Option<String>,
+) -> std::io::Result<()> {
     write!(
         conn,
         "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -352,8 +605,10 @@ fn stream(mut conn: UnixStream, shared: &Shared, after: u64) -> std::io::Result<
                 conn.flush()?;
             }
         }
-        if state.stopped {
-            // Cut off, as a server that is killed cuts it: no last chunk.
+        // Cut off, as a server that is killed cuts it: no last chunk. So is
+        // the stream of a device that was removed.
+        let removed = device.as_ref().is_some_and(|d| !state.devices.contains(d));
+        if state.stopped || removed {
             return Ok(());
         }
         state = shared.changed.wait(state).unwrap();

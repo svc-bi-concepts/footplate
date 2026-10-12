@@ -10,10 +10,10 @@ use std::thread;
 use gpui::{
     Action, AnyWindowHandle, App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle,
     Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, ScrollHandle,
-    SharedString, Window, actions, div, img, prelude::*, px, relative, rems,
+    SharedString, Task, Window, actions, div, img, prelude::*, px, relative, rems,
 };
 
-use crate::api::{self, BlobRef, Client};
+use crate::api::{self, Address, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
@@ -24,6 +24,7 @@ use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::settings::{self, Settings};
 use crate::theme::{Look, Palette};
+use crate::yard::{self, Env};
 
 /// The application's icon, from the 1024px master in assets/icon.png.
 pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
@@ -286,13 +287,37 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Whether a yard that is away is asked again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Away {
+    /// Every few seconds.
+    Trying,
+    /// Not until another is chosen: the one that was could not be opened.
+    Stopped,
+    /// Not until the device is paired again: the yard does not let it in.
+    Out,
+}
+
 pub struct Footplate {
-    client: Client,
+    /// The yard's client, or none while the yard that was chosen cannot be
+    /// opened: `down` says why.
+    client: Option<Client>,
+    /// The name the window runs as, for this machine's yard.
+    name: String,
+    /// What the environment says of the yard, which wins over the settings.
+    env: Env,
+    /// Hands on what the follower of the open yard learns. Another yard's
+    /// takes its place, and the follower of the one before ends at its
+    /// next word, which nobody hears: until then it holds its stream.
+    following: Option<Task<()>>,
     /// What the yard has, once it was read. It is kept while the yard is
     /// away, for the conversation that was open.
     model: Option<Model>,
     /// Why the yard is not there, while it is not.
     down: Option<String>,
+    away: Away,
+    /// Of a yard at an address: who it says this device is.
+    said: Option<api::Me>,
     line: Entity<Line>,
     conversation: ScrollHandle,
     /// The conversation's position when it was left for a decision, so
@@ -333,12 +358,45 @@ pub struct Footplate {
     unkept: Option<String>,
     /// The settings are shown where the conversation is.
     settings_open: bool,
+    /// The yard at an address, in the settings: its address and a pairing's
+    /// code as they are typed, whether they show, whether a code is on its
+    /// way to the yard, and what came of the last.
+    address: Entity<Line>,
+    code: Entity<Line>,
+    pairing_open: bool,
+    pairing: bool,
+    yard_said: Option<String>,
 }
 
 impl Footplate {
     /// The window on the yard behind `client`, for the user the yard knows
     /// `name` as. It follows the yard from here on.
+    #[cfg(test)]
     pub fn new(client: Client, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::bare(Env::default(), name, window, cx);
+        this.follow(Ok(client), cx);
+        this
+    }
+
+    /// The window on the yard the environment names, else the one the
+    /// settings kept in `file` choose: this machine's, for the user the
+    /// yard knows `name` as, or one at an address, for the user its token
+    /// is of. A yard that cannot be opened is said why, and the settings
+    /// are there to choose again.
+    pub fn opened(
+        env: Env,
+        name: String,
+        file: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::bare(env, name, window, cx).kept_in(file, cx);
+        this.reopen(cx);
+        this
+    }
+
+    /// The window before it has a yard.
+    fn bare(env: Env, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // The title in the window's options reaches a macOS and an X11
         // window; a Wayland one has only what is set on it.
         window.set_window_title(crate::NAME);
@@ -351,6 +409,19 @@ impl Footplate {
         .detach();
         cx.subscribe(&line, |this, _, _: &Emptied, cx| this.remove_last(cx))
             .detach();
+        // Enter in the address or the code of a pairing sends the code.
+        let field = |hint: &'static str, cx: &mut Context<Self>| {
+            let field = cx.new(|cx| {
+                let mut field = Line::new(cx);
+                field.set_placeholder(hint, cx);
+                field
+            });
+            cx.subscribe(&field, |this, _, _: &Submitted, cx| this.pair(cx))
+                .detach();
+            field
+        };
+        let address = field("https://mac.example.net", cx);
+        let code = field("K7QM-2XPD", cx);
         let selection = cx.new(|_| Selection::default());
         cx.observe(&selection, |_, _, cx| cx.notify()).detach();
         // Auto is the desktop's look: when that changes, the window is
@@ -369,33 +440,15 @@ impl Footplate {
             this.look(this.settings.look.next(), cx)
         });
 
-        // The yard is followed on a thread of its own, which blocks on the
-        // socket; what it learns comes here.
-        let (tell, told) = async_channel::unbounded::<Update>();
-        let follower = thread::Builder::new().name("yard".into()).spawn({
-            let client = client.clone();
-            move || {
-                session::follow(&client, &name, session::RETRY, |update| {
-                    tell.send_blocking(update).is_ok()
-                })
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            while let Ok(update) = told.recv().await {
-                if this.update(cx, |this, cx| this.told(update, cx)).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-
         Footplate {
-            client,
+            client: None,
+            name,
+            env,
+            following: None,
             model: None,
-            down: Some(match follower {
-                Ok(_) => "Looking for the yard.".to_string(),
-                Err(err) => format!("footplate could not start following the yard: {err}"),
-            }),
+            down: None,
+            away: Away::Stopped,
+            said: None,
             line,
             conversation: ScrollHandle::new(),
             back_position: None,
@@ -414,7 +467,70 @@ impl Footplate {
             kept: None,
             unkept: None,
             settings_open: false,
+            address,
+            code,
+            pairing_open: false,
+            pairing: false,
+            yard_said: None,
         }
+    }
+
+    /// Opens the yard the environment names, else the one the settings
+    /// choose, in place of the one that was open.
+    fn reopen(&mut self, cx: &mut Context<Self>) {
+        let opening = self.env.open(self.settings.chosen(), self.kept.as_deref());
+        self.follow(opening, cx);
+    }
+
+    /// Follows the yard behind the client from here on, and no longer the
+    /// one before it: nothing of that one is shown or kept, since a name
+    /// there is not the same one here. Without a client the window says
+    /// why there is none, and waits for another yard to be chosen.
+    fn follow(&mut self, opening: Result<Client, String>, cx: &mut Context<Self>) {
+        self.following = None;
+        self.model = None;
+        self.said = None;
+        self.images.clear();
+        self.thumbs.clear();
+        self.drafts = Drafts::default();
+        self.ask_words.clear();
+        self.declining = None;
+        self.back_position = None;
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        cx.notify();
+        let client = match opening {
+            Ok(client) => client,
+            Err(why) => {
+                self.client = None;
+                self.down = Some(why);
+                self.away = Away::Stopped;
+                return;
+            }
+        };
+        // The yard is followed on a thread of its own, which blocks on the
+        // socket; what it learns comes here.
+        let (tell, told) = async_channel::unbounded::<Update>();
+        let follower = thread::Builder::new().name("yard".into()).spawn({
+            let (client, name) = (client.clone(), self.name.clone());
+            move || {
+                session::follow(&client, &name, session::RETRY, |update| {
+                    tell.send_blocking(update).is_ok()
+                })
+            }
+        });
+        self.following = Some(cx.spawn(async move |this, cx| {
+            while let Ok(update) = told.recv().await {
+                if this.update(cx, |this, cx| this.told(update, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+        self.client = Some(client);
+        self.away = Away::Trying;
+        self.down = Some(match follower {
+            Ok(_) => "Looking for the yard.".to_string(),
+            Err(err) => format!("footplate could not start following the yard: {err}"),
+        });
     }
 
     /// Does `f` in this window for the action `A`, wherever the focus is.
@@ -439,8 +555,10 @@ impl Footplate {
         });
     }
 
-    /// The window with what `file` keeps of the text size and the look,
-    /// which is where a change of them is kept from here on.
+    /// The window with what `file` keeps of the text size, the look and the
+    /// yard, which is where a change of them is kept from here on. The
+    /// yard that is open stays open: [`Footplate::opened`] opens the kept
+    /// one.
     pub fn kept_in(mut self, file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         if let Some(file) = &file {
             self.settings = Settings::read(file);
@@ -448,6 +566,22 @@ impl Footplate {
         cx.set_global(self.settings.look);
         self.kept = file;
         self
+    }
+
+    /// Which yard the window shows, in words: under the user's name, and
+    /// in the settings.
+    fn which_yard(&self) -> String {
+        let address = self.env.address(self.settings.chosen());
+        match (address, &self.said) {
+            (Some(address), Some(me)) => {
+                format!(
+                    "the yard {} at {address}, as its device {}",
+                    me.yard, me.said_by
+                )
+            }
+            (Some(address), None) => format!("the yard at {address}"),
+            (None, _) => "this machine's yard".to_string(),
+        }
     }
 
     pub fn line(&self) -> &Entity<Line> {
@@ -458,10 +592,12 @@ impl Footplate {
     fn told(&mut self, update: Update, cx: &mut Context<Self>) {
         match update {
             Update::Up(state) => {
+                let mut state = *state;
+                self.said = state.yard.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let (model, effects) = match self.model.as_ref() {
-                    Some(before) => before.resumed(*state),
-                    None => Model::new(*state, None),
+                    Some(before) => before.resumed(state),
+                    None => Model::new(state, None),
                 };
                 self.model = Some(model);
                 self.down = None;
@@ -478,7 +614,14 @@ impl Footplate {
                 self.schedule_return(cx);
             }
             Update::Event(event) => self.change(cx, |m| m.event(&event)),
-            Update::Down(why) => self.down = Some(why),
+            Update::Down(why) => {
+                self.down = Some(why);
+                self.away = Away::Trying;
+            }
+            Update::Out(why) => {
+                self.down = Some(why);
+                self.away = Away::Out;
+            }
         }
         cx.notify();
     }
@@ -717,7 +860,9 @@ impl Footplate {
         call: impl FnOnce(&Client, &str) -> R + Send + 'static,
         then: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
     ) {
-        let client = self.client.clone();
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let me = self
             .model
             .as_ref()
@@ -1380,25 +1525,25 @@ impl Footplate {
         if settings == self.settings {
             return;
         }
-        self.settings = settings;
         // The line and the messages take their colours from this.
         cx.set_global(settings.look);
         if let Some(file) = &self.kept {
             self.unkept = settings.write(file).err().map(|err| err.to_string());
         }
+        self.settings = settings;
         cx.notify();
     }
 
     /// The text a step larger or smaller.
     fn resize(&mut self, by: i8, cx: &mut Context<Self>) {
-        self.set(self.settings.sized(by), cx);
+        self.set(self.settings.clone().sized(by), cx);
     }
 
     fn usual_size(&mut self, cx: &mut Context<Self>) {
         self.set(
             Settings {
                 text: settings::TEXT,
-                ..self.settings
+                ..self.settings.clone()
             },
             cx,
         );
@@ -1408,10 +1553,168 @@ impl Footplate {
         self.set(
             Settings {
                 look,
-                ..self.settings
+                ..self.settings.clone()
             },
             cx,
         );
+    }
+
+    /// This machine's yard is chosen: it is opened in place of the one at
+    /// an address, whose address and token stay where they are kept, to go
+    /// back by. Where the environment names a yard there is no choice.
+    fn choose_near(&mut self, cx: &mut Context<Self>) {
+        self.shut_pairing(cx);
+        self.yard_said = None;
+        cx.notify();
+        if self.env.yard.is_some() || !self.settings.remote {
+            return;
+        }
+        self.set(
+            Settings {
+                remote: false,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+        self.reopen(cx);
+    }
+
+    /// A yard at an address is chosen: its address and a pairing's code
+    /// are asked for, the address as it was last, and the focus is in the
+    /// one that is still to type.
+    fn choose_far(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pairing_open = true;
+        let last = Some(self.settings.address.as_str()).filter(|address| !address.is_empty());
+        let known = self.env.address(last).unwrap_or_default().to_string();
+        if self.address.read(cx).text().is_empty() || self.env.yard.is_some() {
+            self.address
+                .update(cx, |line, cx| line.set_text(&known, cx));
+        }
+        let field = match known.is_empty() {
+            true => &self.address,
+            false => &self.code,
+        };
+        window.focus(&field.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// The device is to be paired again, from where the yard said it is
+    /// not let in: the settings, with the yard's address there already.
+    fn pair_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            self.toggle_settings(window, cx);
+        }
+        self.choose_far(window, cx);
+    }
+
+    /// Sends the code that is typed to the yard at the address that is
+    /// typed, and opens that yard as the device the code was for. With no
+    /// code, the yard this device was last paired with is opened again
+    /// with the token it has.
+    fn pair(&mut self, cx: &mut Context<Self>) {
+        if self.pairing {
+            return;
+        }
+        let (typed, code) = yard::typed(self.address.read(cx).text(), self.code.read(cx).text());
+        // The environment's address wins over one typed, as over one kept.
+        let text = self.env.yard.clone().unwrap_or(typed);
+        cx.notify();
+        let address = match Address::parse(&text) {
+            Ok(address) => address,
+            Err(why) => {
+                self.yard_said = Some(why);
+                return;
+            }
+        };
+        let Some(file) = self.env.token_file(self.kept.as_deref()) else {
+            self.yard_said = Some(
+                "There is no home directory to keep this device's token in. Name a file for it: FOOTPLATE_TOKEN_FILE"
+                    .to_string(),
+            );
+            return;
+        };
+        if code.is_empty() {
+            let paired = self.env.yard.is_some() || text == self.settings.address;
+            if paired && file.exists() {
+                self.yard_said = None;
+                self.shut_pairing(cx);
+                return self.show_far(text, cx);
+            }
+            self.yard_said = Some(
+                "A code is wanted. The yard's operator opens a pairing and gives you its code: yardr user device pair <user> <device>"
+                    .to_string(),
+            );
+            return;
+        }
+        self.pairing = true;
+        self.yard_said = None;
+        cx.spawn(async move |this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move {
+                    let paired = api::pair(&address, &code).map_err(|err| err.to_string())?;
+                    // The token goes from the yard's answer into its file,
+                    // and nowhere else.
+                    yard::keep_token(&file, &paired.token).map_err(|err| {
+                        format!(
+                            "The yard gave this device its token, and {} could not be written ({err}). The token is lost: its operator removes the device (yardr user device rm {} {}) and opens another pairing.",
+                            file.display(),
+                            paired.user,
+                            paired.device
+                        )
+                    })?;
+                    Ok::<_, String>(format!(
+                        "Paired: this is the device {} of {} in the yard {}.",
+                        paired.device, paired.user, paired.yard
+                    ))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.pairing = false;
+                cx.notify();
+                match answer {
+                    Ok(said) => {
+                        // The code is used up, in whichever field it was.
+                        this.code.update(cx, |line, cx| line.set_text("", cx));
+                        this.address.update(cx, |line, cx| line.set_text(&text, cx));
+                        this.yard_said = Some(said);
+                        this.shut_pairing(cx);
+                        this.show_far(text, cx);
+                    }
+                    Err(why) => this.yard_said = Some(why),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The address and the code are no longer asked for. The window holds
+    /// the keys again: a field that is not drawn would take them nowhere.
+    fn shut_pairing(&mut self, cx: &mut Context<Self>) {
+        self.pairing_open = false;
+        let (handle, focus) = (self.handle, self.focus.clone());
+        // Afterwards: the window is not to be had while a key or click
+        // that came through it is still on its way.
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.focus(&focus));
+        });
+    }
+
+    /// Opens the yard at `address` with the token that is kept, and keeps
+    /// the choice.
+    fn show_far(&mut self, address: String, cx: &mut Context<Self>) {
+        if self.env.yard.is_none() {
+            self.set(
+                Settings {
+                    remote: true,
+                    address,
+                    ..self.settings.clone()
+                },
+                cx,
+            );
+        }
+        self.reopen(cx);
     }
 
     /// The control that opens the settings, and shuts them: in the head of
@@ -1430,8 +1733,8 @@ impl Footplate {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
     }
 
-    /// The settings: the text size and the look, each with its buttons and
-    /// its keys, and where they are kept.
+    /// The settings: the text size, the look and the yard, each with its
+    /// buttons and its keys, and where they are kept.
     fn talk_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let kept = match &self.kept {
@@ -1534,6 +1837,107 @@ impl Footplate {
                     .on_click(cx.listener(move |this, _, _, cx| this.look(look, cx)))
             }),
         ));
+        // Which yard: this machine's, or one at an address, with the
+        // address and the code of a pairing to type when that is chosen.
+        let far = self.env.address(self.settings.chosen()).is_some();
+        let chosen = |el: gpui::Stateful<Div>, is: bool| {
+            el.when(is, |el| {
+                el.bg(palette.open)
+                    .text_color(palette.text)
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+        };
+        let typed = |name: &'static str, line: &Entity<Line>, cx: &mut Context<Self>| {
+            let focus = line.focus_handle(cx);
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().w(rems(4.)).flex_none().child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(rems(28.))
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(palette.line)
+                        .bg(palette.side)
+                        .debug_selector(move || format!("yard {name}"))
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            window.focus(&focus);
+                            window.prevent_default();
+                        })
+                        .child(line.clone()),
+                )
+        };
+        let mut yard = setting("yard", format!("the window shows {}", self.which_yard())).child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    chosen(
+                        small_button("this machine's".to_string(), palette).id("yard near"),
+                        !far,
+                    )
+                    .debug_selector(|| "yard near".to_string())
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_near(cx))),
+                )
+                .child(
+                    chosen(
+                        small_button("a yard at an address".to_string(), palette).id("yard far"),
+                        far,
+                    )
+                    .debug_selector(|| "yard far".to_string())
+                    .on_click(cx.listener(|this, _, window, cx| this.choose_far(window, cx))),
+                ),
+        );
+        if let Some(address) = &self.env.yard {
+            yard = yard.child(div().text_sm().text_color(palette.faint).child(format!(
+                "FOOTPLATE_YARD is set, and wins over this choice: {address}"
+            )));
+        }
+        if self.pairing_open {
+            let token = match self.env.token_file(self.kept.as_deref()) {
+                Some(file) => format!(
+                    "The device's token is kept in {}, for you alone, and never with the settings.",
+                    file.display()
+                ),
+                None => "There is no home directory to keep the device's token in: name a file for it in FOOTPLATE_TOKEN_FILE.".to_string(),
+            };
+            yard = yard
+                .child(typed("address", &self.address, cx))
+                .child(typed("code", &self.code, cx))
+                .child(
+                    div().flex().child(
+                        small_button(
+                            match self.pairing {
+                                true => "asking the yard…".to_string(),
+                                false => "pair (enter)".to_string(),
+                            },
+                            palette,
+                        )
+                        .id("yard pair")
+                        .debug_selector(|| "yard pair".to_string())
+                        .when(self.pairing, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.pair(cx))),
+                    ),
+                )
+                .child(div().text_sm().text_color(palette.faint).child(format!(
+                    "The yard's operator opens a pairing for this device and gives you the address and the code: yardr user device pair <user> <device>. With no code, the yard this device was last paired with is opened again. {token}"
+                )));
+        }
+        if let Some(said) = &self.yard_said {
+            yard = yard.child(
+                div()
+                    .debug_selector(|| "yard said".to_string())
+                    .child(said.clone()),
+            );
+        }
         pane.child(head)
             .child(
                 div()
@@ -1546,7 +1950,8 @@ impl Footplate {
                     .flex_col()
                     .gap_4()
                     .child(size)
-                    .child(look),
+                    .child(look)
+                    .child(yard),
             )
             .when_some(self.unkept.clone(), |el, why| {
                 el.child(
@@ -1575,8 +1980,24 @@ impl Footplate {
         });
     }
 
-    /// No yard: why, in words, and that it is tried again.
+    /// No yard: why, in words, where it was looked for, and whether it is
+    /// tried again. A yard that no longer lets this device in is not: the
+    /// device is paired again from here.
     fn away(&self, why: &str, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let place = self.client.as_ref().map(Client::place);
+        let again = match self.away {
+            Away::Trying => format!(
+                "footplate tries again every {} seconds.",
+                session::RETRY.as_secs()
+            ),
+            Away::Out => {
+                "footplate does not ask again until this device has a token again.".to_string()
+            }
+            Away::Stopped => {
+                "footplate does not try again: the settings choose a yard, and so does the next start."
+                    .to_string()
+            }
+        };
         div()
             .size_full()
             .flex()
@@ -1593,16 +2014,20 @@ impl Footplate {
                     .flex_col()
                     .gap_2()
                     .child(div().child(why.to_string()))
-                    .child(
-                        div()
-                            .text_color(palette.faint)
-                            .child(format!("The socket: {}", self.client.socket().display())),
-                    )
-                    .child(div().text_color(palette.faint).child(format!(
-                        "footplate tries again every {} seconds.",
-                        session::RETRY.as_secs()
-                    ))),
+                    .children(place.map(|place| div().text_color(palette.faint).child(place)))
+                    .child(div().text_color(palette.faint).child(again)),
             )
+            // A yard at an address that is away for whatever reason: the
+            // device can be paired again, which is what helps when the yard
+            // no longer knows it.
+            .when(self.client.as_ref().is_some_and(Client::is_remote), |el| {
+                el.child(
+                    small_button("pair again".to_string(), palette)
+                        .id("pair again")
+                        .debug_selector(|| "pair again".to_string())
+                        .on_click(cx.listener(|this, _, window, cx| this.pair_again(window, cx))),
+                )
+            })
             .child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
     }
 
@@ -1637,7 +2062,8 @@ impl Footplate {
                             .text_sm()
                             .text_color(palette.accent)
                             .truncate()
-                            .child(model.me().to_string()),
+                            .debug_selector(|| "which yard".to_string())
+                            .child(format!("{} · {}", model.me(), self.which_yard())),
                     ),
             )
             .child(self.settings_control("settings".to_string(), palette, cx));
@@ -5048,7 +5474,7 @@ mod tests {
     }
 
     fn settings_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Settings {
-        view.read_with(cx, |v, _| v.settings)
+        view.read_with(cx, |v, _| v.settings.clone())
     }
 
     fn settings_open(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
@@ -5076,6 +5502,7 @@ mod tests {
         let today = Settings {
             text: 14,
             look: Look::Auto,
+            ..Settings::default()
         };
         assert_eq!(settings_of(&view, cx), today);
         let desktop = cx.update(|window, _| window.appearance());
@@ -5156,6 +5583,7 @@ mod tests {
         let set = Settings {
             text: settings::TEXT_MIN,
             look: Look::Dark,
+            ..Settings::default()
         };
         assert_eq!(Settings::read(&file), set);
         assert_eq!(view.read_with(cx, |v, _| v.unkept.clone()), None);
@@ -5245,7 +5673,8 @@ mod tests {
             settings_of(&view, cx),
             Settings {
                 text: 15,
-                look: Look::Light
+                look: Look::Light,
+                ..Settings::default()
             }
         );
         cx.simulate_keystrokes("escape");
@@ -5296,7 +5725,10 @@ mod tests {
         let mut rows = Vec::new();
         for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
             view.update(cx, |v, cx| {
-                let set = Settings { text, ..v.settings };
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
                 v.set(set, cx)
             });
             let rem = settings_of(&view, cx).rem();
@@ -5341,5 +5773,335 @@ mod tests {
         assert!(rows[0].2 < rows[1].2 && rows[1].2 < rows[2].2, "{rows:?}");
         let logo = bounds_of(cx, "logo");
         assert!(logo.size.width > px(40.));
+    }
+
+    /// A yard at its listener, told from `a_yard_of_jo` by its mail.
+    fn a_far_yard_of_jo(yard: &Yard) {
+        yard.answer("Head", r#"{"result": 40}"#);
+        yard.answer(
+            "Crew",
+            r#"{"result": [{"name": "yardmaster", "enabled": true, "state": "running", "status": "idle"}]}"#,
+        );
+        yard.answer("Peers", r#"{"result": []}"#);
+        yard.answer(
+            "GetUser",
+            r#"{"result": {"name": "jo", "cursor": 30, "notification_cursor": 0}}"#,
+        );
+        yard.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [{"seq": 32, "from": "yardmaster", "to": "jo", "text": "From afar.", "read": false}], "unread": 1, "last": 32, "from": ["yardmaster"]}}"#,
+        );
+        yard.answer(
+            "Conversation",
+            r#"{"result": [{"seq": 32, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "From afar.", "read": false}]}"#,
+        );
+        yard.answer("AckUserInbox", "{}");
+        yard.answer(
+            "UserNotifications",
+            r#"{"result": {"notifications": [], "unread": 0, "last": 0}}"#,
+        );
+        yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+    }
+
+    /// The window as footplate opens it: on the yard `env` names, else the
+    /// one the settings in `file` choose.
+    fn opened_at<'a>(
+        env: Env,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        let file = file.to_path_buf();
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        cx.add_window_view(|window, cx| {
+            let view = Footplate::opened(env, "jo".into(), Some(file), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        })
+    }
+
+    /// Puts an address and a code where they are typed.
+    fn type_in(view: &Entity<Footplate>, cx: &mut VisualTestContext, address: &str, code: &str) {
+        view.update(cx, |v, cx| {
+            v.address.update(cx, |line, cx| line.set_text(address, cx));
+            v.code.update(cx, |line, cx| line.set_text(code, cx));
+        });
+    }
+
+    /// What came of the last choice of a yard.
+    fn yard_said(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.yard_said.clone().unwrap_or_default())
+    }
+
+    fn which_yard(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.which_yard())
+    }
+
+    fn mode_of(file: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(file).unwrap().permissions().mode() & 0o777
+    }
+
+    /// The choice of the yard in the settings: this machine's, as before,
+    /// or one at an address, which is paired with by a code. A wrong code
+    /// and a refused address are said and change nothing; a removed device
+    /// is said, not asked after, and paired again.
+    #[gpui::test]
+    fn the_settings_choose_the_yard_and_a_code_pairs_the_device(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("footplate/yard.token");
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        // Nothing chosen: this machine's yard, by its socket.
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(which_yard(&view, cx), "this machine's yard");
+        assert!(drawn(cx, "which yard"));
+        assert_eq!(far.requests(), 0);
+
+        // The settings have the choice, and ask for nothing until a yard
+        // at an address is chosen.
+        cx.simulate_keystrokes("secondary-,");
+        assert!(drawn(cx, "yard near") && drawn(cx, "yard far"));
+        assert!(!drawn(cx, "yard pair"));
+        click_on(cx, "yard far");
+        assert!(drawn(cx, "yard address") && drawn(cx, "yard code"));
+        assert!(drawn(cx, "yard pair"));
+
+        // The address is typed first. Plain http off this machine is
+        // refused with the reason, and nothing is sent anywhere.
+        cx.simulate_input("http://mac.example.net");
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.address.read(cx).text().to_string()),
+            "http://mac.example.net"
+        );
+        cx.simulate_keystrokes("enter");
+        let said = yard_said(&view, cx);
+        assert!(
+            said.starts_with("http://mac.example.net is refused: plain http"),
+            "{said}"
+        );
+        // No code, and no device paired before: one is wanted.
+        type_in(&view, cx, far.address(), "");
+        click_on(cx, "yard pair");
+        assert!(yard_said(&view, cx).starts_with("A code is wanted."));
+        // No pairing is open at the yard.
+        type_in(&view, cx, far.address(), "K7QM-2XPD");
+        click_on(cx, "yard pair");
+        wait(cx, "that no pairing is open", |cx| {
+            yard_said(&view, cx).starts_with("No pairing is open at this yard")
+        });
+
+        // The operator opens one, and the code is typed wrong: the yard
+        // says so, and nothing changed.
+        far.pair("K7QM-2XPD");
+        type_in(&view, cx, far.address(), "WXYZ-2345");
+        click_on(cx, "yard pair");
+        wait(cx, "that it is not the code", |cx| {
+            yard_said(&view, cx).starts_with("That is not the code.")
+        });
+        assert!(!token.exists());
+        assert!(!file.exists());
+        assert_eq!(which_yard(&view, cx), "this machine's yard");
+        assert_eq!(far.devices(), [crate::fake::TOKEN]);
+        assert!(drawn(cx, "yard said"));
+
+        // The right code, here as the pairing's QR code holds it: the
+        // window shows that yard, as the user and the device it says.
+        type_in(&view, cx, &format!("{}#k7qm-2xpd", far.address()), "");
+        click_on(cx, "yard pair");
+        wait(cx, "the yard at the address", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        let here = format!("the yard south at {}, as its device laptop", far.address());
+        assert_eq!(which_yard(&view, cx), here);
+        assert!(yard_said(&view, cx).starts_with("Paired: this is the device laptop of jo"));
+        // The address and the code are asked for no longer. (By the
+        // window's own word: gpui's test keeps the bounds of what an
+        // earlier frame drew.)
+        assert!(!view.read_with(cx, |v, _| v.pairing_open));
+        // The address is kept with the settings, the token in a file of
+        // its own that only its user reads, and nowhere else.
+        let kept = Settings::read(&file);
+        assert_eq!((kept.remote, kept.address.as_str()), (true, far.address()));
+        let first = far.devices()[1].clone();
+        assert_eq!(yard::read_token(&token).unwrap(), first);
+        assert_eq!(mode_of(&token), 0o600);
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("yardr-dev")
+        );
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.code.read(cx).text().to_string()),
+            ""
+        );
+        // Every call there is the device's.
+        assert!(
+            far.last_request()
+                .contains(&format!("Authorization: Bearer {first}\r\n"))
+        );
+
+        // The operator removes the device. The window says so, and does
+        // not ask again; it offers to pair again.
+        far.remove_device(&first);
+        wait(cx, "that the device is not let in", |cx| {
+            view.read_with(cx, |v, _| v.away == Away::Out)
+        });
+        let why = view.read_with(cx, |v, _| v.down.clone().unwrap());
+        assert!(why.starts_with("This device is no longer let in"), "{why}");
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
+        assert!(drawn(cx, "pair again"));
+        click_on(cx, "pair again");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "yard pair"));
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.address.read(cx).text().to_string()),
+            far.address()
+        );
+        // The address is there, so the code is what is typed, and Enter
+        // sends it.
+        far.pair("ABCD-EFGH");
+        cx.simulate_input("abcd efgh");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the yard again", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        let second = far.devices()[1].clone();
+        assert_ne!(second, first);
+        assert_eq!(yard::read_token(&token).unwrap(), second);
+        assert_eq!(mode_of(&token), 0o600);
+
+        // This machine's yard again: the socket, as before. The address
+        // and the token stay, to go back by.
+        click_on(cx, "yard near");
+        wait(cx, "this machine's yard again", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(which_yard(&view, cx), "this machine's yard");
+        let kept = Settings::read(&file);
+        assert_eq!((kept.remote, kept.address.as_str()), (false, far.address()));
+        // And back with no code: the device is paired already.
+        click_on(cx, "yard far");
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.address.read(cx).text().to_string()),
+            far.address()
+        );
+        click_on(cx, "yard pair");
+        wait(cx, "the yard at the address once more", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(far.devices()[1], second);
+        assert!(Settings::read(&file).remote);
+
+        // The next start opens what was chosen.
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (again, cx) = opened_at(env, &file, cx);
+        wait(cx, "the chosen yard at the next start", |cx| {
+            texts(&again, cx) == ["From afar."]
+        });
+        assert_eq!(which_yard(&again, cx), here);
+    }
+
+    /// `FOOTPLATE_YARD` and `FOOTPLATE_TOKEN_FILE` win over the settings,
+    /// and the choice in the window says so and changes nothing.
+    #[gpui::test]
+    fn the_environment_s_yard_wins_over_the_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("mac.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let env = Env {
+            yard: Some(far.address().to_string()),
+            token_file: Some(token.clone()),
+            socket: near.socket().to_path_buf(),
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the environment's yard", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(near.requests(), 0);
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "yard near");
+        cx.run_until_parked();
+        assert_eq!(texts(&view, cx), ["From afar."]);
+        assert!(!file.exists());
+        assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
+        // A pairing there goes to the environment's address, whatever is
+        // typed, and its token into the environment's file.
+        click_on(cx, "yard far");
+        far.pair("K7QM-2XPD");
+        type_in(&view, cx, "https://elsewhere.example.net", "K7QM-2XPD");
+        click_on(cx, "yard pair");
+        wait(cx, "the pairing", |cx| {
+            yard_said(&view, cx).starts_with("Paired")
+        });
+        assert_eq!(yard::read_token(&token).unwrap(), far.devices()[1]);
+        assert!(!dir.path().join("footplate/yard.token").exists());
+        assert!(!file.exists());
+    }
+
+    /// A yard that cannot be opened is said why, and not tried: plain http
+    /// off this machine, and a token file open to others. The settings
+    /// are there to choose again.
+    #[gpui::test]
+    fn a_yard_that_is_refused_is_said_why_and_not_tried(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("mac.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let env = |yard: &str| Env {
+            yard: Some(yard.to_string()),
+            token_file: Some(token.clone()),
+            socket: near.socket().to_path_buf(),
+        };
+
+        let (view, cx) = opened_at(env("http://mac.example.net:8790"), &file, cx);
+        cx.run_until_parked();
+        let (why, away) = view.read_with(cx, |v, _| (v.down.clone().unwrap(), v.away));
+        assert!(
+            why.starts_with("http://mac.example.net:8790 is refused: plain http"),
+            "{why}"
+        );
+        assert_eq!(away, Away::Stopped);
+        assert!(drawn(cx, "settings"));
+        assert!(!drawn(cx, "pair again"));
+        cx.simulate_keystrokes("secondary-,");
+        assert!(drawn(cx, "yard far"));
+
+        // The token's file is readable by others: refused before anything
+        // is sent with it.
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (view, cx) = opened_at(env(far.address()), &file, cx);
+        cx.run_until_parked();
+        let (why, away) = view.read_with(cx, |v, _| (v.down.clone().unwrap(), v.away));
+        assert!(why.contains("is open to others (mode 0644)"), "{why}");
+        assert_eq!(away, Away::Stopped);
+        assert_eq!(far.requests(), 0);
+        assert_eq!(near.requests(), 0);
     }
 }

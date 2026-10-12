@@ -1,5 +1,6 @@
 //! footplate: a native chat window onto a yardr yard. It is an interface over
-//! yardr's socket API and starts nothing of yardr's. The first slice is the
+//! yardr's socket API, or over the same calls at a yard's address, and
+//! starts nothing of yardr's. The first slice is the
 //! conversations a person has with this yard's crew and with the crew a
 //! linked yard exposes, as `yardr chat` shows them.
 
@@ -17,13 +18,13 @@ mod settings;
 mod taskbar;
 mod theme;
 mod window;
+mod yard;
 
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowOptions, actions, px, size,
 };
 
-use crate::api::Client;
 use crate::window::Footplate;
 
 /// The application's name: the window's title, and what a desktop groups
@@ -33,7 +34,7 @@ const NAME: &str = "footplate";
 actions!(footplate, [Quit]);
 
 fn main() {
-    let client = Client::new(api::socket_path());
+    let env = yard::Env::read();
     let name = session::login_name();
 
     Application::new().run(move |cx: &mut App| {
@@ -75,8 +76,7 @@ fn main() {
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            let view =
-                cx.new(|cx| Footplate::new(client, name, window, cx).kept_in(settings::file(), cx));
+            let view = cx.new(|cx| Footplate::opened(env, name, settings::file(), window, cx));
             window.focus(&view.read(cx).line().focus_handle(cx));
             view
         });

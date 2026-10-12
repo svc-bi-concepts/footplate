@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, TimeZone};
 
 use crate::api::{
-    AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Notification,
-    OpenAsk, Peer,
+    AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Me,
+    Notification, OpenAsk, Peer,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -51,6 +51,9 @@ pub struct State {
     pub notifications: Vec<Notification>,
     /// The person's open asks with what they dealt with.
     pub asks: Asks,
+    /// Of a yard at an address: who it says this device is. The window
+    /// names the yard by it; the model reads nothing of it.
+    pub yard: Option<Me>,
 }
 
 /// One whom a linked yard exposes to this one: `<name>@<peer>`.

@@ -2,7 +2,9 @@
 
 A native chat window onto a yardr yard, for macOS and Linux: the deck where
 the crew stand. It is an interface over yardr's socket API and starts nothing
-of yardr's; the yard runs as it does (`yardr status`). The first slice is the
+of yardr's; the yard runs as it does (`yardr status`). The yard is this
+machine's, or one at an address, which the window is paired with by a code.
+The first slice is the
 conversations a person has with this yard's crew and with the crew a linked
 yard exposes, as `yardr chat` shows them in a terminal.
 
@@ -11,6 +13,7 @@ Tracked in Linear as YRD-22. Developed in a yardr yard; `.yardr/` holds its
 flow, roles and merge gate (`cargo fmt`, `clippy`, `test`, `build`).
 
     cargo run                # the window, against the yard on this machine
+    FOOTPLATE_YARD=https://mac.example.net cargo run    # against a yard at an address
     cargo build --release    # one binary: target/release/footplate
     cargo test
 
@@ -63,6 +66,9 @@ and nothing else: HTTP/1.1 on the socket, a call a `POST /call/<Method>` with
 its arguments as a JSON object, the events a `GET /events?after=<seq>` of one
 JSON object a line. `src/api.rs` is the whole client.
 
+Or a yard that is not on this machine, at the address of its listener: see
+[A yard at an address](#a-yard-at-an-address). The calls are the same ones.
+
 | It reads | For |
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
@@ -98,7 +104,9 @@ notices arriving never cover or move the open card.
 **Who you are** is not typed. The window acts as `yardr chat` does: as the
 user named in `$YARDR_ACTOR`, else as your login name, when the yard has a
 user of that name; else as the yard's operator. A yard that has neither says
-how one is added (`yardr user add <name>`).
+how one is added (`yardr user add <name>`). At a yard's address none of
+that is read: you are the user the device's token is of, as the yard's
+`GET /user/me` says.
 
 **Unread** is the yard's, so `yardr chat`, `yardr inbox` and the window
 agree. Opening a conversation marks its mail read, and so does mail that
@@ -153,6 +161,90 @@ names the socket, and tries again every 3 seconds. footplate does not start
 the yard's server; any yardr command that reads the yard does
 (`yardr status`). When the server comes back, the conversation that was open
 is open again.
+
+## A yard at an address
+
+The window opens one yard: this machine's, by its socket, as above, or one
+on another machine, at the address of its listener (the yard's setting
+`hook_addr`, or what stands in front of it). There it is a *device* of one
+user of that yard, as `docs/api.md` ("Over the network") and
+`docs/users.md` ("Devices") of the yardr repository have it: the same
+calls, stream and images under `<address>/user/`, each request with
+`Authorization: Bearer <the device's token>`, and `GET /user/me` for who
+the token is. Under your name the window says which yard it shows: `this
+machine's yard`, or `the yard south at https://mac.example.net, as its
+device laptop`.
+
+**Choosing it in the window.** The settings have "yard": "this machine's"
+or "a yard at an address". For the second the window asks for the address
+and a code. The yard's operator opens a pairing for the device and reads
+you both:
+
+    yardr user device pair <user> <device> --url https://mac.example.net
+
+Type them and press Enter, or "pair". What the pairing's QR code holds,
+`<address>#<code>`, can be pasted into the address as it is. footplate
+sends the code once (`POST <address>/user/pair`), is answered with the
+device's token, keeps it, and shows that yard. What the yard says of a code
+is shown under the fields: that it is not the code (the yard counts a wrong
+one, and its fifth ends the pairing), that no pairing is open, that the
+code was used up and the device could not be added. Nothing changes then:
+the window shows the yard it showed.
+
+Choosing "this machine's" opens the socket again. The address and the token
+stay where they are kept, so "a yard at an address" with no code goes back
+to the yard the device is paired with.
+
+**Where they are kept.** The address is in the settings file (`remote` and
+`address`). The token never is: it has a file of its own beside it,
+`yard.token`, written with mode 0600 and replaced by the next pairing.
+There is one such file, so the window is paired with one yard at a time.
+It is a file on macOS too, not the Keychain.
+
+**By the environment.** Two variables, which win over the settings when
+set:
+
+    FOOTPLATE_YARD=https://mac.example.net FOOTPLATE_TOKEN_FILE=~/.config/footplate/mac.token footplate
+
+`FOOTPLATE_YARD` is the address; the window's choice then says that it is
+set and changes nothing. `FOOTPLATE_TOKEN_FILE` is the file the token is
+read from, a token as `yardr user device add` printed it or as a pairing
+gave it, on one line; a pairing in the window writes to it. It names no
+yard by itself: without `FOOTPLATE_YARD` and with this machine's yard
+chosen, the socket is opened as ever.
+
+**What is refused, with the reason, before anything is sent:**
+
+- an address that is `http://` and whose host is not this machine
+  (`127.0.0.1`, `::1`, `localhost`). yardr does no TLS: a proxy or a tunnel
+  of the operator's stands in front of the listener, and the yard cannot
+  tell from the inside whether one does, so the rule is the client's. The
+  token, and a pairing's code, would cross the network for anyone to read.
+  Over `https://` the certificate is checked against the roots this system
+  trusts, for the address's host;
+- a token file that anyone but you can read or write (any bit of mode 077):
+  whoever reads it calls the yard as you. `chmod 600 <file>` and start
+  again. A file that is missing, or holds no token, is said too.
+
+A yard that is refused is not tried again: the window says why, and the
+settings are there to choose another.
+
+**"This device is no longer let in."** The yard answers 401 when the token
+is not a device's: the operator removed the device (`yardr user device rm`),
+or the token is another yard's. That does not pass by itself, so footplate
+says so and stops asking: no call, no stream, until the device has a token
+again. "pair again" under the words opens the settings with the address
+there, for a new code. A yard that has no device at all answers 404 under
+`/user/`, to a token as to none, and so does an address that is no yard's
+listener: the window says that, offers the same, and goes on trying every
+3 seconds, since a proxy that is being set right answers so too. When
+nothing answers at the address it says so, names the address, and tries
+again.
+
+What a device reads and writes, and how it is taken back, is the yard's:
+`docs/users.md` there. In short, it reads what any user of the yard can
+and writes as its user, marked `via <device>`; a token does not end until
+the device is removed.
 
 ## The window
 
@@ -218,7 +310,8 @@ its ask, as a draft stays with its conversation.
 ## Settings
 
 Two things can be set, in the settings or by their own keys, and both are
-drawn at once and kept for the next start:
+drawn at once and kept for the next start; the third is the yard, which
+[A yard at an address](#a-yard-at-an-address) has:
 
 - the text size, 11 to 20 pixels, a pixel a step; 14 is the usual size.
   Everything that goes with the text goes with it: the left column, the
@@ -274,8 +367,9 @@ options have no icon, so the program sees to it when it starts
 
 | File | Holds |
 |---|---|
-| `src/api.rs` | the socket client: the calls, the stream, their JSON |
-| `src/session.rs` | following a yard on a thread: who the window is for, the state it starts from, trying again |
+| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed |
+| `src/yard.rs` | which yard is opened, as plain functions: the environment over the settings, the token's file and its mode |
+| `src/session.rs` | following a yard on a thread: who the window is for, the state it starts from, trying again, or not when the device is not let in |
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
 | `src/draft.rs` | what is not sent yet, as plain functions: each conversation's attachments and text, what is refused and why |
 | `src/window.rs` | the window: draws the model and the draft, and makes the calls they ask for |
@@ -283,14 +377,19 @@ options have no icon, so the program sees to it when it starts
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir that answers the documented JSON |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON |
 
 The tests run without a yard and without a screen: the client against the
-fake yard for each call, an image and the stream, the model as it is, and
+fake yard for each call, an image and the stream, by its socket and at an
+address, with a pairing, a wrong code and a removed device, the model as it
+is, and
 the window itself on gpui's test platform, where an image on its clipboard
 is pasted and the draft sent with Enter. gpui gives a test no way to make
 the paths of a file drop, so the window's test hands the files to what a
-drop calls and drops nothing but an empty one.
+drop calls and drops nothing but an empty one. The fake yard speaks no TLS:
+at an address the tests run over plain HTTP on this machine, and one test
+that is not run by the gate (`cargo test tls -- --ignored`) makes the
+handshake with a site of the internet.
 
 ## Licence
 
