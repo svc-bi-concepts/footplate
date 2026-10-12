@@ -637,7 +637,7 @@ impl Footplate {
         let before_position = matches!(&before_sel, Some(Selected::Conversation(_)))
             .then(|| self.conversation.offset());
         let before_entries = model.entries().len();
-        let before_notices = model.notices().len();
+        let before_notices = model.notices().len() + model.yard_mail().len();
         let effects = f(model);
         let after_sel = model.selected().cloned();
         if let (Some(Selected::Conversation(name)), Some(position), Some(Selected::Decision(_))) =
@@ -672,7 +672,9 @@ impl Footplate {
                 Some(Selected::Conversation(_)) if model.entries().len() != before_entries => {
                     self.conversation.scroll_to_bottom();
                 }
-                Some(Selected::Yard) if model.notices().len() != before_notices => {
+                Some(Selected::Yard)
+                    if model.notices().len() + model.yard_mail().len() != before_notices =>
+                {
                     self.conversation.scroll_to_bottom();
                 }
                 _ => {}
@@ -2577,8 +2579,10 @@ impl Footplate {
                 )
             })
             .when(others > 0, |el| {
+                // Only one who is neither crew here nor on the roster of
+                // a linked yard: the yard's own mail is on the yard row.
                 let line = format!(
-                    "{others} unread from {}, who have no row here: yardr inbox reads it",
+                    "{others} unread from {}, who are neither crew here nor on a linked yard's roster and so have no row: yardr inbox reads it",
                     from.join(", ")
                 );
                 el.child(
@@ -2639,7 +2643,23 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child("What the yard reports, apart from every conversation."),
             );
-        let notices = model.notices();
+        // Its notices and the mail it sent itself, in the order they came.
+        enum Said {
+            Notice(model::Notice),
+            Mail(Entry),
+        }
+        let mut said: Vec<(u64, Said)> = model
+            .notices()
+            .into_iter()
+            .map(|n| (n.seq, Said::Notice(n)))
+            .chain(
+                model
+                    .yard_mail()
+                    .into_iter()
+                    .map(|e| (e.seq, Said::Mail(e))),
+            )
+            .collect();
+        said.sort_by_key(|(seq, _)| *seq);
         let list = div()
             .id("notices")
             .flex_1()
@@ -2650,14 +2670,18 @@ impl Footplate {
             .flex()
             .flex_col()
             .gap_3();
-        let list = if notices.is_empty() {
+        let list = if said.is_empty() {
             list.child(
                 div()
                     .text_color(palette.faint)
                     .child("No notices. The yard reports here what you subscribe to."),
             )
         } else {
-            list.children(notices.into_iter().map(|n| {
+            list.children(said.into_iter().map(|(_, said)| {
+                let n = match said {
+                    Said::Notice(n) => n,
+                    Said::Mail(entry) => return self.entry(entry, palette).into_any_element(),
+                };
                 div()
                     .flex()
                     .flex_col()
@@ -2682,6 +2706,7 @@ impl Footplate {
                             .when(n.read, |el| el.text_color(palette.faint))
                             .child(n.text),
                     )
+                    .into_any_element()
             }))
         };
         pane.child(head)
@@ -2702,7 +2727,7 @@ impl Footplate {
                     .py_2()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child("x marks one read"),
+                    .child("x marks one notice read; mail is read when shown here"),
             )
     }
 
@@ -4021,6 +4046,79 @@ mod tests {
                 Some("clerk@north")
             )
         });
+    }
+
+    #[gpui::test]
+    fn mail_from_the_yard_is_read_on_the_yard_row_and_leaves_no_badge_behind(
+        cx: &mut TestAppContext,
+    ) {
+        // footplate-knh4: two refusals of a linked yard came back as mail
+        // from the yard, between the mail of one of that yard.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [
+                {"seq": 12, "from": "clerk@north", "to": "jo", "text": "One.", "read": false},
+                {"seq": 13, "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": false},
+                {"seq": 14, "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": false},
+                {"seq": 15, "from": "clerk@north", "to": "jo", "text": "Two.", "read": false}],
+                "unread": 4, "last": 15, "from": ["clerk@north", "yard"]}}"#,
+        );
+        yard.answer("Conversation", r#"{"result": []}"#);
+        let (view, cx) = opened(&yard, &[], cx);
+        let counts = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                let m = v.model.as_ref().unwrap();
+                (m.unread("clerk@north"), m.yard_row().unread, m.others().0)
+            })
+        };
+        wait(cx, "the unread mail counted", |cx| {
+            view.read_with(cx, |v, _| v.model.is_some()) && counts(cx) == (2, 2, 0)
+        });
+
+        // The conversation is opened: all its mail is shown, and it has no
+        // badge, though the yard's mail keeps 15 from being acknowledged.
+        yard.answer(
+            "Conversation",
+            r#"{"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "clerk@north", "to": "jo", "text": "One.", "read": false},
+                {"seq": 15, "at": "2026-10-08T09:33:00Z", "from": "clerk@north", "to": "jo", "text": "Two.", "read": false}]}"#,
+        );
+        cx.simulate_keystrokes("tab");
+        wait(cx, "the conversation with the linked yard", |cx| {
+            texts(&view, cx) == ["One.", "Two."]
+        });
+        wait(cx, "its first mail acknowledged", |_| {
+            yard.asked("AckUserInbox") == [json!({"name": "jo", "through": 12})]
+        });
+        assert_eq!(counts(cx), (0, 2, 0));
+
+        // The yard row shows the yard's mail, which is read with that.
+        yard.answer(
+            "Conversation",
+            r#"{"result": [
+                {"seq": 13, "at": "2026-10-08T09:31:00Z", "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": false},
+                {"seq": 14, "at": "2026-10-08T09:32:00Z", "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": false}]}"#,
+        );
+        cx.simulate_keystrokes("tab");
+        wait(cx, "the yard's mail on the yard row", |cx| {
+            view.read_with(cx, |v, _| {
+                let m = v.model.as_ref().unwrap();
+                m.selected() == Some(&Selected::Yard)
+                    && m.yard_mail().iter().map(|e| e.seq).eq([13, 14])
+            })
+        });
+        assert_eq!(
+            yard.asked("Conversation").last(),
+            Some(&json!({"a": "jo", "b": "yard", "after": 0}))
+        );
+        wait(cx, "all of it acknowledged", |_| {
+            yard.asked("AckUserInbox").last() == Some(&json!({"name": "jo", "through": 15}))
+        });
+        assert_eq!(counts(cx), (0, 0, 0));
+        // Its text is drawn there.
+        text_bounds(cx, 13);
     }
 
     const LINK: &str = "see https://example.org/a now";

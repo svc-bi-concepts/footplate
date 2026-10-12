@@ -428,10 +428,15 @@ impl Model {
     /// open stays open as in [`Model::new`], and the conversation to come
     /// back to from a decision stays that one.
     pub fn resumed(&self, state: State) -> (Model, Vec<Effect>) {
-        let (mut m, effects) = Model::new(state, self.selected.clone());
+        let (mut m, mut effects) = Model::new(state, self.selected.clone());
         if m.back.is_none() {
             m.back = self.back.clone();
         }
+        // What was shown before the yard was lost is not unseen again.
+        for (seq, w) in m.unread.iter_mut() {
+            w.seen |= self.unread.get(seq).is_some_and(|before| before.seen);
+        }
+        effects.extend(m.ack());
         (m, effects)
     }
 
@@ -505,19 +510,48 @@ impl Model {
         self.parties.iter().find(|p| p.address() == address)
     }
 
-    /// How many mails from `name` the user has not seen.
+    /// How many mails from `name` the user has not seen. Mail that was
+    /// shown does not count, also while the yard has it unread still: one
+    /// position stands for all senders, so unseen mail of another holds the
+    /// acknowledgement back, and the count would stay on a row with nothing
+    /// left to read.
     pub fn unread(&self, name: &str) -> usize {
-        self.unread.values().filter(|w| w.from == name).count()
+        self.unread
+            .values()
+            .filter(|w| w.from == name && !w.seen)
+            .count()
+    }
+
+    /// Whether the yard row takes the mail the yard itself sends (what
+    /// another yard did not take comes back so). It does unless a crew
+    /// member has the yard's name: then that row has it.
+    fn yard_takes_mail(&self) -> bool {
+        self.member(YARD).is_none()
+    }
+
+    /// The sender whose mail the open row shows: the one the conversation
+    /// is with, or the yard on the yard row.
+    fn showing(&self) -> Option<&str> {
+        match self.selected.as_ref() {
+            Some(Selected::Conversation(name)) => Some(name),
+            Some(Selected::Yard) if self.yard_takes_mail() => Some(YARD),
+            _ => None,
+        }
     }
 
     /// The unread mail of senders who have no row (another user, one of a
     /// linked yard that is not on its roster): how many, and from whom, in
-    /// name order. `yardr inbox` reads it.
+    /// name order. `yardr inbox` reads it. Mail from the yard is not among
+    /// it: the yard row has that.
     pub fn others(&self) -> (usize, Vec<String>) {
         let names = self.conversation_names();
         let mut from: Vec<String> = Vec::new();
         let mut count = 0;
-        for w in self.unread.values().filter(|w| !names.contains(&w.from)) {
+        for w in self
+            .unread
+            .values()
+            .filter(|w| !names.contains(&w.from) && w.from != YARD)
+        {
             count += 1;
             if !from.contains(&w.from) {
                 from.push(w.from.clone());
@@ -1024,9 +1058,25 @@ impl Model {
         }
     }
 
-    /// How many notifications the user has not read.
+    /// How many notifications the user has not read, with the mail from
+    /// the yard not seen.
     pub fn yard_unread(&self) -> usize {
-        self.notifications.iter().filter(|n| !n.read).count()
+        let mail = if self.yard_takes_mail() {
+            self.unread(YARD)
+        } else {
+            0
+        };
+        self.notifications.iter().filter(|n| !n.read).count() + mail
+    }
+
+    /// The mail from the yard itself, oldest first: the yard row shows it
+    /// among the notices.
+    pub fn yard_mail(&self) -> Vec<Entry> {
+        if self.yard_takes_mail() {
+            self.entries_with(YARD)
+        } else {
+            Vec::new()
+        }
     }
 
     /// The notices of the open yard row, oldest first.
@@ -1073,7 +1123,13 @@ impl Model {
 
     /// The open conversation, oldest first.
     pub fn entries(&self) -> Vec<Entry> {
-        let Some(letters) = self.selected_conversation().and_then(|s| self.convo.get(s)) else {
+        self.selected_conversation()
+            .map_or(Vec::new(), |s| self.entries_with(s))
+    }
+
+    /// The mail between the user and `name`, oldest first.
+    fn entries_with(&self, name: &str) -> Vec<Entry> {
+        let Some(letters) = self.convo.get(name) else {
             return Vec::new();
         };
         let mut out: Vec<Entry> = Vec::with_capacity(letters.len());
@@ -1178,28 +1234,32 @@ impl Model {
         self.select(order[next].clone())
     }
 
-    /// What opening a conversation does here: the unread mail in it is
-    /// seen, and it is the one to come back to.
+    /// What opening a row does here: the unread mail it shows is seen, and
+    /// a conversation is the one to come back to.
     fn opened(&mut self) {
-        let Some(Selected::Conversation(sel)) = &self.selected else {
+        let Some(from) = self.showing().map(str::to_string) else {
             return;
         };
-        for w in self.unread.values_mut().filter(|w| &w.from == sel) {
+        for w in self.unread.values_mut().filter(|w| w.from == from) {
             w.seen = true;
         }
-        self.back = Some(sel.clone());
+        if let Some(Selected::Conversation(sel)) = &self.selected {
+            self.back = Some(sel.clone());
+        }
     }
 
     /// Reads the open conversation if it was not read before, and
-    /// acknowledges what opening it showed. A bead and one dealt with read
-    /// the bead whole when it was not read before; the yard row needs no
-    /// call to open.
+    /// acknowledges what opening it showed; the yard row does so with the
+    /// mail from the yard, and its notices need no call. A bead and one
+    /// dealt with read the bead whole when it was not read before.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
-            Some(Selected::Conversation(sel)) => {
+            Some(Selected::Conversation(_) | Selected::Yard) => {
                 let mut effects = Vec::new();
-                if !self.loaded.contains(&sel) {
-                    effects.push(self.read(&sel));
+                if let Some(from) = self.showing().map(str::to_string)
+                    && !self.loaded.contains(&from)
+                {
+                    effects.push(self.read(&from));
                 }
                 effects.extend(self.ack());
                 effects
@@ -1393,8 +1453,8 @@ impl Model {
             let read = l.read;
             self.add(&e.actor, l);
             if !read && !self.unread.contains_key(&e.seq) {
-                // In the open conversation it is seen as it arrives.
-                let seen = self.selected_conversation() == Some(e.actor.as_str());
+                // On the open row that shows it, it is seen as it arrives.
+                let seen = self.showing() == Some(e.actor.as_str());
                 self.unread.insert(
                     e.seq,
                     Waiting {
@@ -1948,8 +2008,10 @@ mod tests {
         );
         // The yard row stands whatever the yard has.
         assert_eq!(m.selected(), Some(&Selected::Yard));
-        assert_eq!(effects, []);
+        // It reads the mail the yard itself sent.
+        assert_eq!(effects, [read("yard", 0)]);
         assert_eq!(m.target(), None);
+        m.conversation("yard", vec![]);
         assert_eq!(m.step(1), []);
         assert_eq!(m.selected(), Some(&Selected::Yard));
         assert_eq!(m.entries(), []);
@@ -2031,10 +2093,120 @@ mod tests {
         let (mut m, effects) = Model::new(yard(&[(6, "yardmaster"), (7, "yardmaster")]), None);
         // The yardmaster's is open from the start.
         assert_eq!(effects, [read("yardmaster", 0), Effect::Ack { through: 7 }]);
-        // It counts until the yard says it is read.
-        assert_eq!(m.unread("yardmaster"), 2);
+        // It was shown: it counts no longer, whenever the yard answers.
+        assert_eq!(m.unread("yardmaster"), 0);
         m.acked(7);
         assert_eq!(m.unread("yardmaster"), 0);
+    }
+
+    #[test]
+    fn mail_from_the_yard_between_leaves_no_badge_on_a_conversation_that_was_shown() {
+        // footplate-knh4: two refusals came back as mail from the yard
+        // between the mail of one of a linked yard. They had no row, so
+        // they were never seen and held the acknowledgement back, and the
+        // row counted its mail though all of it was shown.
+        let (mut m, _) = Model::new(
+            yard(&[
+                (6, "clerk@north"),
+                (7, "yard"),
+                (8, "yard"),
+                (9, "clerk@north"),
+            ]),
+            None,
+        );
+        assert_eq!(m.unread("clerk@north"), 2);
+        assert_eq!(m.yard_row().unread, 2);
+        // The yard's mail has a row: it is not among the senders without.
+        assert_eq!(m.others(), (0, vec![]));
+
+        // Opening the conversation shows 6 and 9; 7 holds back 9.
+        assert_eq!(
+            m.select(Selected::Conversation("clerk@north".into())),
+            [read("clerk@north", 0), Effect::Ack { through: 6 }]
+        );
+        assert_eq!(m.unread("clerk@north"), 0);
+        m.conversation("clerk@north", vec![]);
+        m.acked(6);
+        assert_eq!(m.unread("clerk@north"), 0);
+        // More of it arrives while it is open: shown, and no badge.
+        assert_eq!(m.event(&mail_to_jo(21, "clerk@north")), []);
+        assert_eq!(m.unread("clerk@north"), 0);
+        assert_eq!(m.yard_row().unread, 2);
+
+        // The yard row shows the yard's mail: it is read there, and what
+        // it held back is acknowledged with it.
+        assert_eq!(
+            m.select(Selected::Yard),
+            [read("yard", 0), Effect::Ack { through: 21 }]
+        );
+        assert_eq!(m.yard_row().unread, 0);
+        m.conversation(
+            "yard",
+            vec![
+                letter(7, "yard", "jo", "not delivered to mac: rate_limited"),
+                letter(8, "yard", "jo", "not delivered to mac: rate_limited"),
+            ],
+        );
+        let mail = m.yard_mail();
+        assert_eq!(mail.len(), 2);
+        assert_eq!(mail[0].text, "not delivered to mac: rate_limited");
+        assert_eq!(mail[0].from, "yard");
+        m.acked(21);
+
+        // With the yard's mail read, mail of the conversation that is not
+        // open counts, and opening it clears the count again.
+        m.event(&mail_to_jo(22, "clerk@north"));
+        assert_eq!(m.unread("clerk@north"), 1);
+        // Mail from the yard arriving on its open row is shown and read.
+        assert_eq!(m.event(&mail_to_jo(23, "yard")), []);
+        assert_eq!(m.yard_row().unread, 0);
+        assert_eq!(m.yard_mail().len(), 3);
+        assert_eq!(
+            m.select(Selected::Conversation("clerk@north".into())),
+            [Effect::Ack { through: 23 }]
+        );
+        assert_eq!(m.unread("clerk@north"), 0);
+        // The yard row was read: opening it again asks nothing.
+        m.acked(23);
+        assert_eq!(m.select(Selected::Yard), []);
+    }
+
+    #[test]
+    fn the_yard_row_counts_notices_and_the_yards_mail() {
+        let mut state = yard(&[(6, "yard")]);
+        state.notifications = vec![notification(10, "yd-shed", "yd-shed created", false)];
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!(m.yard_unread(), 2);
+        // Opening reads the mail; the notice waits for its key.
+        m.select(Selected::Yard);
+        assert_eq!(m.yard_unread(), 1);
+        assert_eq!(m.dismiss(), [Effect::AckNotifications { through: 10 }]);
+    }
+
+    #[test]
+    fn a_crew_member_named_yard_keeps_its_mail_on_its_own_row() {
+        let mut state = yard(&[(6, "yard")]);
+        state.crew.push(member("yard", "running", "idle"));
+        let (mut m, _) = Model::new(state, None);
+        assert_eq!((m.unread("yard"), m.yard_unread()), (1, 0));
+        assert_eq!(m.select(Selected::Yard), []);
+        assert_eq!(m.yard_mail(), []);
+        assert_eq!(m.unread("yard"), 1);
+    }
+
+    #[test]
+    fn what_was_shown_is_not_unseen_again_when_the_yard_is_back() {
+        // ada has no row, so her mail holds back the yardmaster's 8.
+        let unread = [(6, "yardmaster"), (7, "ada"), (8, "yardmaster")];
+        let (mut m, _) = Model::new(yard(&unread), None);
+        m.select(Selected::Conversation("assembly".into()));
+        assert_eq!(m.unread("yardmaster"), 0);
+        // The yard was lost before it took the acknowledgement of 6.
+        let (m, effects) = m.resumed(yard(&unread));
+        assert_eq!(m.selected_conversation(), Some("assembly"));
+        assert_eq!(m.unread("yardmaster"), 0);
+        assert_eq!(effects, [read("assembly", 0), Effect::Ack { through: 6 }]);
+        assert_eq!(m.others(), (1, vec!["ada".to_string()]));
     }
 
     #[test]
@@ -2046,7 +2218,8 @@ mod tests {
         // 8 was shown, but 7 was not: only 6 is acknowledged.
         assert_eq!(effects, [read("yardmaster", 0), Effect::Ack { through: 6 }]);
         m.acked(6);
-        assert_eq!((m.unread("yardmaster"), m.unread("assembly")), (1, 1));
+        // 8 was shown and does not count, though it is not acknowledged.
+        assert_eq!((m.unread("yardmaster"), m.unread("assembly")), (0, 1));
         // Opening assembly's shows 7, and 8 was seen before.
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
@@ -2080,7 +2253,8 @@ mod tests {
             "{}",
             m.notice
         );
-        assert_eq!(m.unread("yardmaster"), 1);
+        // It was shown, so it does not count; the yard has it unread still.
+        assert_eq!(m.unread("yardmaster"), 0);
         assert_eq!(
             m.event(&mail_to_jo(21, "yardmaster")),
             [Effect::Ack { through: 21 }]
