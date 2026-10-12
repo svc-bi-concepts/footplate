@@ -206,10 +206,15 @@ const SECRET_GOES: &str = "it goes to a file only the yard's server reads; no ag
 
 /// The keys of a secret ask's card, with the way for a person without the
 /// field: the same answer in a terminal on the yard's machine.
-fn secret_keys(bead: &str, ask: u64) -> String {
-    format!(
+fn secret_keys(bead: &str, ask: u64, writable: bool) -> String {
+    let keys = format!(
         "i types it · enter sends it to the yard · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
-    )
+    );
+    if writable {
+        format!("{keys} · a ask about this")
+    } else {
+        keys
+    }
 }
 
 /// The keys of a dealt with: nothing is chosen by default and Enter alone
@@ -3274,7 +3279,7 @@ impl Footplate {
                     .text_sm()
                     .text_color(palette.faint)
                     .child(match ask.secret {
-                        Some(_) => secret_keys(&bead_id, ask_seq),
+                        Some(_) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
                         None => decision_keys(ask, foreign, unwritable.is_none()),
                     }),
             );
@@ -3491,7 +3496,7 @@ impl Footplate {
             }
             body = body.child(div().text_sm().text_color(palette.faint).child(
                 match detail.secret {
-                    Some(_) if giving => secret_keys(bead, ask),
+                    Some(_) if giving => secret_keys(bead, ask, false),
                     Some(_) => String::new(),
                     None => decided_keys(&detail),
                 },
@@ -3814,6 +3819,16 @@ mod tests {
             decision_keys(&words, true, false),
             "words wanted · i words · enter sends the answer"
         );
+    }
+
+    #[test]
+    fn a_writable_secret_card_lists_ask_about_this_in_its_footer() {
+        let ordinary = "i types it · enter sends it to the yard · esc leaves, and nothing is sent · or in a terminal: yardr bead answer bead-s 7 --secret";
+        assert_eq!(
+            secret_keys("bead-s", 7, true),
+            format!("{ordinary} · a ask about this")
+        );
+        assert_eq!(secret_keys("bead-s", 7, false), ordinary);
     }
 
     /// The yard is followed on a thread of its own, so the test waits for
