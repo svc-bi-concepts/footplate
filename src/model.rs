@@ -1096,9 +1096,9 @@ impl Model {
     }
 
     /// Chooses an option with a number key. One past the last changes
-    /// nothing, as does an ask the bead does not show.
+    /// nothing, as does an ask the bead does not show, and one taken back.
     pub fn choose(&mut self, bead: &str, ask: u64, option: u64) {
-        if option == 0 {
+        if option == 0 || self.taken_back(bead, ask) {
             return;
         }
         let last = match self.bead_ask(bead, ask) {
@@ -1122,7 +1122,7 @@ impl Model {
             Some(full) => full.options.len() as u64,
             None => return,
         };
-        if last == 0 {
+        if last == 0 || self.taken_back(bead, ask) {
             return;
         }
         let key = (bead.to_string(), ask);
@@ -1164,9 +1164,14 @@ impl Model {
     /// chosen, or the recommended one when none is, or words alone. `None`
     /// sends nothing: neither an option, a recommendation, nor words. One
     /// dealt with takes only a new pick: nothing is chosen by default, and
-    /// Enter alone sends nothing, not even the recommendation.
+    /// Enter alone sends nothing, not even the recommendation. One taken
+    /// back takes nothing at all: the yard refuses an answer to an ask that
+    /// is asked no more.
     pub fn answer_action(&self, bead: &str, ask: u64, words: &str) -> Option<AnswerAction> {
         let full = self.bead_ask(bead, ask)?;
+        if self.taken_back(bead, ask) {
+            return None;
+        }
         // A secret ask takes no words and no pick: its answer is typed in
         // its own field and goes in its own call.
         if self.secret(bead, ask).is_some() || full.secret.is_some() {
@@ -1271,6 +1276,14 @@ impl Model {
             .chain(decided.map(|a| &a.secret))
             .next()?
             .as_ref()
+    }
+
+    /// Whether its asker took the ask back: its card reads only, with
+    /// nothing to pick and no line for words.
+    pub fn taken_back(&self, bead: &str, ask: u64) -> bool {
+        self.decided
+            .iter()
+            .any(|a| a.bead == bead && a.ask == ask && a.state == "taken back")
     }
 
     /// What a field on the ask's card takes: the secret of an ask that is

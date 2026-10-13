@@ -223,8 +223,12 @@ fn secret_keys(bead: &str, ask: u64, writable: bool) -> String {
 }
 
 /// The keys of a dealt with: nothing is chosen by default and Enter alone
-/// sends nothing; a number then Enter replaces the pick.
+/// sends nothing; a number then Enter replaces the pick. One taken back has
+/// no keys: nothing is sent from its card.
 fn decided_keys(detail: &DecidedDetail) -> String {
+    if detail.state == "taken back" {
+        return String::new();
+    }
     if detail.options.is_empty() {
         return "i words · enter sends".to_string();
     }
@@ -1342,16 +1346,17 @@ impl Footplate {
             self.forget_secret(cx);
             self.secret_for = ask.clone();
         }
-        // A secret ask's card draws no line for words. A focus left in
+        // A secret ask's card draws no line for words, nor does the card
+        // of an ask taken back. A focus left in
         // the line by the conversation before it would hold the keys where
         // nothing is drawn to take them: the window has them, and `i` or a
         // click types in the field. Never the field at once: what was being
         // typed for a conversation must not go on as a secret.
-        let secret_card = ask.as_ref().is_some_and(|(bead, ask)| {
+        let no_line = ask.as_ref().is_some_and(|(bead, ask)| {
             let model = self.model.as_ref();
-            model.is_some_and(|m| m.secret(bead, *ask).is_some())
+            model.is_some_and(|m| m.secret(bead, *ask).is_some() || m.taken_back(bead, *ask))
         });
-        if secret_card && !self.settings_open {
+        if no_line && !self.settings_open {
             let (handle, line, focus) =
                 (self.handle, self.line.focus_handle(cx), self.focus.clone());
             // Afterwards: the window is not to be had while a key or click
@@ -2180,7 +2185,15 @@ impl Footplate {
 
     /// The line has the words: `i` types them in, where a number key picks.
     fn focus_words(&mut self, _: &FocusWords, window: &mut Window, cx: &mut Context<Self>) {
-        if self.card().is_none() {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        // A taken-back ask's card draws no field to type in.
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.taken_back(&bead, ask))
+        {
             return;
         }
         let field = match self.giving() {
@@ -4038,7 +4051,9 @@ impl Footplate {
 
     /// One dealt with: what was decided, in plain words with who and when;
     /// the picked option marked, with its words under it; the same options
-    /// to pick again from there; and the same full bead one key away.
+    /// to pick again from there; and the same full bead one key away. One
+    /// its asker took back reads only: the yard refuses an answer to it, so
+    /// its card has no options to pick and no field.
     fn talk_decided(
         &self,
         model: &Model,
@@ -4102,8 +4117,10 @@ impl Footplate {
                 body = body.child(div().child(line.clone()));
             }
             // An ask with no options shows none: the answer's words are in
-            // the state line, and nothing is wanted.
-            if !detail.options.is_empty() {
+            // the state line, and nothing is wanted. Nor does one taken
+            // back: there is nothing to pick.
+            let taken_back = detail.state == "taken back";
+            if !detail.options.is_empty() && !taken_back {
                 for option in &detail.options {
                     // The circle marks the pick; a newly chosen option is
                     // the highlighted one, and the button says what it sends.
@@ -4149,8 +4166,8 @@ impl Footplate {
                 body = body.child(self.secret_lines(secret, palette));
             }
             // A line for words with the later pick, or the field of a
-            // secret to give it again: a declined one takes none, nor one
-            // taken back, and no
+            // secret to give it again: a declined one takes none, one taken
+            // back has neither, and no
             // line for words stands where a value could be typed in sight.
             let giving = model.giving(bead, ask);
             let field = match detail.secret {
@@ -4163,7 +4180,8 @@ impl Footplate {
             } else {
                 "words"
             };
-            body = body.when(detail.secret.is_none() || giving.is_some(), |body| {
+            let fielded = !taken_back && (detail.secret.is_none() || giving.is_some());
+            body = body.when(fielded, |body| {
                 body.child(
                     div()
                         .debug_selector(|| format!("{kind} {bead} {ask}"))
@@ -4184,6 +4202,7 @@ impl Footplate {
             // does: the value again on a secret, the words where they are
             // the answer, the new pick where one is chosen.
             let send = match (&detail.secret, giving) {
+                _ if taken_back => None,
                 (Some(_), Some(secret)) => Some((
                     format!("give {bead} {ask}"),
                     give_label(secret, self.secret_typed.len()),
@@ -9228,6 +9247,97 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
         assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+    }
+
+    /// An ask its asker took back reads only: its card draws no option to
+    /// pick and no line for words, with options or without, and no key
+    /// sends anything from it, since the yard refuses an answer to an ask
+    /// that is asked no more. An answered or a declined one keeps its
+    /// options and its line.
+    #[gpui::test]
+    fn a_taken_back_ask_reads_only_and_an_answered_or_declined_one_is_picked_again(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let mut asks: Value =
+            serde_json::from_str(&asks_decided(1, "Switch to attention")).unwrap();
+        let decided = asks["result"]["decided"].as_array_mut().unwrap();
+        for (ask, question) in [(17, "Move the depot?"), (18, "Who drives it?")] {
+            decided.push(json!({
+                "bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+                "ask": ask, "question": question, "asker": "mayor",
+                "since": "2026-10-12T11:07:00Z", "state": "taken back",
+                "by": "mayor", "words": "the train left"
+            }));
+        }
+        let mut bead: Value = serde_json::from_str(&bead_decided()).unwrap();
+        let on_bead = bead["result"]["asks"].as_array_mut().unwrap();
+        on_bead.push(decided_bead_ask(17, "Move the depot?", "taken back", true));
+        on_bead.push(decided_bead_ask(18, "Who drives it?", "taken back", false));
+        yard.answer("UserAsks", &asks.to_string());
+        yard.answer("Bead", &bead.to_string());
+        yard.answer("AnswerAsk", "{}");
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().decided_count() == 8)
+        });
+
+        // With options: none is drawn to click, and no line. The focus the
+        // conversation left in the line is the window's, and neither a
+        // number, an arrow nor `i` and Enter chooses or sends anything.
+        open_decided(&view, cx, "bead-d", 17);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-d"));
+        let d = decided_detail_of(&view, cx, "bead-d", 17);
+        assert_eq!(d.state_line, "taken back by mayor: the train left");
+        assert_eq!(d.options.len(), 4);
+        assert_eq!(decided_keys(&d), "");
+        for n in 1..=4 {
+            assert!(!drawn(cx, &format!("pick bead-d 17 {n}")));
+        }
+        assert!(!drawn(cx, "words bead-d 17"));
+        assert!(!drawn(cx, "send bead-d 17"));
+        cx.simulate_keystrokes("2");
+        cx.simulate_keystrokes("down");
+        assert_eq!(decided_detail_of(&view, cx, "bead-d", 17).chosen, 0);
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("anyway");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "");
+        assert!(!drawn(cx, "send bead-d 17"));
+
+        // Without options: no line for the words that would be the answer.
+        open_decided(&view, cx, "bead-d", 18);
+        let d = decided_detail_of(&view, cx, "bead-d", 18);
+        assert_eq!(d.state_line, "taken back by mayor: the train left");
+        assert_eq!(decided_keys(&d), "");
+        assert!(!drawn(cx, "words bead-d 18"));
+        assert!(!drawn(cx, "send bead-d 18"));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("me");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        assert_eq!(yard.asked("AddNote"), Vec::<Value>::new());
+
+        // A declined one and an answered one are drawn as before: every
+        // option to click, and the line for words.
+        for ask in [14, 11] {
+            open_decided(&view, cx, "bead-d", ask);
+            for n in 1..=4 {
+                assert!(drawn(cx, &format!("pick bead-d {ask} {n}")));
+            }
+            assert!(drawn(cx, &format!("words bead-d {ask}")));
+        }
+        click_on(cx, "pick bead-d 11 2");
+        assert_eq!(decided_detail_of(&view, cx, "bead-d", 11).chosen, 2);
+        click_on(cx, "send bead-d 11");
+        wait(cx, "the changed pick", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-d", "ask": 11, "option": 2, "actor": "jo"})]
+        });
     }
 
     /// The Give button beside a secret's field gives the typed value by the
