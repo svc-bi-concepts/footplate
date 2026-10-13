@@ -9612,6 +9612,53 @@ mod tests {
         assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo"])]);
     }
 
+    /// A taken-back run ask keeps the proposal for the record but has no
+    /// approval control or answer field, including on its card among the
+    /// decided asks.
+    #[gpui::test]
+    fn a_taken_back_run_ask_shows_its_proposal_without_an_approval(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_run("taken back", false)]}})
+                .to_string(),
+        );
+        let mut bead: Value = serde_json::from_str(&bead_run()).unwrap();
+        bead["result"]["asks"][0]["state"] = json!("taken back");
+        yard.answer("Bead", &bead.to_string());
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(at, &file, cx);
+        wait(cx, "the taken-back ask", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|model| model.decided_count() == 1)
+            })
+        });
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        wait(cx, "the taken-back card", |cx| {
+            drawn(cx, "run bead-s 7") && !approvable(&view, cx)
+        });
+
+        assert_eq!(
+            decided_detail_of(&view, cx, "bead-s", 7).state_line,
+            "taken back"
+        );
+        assert!(!drawn(cx, "approve bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+        cx.simulate_keystrokes("secondary-enter enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
     /// `d` on a run ask's card, then words and Enter: `DeclineAsk` with
     /// the words, and no approval.
     #[gpui::test]
