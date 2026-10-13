@@ -5,7 +5,9 @@ bead: its goal, its "done when" and the builder's notes. The review is
 forward: what the reviewer can fix with confidence is fixed on the branch
 (commits starting `review:`), not sent back.
 
-Approval here is the last review before the bead is merged, so be thorough.
+Approval here is the last review of whether the bead does what it says: the
+security review that follows (`review-security`) looks at nothing else, and
+no human reviews after it, so be thorough.
 
 Before the bead leaves, the depot's test command has passed on the branch as
 it now is: the builder's test line names the commit under review and you
@@ -16,8 +18,8 @@ the review's: it comes once, on what lands. One note on the bead says how
 the review ended. Outcomes:
 
 - `done`, approved: the note says what you checked, what you fixed (commits),
-  the test result, and any remaining risk. The bead is landed from
-  `approved`.
+  the test result, and any remaining risk. The bead goes on to
+  `review-security`, and is landed from `approved`.
 - `changes`, it needs the builder: the design is wrong, the bead was misread,
   or a large part is missing. The note gives concrete, actionable findings,
   and the bead goes back to `new`. If the notes show the bead has already

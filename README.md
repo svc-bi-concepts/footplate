@@ -10,7 +10,9 @@ yard exposes, as `yardr chat` shows them in a terminal.
 
 Rust, drawn with [gpui](https://gpui.rs/), the UI framework Zed is built on.
 Tracked in Linear as YRD-22. Developed in a yardr yard; `.yardr/` holds its
-flow, roles and merge gate (`cargo fmt`, `clippy`, `test`, `build`).
+flow, roles and merge gate (`cargo fmt`, `clippy`, `test`, `build`). Every
+change is reviewed twice before it lands: against its bead, then for security
+alone.
 
     cargo run                # the window, against the yard on this machine
     FOOTPLATE_YARD=https://mac.example.net cargo run    # against a yard at an address
