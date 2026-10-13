@@ -350,6 +350,57 @@ What a device reads and writes, and how it is taken back, is the yard's:
 and writes as its user, marked `via <device>`; a token does not end until
 the device is removed.
 
+## yardr, fetched
+
+footplate can fetch yardr itself, for a person who has none and no terminal
+to install it with. Nothing in the window does so yet: `src/fetch.rs` is the
+mechanism, which the first run's screens will call, and nothing that was
+fetched is run.
+
+It fetches from one host, `https://yardr.dev`, and from no other: the yards
+it talks to apart, that is the only place footplate ever asks anything of.
+An answer that sends it elsewhere is refused and not followed. Four files
+are read there, in this order:
+
+| File | For |
+|---|---|
+| `/releases/latest.json` | which version is the latest, and where its archive for this system and its checksums are. Nothing is trusted because this file says so: its own `sha256` and `size` are not read |
+| the release's `checksums.txt` | the SHA-256 of each archive |
+| `checksums.txt.minisig` | yardr's makers' [minisign](https://jedisct1.github.io/minisign/) signature over the checksums |
+| `yardr_<version>_<os>_<arch>.tar.gz` | the archive for this system: macOS or Linux, arm64 or amd64 |
+
+The public half of the key releases are signed with is built into footplate
+(`KEY` in `src/fetch.rs`), and the signature is verified in footplate's own
+process, with the `minisign-verify` crate: no program is started for it.
+The archive is taken for yardr's because its SHA-256 is in the checksums
+that key signed. Its name is made from the version `latest.json` names, so
+an older release, whose signature is as good as it ever was, cannot be
+handed over as a newer one; and a version below the lowest one built into
+footplate (`LOWEST`, there too) is refused whatever is signed.
+
+The archive holds `yardr`, and may hold `README.md`, `LICENSE` and `NOTICE`
+beside it. The binary alone is unpacked, to a `bin` beside the
+[settings](#settings), mode 0755:
+`~/Library/Application Support/footplate/bin/yardr` on macOS,
+`$XDG_CONFIG_HOME/footplate/bin/yardr` on Linux (`~/.config` when that is
+not set). It is written whole beside that place and then moved there, so
+what is at the path is the yardr that was there or the new one, never half
+of one. A yardr of your own, on your PATH, is not touched or looked at.
+
+It refuses, each in a sentence for a person, and keeps nothing of what it
+refused:
+
+- a release with no signature, with one that is not the built-in key's, or
+  with checksums changed after they were signed;
+- an archive whose checksum is not the signed one, or that the signed
+  checksums do not name;
+- an archive that holds anything else: another name, a directory, a link,
+  a name twice, something after its end;
+- a version below the lowest, or one that is not three numbers (`v0.10.0`);
+- a `latest.json` that names a file outside `/releases/`;
+- a system yardr has no release for;
+- a footplate built without the key, which then asks the site nothing.
+
 ## The window
 
 Left, the rows: above the conversations the open questions addressed to
@@ -698,6 +749,7 @@ options have no icon, so the program sees to it when it starts
 | File | Holds |
 |---|---|
 | `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed |
+| `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
 | `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode |
 | `src/session.rs` | following a yard on a thread, one for each yard of the settings: who the window is for, the state it starts from, trying again, or not when the device is not let in |
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
@@ -723,6 +775,12 @@ drop calls and drops nothing but an empty one. The fake yard speaks no TLS:
 at an address the tests run over plain HTTP on this machine, and one test
 that is not run by the gate (`cargo test tls -- --ignored`) makes the
 handshake with a site of the internet.
+
+The fetch of yardr is tested against a stand-in for the site, a port of this
+machine, with a release the tests make and sign with a key of their own:
+the good path and each refusal. One signature in them was made by the
+`minisign` program itself, since that is what signs a release. They ask
+yardr.dev nothing.
 
 ## Licence
 

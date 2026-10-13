@@ -30,6 +30,15 @@ unicode-segmentation = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 socket2 = "0.6"
+# yardr's release is fetched and proved here (fetch.rs). The signature over
+# its checksums is minisign's, verified in this process by the crate
+# minisign's author keeps for exactly that: MIT, with no dependency of its
+# own, so it is the one crate this adds to the tree. sha2 and flate2 are in
+# gpui's tree already: the archive's checksum, and its gzip. The tar inside
+# is read by fetch.rs itself, which takes four names and nothing else.
+minisign-verify = "0.3"
+sha2 = "0.10"
+flate2 = "1"
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on. So is the number
@@ -72,3 +81,8 @@ ksni = { version = "0.3.6", default-features = false, features = ["async-io", "b
 # The window's own test opens it on gpui's test platform, without a screen.
 gpui = { version = "=0.2.2", features = ["test-support"] }
 tempfile = "3"
+# The tests of fetch.rs sign a release of their own with a key they make,
+# which minisign-verify cannot: it only verifies. By the same author, MIT;
+# with it come scrypt and rpassword, for the passwords of keys, which the
+# tests do not use. Nothing of it is in the built footplate.
+minisign = "0.10"

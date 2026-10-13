@@ -10,6 +10,10 @@ mod dock;
 mod draft;
 #[cfg(test)]
 mod fake;
+// Nothing calls it yet: the first run's window (footplate-m1me) is its
+// first caller, and takes this line's allow away.
+#[allow(dead_code)]
+mod fetch;
 mod input;
 mod markdown;
 mod model;

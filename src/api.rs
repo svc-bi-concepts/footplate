@@ -1020,6 +1020,35 @@ pub fn pair(address: &Address, code: &str) -> Result<Paired> {
     }
 }
 
+/// Reads the file a site has at `path`, which is no yard: one `GET` with
+/// no token, as yardr's release is fetched (fetch.rs). A status that is not
+/// 200 is given with no bytes, and the site is not followed anywhere else:
+/// a redirect is such a status. A file longer than `most` bytes is not
+/// read to its end.
+pub fn read(address: &Address, path: &str, most: u64) -> Result<(u16, Vec<u8>)> {
+    let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+    conn.write_all(
+        format!(
+            "GET {}{path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {CLIENT}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+            address.path, address.authority
+        )
+        .as_bytes(),
+    )?;
+    conn.flush()?;
+    let (status, reply) = respond(conn)?;
+    if status != 200 {
+        return Ok((status, Vec::new()));
+    }
+    let mut bytes = Vec::new();
+    reply.take(most.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > most {
+        return Err(Error::Protocol(format!(
+            "{path} is longer than {most} bytes"
+        )));
+    }
+    Ok((status, bytes))
+}
+
 /// How a yard is reached: by the socket of this machine's, or by the
 /// address of another's listener with a device's token.
 #[derive(Clone)]
