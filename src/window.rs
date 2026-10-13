@@ -930,13 +930,13 @@ impl Footplate {
     }
 
     /// Brings the window forward on the row of each notification of
-    /// `system` a person activates.
+    /// `system` a person activates, in the yard it is a row of.
     fn heed(system: &dyn notify::System, cx: &mut Context<Self>) -> Task<()> {
         let activated = system.activated();
         cx.spawn(async move |this, cx| {
-            while let Ok(row) = activated.recv().await {
+            while let Ok((yard, row)) = activated.recv().await {
                 if this
-                    .update(cx, |this, cx| this.come_forward(row, cx))
+                    .update(cx, |this, cx| this.come_forward(yard, row, cx))
                     .is_err()
                 {
                     break;
@@ -991,7 +991,7 @@ impl Footplate {
                     cx.background_executor().timer(notify::BURST).await;
                     this.update(cx, |this, _| {
                         if this.burst_generation == generation
-                            && let Some(telling) = this.burst.take()
+                            && let Some(telling) = this.burst.take(&this.yard)
                         {
                             this.system.show(&telling);
                         }
@@ -1004,8 +1004,11 @@ impl Footplate {
     }
 
     /// A notification was activated: the window comes forward on its row.
-    /// A row that is gone since leaves open what was.
-    fn come_forward(&mut self, row: Selected, cx: &mut Context<Self>) {
+    /// A row that is gone since leaves open what was, and so does one of
+    /// `yard` when another is open by now: the system still shows what it
+    /// told of a yard that was left, and the row of that name here is
+    /// another, where what is typed would reach this yard.
+    fn come_forward(&mut self, yard: String, row: Selected, cx: &mut Context<Self>) {
         cx.activate(true);
         let (this, handle) = (cx.weak_entity(), self.handle);
         // Afterwards: the window is not to be had from here.
@@ -1013,7 +1016,11 @@ impl Footplate {
             // A window that is closed has nothing to bring forward.
             let _ = handle.update(cx, |_, window, cx| {
                 window.activate_window();
-                this.update(cx, |this, cx| this.select(row, window, cx))
+                this.update(cx, |this, cx| {
+                    if this.yard == yard {
+                        this.select(row, window, cx);
+                    }
+                })
             });
         });
     }
@@ -9293,8 +9300,8 @@ mod tests {
         asked: Rc<Cell<usize>>,
         shown: Rc<RefCell<Vec<notify::Telling>>>,
         activated: (
-            async_channel::Sender<Selected>,
-            async_channel::Receiver<Selected>,
+            async_channel::Sender<(String, Selected)>,
+            async_channel::Receiver<(String, Selected)>,
         ),
     }
 
@@ -9310,14 +9317,18 @@ mod tests {
 
         /// What was shown since the last look, once a burst's time is over.
         fn shown(&self, cx: &mut VisualTestContext) -> Vec<(String, String, Selected)> {
-            cx.run_until_parked();
-            cx.executor().advance_clock(notify::BURST);
-            cx.run_until_parked();
-            let shown = std::mem::take(&mut *self.shown.borrow_mut());
-            shown
+            self.tellings(cx)
                 .into_iter()
                 .map(|telling| (telling.title, telling.body, telling.target))
                 .collect()
+        }
+
+        /// The same, each with the yard it tells of.
+        fn tellings(&self, cx: &mut VisualTestContext) -> Vec<notify::Telling> {
+            cx.run_until_parked();
+            cx.executor().advance_clock(notify::BURST);
+            cx.run_until_parked();
+            std::mem::take(&mut *self.shown.borrow_mut())
         }
     }
 
@@ -9333,7 +9344,7 @@ mod tests {
             self.shown.borrow_mut().push(telling.clone());
         }
 
-        fn activated(&self) -> async_channel::Receiver<Selected> {
+        fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
             self.activated.1.clone()
         }
     }
@@ -9518,9 +9529,10 @@ mod tests {
         // out of the settings too.
         cx.simulate_keystrokes("cmd-,");
         assert!(settings_open(&view, cx));
+        let open = view.read_with(cx, |v, _| v.yard.clone());
         told.activated
             .0
-            .try_send(Selected::Conversation("assembly".into()))
+            .try_send((open.clone(), Selected::Conversation("assembly".into())))
             .unwrap();
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.front));
@@ -9532,7 +9544,7 @@ mod tests {
         // A row that is gone since leaves open what was.
         told.activated
             .0
-            .try_send(Selected::Decision("bead-gone".into()))
+            .try_send((open, Selected::Decision("bead-gone".into())))
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -9557,6 +9569,94 @@ mod tests {
             again.read_with(cx, |v, _| v.permission.clone()),
             Some(Permission::Allowed)
         );
+    }
+
+    /// A notification carries the yard it tells of, and the system shows it
+    /// after that yard was left. Activated then, it opens no row of the
+    /// yard that is open: a row of its name there is another conversation,
+    /// and what is typed in it would be sent to the wrong yard.
+    #[gpui::test]
+    fn a_notification_of_a_yard_that_was_left_opens_no_row_of_the_open_one(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let file = dir.path().join("footplate/settings.json");
+        let mut set = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::near("second home", second.socket().to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+        set.notifications.on = true;
+        set.write(&file).unwrap();
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let told = Told::new();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::opened(env, "jo".into(), Some(file.clone()), window, cx)
+                .notified_by(Box::new(told.clone()), cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        let open_row = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned())
+        };
+
+        // Mail arrives behind another window: the system tells of it, as
+        // this yard's.
+        cx.deactivate_window();
+        near.emit(&mail_event(21, "assembly", "Built."));
+        wait(cx, "the unread mail", |cx| {
+            unread_of(&view, cx, "assembly") == 1
+        });
+        let tellings = told.tellings(cx);
+        let [telling] = tellings.as_slice() else {
+            panic!("{tellings:?}");
+        };
+        assert_eq!(telling.yard, "this machine");
+        assert_eq!(telling.target, Selected::Conversation("assembly".into()));
+
+        // The other yard is opened, which has a conversation of that name
+        // too, and then the notification is activated: the window comes
+        // forward, and stays on the row it had.
+        view.update_in(cx, |v, window, cx| v.switch_to("second home", window, cx));
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(unread_of(&view, cx, "assembly"), 1);
+        let before = open_row(cx);
+        assert_eq!(before, Some(Selected::Conversation("yardmaster".into())));
+        told.activated
+            .0
+            .try_send((telling.yard.clone(), telling.target.clone()))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.front));
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(open_row(cx), before);
+        assert_eq!(texts(&view, cx), ["From the second home."]);
+
+        // One of the open yard leads to its row, as before.
+        told.activated
+            .0
+            .try_send(("second home".into(), telling.target.clone()))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(open_row(cx), Some(telling.target.clone()));
     }
 
     fn a_far_yard_of_jo(yard: &Yard) {

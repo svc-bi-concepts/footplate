@@ -46,12 +46,17 @@ pub fn wanted(notify: &Notify, news: &News, in_view: bool) -> bool {
     notify.tells(news.kind) && !(in_view && news.open)
 }
 
-/// One notification: two lines, and the row it leads to.
+/// One notification: two lines, and the row it leads to in its yard.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Telling {
     pub title: String,
     pub body: String,
-    /// Read where activating a notification leads somewhere: on macOS.
+    /// The yard it tells of, by its name in the settings: a row of the
+    /// same name in another yard is not the one it leads to. Read, as the
+    /// target is, where activating a notification leads somewhere: on
+    /// macOS.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub yard: String,
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub target: Selected,
 }
@@ -75,11 +80,12 @@ impl Burst {
     }
 
     /// All there is as one notification, or none when there is nothing. It
-    /// leads to the row of the first.
-    pub fn take(&mut self) -> Option<Telling> {
+    /// leads to the row of the first, in `yard`: the one all of it arrived
+    /// in.
+    pub fn take(&mut self, yard: &str) -> Option<Telling> {
         let news = std::mem::take(&mut self.0);
         let first = news.first()?;
-        let target = first.target.clone();
+        let (yard, target) = (yard.to_string(), first.target.clone());
         if let [one] = news.as_slice() {
             let title = match one.kind {
                 Kind::Mail => line(&one.from),
@@ -90,6 +96,7 @@ impl Burst {
             return Some(Telling {
                 title,
                 body: line(&one.text),
+                yard,
                 target,
             });
         }
@@ -102,6 +109,7 @@ impl Burst {
             return Some(Telling {
                 title: format!("{} from {}", news.len(), line(&first.from)),
                 body: line(&last.text),
+                yard,
                 target,
             });
         }
@@ -132,6 +140,7 @@ impl Burst {
         Some(Telling {
             title: format!("{} new in the yard", news.len()),
             body: body.join(", "),
+            yard,
             target,
         })
     }
@@ -155,20 +164,33 @@ pub fn line(text: &str) -> String {
     cut
 }
 
-/// A row as the name a notification carries, so that activating it finds
-/// the row again: [`row`] reads it back.
+/// A row of `yard` as the name a notification carries, so that activating
+/// it finds the row again, and in no other yard: [`row`] reads it back. The
+/// yard's name goes before the row with its length in bytes, since a name
+/// is whatever a person called the yard and may hold any separator.
 #[cfg(any(target_os = "macos", test))]
-pub fn name(target: &Selected) -> String {
-    match target {
+pub fn name(yard: &str, target: &Selected) -> String {
+    let row = match target {
         Selected::Conversation(with) => format!("conversation:{with}"),
         Selected::Decision(bead) | Selected::Decided(bead, _) => format!("decision:{bead}"),
         Selected::Yard => "yard".to_string(),
-    }
+    };
+    format!("{}:{yard}:{row}", yard.len())
 }
 
-/// The row a notification's name stands for, if it is one of ours.
+/// The yard and the row in it a notification's name stands for, if it is
+/// one of ours.
 #[cfg(any(target_os = "macos", test))]
-pub fn row(name: &str) -> Option<Selected> {
+pub fn row(name: &str) -> Option<(String, Selected)> {
+    let (len, rest) = name.split_once(':')?;
+    let len: usize = len.parse().ok()?;
+    let (yard, name) = (rest.get(..len)?, rest.get(len..)?.strip_prefix(':')?);
+    Some((yard.to_string(), row_in_yard(name)?))
+}
+
+/// The row of a name without its yard.
+#[cfg(any(target_os = "macos", test))]
+fn row_in_yard(name: &str) -> Option<Selected> {
     if name == "yard" {
         return Some(Selected::Yard);
     }
@@ -199,9 +221,10 @@ pub trait System {
     /// [`System::ask`] said why it would be.
     fn show(&self, telling: &Telling);
 
-    /// The rows of the notifications a person activates, as they do. On a
-    /// system with no way back into the program nothing ever comes.
-    fn activated(&self) -> async_channel::Receiver<Selected>;
+    /// The rows of the notifications a person activates, as they do, each
+    /// with the yard it is a row of. On a system with no way back into the
+    /// program nothing ever comes.
+    fn activated(&self) -> async_channel::Receiver<(String, Selected)>;
 }
 
 /// A system whose notifications footplate does not send, which says so.
@@ -216,7 +239,7 @@ impl System for Nowhere {
 
     fn show(&self, _: &Telling) {}
 
-    fn activated(&self) -> async_channel::Receiver<Selected> {
+    fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
         async_channel::bounded(1).1
     }
 }
@@ -303,7 +326,7 @@ mod linux {
             });
         }
 
-        fn activated(&self) -> async_channel::Receiver<Selected> {
+        fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
             Nowhere("").activated()
         }
     }
@@ -335,7 +358,7 @@ mod mac {
         // is in front.
         #[unsafe(super(NSObject))]
         #[name = "FootplateNotifications"]
-        #[ivars = async_channel::Sender<Selected>]
+        #[ivars = async_channel::Sender<(String, Selected)>]
         struct Delegate;
 
         unsafe impl NSObjectProtocol for Delegate {}
@@ -373,7 +396,7 @@ mod mac {
     );
 
     impl Delegate {
-        fn new(tell: async_channel::Sender<Selected>) -> Retained<Self> {
+        fn new(tell: async_channel::Sender<(String, Selected)>) -> Retained<Self> {
             let this = Self::alloc().set_ivars(tell);
             // SAFETY: NSObject's init, on an object just allocated with
             // its ivars set.
@@ -385,8 +408,8 @@ mod mac {
     /// the system's is touched before a person switched notifications on.
     pub struct Center {
         activated: (
-            async_channel::Sender<Selected>,
-            async_channel::Receiver<Selected>,
+            async_channel::Sender<(String, Selected)>,
+            async_channel::Receiver<(String, Selected)>,
         ),
         /// The center keeps no reference of its own to its delegate.
         delegate: OnceCell<Retained<Delegate>>,
@@ -472,17 +495,18 @@ mod mac {
             let content = UNMutableNotificationContent::new();
             content.setTitle(&NSString::from_str(&telling.title));
             content.setBody(&NSString::from_str(&telling.body));
-            // Named by its row: activating it leads there, and a later one
-            // of the same row takes its place in the system's list.
+            // Named by its yard and its row: activating it leads there,
+            // and a later one of the same row takes its place in the
+            // system's list.
             let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-                &NSString::from_str(&super::name(&telling.target)),
+                &NSString::from_str(&super::name(&telling.yard, &telling.target)),
                 &content,
                 None,
             );
             center.addNotificationRequest_withCompletionHandler(&request, None);
         }
 
-        fn activated(&self) -> async_channel::Receiver<Selected> {
+        fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
             self.activated.1.clone()
         }
     }
@@ -573,38 +597,41 @@ mod tests {
     #[test]
     fn one_arrival_names_who_it_is_from_and_its_first_line() {
         let mut burst = Burst::default();
-        assert_eq!(burst.take(), None);
+        assert_eq!(burst.take("north"), None);
         assert!(burst.add(mail(
             "yardmaster@mac",
             "\n  Landed on main.\nThe tests held."
         )));
         assert_eq!(
-            burst.take(),
+            burst.take("north"),
             Some(Telling {
                 title: "yardmaster@mac".into(),
                 body: "Landed on main.".into(),
+                yard: "north".into(),
                 target: Selected::Conversation("yardmaster@mac".into()),
             })
         );
         // Taken: the next is the first again.
-        assert_eq!(burst.take(), None);
+        assert_eq!(burst.take("north"), None);
         assert!(burst.add(ask("assembly", "Land it?", "yd-1")));
         assert_eq!(
-            burst.take(),
+            burst.take("north"),
             Some(Telling {
                 title: "assembly asks".into(),
                 body: "Land it?".into(),
+                yard: "north".into(),
                 target: Selected::Decision("yd-1".into()),
             })
         );
         burst.add(ask("", "Land it?", "yd-1"));
-        assert_eq!(burst.take().unwrap().title, "a decision waits");
+        assert_eq!(burst.take("north").unwrap().title, "a decision waits");
         burst.add(notice("yd-1 closed"));
         assert_eq!(
-            burst.take(),
+            burst.take("north"),
             Some(Telling {
                 title: "yard".into(),
                 body: "yd-1 closed".into(),
+                yard: "north".into(),
                 target: Selected::Yard,
             })
         );
@@ -617,14 +644,15 @@ mod tests {
         assert!(!burst.add(mail("yardmaster@mac", "Two.")));
         assert!(!burst.add(mail("yardmaster@mac", "Three.")));
         assert_eq!(
-            burst.take(),
+            burst.take("north"),
             Some(Telling {
                 title: "3 from yardmaster@mac".into(),
                 body: "Three.".into(),
+                yard: "north".into(),
                 target: Selected::Conversation("yardmaster@mac".into()),
             })
         );
-        assert_eq!(burst.take(), None);
+        assert_eq!(burst.take("north"), None);
 
         // Of several senders and kinds: how many of each, and it leads to
         // the first.
@@ -639,10 +667,11 @@ mod tests {
             burst.add(news);
         }
         assert_eq!(
-            burst.take(),
+            burst.take("north"),
             Some(Telling {
                 title: "6 new in the yard".into(),
                 body: "2 from assembly, 1 from yardmaster, 2 decisions, 1 notice".into(),
+                yard: "north".into(),
                 target: Selected::Decision("yd-1".into()),
             })
         );
@@ -675,14 +704,41 @@ mod tests {
             Selected::Decision("yardr-n8ta".into()),
             Selected::Yard,
         ] {
-            assert_eq!(row(&name(&target)), Some(target));
+            // A yard's name is whatever a person called it, and none at
+            // all for a window that follows no yard of the settings.
+            for yard in ["north", "", "2:é:yard", "at home: 5"] {
+                assert_eq!(
+                    row(&name(yard, &target)),
+                    Some((yard.to_string(), target.clone())),
+                    "{yard}"
+                );
+            }
         }
+        // The same row of two yards is two names.
+        let yardmaster = Selected::Conversation("yardmaster".into());
+        assert_eq!(
+            name("north", &yardmaster),
+            "5:north:conversation:yardmaster"
+        );
+        assert_ne!(name("north", &yardmaster), name("south", &yardmaster));
         // A crew member named yard is a conversation, not the yard row.
         assert_eq!(
-            row("conversation:yard"),
-            Some(Selected::Conversation("yard".into()))
+            row("5:north:conversation:yard"),
+            Some(("north".into(), Selected::Conversation("yard".into())))
         );
-        for other in ["", "yards", "bead:yd-1", "com.apple.something"] {
+        for other in [
+            "",
+            "yard",
+            "conversation:yardmaster",
+            "5:north",
+            "5:north:yards",
+            "5:north:bead:yd-1",
+            // A length that is not the name's, or that ends within a letter.
+            "9:north:yard",
+            "1:é:yard",
+            "-1:north:yard",
+            "com.apple.something",
+        ] {
             assert_eq!(row(other), None, "{other}");
         }
     }
@@ -692,6 +748,7 @@ mod tests {
         let telling = Telling {
             title: "--urgency=critical".into(),
             body: "<a href=\"https://example.net\">look</a> & <b>see</b>".into(),
+            yard: "north".into(),
             target: Selected::Yard,
         };
         assert_eq!(
@@ -716,6 +773,7 @@ mod tests {
         nowhere.show(&Telling {
             title: "yard".into(),
             body: String::new(),
+            yard: "north".into(),
             target: Selected::Yard,
         });
         assert!(nowhere.activated().try_recv().is_err());
@@ -749,6 +807,7 @@ mod tests {
             center.show(&Telling {
                 title: "yard".into(),
                 body: String::new(),
+                yard: "north".into(),
                 target: Selected::Yard,
             });
             return;

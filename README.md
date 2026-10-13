@@ -515,6 +515,9 @@ What the system asks:
   ([Building](#building): `scripts/bundle-mac.sh`); from `cargo run` the
   settings say that instead and nothing is shown. Clicking a notification
   brings the window forward on that conversation, card or the yard row.
+  One of a yard you have switched away from since brings the window
+  forward and opens nothing: the row of that name in the open yard is
+  another.
 - **Linux** asks nothing. footplate hands the notification to the
   desktop's notification service through `notify-send` (libnotify's), and
   the settings say so when that is not installed. Clicking one opens
