@@ -24,10 +24,12 @@ pub enum Update {
     Up(Box<State>),
     /// Something happened in it.
     Event(Event),
-    /// It is not there, or not for this person: why, in words.
-    Down(String),
+    /// It is not there, or not for this person: why, in words, and in a
+    /// word or two for where there is no room for them ([`Trouble::short`]).
+    Down(String, &'static str),
     /// It is there and does not let this device in: why, in words. The
-    /// yard is not asked again; the thread has ended.
+    /// yard is not asked again; the thread has ended. In a word or two it
+    /// is [`PAIR_AGAIN`].
     Out(String),
 }
 
@@ -78,6 +80,13 @@ impl FollowControl {
     }
 }
 
+/// Why a yard is not reached, in a word or two: it is stopped, or away
+/// from the network.
+pub const NOTHING_ANSWERS: &str = "nothing answers";
+
+/// The same of a yard that no longer lets this device in.
+pub const PAIR_AGAIN: &str = "pair again";
+
 /// Why there is nothing to show.
 #[derive(Debug)]
 pub enum Trouble {
@@ -109,6 +118,18 @@ impl Trouble {
         match self {
             Trouble::Yard(api::Error::Down(err)) if client.is_remote() => Trouble::Unreached(err),
             trouble => trouble,
+        }
+    }
+
+    /// The trouble in a word or two, for a row that names the yard and has
+    /// no room for the telling: what the person does about it where that
+    /// is one thing, else what is wrong.
+    pub fn short(&self) -> &'static str {
+        match self {
+            Trouble::Yard(api::Error::Down(_)) | Trouble::Unreached(_) => NOTHING_ANSWERS,
+            Trouble::NotLetIn | Trouble::Yard(api::Error::NoDevice) => PAIR_AGAIN,
+            Trouble::NoUser(_) => "no user here",
+            Trouble::Yard(_) => "cannot be read",
         }
     }
 }
@@ -280,9 +301,9 @@ pub fn follow_with_control(
                 tell(Update::Out(Trouble::NotLetIn.to_string()));
                 return;
             }
-            Err(trouble) => trouble.with(client).to_string(),
+            Err(trouble) => trouble.with(client),
         };
-        if !tell(Update::Down(trouble)) {
+        if !tell(Update::Down(trouble.to_string(), trouble.short())) {
             return;
         }
         if control.stopped() {
@@ -467,7 +488,7 @@ mod tests {
         let why = loop {
             match rx.recv_timeout(wait).unwrap() {
                 Update::Out(why) => break why,
-                Update::Down(why) => panic!("it is there, and says no: {why}"),
+                Update::Down(why, _) => panic!("it is there, and says no: {why}"),
                 Update::Up(_) | Update::Event(_) => continue,
             }
         };
@@ -536,6 +557,25 @@ mod tests {
             "{why}"
         );
         assert!(why.contains("yardr user device pair"), "{why}");
+        assert_eq!(trouble.short(), PAIR_AGAIN);
+    }
+
+    /// The short why says what the person does where that is one thing,
+    /// and never more than a row has room for.
+    #[test]
+    fn a_trouble_is_said_in_a_word_or_two() {
+        let gone = || std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            Trouble::Yard(api::Error::Down(gone())).short(),
+            "nothing answers"
+        );
+        assert_eq!(Trouble::Unreached(gone()).short(), "nothing answers");
+        assert_eq!(Trouble::NotLetIn.short(), "pair again");
+        assert_eq!(Trouble::NoUser("jo".into()).short(), "no user here");
+        assert_eq!(
+            Trouble::Yard(api::Error::Protocol("x".into())).short(),
+            "cannot be read"
+        );
     }
 
     #[test]
@@ -555,13 +595,14 @@ mod tests {
         });
         let wait = Duration::from_secs(10);
         for _ in 0..2 {
-            let Update::Down(why) = rx.recv_timeout(wait).unwrap() else {
+            let Update::Down(why, short) = rx.recv_timeout(wait).unwrap() else {
                 panic!("the yard is not there")
             };
             assert!(
                 why.starts_with("No yard: nothing answers at the yard's address"),
                 "{why}"
             );
+            assert_eq!(short, NOTHING_ANSWERS);
             assert!(!why.contains("socket"), "{why}");
         }
         drop(rx);
@@ -588,14 +629,15 @@ mod tests {
         let wait = Duration::from_secs(10);
 
         // The socket is missing.
-        let Update::Down(why) = rx.recv_timeout(wait).unwrap() else {
+        let Update::Down(why, short) = rx.recv_timeout(wait).unwrap() else {
             panic!("the yard is not there")
         };
         assert!(
             why.starts_with("No yard: nothing answers at the yard's socket"),
             "{why}"
         );
-        assert!(matches!(rx.recv_timeout(wait).unwrap(), Update::Down(_)));
+        assert_eq!(short, NOTHING_ANSWERS);
+        assert!(matches!(rx.recv_timeout(wait).unwrap(), Update::Down(..)));
 
         // The yard starts: the state, then the stream after its head.
         let yard = Yard::start_at(&socket);
@@ -605,7 +647,7 @@ mod tests {
         let state = loop {
             match rx.recv_timeout(wait).unwrap() {
                 // A call may have come between two answers being set.
-                Update::Down(_) => continue,
+                Update::Down(..) => continue,
                 Update::Up(state) => break state,
                 Update::Event(e) => panic!("an event before the state: {e:?}"),
                 Update::Out(why) => panic!("the socket lets everyone in: {why}"),
@@ -621,7 +663,7 @@ mod tests {
         yard.stop();
         let why = loop {
             match rx.recv_timeout(wait).unwrap() {
-                Update::Down(why) => break why,
+                Update::Down(why, _) => break why,
                 // The state may be read once more as the stream ends.
                 Update::Up(_) | Update::Event(_) => continue,
                 Update::Out(why) => panic!("the socket lets everyone in: {why}"),

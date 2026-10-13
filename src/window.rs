@@ -542,6 +542,10 @@ struct Place {
     decided_expanded: bool,
 }
 
+/// Why a yard that could not be opened is not reached, in a word or two:
+/// its address or its token's file is refused, and nothing was asked.
+const NOT_OPENED: &str = "cannot be opened";
+
 /// Whether a yard that is away is asked again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Away {
@@ -686,6 +690,10 @@ pub struct Footplate {
     kept_words: HashMap<String, HashMap<(String, u64), String>>,
     /// What each yard had waiting when it was last left, by yard.
     counts: HashMap<String, Counts>,
+    /// Why each yard that was not reached was not, in a word or two, by
+    /// yard: what its row in the switcher says, of the open one and of
+    /// one that was left so. A yard that answers is in it no longer.
+    unreached: HashMap<String, &'static str>,
     /// Where each yard stood when it was last left, by yard.
     places: HashMap<String, Place>,
     /// The place the open yard is to be put back to, which it is not
@@ -893,6 +901,7 @@ impl Footplate {
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
             counts: HashMap::new(),
+            unreached: HashMap::new(),
             places: HashMap::new(),
             returning: None,
             late: None,
@@ -1093,6 +1102,7 @@ impl Footplate {
                 self.client = None;
                 self.down = Some(why);
                 self.away = Away::Stopped;
+                self.unreached.insert(self.yard.clone(), NOT_OPENED);
                 return;
             }
         };
@@ -1179,6 +1189,23 @@ impl Footplate {
         }
     }
 
+    /// The head's line: who the window is for, where the yard said, the
+    /// open yard, and why it is not reached while it is not. It ends in
+    /// the mark of the switcher where there are yards to switch between.
+    fn head_line(&self, me: Option<&str>) -> String {
+        let yard = self.which_yard_short();
+        let why = self.unreached.get(&self.yard).copied();
+        let mut line = [me, Some(yard.as_str()), why]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if self.env.yard.is_none() {
+            line.push_str(" ▾");
+        }
+        line
+    }
+
     /// Which yard the head's line names, short: the open one by the name
     /// the switcher lists it under, or the whole telling of the one yard
     /// the environment names. The line has the column's width beside the
@@ -1223,6 +1250,7 @@ impl Footplate {
                 }
                 self.model = Some(model);
                 self.down = None;
+                self.unreached.remove(&self.yard);
                 if fresh {
                     // The yard was opened: the line has what was typed in
                     // the row that is open, before the yard was left.
@@ -1258,13 +1286,16 @@ impl Footplate {
                 self.news(cx);
             }
             Update::Event(event) => self.change(cx, |m| m.event(&event)),
-            Update::Down(why) => {
+            Update::Down(why, short) => {
                 self.down = Some(why);
                 self.away = Away::Trying;
+                self.unreached.insert(self.yard.clone(), short);
             }
             Update::Out(why) => {
                 self.down = Some(why);
                 self.away = Away::Out;
+                self.unreached
+                    .insert(self.yard.clone(), session::PAIR_AGAIN);
             }
         }
         cx.notify();
@@ -3057,19 +3088,20 @@ impl Footplate {
     /// The switcher's list under the head, or no longer: the yards the
     /// settings list, to open one of. While it shows, the window holds the
     /// keys, on the row of the open yard first. With one yard named by the
-    /// environment there is nothing to switch between, and a yard that is
-    /// away has no head: its keys and the settings open another.
+    /// environment there is nothing to switch between. A yard that is away
+    /// has the list as any other: it is how the person leaves it.
     fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
         if self.switching.take().is_some() {
             let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
             let focus = match conversation {
-                Some(_) if !self.settings_open => self.line.focus_handle(cx),
+                // A yard that is away draws no line to type in.
+                Some(_) if !self.settings_open && self.down.is_none() => self.line.focus_handle(cx),
                 _ => self.focus.clone(),
             };
             return window.focus(&focus);
         }
-        if self.env.yard.is_some() || self.down.is_some() || self.model.is_none() {
+        if self.env.yard.is_some() {
             return;
         }
         let yards = &self.settings.yards;
@@ -3367,6 +3399,7 @@ impl Footplate {
             }
             self.kept_words.remove(name);
             self.counts.remove(name);
+            self.unreached.remove(name);
             self.places.remove(name);
         }
         cx.notify();
@@ -3601,13 +3634,16 @@ impl Footplate {
     }
 
     /// What the switcher and the settings say of a yard of the list after
-    /// its name and its kind: that it is the open one, or what it had
-    /// waiting when it was last left.
+    /// its name and its kind: that it is not reached, with the short why,
+    /// that it is the open one, or what it had waiting when it was last
+    /// left. One that was left not reached is said so until it is opened
+    /// and answers: nothing asks it meanwhile.
     fn yard_state(&self, yard: &settings::Yard) -> String {
-        match self.counts.get(&yard.name) {
+        match (self.unreached.get(&yard.name), self.counts.get(&yard.name)) {
+            (Some(why), _) => format!("not reached: {why}"),
             _ if yard.name == self.yard => "open".to_string(),
-            Some(counts) => counts.line(),
-            None => "not opened yet".to_string(),
+            (None, Some(counts)) => counts.line(),
+            (None, None) => "not opened yet".to_string(),
         }
     }
 
@@ -3902,11 +3938,16 @@ impl Footplate {
         });
     }
 
-    /// No yard: why, in words, where it was looked for, and whether it is
-    /// tried again. A yard that no longer lets this device in is not: the
-    /// device is paired again from here.
+    /// No yard: which, and why in a word or two, then why in words, where
+    /// it was looked for, and whether it is tried again. A yard that no
+    /// longer lets this device in is not: the device is paired again from
+    /// here. It stands beside the head of the left column, which opens
+    /// another yard; the one yard the environment names has no other, and
+    /// its settings are reached from under the words.
     fn away(&self, why: &str, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let place = self.client.as_ref().map(Client::place);
+        let alone = self.env.yard.is_some();
+        let short = self.unreached.get(&self.yard).copied();
         let again = match self.away {
             Away::Trying => format!(
                 "footplate tries again every {} seconds.",
@@ -3915,13 +3956,19 @@ impl Footplate {
             Away::Out => {
                 "footplate does not ask again until this device has a token again.".to_string()
             }
-            Away::Stopped => {
+            Away::Stopped if alone => {
                 "footplate does not try again: the settings open a yard, and so does the next start."
+                    .to_string()
+            }
+            Away::Stopped => {
+                "footplate does not try again: the head opens another yard, and so do the settings."
                     .to_string()
             }
         };
         div()
-            .size_full()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .flex_col()
             .items_center()
@@ -3935,6 +3982,12 @@ impl Footplate {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .children(short.map(|short| {
+                        div()
+                            .debug_selector(|| "away why".to_string())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("{} · {short}", self.which_yard_short()))
+                    }))
                     .child(div().child(why.to_string()))
                     .children(place.map(|place| div().text_color(palette.faint).child(place)))
                     .child(div().text_color(palette.faint).child(again)),
@@ -3952,11 +4005,24 @@ impl Footplate {
                         ),
                 )
             })
-            .child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
+            // The column's foot has the control where there is a column.
+            .when(alone, |el| {
+                el.child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
+            })
     }
 
-    fn list(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = model.rows();
+    /// The left column: the head, which names the open yard and is the
+    /// switcher, the switcher's list while it is open, `body`, and the
+    /// column's own controls at its foot. It stands the same beside a yard
+    /// that is away, with nothing of that yard in `body`: the person goes
+    /// to another from where they always do.
+    fn column(
+        &self,
+        me: Option<&str>,
+        body: impl IntoElement,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let head = div()
             .flex()
             .items_center()
@@ -3999,12 +4065,42 @@ impl Footplate {
                                         this.toggle_switcher(window, cx)
                                     }))
                             })
-                            .child(match self.env.yard {
-                                Some(_) => format!("{} · {}", model.me(), self.which_yard_short()),
-                                None => format!("{} · {} ▾", model.me(), self.which_yard_short()),
-                            }),
+                            .child(self.head_line(me)),
                     ),
             );
+        // A quiet row for the column's own controls, under the rows and
+        // outside what scrolls, so it stays in place.
+        let foot = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(palette.line)
+            .child(self.settings_control("settings".to_string(), palette, cx));
+        div()
+            // 260 pixels at the usual text size. Its rows are cut to it, so
+            // it grows with the text, but never over the conversation: the
+            // smallest window still has the larger part for that.
+            .w(rems(16.25))
+            .max_w(relative(0.45))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(palette.side)
+            .border_r_1()
+            .border_color(palette.line)
+            .child(head)
+            .children(self.switching.map(|at| self.switcher(at, palette, cx)))
+            .child(body)
+            .child(foot)
+    }
+
+    fn list(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = model.rows();
         let now = chrono::Utc::now();
         let mut body = div()
             .id("rows")
@@ -4081,35 +4177,7 @@ impl Footplate {
         body = body.child(divider(palette));
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
-        // A quiet row for the column's own controls, under the rows and
-        // outside what scrolls, so it stays in place.
-        let foot = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_t_1()
-            .border_color(palette.line)
-            .child(self.settings_control("settings".to_string(), palette, cx));
-        div()
-            // 260 pixels at the usual text size. Its rows are cut to it, so
-            // it grows with the text, but never over the conversation: the
-            // smallest window still has the larger part for that.
-            .w(rems(16.25))
-            .max_w(relative(0.45))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(palette.side)
-            .border_r_1()
-            .border_color(palette.line)
-            .child(head)
-            .children(self.switching.map(|at| self.switcher(at, palette, cx)))
-            .child(body)
-            .child(foot)
+        self.column(Some(model.me()), body, palette, cx)
     }
 
     fn row(
@@ -5669,6 +5737,17 @@ impl Render for Footplate {
             .bg(palette.ground)
             .text_color(palette.text)
             .text_size(rems(0.875));
+        // A yard that is away keeps the column with its head, and none of
+        // its rows: what they open is not there. The one yard the
+        // environment names has no other to go to, and no column.
+        let beside = match (&self.down, &self.model) {
+            (Some(_), model) if self.env.yard.is_none() => {
+                let me = model.as_ref().map(Model::me);
+                Some(self.column(me, div().flex_1(), palette, cx))
+            }
+            _ => None,
+        };
+        let root = root.children(beside);
         match (&self.down, &self.model) {
             (Some(_), _) if self.settings_open => root.child(self.talk_settings(palette, cx)),
             (Some(why), _) => root.child(self.away(why, palette, cx)),
@@ -9082,8 +9161,8 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.unkept.is_some()));
     }
 
-    /// With the yard away there is no left column: the settings are reached
-    /// by the same key, and by a control under the words.
+    /// With the yard away the left column has its head and its foot: the
+    /// settings are reached by the same key, and by the control there.
     #[gpui::test]
     fn the_settings_are_reached_while_the_yard_is_away(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -10928,6 +11007,193 @@ mod tests {
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.down.is_some()));
         assert_eq!(open_yard(&view, cx), "far");
+    }
+
+    /// The head's line, as it is drawn.
+    fn head_line(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.head_line(v.model.as_ref().map(Model::me)))
+    }
+
+    /// A yard that is not reached says so with its short why, in the
+    /// switcher's row and where it is open: one that is stopped and one
+    /// away from the network, "nothing answers"; one that no longer lets
+    /// the device in, "pair again". The head stays with the switcher, so
+    /// another yard is opened from there and never through the settings,
+    /// and the yard that answers has all that was its.
+    #[gpui::test]
+    fn a_yard_that_is_not_reached_says_why_and_the_switcher_leaves_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let shop = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        Settings::read(&file)
+            .with_yard(
+                None,
+                settings::Yard::far("shop", shop.address(), "yard-shop.token"),
+                Some(&file),
+            )
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-shop.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(head_line(&view, cx), "jo · this machine ▾");
+        cx.simulate_input("kept");
+
+        // The second home's yard is stopped, the shop is away from the
+        // network, and the far yard's operator removed this device, one of
+        // two.
+        let socket = second.socket().to_path_buf();
+        second.stop();
+        shop.stop();
+        far.add_device("yardr-dev-phone");
+        far.remove_device(crate::fake::TOKEN);
+        let down = |view: &Entity<Footplate>, cx: &mut VisualTestContext, start: &str| {
+            view.read_with(cx, |v, _| {
+                v.down.as_deref().is_some_and(|why| why.starts_with(start))
+            })
+        };
+
+        // The stopped yard: its why in a word or two, in the head, in the
+        // away view and in its row, with the telling under it. The column
+        // has its head and none of a yard's rows.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "that the second home's yard is stopped", |cx| {
+            down(&view, cx, "No yard: nothing answers at the yard's socket")
+        });
+        assert_eq!(head_line(&view, cx), "second home · nothing answers ▾");
+        assert_eq!(
+            state_of(&view, cx, "second home"),
+            "not reached: nothing answers"
+        );
+        assert!(drawn(cx, "which yard") && drawn(cx, "away why"));
+        assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
+        // What the yard that answers had is as it was left.
+        assert_eq!(
+            state_of(&view, cx, "this machine"),
+            "nothing waiting when last opened"
+        );
+
+        // The head is the switcher there too: a click lists the yards, the
+        // arrows move, and Enter opens the one away from the network.
+        click_on(cx, "which yard");
+        assert_eq!(switching(&view, cx), Some(1));
+        assert!(drawn(cx, "switcher") && drawn(cx, "switch this machine"));
+        cx.simulate_keystrokes("down down enter");
+        wait(cx, "that nothing answers at the shop", |cx| {
+            down(&view, cx, "No yard: nothing answers at the yard's address")
+        });
+        assert_eq!(head_line(&view, cx), "shop · nothing answers ▾");
+        assert_eq!(state_of(&view, cx, "shop"), "not reached: nothing answers");
+        // The one that was left is said as it was left.
+        assert_eq!(
+            state_of(&view, cx, "second home"),
+            "not reached: nothing answers"
+        );
+
+        // The switcher's key from a yard that is away, to the one that no
+        // longer lets the device in: that is not asked again.
+        cx.simulate_keystrokes("secondary-y");
+        assert_eq!(switching(&view, cx), Some(3));
+        cx.simulate_keystrokes("up enter");
+        wait(cx, "that the device is not let in", |cx| {
+            view.read_with(cx, |v, _| v.away == Away::Out)
+        });
+        assert_eq!(head_line(&view, cx), "far · pair again ▾");
+        assert_eq!(state_of(&view, cx, "far"), "not reached: pair again");
+        assert!(drawn(cx, "away why") && drawn(cx, "pair again"));
+        // Esc leaves the list, and the yard stays as it is.
+        cx.simulate_keystrokes("secondary-y");
+        assert!(drawn(cx, "switcher"));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(switching(&view, cx), None);
+        assert_eq!(open_yard(&view, cx), "far");
+
+        // Back to the yard that answers by a click on its row, with no
+        // settings: what was typed there is in its line, and the three
+        // that were not reached are said so, each with its own why.
+        click_on(cx, "which yard");
+        click_on(cx, "switch this machine");
+        wait(cx, "this machine's yard again", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert!(!settings_open(&view, cx));
+        assert_eq!(typed(&view, cx), "kept");
+        assert_eq!(head_line(&view, cx), "jo · this machine ▾");
+        assert_eq!(state_of(&view, cx, "this machine"), "open");
+        assert_eq!(
+            state_of(&view, cx, "second home"),
+            "not reached: nothing answers"
+        );
+        assert_eq!(state_of(&view, cx, "shop"), "not reached: nothing answers");
+        assert_eq!(state_of(&view, cx, "far"), "not reached: pair again");
+        // (By the window's own word: gpui's test keeps the bounds of what
+        // an earlier frame drew.)
+        assert_eq!(view.read_with(cx, |v, _| v.down.clone()), None);
+
+        // The stopped yard is started: opened, it answers, and is said
+        // not reached no longer, there or when it is left.
+        let second = Yard::start_at(&socket);
+        a_second_yard_of_jo(&second);
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(head_line(&view, cx), "jo · second home ▾");
+        assert_eq!(state_of(&view, cx, "second home"), "open");
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard once more", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(
+            state_of(&view, cx, "second home"),
+            "1 mail when last opened"
+        );
+    }
+
+    /// The one yard the environment names has no other to go to: away, it
+    /// has no column, and its settings are reached from under the words.
+    #[gpui::test]
+    fn the_environment_s_yard_away_has_no_switcher(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("mac.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let far = Yard::start_tcp();
+        far.stop();
+        let env = Env {
+            yard: Some(far.address().to_string()),
+            token_file: Some(token),
+            socket: dir.path().join("yard.sock"),
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "that nothing answers", |cx| {
+            view.read_with(cx, |v, _| {
+                v.down
+                    .as_deref()
+                    .is_some_and(|why| why.starts_with("No yard: nothing answers"))
+            })
+        });
+        assert!(drawn(cx, "away why") && drawn(cx, "settings"));
+        assert!(!drawn(cx, "which yard"));
+        cx.simulate_keystrokes("secondary-y");
+        assert_eq!(switching(&view, cx), None);
     }
 
     /// What the yard says a secret ask asks for.
