@@ -1,5 +1,6 @@
 //! What a person set and the window keeps between runs: the text size, the
-//! look, which yard it shows, and what the system tells of. One small JSON file where the platform has a program's own
+//! look, the yards it can show and which of them is open, and what the
+//! system tells of. One small JSON file where the platform has a program's own
 //! configuration: `~/Library/Application Support/footplate/settings.json`
 //! on macOS, `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere
 //! (`~/.config` when that is not set). It is footplate's to write, on every
@@ -13,8 +14,10 @@ use std::path::{Path, PathBuf};
 use gpui::{Pixels, px};
 use serde::{Deserialize, Serialize};
 
+use crate::api::Address;
 use crate::model::Kind;
 use crate::theme::Look;
+use crate::yard;
 
 /// The text size the window was drawn with before there was a setting, in
 /// pixels, and the ends of what can be set, a pixel a step. Below the
@@ -25,27 +28,156 @@ pub const TEXT: u8 = 14;
 pub const TEXT_MIN: u8 = 11;
 pub const TEXT_MAX: u8 = 20;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// What the one yard is called that a file names none for: this machine's,
+/// by this run's socket.
+pub const HERE: &str = "this machine";
+
+/// A yard the window can show: its name in the switcher, and how it is
+/// reached. Near, by its socket on this machine, or far, at an address, as
+/// a device of its user with a token in a file of its own. What says
+/// nothing is left out of the file.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct Yard {
+    /// What the switcher calls it: no two of the list share one.
+    pub name: String,
+    /// Of a near yard: its socket's path. Empty is this run's socket, a
+    /// path names another home's yard on this machine.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub socket: String,
+    /// Of a far yard: its address. A yard with one is far.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub address: String,
+    /// Of a far yard: the file its device's token is in, a bare name
+    /// beside the settings or a whole path. The token is never here.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub token_file: String,
+}
+
+impl Yard {
+    /// A yard of this machine, by `socket`, or by this run's where that
+    /// is empty.
+    pub fn near(name: &str, socket: &str) -> Yard {
+        Yard {
+            name: name.to_string(),
+            socket: socket.to_string(),
+            ..Yard::default()
+        }
+    }
+
+    /// A yard at `address`, whose device's token is in `token_file`.
+    pub fn far(name: &str, address: &str, token_file: &str) -> Yard {
+        Yard {
+            name: name.to_string(),
+            address: address.to_string(),
+            token_file: token_file.to_string(),
+            ..Yard::default()
+        }
+    }
+
+    pub fn is_far(&self) -> bool {
+        !self.address.is_empty()
+    }
+
+    /// What kind of yard it is, as the switcher and the settings say it.
+    pub fn kind(&self) -> &'static str {
+        match self.is_far() {
+            true => "paired",
+            false => "on this machine",
+        }
+    }
+}
+
+/// The name a far yard gets where none is typed, and the one yard of a
+/// file from before there were several: its address's host.
+pub fn host_of(address: &str) -> String {
+    let rest = address.split_once("://").map_or(address, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host),
+    };
+    host.to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "Kept")]
 pub struct Settings {
     /// The size of the window's text, in pixels.
     pub text: u8,
     pub look: Look,
-    /// The window shows the yard at `address`, not this machine's. Both
-    /// are left out of the file while they say nothing, so the file of a
-    /// person who never chose is as it was.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub remote: bool,
-    /// The address of the yard at an address that was last paired with. It
-    /// is kept when this machine's yard is chosen again, to go back by.
-    /// The device's token is never here: it has a file of its own
-    /// (yard.rs).
+    /// The yards the window can show, in the order the switcher lists
+    /// them: never none. They are left out of the file while they are the
+    /// one yard nobody chose, so the file of a person who never chose is
+    /// as it was.
+    #[serde(skip_serializing_if = "nobody_chose")]
+    pub yards: Vec<Yard>,
+    /// The name of the yard the window had open last, which the next start
+    /// opens. Empty, or the name of none, is the first of the list.
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub address: String,
+    pub open: String,
     /// What the system tells of. Left out of the file while nothing was
-    /// chosen, as the yard is.
+    /// chosen, as the yards are.
     #[serde(skip_serializing_if = "Notify::is_usual")]
     pub notifications: Notify,
+}
+
+fn nobody_chose(yards: &[Yard]) -> bool {
+    yards == [Yard::near(HERE, "")]
+}
+
+/// A settings file as it is read: today's, and the one from before there
+/// were several yards, which had `remote` and `address` for its one.
+#[derive(Deserialize)]
+#[serde(default)]
+struct Kept {
+    text: u8,
+    look: Look,
+    yards: Vec<Yard>,
+    open: String,
+    remote: bool,
+    address: String,
+    notifications: Notify,
+}
+
+impl Default for Kept {
+    fn default() -> Self {
+        Kept {
+            text: TEXT,
+            look: Look::Auto,
+            yards: Vec::new(),
+            open: String::new(),
+            remote: false,
+            address: String::new(),
+            notifications: Notify::default(),
+        }
+    }
+}
+
+impl From<Kept> for Settings {
+    /// A file that lists no yards has one: the yard at its address, where
+    /// it chose that, with the token file a pairing wrote then, else this
+    /// machine's. The next write keeps it as a list.
+    fn from(kept: Kept) -> Settings {
+        let yards = match kept.yards.is_empty() {
+            false => kept.yards,
+            true if kept.remote && !kept.address.is_empty() => vec![Yard::far(
+                &host_of(&kept.address),
+                &kept.address,
+                yard::TOKEN_FILE,
+            )],
+            true => vec![Yard::near(HERE, "")],
+        };
+        Settings {
+            text: kept.text,
+            look: kept.look,
+            yards,
+            open: kept.open,
+            notifications: kept.notifications,
+        }
+    }
 }
 
 /// Whether the system shows a notification for what arrives while the
@@ -109,8 +241,8 @@ impl Default for Settings {
         Settings {
             text: TEXT,
             look: Look::Auto,
-            remote: false,
-            address: String::new(),
+            yards: vec![Yard::near(HERE, "")],
+            open: String::new(),
             notifications: Notify::default(),
         }
     }
@@ -140,13 +272,185 @@ impl Settings {
         fs::write(file, text)
     }
 
-    /// The text `by` steps larger, or smaller, within the ends.
-    /// The address of the yard at an address the settings choose, if they
-    /// choose one.
-    pub fn chosen(&self) -> Option<&str> {
-        Some(self.address.as_str()).filter(|address| self.remote && !address.is_empty())
+    /// The yard the window opens: the one it had open last, else the first
+    /// of the list.
+    pub fn opened(&self) -> &Yard {
+        let named = self.yards.iter().find(|yard| yard.name == self.open);
+        named
+            .or(self.yards.first())
+            .expect("the settings always list a yard")
     }
 
+    /// The yard called `name`, if the list has one.
+    pub fn yard(&self, name: &str) -> Option<&Yard> {
+        self.yards.iter().find(|yard| yard.name == name)
+    }
+
+    /// With the yard called `name` the one to open.
+    pub fn opening(self, name: &str) -> Settings {
+        Settings {
+            open: name.to_string(),
+            ..self
+        }
+    }
+
+    /// The far yard other than `name` whose token is in the same file as
+    /// that one's, and the file: only a list edited by hand has such a
+    /// pair, and neither of them is opened or paired until their files
+    /// differ. `file` is where the settings are kept.
+    pub fn shares(&self, name: &str, file: Option<&Path>) -> Option<(&Yard, PathBuf)> {
+        let at = yard::token_path(
+            &self.yard(name).filter(|yard| yard.is_far())?.token_file,
+            file,
+        )
+        .ok()?;
+        let others = self.yards.iter().filter(|other| other.is_far());
+        let other = others.filter(|other| other.name != name).find(|other| {
+            yard::token_path(&other.token_file, file).is_ok_and(|path| yard::same_file(&path, &at))
+        })?;
+        Some((other, at))
+    }
+
+    /// With `yard` in place of the one called `at`, or after the last of
+    /// the list: a yard added, renamed or edited. What cannot stand in the
+    /// list is refused with its reason before anything is paired or
+    /// written: a name another yard has, an address or a token file that
+    /// is none, and a token file another yard's token is in. A yard that is
+    /// renamed keeps its token file, and stays the open one if it was.
+    pub fn with_yard(
+        mut self,
+        at: Option<&str>,
+        yard: Yard,
+        file: Option<&Path>,
+    ) -> Result<Settings, String> {
+        let name = yard.name.trim().to_string();
+        if name.is_empty() {
+            return Err("A yard wants a name, to tell it from the others.".to_string());
+        }
+        let others = || {
+            self.yards
+                .iter()
+                .filter(|other| Some(other.name.as_str()) != at)
+        };
+        if others().any(|other| other.name == name) {
+            return Err(format!(
+                "There is a yard called {name} already, and two may not share a name. Give this one another."
+            ));
+        }
+        let yard = match yard.is_far() {
+            true => {
+                Address::parse(&yard.address)?;
+                let path = yard::token_path(&yard.token_file, file)?;
+                let taken = others().filter(|other| other.is_far()).find(|other| {
+                    yard::token_path(&other.token_file, file)
+                        .is_ok_and(|theirs| yard::same_file(&theirs, &path))
+                });
+                if let Some(other) = taken {
+                    return Err(format!(
+                        "The token file {} is the yard {}'s, and two yards may not share one: whoever holds a token calls its yard as you. Name another file.",
+                        path.display(),
+                        other.name
+                    ));
+                }
+                Yard::far(&name, yard.address.trim(), yard.token_file.trim())
+            }
+            false => {
+                let socket = yard.socket.trim();
+                if !socket.is_empty() && !Path::new(socket).is_absolute() {
+                    return Err(format!(
+                        "{socket:?} is no path of a socket: give it whole, from /, or leave it empty for this machine's own yard."
+                    ));
+                }
+                Yard::near(&name, socket)
+            }
+        };
+        match at.and_then(|at| self.yards.iter().position(|other| other.name == at)) {
+            Some(place) => {
+                if self.open == self.yards[place].name {
+                    self.open = name;
+                }
+                self.yards[place] = yard;
+            }
+            None => self.yards.push(yard),
+        }
+        Ok(self)
+    }
+
+    /// The token file a new far yard called `name` gets: `yard-<name>.token`
+    /// beside the settings, the name in small letters with `-` for what is
+    /// neither a letter nor a digit, and with `-2`, `-3` and so on while
+    /// another yard's token is in a file of that name or such a file is
+    /// there already.
+    pub fn token_name(&self, name: &str, file: Option<&Path>) -> String {
+        let mut slug = String::new();
+        for c in name.trim().chars().flat_map(char::to_lowercase) {
+            match c.is_alphanumeric() {
+                true => slug.push(c),
+                false if !slug.ends_with('-') => slug.push('-'),
+                false => {}
+            }
+        }
+        let slug = match slug.trim_matches('-') {
+            "" => "yard",
+            slug => slug,
+        };
+        let taken = |token_file: &str| {
+            let path = yard::token_path(token_file, file).ok();
+            let theirs = self
+                .yards
+                .iter()
+                .filter(|other| other.is_far())
+                .any(|other| {
+                    other.token_file == token_file
+                        || yard::token_path(&other.token_file, file)
+                            .ok()
+                            .zip(path.as_ref())
+                            .is_some_and(|(theirs, path)| yard::same_file(&theirs, path))
+                });
+            theirs || path.is_some_and(|path| path.exists())
+        };
+        let mut token_file = format!("yard-{slug}.token");
+        let mut n = 1;
+        while taken(&token_file) {
+            n += 1;
+            token_file = format!("yard-{slug}-{n}.token");
+        }
+        token_file
+    }
+
+    /// Without the yard called `name`, and what became of its token's
+    /// file. That is deleted only where it is a bare name beside the
+    /// settings and no other yard's token is in it; one named by a whole
+    /// path is the person's own, and is left. A list is never empty: the
+    /// last yard removed leaves this machine's.
+    pub fn without(mut self, name: &str, file: Option<&Path>) -> (Settings, TokenLeft) {
+        let Some(yard) = self.yard(name).cloned() else {
+            return (self, TokenLeft::None);
+        };
+        let left = match yard::token_path(&yard.token_file, file) {
+            _ if !yard.is_far() => TokenLeft::None,
+            Err(_) => TokenLeft::None,
+            Ok(path) => match self.shares(name, file) {
+                Some((other, _)) => TokenLeft::Shared(path, other.name.clone()),
+                None if yard::is_bare(&yard.token_file) => {
+                    // One that is gone already is as deleted as it gets.
+                    let _ = fs::remove_file(&path);
+                    TokenLeft::Deleted(path)
+                }
+                None => TokenLeft::Elsewhere(path),
+            },
+        };
+        self.yards.retain(|other| other.name != name);
+        if self.yards.is_empty() {
+            self.yards.push(Yard::near(HERE, ""));
+        }
+        if self.open == name {
+            self.open.clear();
+        }
+        (self, left)
+    }
+
+    /// The text `by` steps larger, or smaller, within the ends.
     pub fn sized(self, by: i8) -> Settings {
         let text = self.text.saturating_add_signed(by);
         Settings {
@@ -161,6 +465,46 @@ impl Settings {
     /// gpui's own 16 pixels.
     pub fn rem(&self) -> Pixels {
         px(16. * f32::from(self.text) / f32::from(TEXT))
+    }
+}
+
+/// What became of the token's file of a yard that was removed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenLeft {
+    /// It had none: a yard of this machine, or one whose file was no file.
+    None,
+    Deleted(PathBuf),
+    /// Named by a whole path, and left where the person keeps it.
+    Elsewhere(PathBuf),
+    /// Left: the yard of this name keeps its token in it.
+    Shared(PathBuf, String),
+}
+
+impl TokenLeft {
+    /// What the settings say of a yard called `name` that was removed, in
+    /// a line, with the command that removes the device at the yard:
+    /// removing it here does not. `device` is its user and its name there,
+    /// where the yard said them.
+    pub fn said(&self, name: &str, device: Option<(&str, &str)>) -> String {
+        let (user, device) = device.unwrap_or(("<user>", "<device>"));
+        let stays = format!(
+            "The device itself stays at the yard until its operator removes it: yardr user device rm {user} {device}"
+        );
+        match self {
+            TokenLeft::None => format!("{name} is removed from the list. Its yard is as it was."),
+            TokenLeft::Deleted(path) => format!(
+                "{name} is removed, and its token's file {} with it. {stays}",
+                path.display()
+            ),
+            TokenLeft::Elsewhere(path) => format!(
+                "{name} is removed. Its token's file {} is not beside the settings, and is left alone. {stays}",
+                path.display()
+            ),
+            TokenLeft::Shared(path, other) => format!(
+                "{name} is removed. Its token's file {} is left: the yard {other} keeps its token in it. {stays}",
+                path.display()
+            ),
+        }
     }
 }
 
@@ -278,35 +622,392 @@ mod tests {
     }
 
     #[test]
-    fn the_yard_that_was_chosen_is_kept_and_never_a_token() {
+    fn the_yards_are_kept_in_their_order_with_the_open_one_and_never_a_token() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
-        let set = Settings {
-            remote: true,
-            address: "https://mac.example.net".into(),
-            ..Settings::default()
-        };
-        assert_eq!(set.chosen(), Some("https://mac.example.net"));
+        let set = Settings::default()
+            .with_yard(
+                None,
+                Yard::far(
+                    "plantime",
+                    "https://plantime.example.net",
+                    "yard-plantime.token",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .with_yard(
+                None,
+                Yard::near("shop", "/home/shop/.yardr/yard.sock"),
+                None,
+            )
+            .unwrap()
+            .opening("plantime");
+        assert_eq!(set.opened().name, "plantime");
+        assert_eq!(set.opened().kind(), "paired");
+        assert_eq!(set.yards[0].kind(), "on this machine");
         set.write(&file).unwrap();
         assert_eq!(Settings::read(&file), set);
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
-            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"remote\": true,\n  \"address\": \"https://mac.example.net\"\n}\n"
+            r#"{
+  "text": 14,
+  "look": "auto",
+  "yards": [
+    {
+      "name": "this machine"
+    },
+    {
+      "name": "plantime",
+      "address": "https://plantime.example.net",
+      "token_file": "yard-plantime.token"
+    },
+    {
+      "name": "shop",
+      "socket": "/home/shop/.yardr/yard.sock"
+    }
+  ],
+  "open": "plantime"
+}
+"#
         );
-        // This machine's yard again: the address stays, to go back by.
-        let near = Settings {
-            remote: false,
-            ..set
+        // The yard that was open last is opened, else the first: a name
+        // of none, as of a yard removed by hand, is the first too.
+        assert_eq!(set.clone().opening("").opened().name, HERE);
+        assert_eq!(set.clone().opening("gone").opened().name, HERE);
+        // A file that lists none has this machine's.
+        fs::write(&file, r#"{"yards": []}"#).unwrap();
+        assert_eq!(Settings::read(&file), Settings::default());
+    }
+
+    #[test]
+    fn a_file_of_one_yard_from_before_there_were_several_opens_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Paired with the yard at an address: one far yard, called by the
+        // address's host, with the token file the pairing wrote then.
+        fs::write(
+            &file,
+            "{\n  \"text\": 15,\n  \"look\": \"dark\",\n  \"remote\": true,\n  \"address\": \"https://mac.example.net:8443/yard\"\n}\n",
+        )
+        .unwrap();
+        let set = Settings::read(&file);
+        assert_eq!(
+            set.yards,
+            [Yard::far(
+                "mac.example.net",
+                "https://mac.example.net:8443/yard",
+                "yard.token"
+            )]
+        );
+        assert_eq!((set.text, set.look), (15, Look::Dark));
+        assert_eq!(set.opened().name, "mac.example.net");
+        assert_eq!(
+            yard::token_path(&set.opened().token_file, Some(&file)).unwrap(),
+            dir.path().join("yard.token")
+        );
+        // The next write keeps it as a list, and reads back the same.
+        set.write(&file).unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("remote") && text.contains("\"yards\""),
+            "{text}"
+        );
+        assert_eq!(Settings::read(&file), set);
+
+        // This machine's yard was chosen, or nothing ever was: the one
+        // yard is this machine's, and the file says nothing of it.
+        for near in [
+            "{\"text\": 15}",
+            "{\"remote\": false, \"address\": \"https://mac.example.net\"}",
+            "{\"remote\": true}",
+        ] {
+            fs::write(&file, near).unwrap();
+            let set = Settings::read(&file);
+            assert_eq!(set.yards, [Yard::near(HERE, "")], "{near}");
+            assert!(!set.opened().is_far());
+            set.write(&file).unwrap();
+            assert!(!fs::read_to_string(&file).unwrap().contains("yards"));
+        }
+        assert_eq!(host_of("http://[::1]:8790"), "::1");
+        assert_eq!(host_of("http://127.0.0.1:8790/"), "127.0.0.1");
+        assert_eq!(host_of("https://mac.example.net"), "mac.example.net");
+    }
+
+    fn two_far(file: &Path) -> Settings {
+        Settings::default()
+            .with_yard(
+                None,
+                Yard::far("mac", "https://mac.example.net", "yard.token"),
+                Some(file),
+            )
+            .unwrap()
+            .with_yard(
+                None,
+                Yard::far(
+                    "plantime",
+                    "https://plantime.example.net",
+                    "yard-plantime.token",
+                ),
+                Some(file),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn no_two_yards_share_a_name_or_a_token_file_by_adding_renaming_or_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = two_far(&file);
+        let refused = |at: Option<&str>, yard: Yard| {
+            set.clone().with_yard(at, yard, Some(&file)).unwrap_err()
         };
-        assert_eq!(near.chosen(), None);
-        near.write(&file).unwrap();
-        assert_eq!(Settings::read(&file).address, "https://mac.example.net");
-        // Remote with no address chooses nothing.
-        let none = Settings {
-            remote: true,
-            ..Settings::default()
+
+        // Adding: a name that is taken, no name, an address that is none.
+        let why = refused(None, Yard::near("mac", ""));
+        assert!(
+            why.starts_with("There is a yard called mac already"),
+            "{why}"
+        );
+        let why = refused(None, Yard::near("  ", ""));
+        assert!(why.starts_with("A yard wants a name"), "{why}");
+        let why = refused(
+            None,
+            Yard::far("shop", "http://shop.example.net", "shop.token"),
+        );
+        assert!(why.contains("plain http"), "{why}");
+        let why = refused(None, Yard::near("shop", "run/yard.sock"));
+        assert!(why.contains("is no path of a socket"), "{why}");
+
+        // Adding with the token file of another: by its bare name, and by
+        // the whole path of the same file.
+        let shared = |why: String, of: &str| {
+            assert!(
+                why.starts_with(&format!(
+                    "The token file {} is the yard {of}'s",
+                    dir.path()
+                        .join(format!(
+                            "{}.token",
+                            match of {
+                                "mac" => "yard",
+                                _ => "yard-plantime",
+                            }
+                        ))
+                        .display()
+                )),
+                "{why}"
+            );
         };
-        assert_eq!(none.chosen(), None);
+        shared(
+            refused(
+                None,
+                Yard::far("shop", "https://shop.example.net", "yard.token"),
+            ),
+            "mac",
+        );
+        let whole = dir.path().join("yard-plantime.token");
+        shared(
+            refused(
+                None,
+                Yard::far("shop", "https://shop.example.net", whole.to_str().unwrap()),
+            ),
+            "plantime",
+        );
+        // A token file that is neither a bare name nor a whole path.
+        for none in ["", "tokens/shop.token", "../shop.token", "..", "/"] {
+            let why = refused(None, Yard::far("shop", "https://shop.example.net", none));
+            assert!(why.contains("names no token file"), "{none:?}: {why}");
+        }
+
+        // Editing a yard onto another's file is refused the same; onto
+        // its own, as with another address, it is taken.
+        shared(
+            refused(
+                Some("plantime"),
+                Yard::far("plantime", "https://plantime.example.net", "yard.token"),
+            ),
+            "mac",
+        );
+        let moved = set
+            .clone()
+            .with_yard(
+                Some("plantime"),
+                Yard::far("plantime", "https://new.example.net", "yard-plantime.token"),
+                Some(&file),
+            )
+            .unwrap();
+        assert_eq!(moved.yards[2].address, "https://new.example.net");
+        assert_eq!(moved.yards.len(), 3);
+
+        // Renaming keeps the token file, so it cannot come to another's;
+        // only the name may not be one that is taken. The open yard stays
+        // the open one under its new name, in its place in the list.
+        let why = refused(
+            Some("plantime"),
+            Yard {
+                name: "mac".into(),
+                ..set.yards[2].clone()
+            },
+        );
+        assert!(
+            why.starts_with("There is a yard called mac already"),
+            "{why}"
+        );
+        let renamed = set
+            .clone()
+            .opening("mac")
+            .with_yard(
+                Some("mac"),
+                Yard {
+                    name: "plantime 2".into(),
+                    ..set.yards[1].clone()
+                },
+                Some(&file),
+            )
+            .unwrap();
+        assert_eq!(
+            renamed.yards[1],
+            Yard::far("plantime 2", "https://mac.example.net", "yard.token")
+        );
+        assert_eq!(renamed.opened().name, "plantime 2");
+        assert_eq!(renamed.shares("plantime 2", Some(&file)), None);
+
+        // A list edited by hand may still have two on one file: it is
+        // found, from either of them.
+        let mut edited = set.clone();
+        edited.yards[2].token_file = "yard.token".into();
+        let (other, at) = edited.shares("plantime", Some(&file)).unwrap();
+        assert_eq!(
+            (other.name.as_str(), at),
+            ("mac", dir.path().join("yard.token"))
+        );
+        assert_eq!(
+            edited.shares("mac", Some(&file)).unwrap().0.name,
+            "plantime"
+        );
+        assert_eq!(edited.shares(HERE, Some(&file)), None);
+    }
+
+    #[test]
+    fn a_new_yard_s_token_file_is_named_for_it_and_skips_what_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = two_far(&file);
+        assert_eq!(set.token_name("Shop", Some(&file)), "yard-shop.token");
+        assert_eq!(
+            set.token_name("  The Shop, north (2) ", Some(&file)),
+            "yard-the-shop-north-2.token"
+        );
+        assert_eq!(set.token_name("...", Some(&file)), "yard-yard.token");
+        // Another yard's token is in a file of that name.
+        assert_eq!(
+            set.token_name("Plantime", Some(&file)),
+            "yard-plantime-2.token"
+        );
+        // A file of that name is there already, whoever's it is.
+        fs::write(dir.path().join("yard-plantime-2.token"), "").unwrap();
+        fs::write(dir.path().join("yard-shop.token"), "").unwrap();
+        assert_eq!(
+            set.token_name("plantime", Some(&file)),
+            "yard-plantime-3.token"
+        );
+        assert_eq!(set.token_name("shop", Some(&file)), "yard-shop-2.token");
+        // What it names is taken as a new yard's.
+        let name = set.token_name("plantime", Some(&file));
+        let more = set
+            .clone()
+            .with_yard(
+                None,
+                Yard::far("plantime north", "https://north.example.net", &name),
+                Some(&file),
+            )
+            .unwrap();
+        assert_eq!(
+            more.token_name("plantime", Some(&file)),
+            "yard-plantime-4.token"
+        );
+    }
+
+    #[test]
+    fn removing_a_yard_deletes_its_token_file_only_where_it_is_footplate_s_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let own = other.path().join("shop.token");
+        let set = two_far(&file)
+            .with_yard(
+                None,
+                Yard::far("shop", "https://shop.example.net", own.to_str().unwrap()),
+                Some(&file),
+            )
+            .unwrap()
+            .opening("plantime");
+        let beside = |name: &str| dir.path().join(name);
+        for token in [
+            beside("yard.token"),
+            beside("yard-plantime.token"),
+            own.clone(),
+        ] {
+            fs::write(token, "yardr-dev-kept\n").unwrap();
+        }
+
+        // A bare name beside the settings, and no other yard's: deleted.
+        // The open yard removed leaves the first to open.
+        let (less, left) = set.clone().without("plantime", Some(&file));
+        assert_eq!(left, TokenLeft::Deleted(beside("yard-plantime.token")));
+        assert!(!beside("yard-plantime.token").exists() && beside("yard.token").exists());
+        assert_eq!(less.yard("plantime"), None);
+        assert_eq!((less.yards.len(), less.opened().name.as_str()), (3, HERE));
+        let said = left.said("plantime", Some(("jo", "laptop")));
+        assert!(
+            said.starts_with("plantime is removed, and its token's file"),
+            "{said}"
+        );
+        assert!(said.ends_with("yardr user device rm jo laptop"), "{said}");
+
+        // A whole path is the person's own file: left, and said so.
+        let (less, left) = less.without("shop", Some(&file));
+        assert_eq!(left, TokenLeft::Elsewhere(own.clone()));
+        assert!(own.exists());
+        let said = left.said("shop", None);
+        assert!(said.contains("is left alone"), "{said}");
+        assert!(
+            said.ends_with("yardr user device rm <user> <device>"),
+            "{said}"
+        );
+
+        // A file another yard's token is in, as in a list edited by hand:
+        // left, and the settings say which yard keeps it.
+        let mut edited = less.clone();
+        edited
+            .yards
+            .push(Yard::far("twin", "https://twin.example.net", "yard.token"));
+        let (edited, left) = edited.without("twin", Some(&file));
+        assert_eq!(left, TokenLeft::Shared(beside("yard.token"), "mac".into()));
+        assert!(beside("yard.token").exists());
+        assert!(
+            left.said("twin", None)
+                .contains("the yard mac keeps its token in it")
+        );
+        assert_eq!(edited, less);
+
+        // A yard of this machine has no token, and one that is not listed
+        // changes nothing.
+        let (less, left) = less.without(HERE, Some(&file));
+        assert_eq!(left, TokenLeft::None);
+        assert_eq!(
+            left.said(HERE, None),
+            "this machine is removed from the list. Its yard is as it was."
+        );
+        assert_eq!(
+            less.clone().without("nobody", Some(&file)),
+            (less.clone(), TokenLeft::None)
+        );
+        // The last one removed leaves this machine's: a list is never
+        // empty.
+        let (none, left) = less.without("mac", Some(&file));
+        assert_eq!(left, TokenLeft::Deleted(beside("yard.token")));
+        assert_eq!(none.yards, [Yard::near(HERE, "")]);
     }
 
     #[test]

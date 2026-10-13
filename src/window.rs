@@ -61,6 +61,16 @@ actions!(
         Smaller,
         UsualSize,
         NextLook,
+        SwitchYards,
+        Yard1,
+        Yard2,
+        Yard3,
+        Yard4,
+        Yard5,
+        Yard6,
+        Yard7,
+        Yard8,
+        Yard9,
         JumpNewest,
         JumpOldest,
         PageUp,
@@ -74,6 +84,9 @@ const CONTEXT: &str = "Footplate";
 /// conversation open, or a decision with the line focused to type words in,
 /// those keys are the line's text.
 const NO_LINE_CONTEXT: &str = "FootplateNoLine";
+/// Where the switcher's list is open: the arrows move in it, Enter opens
+/// the yard they are on and esc leaves it, and no key is a card's.
+const SWITCH_CONTEXT: &str = "FootplateSwitch";
 
 /// How high an image of a mail stands in the conversation, whatever its own
 /// size: the room is there before the image is, so nothing moves under the
@@ -207,6 +220,10 @@ fn decision_keys(ask: &DecisionAsk, foreign: bool, writable: bool) -> String {
     }
     keys.join(" · ")
 }
+
+/// What the settings say over the list of yards: what a pairing gives that
+/// a link between two yards does not.
+const PAIRING_GIVES: &str = "A paired yard is called with this device's own token, so your picks and approvals there count as yours, where over a peer link you only see what the link carries and an approval never crosses.";
 
 /// What a secret ask's card says under the yard's line of what is asked
 /// for: where the value goes, in the words `yardr chat` has for it.
@@ -441,6 +458,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("i", FocusWords, Some(NO_LINE_CONTEXT)),
     ]);
+    cx.bind_keys([
+        KeyBinding::new("up", ChoiceUp, Some(SWITCH_CONTEXT)),
+        KeyBinding::new("down", ChoiceDown, Some(SWITCH_CONTEXT)),
+        KeyBinding::new("enter", Decide, Some(SWITCH_CONTEXT)),
+        KeyBinding::new("escape", Leave, Some(SWITCH_CONTEXT)),
+    ]);
+    // The switcher and a yard by its place in the list, from anywhere:
+    // with the modifier, since a plain digit is a card's pick.
+    cx.bind_keys([
+        KeyBinding::new("secondary-y", SwitchYards, None),
+        KeyBinding::new("secondary-1", Yard1, None),
+        KeyBinding::new("secondary-2", Yard2, None),
+        KeyBinding::new("secondary-3", Yard3, None),
+        KeyBinding::new("secondary-4", Yard4, None),
+        KeyBinding::new("secondary-5", Yard5, None),
+        KeyBinding::new("secondary-6", Yard6, None),
+        KeyBinding::new("secondary-7", Yard7, None),
+        KeyBinding::new("secondary-8", Yard8, None),
+        KeyBinding::new("secondary-9", Yard9, None),
+    ]);
     // The settings and their own keys, wherever the focus is, the yard
     // there or away. Larger is on `=`, the key `+` is on, with shift or
     // without.
@@ -452,6 +489,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-0", UsualSize, None),
         KeyBinding::new("secondary-shift-l", NextLook, None),
     ]);
+}
+
+/// A pairing's code as it was typed where the yard's address is known
+/// already: what a pairing's QR code holds, `<address>#<code>`, may be
+/// given for it, and is its code.
+fn code_of(typed: &str) -> String {
+    let typed = typed.trim();
+    let code = typed.rsplit_once('#').map_or(typed, |(_, code)| code);
+    code.trim().to_string()
 }
 
 /// A mail of the open conversation to keep in place while older mail is
@@ -474,6 +520,59 @@ enum Away {
     Out,
 }
 
+/// What is typed in the settings for a yard: one to add, or a code for one
+/// that is listed.
+#[derive(Clone, Debug, PartialEq)]
+enum Adding {
+    /// A yard of this machine: its name and its socket.
+    Near,
+    /// A yard at an address: its name, its address and a pairing's code.
+    Far,
+    /// A pairing's code for the yard of this name, to pair its device
+    /// again.
+    Again(String),
+}
+
+/// What a yard had waiting when the window last left it: the switcher
+/// shows it for a yard that is not open, as of then.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Counts {
+    mail: usize,
+    decisions: usize,
+    notices: usize,
+}
+
+impl Counts {
+    fn of(model: &Model) -> Counts {
+        Counts {
+            mail: model.rows().iter().map(|row| row.unread).sum(),
+            decisions: model.decisions_count(),
+            notices: model.yard_unread(),
+        }
+    }
+
+    /// In words, marked as from when the yard was last open.
+    fn line(&self) -> String {
+        let some = |n: usize, one: &str, more: &str| match n {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            n => Some(format!("{n} {more}")),
+        };
+        let parts: Vec<String> = [
+            some(self.mail, "mail", "mail"),
+            some(self.decisions, "decision", "decisions"),
+            some(self.notices, "notice", "notices"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        match parts.is_empty() {
+            true => "nothing waiting when last opened".to_string(),
+            false => format!("{} when last opened", parts.join(", ")),
+        }
+    }
+}
+
 pub struct Footplate {
     /// The yard's client, or none while the yard that was chosen cannot be
     /// opened: `down` says why.
@@ -482,6 +581,14 @@ pub struct Footplate {
     name: String,
     /// What the environment says of the yard, which wins over the settings.
     env: Env,
+    /// The yard that is open, by the name the settings list it under, or
+    /// by its address where the environment names it: whose the drafts,
+    /// the ask words and the counts are.
+    yard: String,
+    /// Which opening of a yard this is, counted from the window's start.
+    /// The answer to a call made in an earlier one is another yard's, or
+    /// this one's before it was left, and changes nothing that is shown.
+    opening: u64,
     /// Hands on what the follower of the open yard learns. Another yard's
     /// takes its place, and the follower of the one before ends at its
     /// next word, which nobody hears: until then it holds its stream.
@@ -522,12 +629,25 @@ pub struct Footplate {
     /// The images of the conversations that were open, by hash: an image
     /// never changes under its hash, so each is asked for once.
     images: HashMap<String, Picture>,
-    /// What is attached and not sent, for each conversation, and the text
-    /// typed in those that are not open; the open one's is in the line.
+    /// What is attached and not sent, for each conversation of each yard,
+    /// and the text typed in those that are not open; the open one's is in
+    /// the line. They speak of the open yard alone.
     drafts: Drafts,
-    /// The words typed for each ask that is not the open one, by bead and
-    /// ask; the open one's are in the line.
+    /// The words typed for each ask of the open yard that is not the open
+    /// one, by bead and ask; the open one's are in the line.
     ask_words: HashMap<(String, u64), String>,
+    /// The same of the yards that are not open, by yard: they are the
+    /// open yard's again when theirs is opened, and no call of another
+    /// yard can name them.
+    kept_words: HashMap<String, HashMap<(String, u64), String>>,
+    /// What each yard had waiting when it was last left, by yard.
+    counts: HashMap<String, Counts>,
+    /// What there was to say while a yard was being opened and nothing
+    /// showed to say it in: it is said when the yard shows.
+    late: Option<String>,
+    /// The switcher's list is shown under the head: the row of it the
+    /// keys are on.
+    switching: Option<usize>,
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
@@ -565,12 +685,15 @@ pub struct Footplate {
     unkept: Option<String>,
     /// The settings are shown where the conversation is.
     settings_open: bool,
-    /// The yard at an address, in the settings: its address and a pairing's
-    /// code as they are typed, whether they show, whether a code is on its
-    /// way to the yard, and what came of the last.
+    /// A yard in the settings, to add or to pair again: its name, its
+    /// socket or its address and a pairing's code as they are typed, which
+    /// of them show, whether a code is on its way to the yard, and what
+    /// came of the last.
+    yard_name: Entity<Line>,
+    socket: Entity<Line>,
     address: Entity<Line>,
     code: Entity<Line>,
-    pairing_open: bool,
+    adding: Option<Adding>,
     pairing: bool,
     yard_said: Option<String>,
     /// The system's notifications, and what it answered when it was asked
@@ -595,14 +718,14 @@ impl Footplate {
     #[cfg(test)]
     pub fn new(client: Client, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::bare(Env::default(), name, window, cx);
-        this.follow(Ok(client), cx);
+        this.follow(settings::HERE.to_string(), Ok(client), cx);
         this
     }
 
     /// The window on the yard the environment names, else the one the
-    /// settings kept in `file` choose: this machine's, for the user the
-    /// yard knows `name` as, or one at an address, for the user its token
-    /// is of. A yard that cannot be opened is said why, and the settings
+    /// settings kept in `file` had open last: one of this machine, for the
+    /// user the yard knows `name` as, or one at an address, for the user
+    /// its token is of. A yard that cannot be opened is said why, and the settings
     /// are there to choose again.
     pub fn opened(
         env: Env,
@@ -637,17 +760,19 @@ impl Footplate {
         // is empty: the window is drawn again with what is typed.
         cx.observe(&line, |_, _, cx| cx.notify()).detach();
         cx.observe(&secret, |_, _, cx| cx.notify()).detach();
-        // Enter in the address or the code of a pairing sends the code.
+        // Enter in a field of a yard adds it, or sends the pairing's code.
         let field = |hint: &'static str, cx: &mut Context<Self>| {
             let field = cx.new(|cx| {
                 let mut field = Line::new(cx);
                 field.set_placeholder(hint, cx);
                 field
             });
-            cx.subscribe(&field, |this, _, _: &Submitted, cx| this.pair(cx))
+            cx.subscribe(&field, |this, _, _: &Submitted, cx| this.submit_yard(cx))
                 .detach();
             field
         };
+        let yard_name = field("plantime", cx);
+        let socket = field("/Users/plantime/.yardr/yard.sock", cx);
         let address = field("https://mac.example.net", cx);
         let code = field("K7QM-2XPD", cx);
         let selection = cx.new(|_| Selection::default());
@@ -667,6 +792,18 @@ impl Footplate {
         Self::on_app_action::<NextLook>(window, cx, |this, _, cx| {
             this.look(this.settings.look.next(), cx)
         });
+        // So are the switcher's: another yard is opened from wherever the
+        // focus is, and from a yard that is away.
+        Self::on_app_action::<SwitchYards>(window, cx, Self::toggle_switcher);
+        Self::on_app_action::<Yard1>(window, cx, |this, w, cx| this.switch_nth(0, w, cx));
+        Self::on_app_action::<Yard2>(window, cx, |this, w, cx| this.switch_nth(1, w, cx));
+        Self::on_app_action::<Yard3>(window, cx, |this, w, cx| this.switch_nth(2, w, cx));
+        Self::on_app_action::<Yard4>(window, cx, |this, w, cx| this.switch_nth(3, w, cx));
+        Self::on_app_action::<Yard5>(window, cx, |this, w, cx| this.switch_nth(4, w, cx));
+        Self::on_app_action::<Yard6>(window, cx, |this, w, cx| this.switch_nth(5, w, cx));
+        Self::on_app_action::<Yard7>(window, cx, |this, w, cx| this.switch_nth(6, w, cx));
+        Self::on_app_action::<Yard8>(window, cx, |this, w, cx| this.switch_nth(7, w, cx));
+        Self::on_app_action::<Yard9>(window, cx, |this, w, cx| this.switch_nth(8, w, cx));
         // What arrives on the open row of a window in front is read there,
         // and the system tells of the rest.
         cx.observe_window_activation(window, |this, window, _| {
@@ -680,6 +817,8 @@ impl Footplate {
             client: None,
             name,
             env,
+            yard: String::new(),
+            opening: 0,
             following: None,
             model: None,
             down: None,
@@ -697,6 +836,10 @@ impl Footplate {
             images: HashMap::new(),
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
+            kept_words: HashMap::new(),
+            counts: HashMap::new(),
+            late: None,
+            switching: None,
             declining: None,
             secret,
             secret_typed: Vec::new(),
@@ -712,9 +855,11 @@ impl Footplate {
             kept: None,
             unkept: None,
             settings_open: false,
+            yard_name,
+            socket,
             address,
             code,
-            pairing_open: false,
+            adding: None,
             pairing: false,
             yard_said: None,
             system,
@@ -816,24 +961,43 @@ impl Footplate {
     }
 
     /// Opens the yard the environment names, else the one the settings
-    /// choose, in place of the one that was open.
+    /// open, in place of the one that was open.
     fn reopen(&mut self, cx: &mut Context<Self>) {
-        let opening = self.env.open(self.settings.chosen(), self.kept.as_deref());
-        self.follow(opening, cx);
+        let opening = self.env.open(&self.settings, self.kept.as_deref());
+        let named = self.env.yard.clone();
+        let yard = named.unwrap_or_else(|| self.settings.opened().name.clone());
+        self.follow(yard, opening, cx);
     }
 
-    /// Follows the yard behind the client from here on, and no longer the
-    /// one before it: nothing of that one is shown or kept, since a name
-    /// there is not the same one here. Without a client the window says
-    /// why there is none, and waits for another yard to be chosen.
-    fn follow(&mut self, opening: Result<Client, String>, cx: &mut Context<Self>) {
+    /// Follows `yard` behind the client from here on, and no longer the
+    /// one before it. Nothing of that one is shown, since a name there is
+    /// not the same one here; what was written in it and not sent is kept
+    /// aside for it, with what it had waiting, and what was written for
+    /// this one before is its again. Nothing typed of a secret is kept for
+    /// either. Without a client the window says why there is none, and
+    /// waits for another yard to be chosen.
+    fn follow(&mut self, yard: String, opening: Result<Client, String>, cx: &mut Context<Self>) {
+        // The line's text is the open row's of the yard that is left: it
+        // stays with that, and is in the line again when the row is open.
+        if let Some(model) = self.model.as_ref() {
+            self.counts.insert(self.yard.clone(), Counts::of(model));
+            if let Some(from) = model.selected().cloned() {
+                self.keep_typed(&from, cx);
+            }
+        }
+        let words = std::mem::take(&mut self.ask_words);
+        if !words.is_empty() {
+            self.kept_words.insert(self.yard.clone(), words);
+        }
+        self.ask_words = self.kept_words.remove(&yard).unwrap_or_default();
+        self.drafts.turn_to(&yard);
+        self.yard = yard;
+        self.opening += 1;
+        self.switching = None;
         self.following = None;
         self.model = None;
         self.said = None;
         self.images.clear();
-        self.thumbs.clear();
-        self.drafts = Drafts::default();
-        self.ask_words.clear();
         self.declining = None;
         self.back_position = None;
         // What arrived in the yard before is not told of as this one's.
@@ -902,7 +1066,7 @@ impl Footplate {
     }
 
     /// The window with what `file` keeps of the text size, the look and the
-    /// yard, which is where a change of them is kept from here on. The
+    /// yards, which is where a change of them is kept from here on. The
     /// yard that is open stays open: [`Footplate::opened`] opens the kept
     /// one.
     pub fn kept_in(mut self, file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
@@ -918,10 +1082,10 @@ impl Footplate {
     }
 
     /// Which yard the window shows, in words: the whole telling, as the
-    /// settings say it. The head's line shortens this machine's.
+    /// settings say it. The head's line has its name.
     fn which_yard(&self) -> String {
-        let address = self.env.address(self.settings.chosen());
-        match (address, &self.said) {
+        let opened = self.settings.opened();
+        match (self.env.address(&self.settings), &self.said) {
             (Some(address), Some(me)) => {
                 format!(
                     "the yard {} at {address}, as its device {}",
@@ -929,19 +1093,19 @@ impl Footplate {
                 )
             }
             (Some(address), None) => format!("the yard at {address}"),
-            (None, _) => "this machine's yard".to_string(),
+            (None, _) if opened.socket.is_empty() => "this machine's yard".to_string(),
+            (None, _) => format!("the yard at the socket {}", opened.socket),
         }
     }
 
-    /// Which yard the head's line names, short: this machine's, or the
-    /// yard at an address, as the settings say it. The line has the
-    /// column's width beside the logo, and the whole telling stands in
-    /// the settings.
+    /// Which yard the head's line names, short: the open one by the name
+    /// the switcher lists it under, or the whole telling of the one yard
+    /// the environment names. The line has the column's width beside the
+    /// logo, and the whole telling stands in the settings.
     fn which_yard_short(&self) -> String {
-        if self.env.address(self.settings.chosen()).is_none() {
-            "this machine's".to_string()
-        } else {
-            self.which_yard()
+        match self.env.yard {
+            Some(_) => self.which_yard(),
+            None => self.yard.clone(),
         }
     }
 
@@ -956,12 +1120,28 @@ impl Footplate {
                 let mut state = *state;
                 self.said = state.yard.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
+                let fresh = self.model.is_none();
                 let (model, effects) = match self.model.as_ref() {
                     Some(before) => before.resumed(state),
                     None => Model::new(state, None),
                 };
                 self.model = Some(model);
                 self.down = None;
+                if fresh {
+                    // The yard was opened: the line has what was typed in
+                    // the row that is open, before the yard was left.
+                    if let (Some(model), Some(late)) = (self.model.as_mut(), self.late.take()) {
+                        model.notice = late;
+                    }
+                    let to = self.model.as_ref().and_then(|m| m.selected().cloned());
+                    let kept = self.typed_for(to.as_ref());
+                    if !kept.is_empty() {
+                        self.line.update(cx, |line, cx| {
+                            let all = draft::rejoin(kept, line.text().to_string());
+                            line.set_text(&all, cx);
+                        });
+                    }
+                }
                 self.turned(open, cx);
                 self.new_below = 0;
                 self.scroll_to_newest();
@@ -1359,8 +1539,16 @@ impl Footplate {
         self.selection
             .update(cx, |selection, cx| selection.clear(cx));
         self.declining = None;
+        self.keep_typed(&from, cx);
+        let text = self.typed_for(to.as_ref());
+        self.line.update(cx, |line, cx| line.set_text(&text, cx));
+    }
+
+    /// What is typed in the line stays with `from`, the row it was typed
+    /// in: the conversation's draft, or the ask's words.
+    fn keep_typed(&mut self, from: &Selected, cx: &mut Context<Self>) {
         let typed = self.line.read(cx).text().to_string();
-        match &from {
+        match from {
             Selected::Conversation(name) => self.drafts.put_text(name, typed),
             Selected::Decision(bead) => {
                 if let Some(ask) = self.model.as_ref().and_then(|m| m.current_for(bead)) {
@@ -1372,7 +1560,11 @@ impl Footplate {
             }
             Selected::Yard => {}
         }
-        let text = match &to {
+    }
+
+    /// What was typed in the row `to`, for the line: the row is open.
+    fn typed_for(&mut self, to: Option<&Selected>) -> String {
+        match to {
             Some(Selected::Conversation(name)) => self.drafts.take_text(name),
             Some(Selected::Decision(_)) => self
                 .model
@@ -1385,8 +1577,7 @@ impl Footplate {
                 .remove(&(bead.clone(), *ask))
                 .unwrap_or_default(),
             _ => String::new(),
-        };
-        self.line.update(cx, |line, cx| line.set_text(&text, cx));
+        }
     }
 
     /// The line says whom it writes to, or what words on a card do.
@@ -1566,8 +1757,28 @@ impl Footplate {
     }
 
     /// Makes a call off the window's thread, as the user the window is for,
-    /// and hands its answer back to the window.
+    /// and hands its answer back to the window. An answer that comes when
+    /// another yard was opened since is dropped: it says nothing of what
+    /// the window shows now.
     fn ask<R: Send + 'static>(
+        &self,
+        cx: &mut Context<Self>,
+        call: impl FnOnce(&Client, &str) -> R + Send + 'static,
+        then: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
+    ) {
+        let opening = self.opening;
+        self.ask_through(cx, call, move |this, answer, cx| {
+            if this.opening == opening {
+                then(this, answer, cx)
+            }
+        });
+    }
+
+    /// As [`Footplate::ask`], with the answer handed back whichever yard is
+    /// open by then: for a call that carries what a person wrote, which is
+    /// put back where it was written when it did not go. The call is the
+    /// yard's it was made in, since its client is taken here.
+    fn ask_through<R: Send + 'static>(
         &self,
         cx: &mut Context<Self>,
         call: impl FnOnce(&Client, &str) -> R + Send + 'static,
@@ -1592,8 +1803,12 @@ impl Footplate {
     }
 
     fn notice(&mut self, notice: String, cx: &mut Context<Self>) {
-        if let Some(model) = self.model.as_mut() {
-            model.notice = notice;
+        match self.model.as_mut() {
+            Some(model) => model.notice = notice,
+            // A yard that is being opened has nowhere to say it yet: what
+            // did not go in the one before is said when this one shows.
+            None if !notice.is_empty() => self.late = Some(notice),
+            None => {}
         }
         cx.notify();
     }
@@ -1776,7 +1991,8 @@ impl Footplate {
             Target::Crew(name) => name.clone(),
             Target::Peer { name, peer } => format!("{name}@{peer}"),
         };
-        self.ask(
+        let (yard, opening) = (self.yard.clone(), self.opening);
+        self.ask_through(
             cx,
             move |client, me| match post(client, me, &target, &text, &images) {
                 Ok(blobs) => Ok(images.iter().map(|a| a.id).zip(blobs).collect::<Vec<_>>()),
@@ -1788,6 +2004,9 @@ impl Footplate {
                 }),
             },
             move |this, sent, cx| match sent {
+                // It went, in the yard it was written in, and another is
+                // open since: nothing of this one's shows it.
+                Ok(_) if this.opening != opening => {}
                 Ok(sent) => {
                     // The bytes are here already: the yard is not asked.
                     for (id, blob) in sent {
@@ -1797,23 +2016,26 @@ impl Footplate {
                     }
                     this.change(cx, |m| m.sent(&to))
                 }
-                Err(unsent) => this.unsent(&to, &at, unsent, cx),
+                Err(unsent) => this.unsent(&yard, &to, &at, unsent, cx),
             },
         );
     }
 
     /// Nothing of a draft is lost to a failed send: what did not go is back
-    /// where it was, in the conversation `to`, before what was typed and
-    /// attached since, the attachment that kept it is marked, and the
-    /// window says why `at`, whom it was written to, did not get it. It is
-    /// written to nobody else instead.
-    fn unsent(&mut self, to: &str, at: &str, unsent: Unsent, cx: &mut Context<Self>) {
+    /// where it was, in the conversation `to` of `yard`, before what was
+    /// typed and attached since, the attachment that kept it is marked,
+    /// and the window says why `at`, whom it was written to, did not get
+    /// it. It is written to nobody else instead, and where another yard is
+    /// open by now it is in no line of that one: it waits in its own.
+    fn unsent(&mut self, yard: &str, to: &str, at: &str, unsent: Unsent, cx: &mut Context<Self>) {
+        let open = self.drafts.turn_to(yard);
+        let here = open == yard;
         self.drafts.restore(to, unsent.images);
         if let Some(id) = unsent.at {
             self.drafts.refuse(id, &unsent.why);
         }
-        let open = self.model.as_ref().and_then(|m| m.selected_conversation()) == Some(to);
-        if open {
+        let shown = self.model.as_ref().and_then(|m| m.selected_conversation()) == Some(to);
+        if here && shown {
             self.line.update(cx, |line, cx| {
                 let back = draft::rejoin(unsent.text, line.text().to_string());
                 line.set_text(&back, cx);
@@ -1821,7 +2043,41 @@ impl Footplate {
         } else {
             self.drafts.unsend(to, unsent.text);
         }
-        self.notice(format!("not sent to {at}: {}", unsent.why), cx);
+        self.drafts.turn_to(&open);
+        let whom = match here {
+            true => at.to_string(),
+            false => format!("{at} in {yard}"),
+        };
+        self.notice(format!("not sent to {whom}: {}", unsent.why), cx);
+    }
+
+    /// Words for the ask `at` of `yard` that the yard did not take are
+    /// back with what was typed since: in the line while that yard is
+    /// still the open one, as it was opened then, and else with the ask
+    /// they were typed for, in its own yard. `what` did not happen, and
+    /// `err` is why.
+    fn words_back(
+        &mut self,
+        (yard, opening): (&str, u64),
+        at: (String, u64),
+        words: String,
+        (what, err): (&str, String),
+        cx: &mut Context<Self>,
+    ) {
+        if opening == self.opening {
+            self.line.update(cx, |line, cx| {
+                let back = draft::rejoin(words, line.text().to_string());
+                line.set_text(&back, cx);
+            });
+            return self.notice(format!("{what}: {err}"), cx);
+        }
+        let kept = match yard == self.yard {
+            true => &mut self.ask_words,
+            false => self.kept_words.entry(yard.to_string()).or_default(),
+        };
+        let typed = kept.remove(&at).unwrap_or_default();
+        kept.insert(at, draft::rejoin(words, typed));
+        self.notice(format!("{what} in {yard}: {err}"), cx);
     }
 
     /// The open card's ask: the current one of a decision, or the dealt
@@ -2003,20 +2259,19 @@ impl Footplate {
         self.ask_words.remove(&(bead.clone(), ask));
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
-        self.ask(
+        let (yard, opening) = (self.yard.clone(), self.opening);
+        self.ask_through(
             cx,
             move |client, me| client.answer_ask(&call_bead, ask, option, &call_words, me),
             move |this, answered, cx| match answered {
+                Ok(()) if this.opening != opening => {}
                 Ok(()) => {
                     this.change(cx, |m| m.picked(&bead, ask, option, &words));
                     this.schedule_return(cx);
                 }
                 Err(err) => {
-                    this.line.update(cx, |line, cx| {
-                        let back = draft::rejoin(words.clone(), line.text().to_string());
-                        line.set_text(&back, cx);
-                    });
-                    this.notice(format!("not answered: {err}"), cx);
+                    let said = ("not answered", err.to_string());
+                    this.words_back((&yard, opening), (bead, ask), words, said, cx);
                 }
             },
         );
@@ -2028,7 +2283,8 @@ impl Footplate {
         self.ask_words.remove(&(bead.clone(), ask));
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
-        self.ask(
+        let (yard, opening) = (self.yard.clone(), self.opening);
+        self.ask_through(
             cx,
             move |client, me| client.add_note(&call_bead, &call_words, me),
             move |this, noted, cx| match noted {
@@ -2037,11 +2293,8 @@ impl Footplate {
                     // queue and the bead again.
                 }
                 Err(err) => {
-                    this.line.update(cx, |line, cx| {
-                        let back = draft::rejoin(words.clone(), line.text().to_string());
-                        line.set_text(&back, cx);
-                    });
-                    this.notice(format!("not noted: {err}"), cx);
+                    let said = ("not noted", err.to_string());
+                    this.words_back((&yard, opening), (bead, ask), words, said, cx);
                 }
             },
         );
@@ -2075,20 +2328,19 @@ impl Footplate {
         self.declining = None;
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
-        self.ask(
+        let (yard, opening) = (self.yard.clone(), self.opening);
+        self.ask_through(
             cx,
             move |client, me| client.decline_ask(&call_bead, ask, &call_words, me),
             move |this, declined, cx| match declined {
+                Ok(()) if this.opening != opening => {}
                 Ok(()) => {
                     this.change(cx, |m| m.declined(&bead, ask, &words));
                     this.schedule_return(cx);
                 }
                 Err(err) => {
-                    this.line.update(cx, |line, cx| {
-                        let back = draft::rejoin(words.clone(), line.text().to_string());
-                        line.set_text(&back, cx);
-                    });
-                    this.notice(format!("not declined: {err}"), cx);
+                    let said = ("not declined", err.to_string());
+                    this.words_back((&yard, opening), (bead, ask), words, said, cx);
                 }
             },
         );
@@ -2247,6 +2499,13 @@ impl Footplate {
 
     /// The arrows choose an option of the open card, around the ends.
     fn choice(&mut self, by: isize, cx: &mut Context<Self>) {
+        // In the switcher's list the arrows move among the yards, and stop
+        // at its ends.
+        if let Some(at) = self.switching {
+            let last = self.settings.yards.len().saturating_sub(1);
+            self.switching = Some(at.saturating_add_signed(by).min(last));
+            return cx.notify();
+        }
         let Some((bead, ask)) = self.card() else {
             return;
         };
@@ -2373,6 +2632,9 @@ impl Footplate {
     /// Esc leaves what it can: a decline asked for words, the words for
     /// the card's keys, the pick, then the words.
     fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switching.is_some() {
+            return self.toggle_switcher(window, cx);
+        }
         if self.settings_open {
             return self.toggle_settings(window, cx);
         }
@@ -2556,87 +2818,179 @@ impl Footplate {
         );
     }
 
-    /// This machine's yard is chosen: it is opened in place of the one at
-    /// an address, whose address and token stay where they are kept, to go
-    /// back by. Where the environment names a yard there is no choice.
-    fn choose_near(&mut self, cx: &mut Context<Self>) {
-        self.shut_pairing(cx);
-        self.yard_said = None;
+    /// The switcher's list under the head, or no longer: the yards the
+    /// settings list, to open one of. While it shows, the window holds the
+    /// keys, on the row of the open yard first. With one yard named by the
+    /// environment there is nothing to switch between, and a yard that is
+    /// away has no head: its keys and the settings open another.
+    fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
-        if self.env.yard.is_some() || !self.settings.remote {
+        if self.switching.take().is_some() {
+            let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
+            let focus = match conversation {
+                Some(_) if !self.settings_open => self.line.focus_handle(cx),
+                _ => self.focus.clone(),
+            };
+            return window.focus(&focus);
+        }
+        if self.env.yard.is_some() || self.down.is_some() || self.model.is_none() {
             return;
         }
-        self.set(
-            Settings {
-                remote: false,
-                ..self.settings.clone()
-            },
-            cx,
-        );
+        let yards = &self.settings.yards;
+        let open = yards.iter().position(|yard| yard.name == self.yard);
+        self.switching = Some(open.unwrap_or(0));
+        window.focus(&self.focus.clone());
+    }
+
+    /// Opens the yard at place `n` of the settings' list, counted from
+    /// nought: the switcher's row, and its key from anywhere.
+    fn switch_nth(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(name) = self.settings.yards.get(n).map(|yard| yard.name.clone()) {
+            self.switch_to(&name, window, cx);
+        }
+    }
+
+    /// Opens the yard called `name` in place of the open one, and keeps
+    /// that it is the one to open at the next start. The line has the
+    /// focus, as when the window starts. The yard that is open already
+    /// stays as it is, unless it could not be opened: that is tried again.
+    fn switch_to(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.switching = None;
+        cx.notify();
+        if self.env.yard.is_some() || self.settings.yard(name).is_none() {
+            return;
+        }
+        window.focus(&self.line.focus_handle(cx));
+        if name == self.yard && self.client.is_some() {
+            return;
+        }
+        self.set(self.settings.clone().opening(name), cx);
         self.reopen(cx);
     }
 
-    /// A yard at an address is chosen: its address and a pairing's code
-    /// are asked for, the address as it was last, and the focus is in the
-    /// one that is still to type.
-    fn choose_far(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pairing_open = true;
-        let last = Some(self.settings.address.as_str()).filter(|address| !address.is_empty());
-        let known = self.env.address(last).unwrap_or_default().to_string();
-        if self.address.read(cx).text().is_empty() || self.env.yard.is_some() {
-            self.address
-                .update(cx, |line, cx| line.set_text(&known, cx));
+    /// A yard is to be added in the settings: its fields are asked for,
+    /// empty, with the focus in its name.
+    fn add_yard(&mut self, far: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.env.yard.is_some() {
+            return;
         }
-        let field = match known.is_empty() {
-            true => &self.address,
-            false => &self.code,
-        };
-        window.focus(&field.focus_handle(cx));
+        self.adding = Some(match far {
+            true => Adding::Far,
+            false => Adding::Near,
+        });
+        self.yard_said = None;
+        for field in [&self.yard_name, &self.socket, &self.address, &self.code] {
+            field.update(cx, |line, cx| line.set_text("", cx));
+        }
+        window.focus(&self.yard_name.focus_handle(cx));
         cx.notify();
     }
 
-    /// The device is to be paired again, from where the yard said it is
-    /// not let in: the settings, with the yard's address there already.
-    fn pair_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The device of the yard called `name` is to be paired again: the
+    /// settings, with a code to type for that yard's address. From where a
+    /// yard said this device is not let in, it is the open one.
+    fn pair_again(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if !self.settings_open {
             self.toggle_settings(window, cx);
         }
-        self.choose_far(window, cx);
+        self.adding = Some(Adding::Again(name.unwrap_or_else(|| self.yard.clone())));
+        self.yard_said = None;
+        self.code.update(cx, |line, cx| line.set_text("", cx));
+        window.focus(&self.code.focus_handle(cx));
+        cx.notify();
     }
 
-    /// Sends the code that is typed to the yard at the address that is
-    /// typed, and opens that yard as the device the code was for. With no
-    /// code, the yard this device was last paired with is opened again
-    /// with the token it has.
+    /// Enter in a field of a yard, and the button under them: the yard of
+    /// this machine is added, or the code goes to the yard at the address.
+    fn submit_yard(&mut self, cx: &mut Context<Self>) {
+        match self.adding {
+            Some(Adding::Near) => self.add_near(cx),
+            Some(Adding::Far) | Some(Adding::Again(_)) => self.pair(cx),
+            None => {}
+        }
+    }
+
+    /// Adds the yard of this machine that is typed, and opens it. What
+    /// keeps it out of the list is said, and nothing changed.
+    fn add_near(&mut self, cx: &mut Context<Self>) {
+        let name = self.yard_name.read(cx).text().trim().to_string();
+        let yard = settings::Yard::near(&name, self.socket.read(cx).text());
+        cx.notify();
+        match self.settings.clone().with_yard(None, yard, None) {
+            Ok(settings) => {
+                self.yard_said = None;
+                self.shut_adding(cx);
+                self.set(settings.opening(&name), cx);
+                self.reopen(cx);
+            }
+            Err(why) => self.yard_said = Some(why),
+        }
+    }
+
+    /// Sends the code that is typed to the yard it is for, and opens that
+    /// yard as the device the code was for: a yard that is added, at the
+    /// address that is typed, or one of the list whose device is paired
+    /// again. The token goes into that yard's own file and no other's.
+    /// What keeps a yard out of the list is said before anything is sent:
+    /// a code is used up by the yard it is sent to.
     fn pair(&mut self, cx: &mut Context<Self>) {
         if self.pairing {
             return;
         }
-        let (typed, code) = yard::typed(self.address.read(cx).text(), self.code.read(cx).text());
-        // The environment's address wins over one typed, as over one kept.
-        let text = self.env.yard.clone().unwrap_or(typed);
+        let Some(adding) = self.adding.clone() else {
+            return;
+        };
         cx.notify();
-        let address = match Address::parse(&text) {
-            Ok(address) => address,
+        let kept = self.kept.clone();
+        let (address, code) = (self.address.read(cx).text(), self.code.read(cx).text());
+        // The yard's address, the code, the file its token goes in, and
+        // the settings once it is paired.
+        let asked = match (&self.env.yard, &adding) {
+            (_, Adding::Near) => return,
+            // The environment's yard is the one there is, and its token's
+            // file the environment's.
+            (Some(address), _) => self
+                .env
+                .token_of(&self.settings, "", kept.as_deref())
+                .map(|file| (address.clone(), code_of(code), file, self.settings.clone())),
+            (None, Adding::Again(name)) => self
+                .env
+                .token_of(&self.settings, name, kept.as_deref())
+                .map(|file| {
+                    let listed = self.settings.yard(name);
+                    let address = listed.map(|yard| yard.address.clone()).unwrap_or_default();
+                    let settings = self.settings.clone().opening(name);
+                    (address, code_of(code), file, settings)
+                }),
+            (None, Adding::Far) => {
+                let (address, code) = yard::typed(address, code);
+                // Called by its address's host where no name is typed.
+                let name = match self.yard_name.read(cx).text().trim() {
+                    "" => settings::host_of(&address),
+                    name => name.to_string(),
+                };
+                let token_file = self.settings.token_name(&name, kept.as_deref());
+                let yard = settings::Yard::far(&name, &address, &token_file);
+                let settings = self.settings.clone();
+                settings
+                    .with_yard(None, yard, kept.as_deref())
+                    .and_then(|settings| {
+                        let file = yard::token_path(&token_file, kept.as_deref())?;
+                        Ok((address, code, file, settings.opening(&name)))
+                    })
+            }
+        };
+        let parsed = asked.and_then(|(text, code, file, settings)| {
+            Ok((Address::parse(&text)?, code, file, settings))
+        });
+        let (address, code, file, settings) = match parsed {
+            Ok(asked) => asked,
             Err(why) => {
                 self.yard_said = Some(why);
                 return;
             }
         };
-        let Some(file) = self.env.token_file(self.kept.as_deref()) else {
-            self.yard_said = Some(
-                "There is no home directory to keep this device's token in. Name a file for it: FOOTPLATE_TOKEN_FILE"
-                    .to_string(),
-            );
-            return;
-        };
         if code.is_empty() {
-            let paired = self.env.yard.is_some() || text == self.settings.address;
-            if paired && file.exists() {
-                self.yard_said = None;
-                self.shut_pairing(cx);
-                return self.show_far(text, cx);
-            }
             self.yard_said = Some(
                 "A code is wanted. The yard's operator opens a pairing and gives you its code: yardr user device pair <user> <device>"
                     .to_string(),
@@ -2671,12 +3025,12 @@ impl Footplate {
                 cx.notify();
                 match answer {
                     Ok(said) => {
-                        // The code is used up, in whichever field it was.
+                        // The code is used up.
                         this.code.update(cx, |line, cx| line.set_text("", cx));
-                        this.address.update(cx, |line, cx| line.set_text(&text, cx));
                         this.yard_said = Some(said);
-                        this.shut_pairing(cx);
-                        this.show_far(text, cx);
+                        this.shut_adding(cx);
+                        this.set(settings, cx);
+                        this.reopen(cx);
                     }
                     Err(why) => this.yard_said = Some(why),
                 }
@@ -2686,32 +3040,53 @@ impl Footplate {
         .detach();
     }
 
-    /// The address and the code are no longer asked for. The window holds
-    /// the keys again: a field that is not drawn would take them nowhere.
-    fn shut_pairing(&mut self, cx: &mut Context<Self>) {
-        self.pairing_open = false;
+    /// The fields of a yard are no longer asked for. The window holds the
+    /// keys again: a field that is not drawn would take them nowhere.
+    fn shut_adding(&mut self, cx: &mut Context<Self>) {
+        self.adding = None;
         let (handle, focus) = (self.handle, self.focus.clone());
         // Afterwards: the window is not to be had while a key or click
         // that came through it is still on its way.
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, window, _| window.focus(&focus));
         });
+        cx.notify();
     }
 
-    /// Opens the yard at `address` with the token that is kept, and keeps
-    /// the choice.
-    fn show_far(&mut self, address: String, cx: &mut Context<Self>) {
-        if self.env.yard.is_none() {
-            self.set(
-                Settings {
-                    remote: true,
-                    address,
-                    ..self.settings.clone()
-                },
-                cx,
-            );
+    /// Takes the yard called `name` off the list, with what the window
+    /// kept for it, and says what became of its token's file and how the
+    /// device is removed at the yard: taking it off here does not. Where
+    /// it was the open one, the first of the list is opened.
+    fn remove_yard(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.env.yard.is_some() {
+            return;
         }
-        self.reopen(cx);
+        // Who the device is there is known of the open yard alone.
+        let me = self.model.as_ref().map(|m| m.me().to_string());
+        let device = (name == self.yard)
+            .then(|| Some((me?, self.said.as_ref()?.said_by.clone())))
+            .flatten();
+        let was_open = self.settings.opened().name == name;
+        let (settings, left) = self.settings.clone().without(name, self.kept.as_deref());
+        let device = device
+            .as_ref()
+            .map(|(user, device)| (user.as_str(), device.as_str()));
+        self.yard_said = Some(left.said(name, device));
+        if self.adding == Some(Adding::Again(name.to_string())) {
+            self.shut_adding(cx);
+        }
+        self.set(settings, cx);
+        if was_open {
+            self.reopen(cx);
+        }
+        // The last yard removed leaves this machine's, which may be the
+        // one that was to go: then it is still there, with what is its.
+        if self.settings.yard(name).is_none() {
+            self.drafts.forget(name);
+            self.kept_words.remove(name);
+            self.counts.remove(name);
+        }
+        cx.notify();
     }
 
     /// The control that opens the settings, and shuts them: at the foot
@@ -2839,9 +3214,6 @@ impl Footplate {
                     .on_click(cx.listener(move |this, _, _, cx| this.look(look, cx)))
             }),
         ));
-        // Which yard: this machine's, or one at an address, with the
-        // address and the code of a pairing to type when that is chosen.
-        let far = self.env.address(self.settings.chosen()).is_some();
         let chosen = |el: gpui::Stateful<Div>, is: bool| {
             el.when(is, |el| {
                 el.bg(palette.open)
@@ -2849,97 +3221,7 @@ impl Footplate {
                     .font_weight(FontWeight::SEMIBOLD)
             })
         };
-        let typed = |name: &'static str, line: &Entity<Line>, cx: &mut Context<Self>| {
-            let focus = line.focus_handle(cx);
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().w(rems(4.)).flex_none().child(name))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .max_w(rems(28.))
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(palette.line)
-                        .bg(palette.side)
-                        .debug_selector(move || format!("yard {name}"))
-                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                            window.focus(&focus);
-                            window.prevent_default();
-                        })
-                        .child(line.clone()),
-                )
-        };
-        let mut yard = setting("yard", format!("the window shows {}", self.which_yard())).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(
-                    chosen(
-                        small_button("this machine's".to_string(), palette).id("yard near"),
-                        !far,
-                    )
-                    .debug_selector(|| "yard near".to_string())
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_near(cx))),
-                )
-                .child(
-                    chosen(
-                        small_button("a yard at an address".to_string(), palette).id("yard far"),
-                        far,
-                    )
-                    .debug_selector(|| "yard far".to_string())
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_far(window, cx))),
-                ),
-        );
-        if let Some(address) = &self.env.yard {
-            yard = yard.child(div().text_sm().text_color(palette.faint).child(format!(
-                "FOOTPLATE_YARD is set, and wins over this choice: {address}"
-            )));
-        }
-        if self.pairing_open {
-            let token = match self.env.token_file(self.kept.as_deref()) {
-                Some(file) => format!(
-                    "The device's token is kept in {}, for you alone, and never with the settings.",
-                    file.display()
-                ),
-                None => "There is no home directory to keep the device's token in: name a file for it in FOOTPLATE_TOKEN_FILE.".to_string(),
-            };
-            yard = yard
-                .child(typed("address", &self.address, cx))
-                .child(typed("code", &self.code, cx))
-                .child(
-                    div().flex().child(
-                        small_button(
-                            match self.pairing {
-                                true => "asking the yard…".to_string(),
-                                false => "pair (enter)".to_string(),
-                            },
-                            palette,
-                        )
-                        .id("yard pair")
-                        .debug_selector(|| "yard pair".to_string())
-                        .when(self.pairing, |el| el.opacity(0.5))
-                        .on_click(cx.listener(|this, _, _, cx| this.pair(cx))),
-                    ),
-                )
-                .child(div().text_sm().text_color(palette.faint).child(format!(
-                    "The yard's operator opens a pairing for this device and gives you the address and the code: yardr user device pair <user> <device>. With no code, the yard this device was last paired with is opened again. {token}"
-                )));
-        }
-        if let Some(said) = &self.yard_said {
-            yard = yard.child(
-                div()
-                    .debug_selector(|| "yard said".to_string())
-                    .child(said.clone()),
-            );
-        }
+        let yard = self.talk_yards(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
         let notify = self.settings.notifications;
@@ -3035,6 +3317,301 @@ impl Footplate {
             )
     }
 
+    /// What the switcher and the settings say of a yard of the list after
+    /// its name and its kind: that it is the open one, or what it had
+    /// waiting when it was last left.
+    fn yard_state(&self, yard: &settings::Yard) -> String {
+        match self.counts.get(&yard.name) {
+            _ if yard.name == self.yard => "open".to_string(),
+            Some(counts) => counts.line(),
+            None => "not opened yet".to_string(),
+        }
+    }
+
+    /// The yards in the settings: what a pairing is for, every yard of the
+    /// list with its kind, its reach and its state and with the buttons
+    /// that open it, pair its device again and remove it, and the fields
+    /// of one that is added. With a yard named by the environment there is
+    /// that one alone, to pair again.
+    fn talk_yards(
+        &self,
+        setting: impl Fn(&'static str, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let typed = |name: &'static str, line: &Entity<Line>, cx: &mut Context<Self>| {
+            let focus = line.focus_handle(cx);
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().w(rems(4.)).flex_none().child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(rems(28.))
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(palette.line)
+                        .bg(palette.side)
+                        .debug_selector(move || format!("yard {name}"))
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            window.focus(&focus);
+                            window.prevent_default();
+                        })
+                        .child(line.clone()),
+                )
+        };
+        let faint = |text: String| div().text_sm().text_color(palette.faint).child(text);
+        let mut yard = setting(
+            "yards",
+            format!(
+                "the window shows {} · {SECONDARY}+y lists them · {SECONDARY}+1 to 9 opens one",
+                self.which_yard()
+            ),
+        )
+        .child(
+            div()
+                .debug_selector(|| "pairing gives".to_string())
+                .text_sm()
+                .child(PAIRING_GIVES),
+        );
+        match &self.env.yard {
+            Some(address) => {
+                yard = yard
+                    .child(faint(format!(
+                        "FOOTPLATE_YARD is set, and this window is of the one yard it names: {address}. The yards of the settings are for a start without it."
+                    )))
+                    .child(
+                        div().flex().child(
+                            small_button("pair again".to_string(), palette)
+                                .id("yard again")
+                                .debug_selector(|| "yard again".to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.pair_again(None, window, cx)
+                                })),
+                        ),
+                    );
+            }
+            None => {
+                for listed in &self.settings.yards {
+                    let name = listed.name.clone();
+                    let reach = match (listed.is_far(), listed.socket.is_empty()) {
+                        (true, _) => listed.address.clone(),
+                        (false, true) => "by this run's socket".to_string(),
+                        (false, false) => listed.socket.clone(),
+                    };
+                    let open = name == self.yard;
+                    let button = |what: &str, text: &str| {
+                        let at = format!("yard {what} {name}");
+                        small_button(text.to_string(), palette)
+                            .id(SharedString::from(at.clone()))
+                            .debug_selector(move || at.clone())
+                            .flex_none()
+                    };
+                    let mut row = div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .debug_selector({
+                            let name = name.clone();
+                            move || format!("yard row {name}")
+                        })
+                        .child(
+                            div()
+                                .when(open, |el| el.font_weight(FontWeight::SEMIBOLD))
+                                .child(format!(
+                                    "{name} · {} · {}",
+                                    listed.kind(),
+                                    self.yard_state(listed)
+                                )),
+                        )
+                        .child(faint(reach));
+                    if !open {
+                        row = row.child(button("open", "open").on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| this.switch_to(&name, window, cx)
+                        })));
+                    }
+                    if listed.is_far() {
+                        row = row.child(button("again", "pair again").on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| {
+                                this.pair_again(Some(name.clone()), window, cx)
+                            }
+                        })));
+                    }
+                    row = row.child(button("remove", "remove").on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, _, cx| this.remove_yard(&name, cx)
+                    })));
+                    yard = yard.child(row);
+                }
+                yard = yard.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            small_button("add a yard of this machine".to_string(), palette)
+                                .id("add near")
+                                .debug_selector(|| "add near".to_string())
+                                .when(self.adding == Some(Adding::Near), |el| el.bg(palette.open))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_yard(false, window, cx)
+                                })),
+                        )
+                        .child(
+                            small_button("add a yard at an address".to_string(), palette)
+                                .id("add far")
+                                .debug_selector(|| "add far".to_string())
+                                .when(self.adding == Some(Adding::Far), |el| el.bg(palette.open))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_yard(true, window, cx)
+                                })),
+                        ),
+                );
+            }
+        }
+        let submit = |text: &str, cx: &mut Context<Self>| {
+            div().flex().child(
+                small_button(text.to_string(), palette)
+                    .id("yard pair")
+                    .debug_selector(|| "yard pair".to_string())
+                    .when(self.pairing, |el| el.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_yard(cx))),
+            )
+        };
+        let pair = match self.pairing {
+            true => "asking the yard…",
+            false => "pair (enter)",
+        };
+        const OPERATOR: &str = "The yard's operator opens a pairing for this device and gives you the address and the code: yardr user device pair <user> <device>. A code is for one yard, and is used up there.";
+        match &self.adding {
+            None => {}
+            Some(Adding::Near) => {
+                yard = yard
+                    .child(typed("name", &self.yard_name, cx))
+                    .child(typed("socket", &self.socket, cx))
+                    .child(submit("add (enter)", cx))
+                    .child(faint(
+                        "A yard of this machine is reached by its socket, as whoever runs footplate: no token and no pairing. With no socket named it is this machine's own yard; a path is another home's, <its home>/.yardr/yard.sock."
+                            .to_string(),
+                    ));
+            }
+            Some(Adding::Far) => {
+                yard = yard
+                    .child(typed("name", &self.yard_name, cx))
+                    .child(typed("address", &self.address, cx))
+                    .child(typed("code", &self.code, cx))
+                    .child(submit(pair, cx))
+                    .child(faint(format!(
+                        "{OPERATOR} With no name it is called by its address's host. The device's token is kept in a file of this yard's own beside the settings, for you alone, and never with the settings."
+                    )));
+            }
+            Some(Adding::Again(name)) => {
+                let (whose, address) = match &self.env.yard {
+                    Some(address) => ("the yard".to_string(), address.clone()),
+                    None => {
+                        let listed = self.settings.yard(name);
+                        let address = listed.map(|yard| yard.address.clone());
+                        (name.clone(), address.unwrap_or_default())
+                    }
+                };
+                let token = match self
+                    .env
+                    .token_of(&self.settings, name, self.kept.as_deref())
+                {
+                    Ok(file) => format!(
+                        "The device's token is kept in {}, for you alone, and never with the settings.",
+                        file.display()
+                    ),
+                    Err(why) => why,
+                };
+                yard = yard
+                    .child(
+                        div()
+                            .debug_selector(|| "yard again for".to_string())
+                            .child(format!("a code for {whose}, at {address}")),
+                    )
+                    .child(typed("code", &self.code, cx))
+                    .child(submit(pair, cx))
+                    .child(faint(format!("{OPERATOR} {token}")));
+            }
+        }
+        if let Some(said) = &self.yard_said {
+            yard = yard.child(
+                div()
+                    .debug_selector(|| "yard said".to_string())
+                    .child(said.clone()),
+            );
+        }
+        yard
+    }
+
+    /// The switcher's list, under the head of the left column: a row for
+    /// each yard of the settings, with its kind and its state, the open
+    /// one marked. A click opens a yard, as Enter does on the row the
+    /// arrows are on.
+    fn switcher(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div()
+            .debug_selector(|| "switcher".to_string())
+            .flex()
+            .flex_col()
+            .flex_none()
+            .py_1()
+            .border_b_1()
+            .border_color(palette.line);
+        for (place, yard) in self.settings.yards.iter().enumerate() {
+            let name = yard.name.clone();
+            let open = name == self.yard;
+            let mark = if open { "▸" } else { " " };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("switch {name}")))
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("switch {name}")
+                    })
+                    .mx_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(place == at, |el| el.bg(palette.open))
+                    // What a yard that is not open had is as of when it
+                    // was left, and is drawn so.
+                    .when(!open, |el| el.text_color(palette.faint))
+                    .hover(|style| style.bg(palette.hover))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.switch_to(&name, window, cx)),
+                    )
+                    .child(format!(
+                        "{mark} {} · {} · {}",
+                        yard.name,
+                        yard.kind(),
+                        self.yard_state(yard)
+                    )),
+            );
+        }
+        list.child(
+            div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(palette.faint)
+                .child(format!(
+                    "↑↓ enter opens · esc leaves · {SECONDARY}+1 to 9 from anywhere"
+                )),
+        )
+    }
+
     fn toggle_decided(&mut self, cx: &mut Context<Self>) {
         self.change(cx, |m| {
             m.toggle_decided();
@@ -3056,7 +3633,7 @@ impl Footplate {
                 "footplate does not ask again until this device has a token again.".to_string()
             }
             Away::Stopped => {
-                "footplate does not try again: the settings choose a yard, and so does the next start."
+                "footplate does not try again: the settings open a yard, and so does the next start."
                     .to_string()
             }
         };
@@ -3087,7 +3664,9 @@ impl Footplate {
                     small_button("pair again".to_string(), palette)
                         .id("pair again")
                         .debug_selector(|| "pair again".to_string())
-                        .on_click(cx.listener(|this, _, window, cx| this.pair_again(window, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.pair_again(None, window, cx)),
+                        ),
                 )
             })
             .child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
@@ -3121,13 +3700,26 @@ impl Footplate {
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("footplate"))
                     .child(
                         div()
+                            .id("which yard")
                             // Leave enough room for the operator and the
                             // local yard name at the narrowest window.
                             .text_size(rems(0.8))
                             .text_color(palette.accent)
                             .truncate()
                             .debug_selector(|| "which yard".to_string())
-                            .child(format!("{} · {}", model.me(), self.which_yard_short())),
+                            // The line is the switcher: it names the open
+                            // yard and opens the list of them. The one
+                            // yard the environment names has none.
+                            .when(self.env.yard.is_none(), |el| {
+                                el.cursor_pointer()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_switcher(window, cx)
+                                    }))
+                            })
+                            .child(match self.env.yard {
+                                Some(_) => format!("{} · {}", model.me(), self.which_yard_short()),
+                                None => format!("{} · {} ▾", model.me(), self.which_yard_short()),
+                            }),
                     ),
             );
         let now = chrono::Utc::now();
@@ -3232,6 +3824,7 @@ impl Footplate {
             .border_r_1()
             .border_color(palette.line)
             .child(head)
+            .children(self.switching.map(|at| self.switcher(at, palette, cx)))
             .child(body)
             .child(foot)
     }
@@ -4713,6 +5306,8 @@ impl Render for Footplate {
         // On a card the window holds the keys to pick with, and the line to
         // type words in: with the focus in the line those keys are text.
         let context = match self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            // The switcher's list has the keys while it is open.
+            _ if self.switching.is_some() => SWITCH_CONTEXT,
             // The settings stand where the card or the notices do: the keys
             // that pick and mark read are not for what is not in view.
             _ if self.settings_open => CONTEXT,
@@ -4744,7 +5339,12 @@ impl Render for Footplate {
             .on_action(cx.listener(|this, _: &Pick9, _, cx| this.pick(9, cx)))
             .on_action(cx.listener(|this, _: &ChoiceUp, _, cx| this.choice(-1, cx)))
             .on_action(cx.listener(|this, _: &ChoiceDown, _, cx| this.choice(1, cx)))
-            .on_action(cx.listener(|this, _: &Decide, _, cx| this.decide(cx)))
+            .on_action(
+                cx.listener(|this, _: &Decide, window, cx| match this.switching {
+                    Some(at) => this.switch_nth(at, window, cx),
+                    None => this.decide(cx),
+                }),
+            )
             .on_action(cx.listener(|this, _: &Approve, _, cx| this.approve(cx)))
             .on_action(cx.listener(Self::decline))
             .on_action(cx.listener(Self::ask_about))
@@ -8671,15 +9271,22 @@ mod tests {
         })
     }
 
-    /// Puts an address and a code where they are typed.
-    fn type_in(view: &Entity<Footplate>, cx: &mut VisualTestContext, address: &str, code: &str) {
+    /// Puts a yard's name, its address and a code where they are typed.
+    fn type_in(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        name: &str,
+        address: &str,
+        code: &str,
+    ) {
         view.update(cx, |v, cx| {
+            v.yard_name.update(cx, |line, cx| line.set_text(name, cx));
             v.address.update(cx, |line, cx| line.set_text(address, cx));
             v.code.update(cx, |line, cx| line.set_text(code, cx));
         });
     }
 
-    /// What came of the last choice of a yard.
+    /// What came of the last change to the yards.
     fn yard_said(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.yard_said.clone().unwrap_or_default())
     }
@@ -8688,20 +9295,68 @@ mod tests {
         view.read_with(cx, |v, _| v.which_yard())
     }
 
+    /// The name of the yard that is open, as the head has it.
+    fn open_yard(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.which_yard_short())
+    }
+
+    /// What the switcher says of the yard called `name` after its kind.
+    fn state_of(view: &Entity<Footplate>, cx: &mut VisualTestContext, name: &str) -> String {
+        view.read_with(cx, |v, _| v.yard_state(v.settings.yard(name).unwrap()))
+    }
+
+    fn switching(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<usize> {
+        view.read_with(cx, |v, _| v.switching)
+    }
+
     fn mode_of(file: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(file).unwrap().permissions().mode() & 0o777
     }
 
-    /// The choice of the yard in the settings: this machine's, as before,
-    /// or one at an address, which is paired with by a code. A wrong code
-    /// and a refused address are said and change nothing; a removed device
-    /// is said, not asked after, and paired again.
+    /// A second home's yard on this machine: jo's too, with other mail, one
+    /// of it in a conversation that is not open.
+    fn a_second_yard_of_jo(yard: &Yard) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "From the second home.", "read": false},
+                {"seq": 13, "from": "assembly", "to": "jo", "text": "Assembled.", "read": false}], "unread": 2, "last": 13, "from": ["yardmaster", "assembly"]}}"#,
+        );
+        yard.answer(
+            "Conversation",
+            r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "From the second home.", "read": false}]}"#,
+        );
+    }
+
+    #[test]
+    fn what_a_yard_had_waiting_is_said_as_of_when_it_was_last_open() {
+        let counts = |mail, decisions, notices| Counts {
+            mail,
+            decisions,
+            notices,
+        };
+        assert_eq!(counts(0, 0, 0).line(), "nothing waiting when last opened");
+        assert_eq!(
+            counts(2, 1, 0).line(),
+            "2 mail, 1 decision when last opened"
+        );
+        assert_eq!(counts(1, 0, 1).line(), "1 mail, 1 notice when last opened");
+        assert_eq!(
+            counts(0, 3, 12).line(),
+            "3 decisions, 12 notices when last opened"
+        );
+    }
+
+    /// The yards in the settings: this machine's, as before, and one at an
+    /// address that is added by a pairing's code. A wrong code and a
+    /// refused address are said and change nothing; a removed device is
+    /// said, not asked after, and paired again into the same file.
     #[gpui::test]
-    fn the_settings_choose_the_yard_and_a_code_pairs_the_device(cx: &mut TestAppContext) {
+    fn the_settings_list_the_yards_and_a_code_pairs_a_new_one(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
-        let token = dir.path().join("footplate/yard.token");
+        let token = dir.path().join("footplate/yard-far.token");
         let near = Yard::start();
         a_yard_of_jo(&near);
         let far = Yard::start_tcp();
@@ -8716,37 +9371,45 @@ mod tests {
             texts(&view, cx) == ["Shall I land it?"]
         });
         assert_eq!(which_yard(&view, cx), "this machine's yard");
+        assert_eq!(open_yard(&view, cx), "this machine");
         assert!(drawn(cx, "which yard"));
         assert_eq!(far.requests(), 0);
 
-        // The settings have the choice, and ask for nothing until a yard
-        // at an address is chosen.
+        // The settings list it, say what a pairing gives over a peer link,
+        // and ask for nothing until a yard is added.
         cx.simulate_keystrokes("secondary-,");
-        assert!(drawn(cx, "yard near") && drawn(cx, "yard far"));
+        assert!(drawn(cx, "yard row this machine"));
+        assert!(drawn(cx, "pairing gives"));
+        assert_eq!(
+            PAIRING_GIVES,
+            "A paired yard is called with this device's own token, so your picks and approvals there count as yours, where over a peer link you only see what the link carries and an approval never crosses."
+        );
+        assert!(drawn(cx, "add near") && drawn(cx, "add far"));
         assert!(!drawn(cx, "yard pair"));
-        click_on(cx, "yard far");
-        assert!(drawn(cx, "yard address") && drawn(cx, "yard code"));
+        click_on(cx, "add far");
+        assert!(drawn(cx, "yard name") && drawn(cx, "yard address") && drawn(cx, "yard code"));
         assert!(drawn(cx, "yard pair"));
 
-        // The address is typed first. Plain http off this machine is
-        // refused with the reason, and nothing is sent anywhere.
-        cx.simulate_input("http://mac.example.net");
+        // The name is typed first. Plain http off this machine is refused
+        // with the reason, and nothing is sent anywhere.
+        cx.simulate_input("far");
         assert_eq!(
-            view.read_with(cx, |v, cx| v.address.read(cx).text().to_string()),
-            "http://mac.example.net"
+            view.read_with(cx, |v, cx| v.yard_name.read(cx).text().to_string()),
+            "far"
         );
+        type_in(&view, cx, "far", "http://mac.example.net", "K7QM-2XPD");
         cx.simulate_keystrokes("enter");
         let said = yard_said(&view, cx);
         assert!(
             said.starts_with("http://mac.example.net is refused: plain http"),
             "{said}"
         );
-        // No code, and no device paired before: one is wanted.
-        type_in(&view, cx, far.address(), "");
+        // No code: one is wanted.
+        type_in(&view, cx, "far", far.address(), "");
         click_on(cx, "yard pair");
         assert!(yard_said(&view, cx).starts_with("A code is wanted."));
         // No pairing is open at the yard.
-        type_in(&view, cx, far.address(), "K7QM-2XPD");
+        type_in(&view, cx, "far", far.address(), "K7QM-2XPD");
         click_on(cx, "yard pair");
         wait(cx, "that no pairing is open", |cx| {
             yard_said(&view, cx).starts_with("No pairing is open at this yard")
@@ -8755,7 +9418,7 @@ mod tests {
         // The operator opens one, and the code is typed wrong: the yard
         // says so, and nothing changed.
         far.pair("K7QM-2XPD");
-        type_in(&view, cx, far.address(), "WXYZ-2345");
+        type_in(&view, cx, "far", far.address(), "WXYZ-2345");
         click_on(cx, "yard pair");
         wait(cx, "that it is not the code", |cx| {
             yard_said(&view, cx).starts_with("That is not the code.")
@@ -8768,22 +9431,36 @@ mod tests {
 
         // The right code, here as the pairing's QR code holds it: the
         // window shows that yard, as the user and the device it says.
-        type_in(&view, cx, &format!("{}#k7qm-2xpd", far.address()), "");
+        type_in(
+            &view,
+            cx,
+            "far",
+            &format!("{}#k7qm-2xpd", far.address()),
+            "",
+        );
         click_on(cx, "yard pair");
         wait(cx, "the yard at the address", |cx| {
             texts(&view, cx) == ["From afar."]
         });
         let here = format!("the yard south at {}, as its device laptop", far.address());
         assert_eq!(which_yard(&view, cx), here);
+        assert_eq!(open_yard(&view, cx), "far");
         assert!(yard_said(&view, cx).starts_with("Paired: this is the device laptop of jo"));
-        // The address and the code are asked for no longer. (By the
-        // window's own word: gpui's test keeps the bounds of what an
-        // earlier frame drew.)
-        assert!(!view.read_with(cx, |v, _| v.pairing_open));
-        // The address is kept with the settings, the token in a file of
-        // its own that only its user reads, and nowhere else.
+        // Its fields are asked for no longer. (By the window's own word:
+        // gpui's test keeps the bounds of what an earlier frame drew.)
+        assert_eq!(view.read_with(cx, |v, _| v.adding.clone()), None);
+        // The yard is kept with the settings after this machine's, as the
+        // open one, its token in a file of its own that only its user
+        // reads, and nowhere else.
         let kept = Settings::read(&file);
-        assert_eq!((kept.remote, kept.address.as_str()), (true, far.address()));
+        assert_eq!(
+            kept.yards,
+            [
+                settings::Yard::near(settings::HERE, ""),
+                settings::Yard::far("far", far.address(), "yard-far.token")
+            ]
+        );
+        assert_eq!(kept.open, "far");
         let first = far.devices()[1].clone();
         assert_eq!(yard::read_token(&token).unwrap(), first);
         assert_eq!(mode_of(&token), 0o600);
@@ -8817,11 +9494,11 @@ mod tests {
         assert!(settings_open(&view, cx));
         assert!(drawn(cx, "yard pair"));
         assert_eq!(
-            view.read_with(cx, |v, cx| v.address.read(cx).text().to_string()),
-            far.address()
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Again("far".into()))
         );
-        // The address is there, so the code is what is typed, and Enter
-        // sends it.
+        // The yard's address is known, so the code is what is typed, and
+        // Enter sends it: the token is the same yard's, in the same file.
         far.pair("ABCD-EFGH");
         cx.simulate_input("abcd efgh");
         cx.simulate_keystrokes("enter");
@@ -8832,53 +9509,606 @@ mod tests {
         assert_ne!(second, first);
         assert_eq!(yard::read_token(&token).unwrap(), second);
         assert_eq!(mode_of(&token), 0o600);
+        assert_eq!(Settings::read(&file), kept);
 
-        // This machine's yard again: the socket, as before. The address
-        // and the token stay, to go back by.
-        click_on(cx, "yard near");
+        // This machine's yard again: the socket, as before. The far yard
+        // and its token stay, to go back to.
+        click_on(cx, "yard open this machine");
         wait(cx, "this machine's yard again", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
         assert_eq!(which_yard(&view, cx), "this machine's yard");
-        let kept = Settings::read(&file);
-        assert_eq!((kept.remote, kept.address.as_str()), (false, far.address()));
-        // And back with no code: the device is paired already.
-        click_on(cx, "yard far");
+        let again = Settings::read(&file);
         assert_eq!(
-            view.read_with(cx, |v, cx| v.address.read(cx).text().to_string()),
-            far.address()
+            (again.open.as_str(), &again.yards),
+            (settings::HERE, &kept.yards)
         );
-        click_on(cx, "yard pair");
+        // And back with no code: the device is paired already.
+        click_on(cx, "yard open far");
         wait(cx, "the yard at the address once more", |cx| {
             texts(&view, cx) == ["From afar."]
         });
         assert_eq!(far.devices()[1], second);
-        assert!(Settings::read(&file).remote);
+        assert_eq!(Settings::read(&file), kept);
 
-        // The next start opens what was chosen.
+        // The next start opens the yard that was open.
         let env = Env {
             socket: near.socket().to_path_buf(),
             ..Env::default()
         };
         let (again, cx) = opened_at(env, &file, cx);
-        wait(cx, "the chosen yard at the next start", |cx| {
+        wait(cx, "the open yard at the next start", |cx| {
             texts(&again, cx) == ["From afar."]
         });
         assert_eq!(which_yard(&again, cx), here);
     }
 
-    /// `FOOTPLATE_YARD` and `FOOTPLATE_TOKEN_FILE` win over the settings,
-    /// and the choice in the window says so and changes nothing.
+    /// The settings file of a window paired before there were several
+    /// yards, with `yard.token` beside it, opens paired as it was, as one
+    /// yard called by its address's host; the next change keeps it so.
     #[gpui::test]
-    fn the_environment_s_yard_wins_over_the_settings(cx: &mut TestAppContext) {
+    fn a_settings_file_from_before_opens_paired_as_it_was(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
-        let token = dir.path().join("mac.token");
-        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let token = dir.path().join("footplate/yard.token");
         let near = Yard::start();
         a_yard_of_jo(&near);
         let far = Yard::start_tcp();
         a_far_yard_of_jo(&far);
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        std::fs::write(
+            &file,
+            format!(
+                "{{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"remote\": true,\n  \"address\": \"{}\"\n}}\n",
+                far.address()
+            ),
+        )
+        .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yard it was paired with", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(
+            which_yard(&view, cx),
+            format!("the yard south at {}, as its device laptop", far.address())
+        );
+        assert_eq!(open_yard(&view, cx), "127.0.0.1");
+        assert_eq!(near.requests(), 0);
+        assert!(
+            far.last_request()
+                .contains(&format!("Authorization: Bearer {}\r\n", crate::fake::TOKEN))
+        );
+        // Reading it changed nothing; the next change keeps the list.
+        assert!(std::fs::read_to_string(&file).unwrap().contains("remote"));
+        cx.simulate_keystrokes("secondary-=");
+        let kept = Settings::read(&file);
+        assert_eq!(
+            kept.yards,
+            [settings::Yard::far(
+                "127.0.0.1",
+                far.address(),
+                "yard.token"
+            )]
+        );
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("remote") && text.contains("\"yards\""),
+            "{text}"
+        );
+        assert_eq!(yard::read_token(&token).unwrap(), crate::fake::TOKEN);
+    }
+
+    /// Three yards kept with the settings: this machine's, a second
+    /// home's by its socket, and a paired one. Their settings file, and the
+    /// paired one's token beside it.
+    fn three_yards(dir: &std::path::Path, second: &Yard, far: &Yard) -> PathBuf {
+        let file = dir.join("footplate/settings.json");
+        let set = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::near("second home", second.socket().to_str().unwrap()),
+                None,
+            )
+            .unwrap()
+            .with_yard(
+                None,
+                settings::Yard::far("far", far.address(), "yard-far.token"),
+                Some(&file),
+            )
+            .unwrap();
+        set.write(&file).unwrap();
+        yard::keep_token(&dir.join("footplate/yard-far.token"), crate::fake::TOKEN).unwrap();
+        file
+    }
+
+    /// The head of the left column names the open yard and switches: a
+    /// click or its key opens the list of the yards, each with its kind
+    /// and what it had when it was last open; a click on a row, Enter on
+    /// the row the arrows are on, or a yard's own key from anywhere opens
+    /// it, loaded then.
+    #[gpui::test]
+    fn the_head_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        // The first of the list, where none was open before, and no other
+        // is asked anything until it is opened.
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(open_yard(&view, cx), "this machine");
+        assert_eq!((second.requests(), far.requests()), (0, 0));
+        assert!(!drawn(cx, "switcher"));
+
+        // A click on the head opens the list: each yard, its kind, and
+        // its state.
+        click_on(cx, "which yard");
+        assert_eq!(switching(&view, cx), Some(0));
+        assert!(drawn(cx, "switcher"));
+        assert!(drawn(cx, "switch this machine") && drawn(cx, "switch far"));
+        assert_eq!(state_of(&view, cx, "this machine"), "open");
+        assert_eq!(state_of(&view, cx, "second home"), "not opened yet");
+        let kinds: Vec<&str> = view.read_with(cx, |v, _| {
+            v.settings.yards.iter().map(|y| y.kind()).collect()
+        });
+        assert_eq!(kinds, ["on this machine", "on this machine", "paired"]);
+        // A click on a row opens that yard, and it is the one to open at
+        // the next start.
+        click_on(cx, "switch second home");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(switching(&view, cx), None);
+        assert_eq!(Settings::read(&file).open, "second home");
+        assert_eq!(far.requests(), 0);
+        // What the one that was left had is said as of then: its mail was
+        // read in the open conversation.
+        assert_eq!(
+            state_of(&view, cx, "this machine"),
+            "nothing waiting when last opened"
+        );
+        let had = view.read_with(cx, |v, _| Counts::of(v.model.as_ref().unwrap()));
+        assert_eq!((had.mail, had.decisions), (1, 0), "{had:?}");
+
+        // The switcher's key opens the list on the open yard; the arrows
+        // move and stop at its ends, esc leaves it, Enter opens.
+        cx.simulate_keystrokes("secondary-y");
+        assert_eq!(switching(&view, cx), Some(1));
+        cx.simulate_keystrokes("up up");
+        assert_eq!(switching(&view, cx), Some(0));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(switching(&view, cx), None);
+        assert_eq!(texts(&view, cx), ["From the second home."]);
+        cx.simulate_keystrokes("secondary-y down down down");
+        assert_eq!(switching(&view, cx), Some(2));
+        // No key is a card's or the line's while the list has them.
+        cx.simulate_keystrokes("x 1");
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the paired yard", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(open_yard(&view, cx), "far");
+        assert_eq!(switching(&view, cx), None);
+        assert_eq!(
+            state_of(&view, cx, "second home"),
+            "1 mail when last opened"
+        );
+        // Every call there is the device's, with the token of that yard.
+        assert!(
+            far.last_request()
+                .contains(&format!("Authorization: Bearer {}\r\n", crate::fake::TOKEN))
+        );
+
+        // A yard's place in the list is its key, from anywhere: the line
+        // has the focus here. A place with no yard opens nothing.
+        cx.simulate_input("typed");
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard by its key", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(
+            state_of(&view, cx, "far"),
+            "nothing waiting when last opened"
+        );
+        cx.simulate_keystrokes("secondary-9");
+        cx.run_until_parked();
+        assert_eq!(open_yard(&view, cx), "this machine");
+        cx.simulate_keystrokes("secondary-3");
+        wait(cx, "the paired yard by its key", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        // What was typed there is there again.
+        assert_eq!(typed(&view, cx), "typed");
+        assert_eq!(Settings::read(&file).open, "far");
+    }
+
+    /// What is written for one yard stays with it across a switch and is
+    /// sent only there: the line's text, the attachments and the words of
+    /// an ask. A mail that is on its way when another yard is opened goes
+    /// to the yard it was written in, and what of it does not go is back
+    /// in that yard's draft, never in the open one's. Nothing typed of a
+    /// secret outlasts a switch.
+    #[gpui::test]
+    fn what_is_written_for_one_yard_is_untouched_by_a_switch_and_sent_only_there(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        near.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "image/png", "bytes": 70}}).to_string(),
+        );
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        let mails = |yard: &Yard| -> Vec<String> {
+            let asked = yard.asked("Mail");
+            asked.iter().map(|args| args.to_string()).collect()
+        };
+
+        // A draft for this machine's yardmaster: text, an image, and the
+        // words of an ask; and a value half typed in a secret's field.
+        cx.simulate_input("For the mac.");
+        let image = Image::from_bytes(ImageFormat::Png, png());
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        cx.simulate_keystrokes("cmd-v");
+        wait(cx, "the image in the draft", |cx| {
+            attached(&view, cx) == [(1, PASTED.to_string(), None)]
+        });
+        let words = (("bead-a".to_string(), 3), "Not yet.".to_string());
+        view.update(cx, |v, cx| {
+            v.ask_words.insert(words.0.clone(), words.1.clone());
+            v.secret
+                .update(cx, |field, cx| field.set_text("hunter2", cx));
+            v.secret_typed.push("first of two".into());
+        });
+
+        // The second home's yard: its line is empty, nothing is attached,
+        // no ask has words, and nothing of a secret is anywhere.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(attached(&view, cx), []);
+        view.read_with(cx, |v, cx| {
+            assert!(v.ask_words.is_empty());
+            assert_eq!(v.secret.read(cx).text(), "");
+            assert!(v.secret_typed.is_empty());
+        });
+        // What is written here is sent here, and nothing of the other.
+        cx.simulate_input("For the second.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail in the second home's yard", |cx| {
+            let _ = cx;
+            second.asked("Mail").len() == 1
+        });
+        assert!(
+            mails(&second)[0].contains("For the second."),
+            "{:?}",
+            mails(&second)
+        );
+        assert!(!mails(&second)[0].contains("For the mac."));
+        assert_eq!(second.asked("PutBlob").len(), 0);
+        assert_eq!(near.asked("Mail").len(), 0);
+        cx.simulate_input("Half a thought.");
+
+        // Back: all of the first draft is as it was left.
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard again", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(typed(&view, cx), "For the mac.");
+        assert_eq!(attached(&view, cx), [(1, PASTED.to_string(), None)]);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.ask_words.get(&words.0), Some(&words.1));
+            assert!(v.thumbs.contains_key(&1));
+        });
+
+        // It is sent, and with the mail on its way the other yard is
+        // opened, with text in the line that was typed since: the keys
+        // come one after the other before the call's answer is heard. The
+        // yard it was written in refuses it.
+        near.answer(
+            "Mail",
+            r#"{"error": {"code": "error", "message": "mail to yardmaster: the yard is full"}}"#,
+        );
+        cx.simulate_keystrokes("enter s i n c e secondary-2");
+        wait(cx, "the second home's yard with a mail on its way", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        wait(cx, "that it did not go", |cx| {
+            notice(&view, cx).starts_with("not sent to yardmaster in this machine: ")
+        });
+        // It went to the yard it was written in and to no other, and what
+        // did not go is in no line and no draft of the open yard.
+        assert_eq!(near.asked("Mail").len(), 1);
+        assert!(
+            mails(&near)[0].contains("For the mac."),
+            "{:?}",
+            mails(&near)
+        );
+        assert!(!mails(&near)[0].contains("Half a thought."));
+        assert_eq!(typed(&view, cx), "Half a thought.");
+        assert_eq!(attached(&view, cx), []);
+        assert_eq!(second.asked("Mail").len(), 1);
+        assert_eq!(second.asked("PutBlob").len(), 0);
+
+        // Back in its own yard it is in the line again, before what was
+        // typed since, with its image.
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard once more", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(typed(&view, cx), "For the mac. since");
+        assert_eq!(attached(&view, cx), [(1, PASTED.to_string(), None)]);
+
+        // Sent again, and the other yard opened over it: it goes where it
+        // was written, and the open yard's line is its own.
+        near.answer("Mail", "{}");
+        cx.simulate_keystrokes("enter secondary-2");
+        wait(cx, "the second home's yard over it", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(near.asked("Mail").len(), 2);
+        assert!(
+            mails(&near)[1].contains("For the mac. since"),
+            "{:?}",
+            mails(&near)
+        );
+        assert_eq!(typed(&view, cx), "Half a thought.");
+        assert_eq!(notice(&view, cx), "");
+        assert_eq!(second.asked("Mail").len(), 1);
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard at last", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(attached(&view, cx), []);
+    }
+
+    /// The words of an answer that is on its way when another yard is
+    /// opened, and that its yard refuses, are back with the ask they were
+    /// typed for, in its own yard: never in the line of the open one.
+    #[gpui::test]
+    fn words_a_yard_refused_are_back_with_their_ask_and_not_in_another_yard_s_line(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        near.answer("UserAsks", &asks_three());
+        near.answer("Bead", &bead_three());
+        near.answer(
+            "AnswerAsk",
+            r#"{"error": {"code": "error", "message": "bead-a: the ask is closed"}}"#,
+        );
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        let on_the_card = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        };
+        wait(cx, "the decision", on_the_card);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        cx.run_until_parked();
+        // A pick with words, and the other yard opened before the yard's
+        // answer to it is heard.
+        cx.simulate_keystrokes("escape 2 i");
+        cx.simulate_input("because");
+        cx.simulate_keystrokes("enter secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        wait(cx, "that it was not answered", |cx| {
+            notice(&view, cx) == "not answered in this machine: bead-a: the ask is closed"
+        });
+        assert_eq!(near.asked("AnswerAsk").len(), 1);
+        assert_eq!(second.asked("AnswerAsk").len(), 0);
+        assert_eq!(typed(&view, cx), "");
+        view.read_with(cx, |v, _| {
+            assert!(v.ask_words.is_empty());
+            let kept = &v.kept_words["this machine"];
+            assert_eq!(
+                kept.get(&("bead-a".to_string(), 3)).map(String::as_str),
+                Some("because")
+            );
+        });
+        // Its own yard has them in the line again, on its card.
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the decision again", on_the_card);
+        assert_eq!(typed(&view, cx), "because");
+    }
+
+    /// Yards are added and removed in the settings. A name that is taken
+    /// is refused before a code is sent anywhere; a new yard's token file
+    /// is one no other has; removing a yard deletes its token's file where
+    /// it is footplate's alone, and says how the device is removed at the
+    /// yard.
+    #[gpui::test]
+    fn yards_are_added_and_removed_in_the_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        // This machine's and a paired one, to begin with.
+        let file = three_yards(dir.path(), &second, &far);
+        let (set, _) = Settings::read(&file).without("second home", Some(&file));
+        set.write(&file).unwrap();
+        let beside = |name: &str| dir.path().join("footplate").join(name);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        cx.simulate_keystrokes("secondary-,");
+
+        // A second home's yard, by its socket: no code, and it is opened.
+        click_on(cx, "add near");
+        assert!(drawn(cx, "yard name") && drawn(cx, "yard socket"));
+        view.update(cx, |v, cx| {
+            v.yard_name.update(cx, |line, cx| line.set_text("far", cx));
+            let socket = second.socket().to_str().unwrap().to_string();
+            v.socket.update(cx, |line, cx| line.set_text(&socket, cx));
+        });
+        // The name is another yard's: said, and nothing changed.
+        click_on(cx, "yard pair");
+        assert!(
+            yard_said(&view, cx).starts_with("There is a yard called far already"),
+            "{}",
+            yard_said(&view, cx)
+        );
+        assert_eq!(Settings::read(&file), set);
+        view.update(cx, |v, cx| {
+            v.yard_name
+                .update(cx, |line, cx| line.set_text("second home", cx));
+        });
+        click_on(cx, "yard pair");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        let kept = Settings::read(&file);
+        assert_eq!(
+            kept.yards[2],
+            settings::Yard::near("second home", second.socket().to_str().unwrap())
+        );
+        assert_eq!(kept.open, "second home");
+
+        // A yard at an address under a name that is taken: refused before
+        // the code is sent, which would use it up.
+        far.pair("K7QM-2XPD");
+        click_on(cx, "add far");
+        type_in(&view, cx, "second home", far.address(), "K7QM-2XPD");
+        let before = far.requests();
+        click_on(cx, "yard pair");
+        assert!(yard_said(&view, cx).starts_with("There is a yard called second home already"));
+        cx.run_until_parked();
+        assert_eq!(far.requests(), before);
+        assert!(far.pairing_open());
+        // Under its own name it is paired, into a file no other yard has:
+        // the name's own is the yard far's.
+        type_in(&view, cx, "FAR", far.address(), "K7QM-2XPD");
+        click_on(cx, "yard pair");
+        wait(cx, "the pairing", |cx| {
+            yard_said(&view, cx).starts_with("Paired")
+        });
+        wait(cx, "the yard that was paired", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        let kept = Settings::read(&file);
+        assert_eq!(
+            kept.yards[3],
+            settings::Yard::far("FAR", far.address(), "yard-far-2.token")
+        );
+        assert_eq!(
+            yard::read_token(&beside("yard-far-2.token")).unwrap(),
+            far.devices()[1]
+        );
+        assert_eq!(
+            yard::read_token(&beside("yard-far.token")).unwrap(),
+            crate::fake::TOKEN
+        );
+
+        // Removing the open yard: its token's file goes with it, the
+        // other's stays, the settings say the command that removes the
+        // device at the yard, and the first of the list is opened.
+        click_on(cx, "yard remove FAR");
+        let said = yard_said(&view, cx);
+        assert!(
+            said.starts_with(&format!(
+                "FAR is removed, and its token's file {} with it.",
+                beside("yard-far-2.token").display()
+            )),
+            "{said}"
+        );
+        assert!(said.ends_with("yardr user device rm jo laptop"), "{said}");
+        assert!(!beside("yard-far-2.token").exists());
+        assert!(beside("yard-far.token").exists());
+        wait(cx, "the first yard of the list", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        let kept = Settings::read(&file);
+        assert_eq!(kept.yards.len(), 3);
+        assert_eq!(kept.opened().name, settings::HERE);
+        // A yard that is not open is removed too, and one of this machine
+        // has no token to say anything of.
+        click_on(cx, "yard remove second home");
+        assert_eq!(
+            yard_said(&view, cx),
+            "second home is removed from the list. Its yard is as it was."
+        );
+        click_on(cx, "yard remove far");
+        let said = yard_said(&view, cx);
+        assert!(
+            said.ends_with("yardr user device rm <user> <device>"),
+            "{said}"
+        );
+        assert!(!beside("yard-far.token").exists());
+        assert_eq!(
+            Settings::read(&file).yards,
+            [settings::Yard::near(settings::HERE, "")]
+        );
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+    }
+
+    /// `FOOTPLATE_YARD` and `FOOTPLATE_TOKEN_FILE` name the one yard of a
+    /// run: the window has no switcher and the settings no list, and a
+    /// pairing there writes the environment's file.
+    #[gpui::test]
+    fn the_environment_s_yard_is_the_one_yard_of_the_window(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("mac.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let file = three_yards(dir.path(), &second, &far);
+        let kept = std::fs::read_to_string(&file).unwrap();
         let env = Env {
             yard: Some(far.address().to_string()),
             token_file: Some(token.clone()),
@@ -8889,29 +10119,46 @@ mod tests {
             texts(&view, cx) == ["From afar."]
         });
         assert_eq!(near.requests(), 0);
-        cx.simulate_keystrokes("secondary-,");
-        click_on(cx, "yard near");
-        cx.run_until_parked();
-        assert_eq!(texts(&view, cx), ["From afar."]);
-        assert!(!file.exists());
         assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
-        // A pairing there goes to the environment's address, whatever is
-        // typed, and its token into the environment's file.
-        click_on(cx, "yard far");
+        // No switcher: neither the head nor a key opens another yard.
+        click_on(cx, "which yard");
+        assert_eq!(switching(&view, cx), None);
+        cx.simulate_keystrokes("secondary-y secondary-1 secondary-2");
+        cx.run_until_parked();
+        assert_eq!(switching(&view, cx), None);
+        assert_eq!(texts(&view, cx), ["From afar."]);
+        assert_eq!((near.requests(), second.requests()), (0, 0));
+        // Nor do the settings list the yards they keep.
+        cx.simulate_keystrokes("secondary-,");
+        assert!(drawn(cx, "yard again"));
+        view.update_in(cx, |v, window, cx| {
+            v.add_yard(true, window, cx);
+            v.remove_yard("far", cx);
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.adding.clone()), None);
+        // A pairing there goes to the environment's address, and its token
+        // into the environment's file: no yard's of the settings.
+        click_on(cx, "yard again");
         far.pair("K7QM-2XPD");
-        type_in(&view, cx, "https://elsewhere.example.net", "K7QM-2XPD");
+        view.update(cx, |v, cx| {
+            v.code.update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
+        });
         click_on(cx, "yard pair");
         wait(cx, "the pairing", |cx| {
             yard_said(&view, cx).starts_with("Paired")
         });
         assert_eq!(yard::read_token(&token).unwrap(), far.devices()[1]);
+        assert_eq!(
+            yard::read_token(&dir.path().join("footplate/yard-far.token")).unwrap(),
+            crate::fake::TOKEN
+        );
         assert!(!dir.path().join("footplate/yard.token").exists());
-        assert!(!file.exists());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), kept);
     }
 
     /// A yard that cannot be opened is said why, and not tried: plain http
     /// off this machine, and a token file open to others. The settings
-    /// are there to choose again.
+    /// are there to open another.
     #[gpui::test]
     fn a_yard_that_is_refused_is_said_why_and_not_tried(cx: &mut TestAppContext) {
         use std::os::unix::fs::PermissionsExt;
@@ -8940,7 +10187,7 @@ mod tests {
         assert!(drawn(cx, "settings"));
         assert!(!drawn(cx, "pair again"));
         cx.simulate_keystrokes("secondary-,");
-        assert!(drawn(cx, "yard far"));
+        assert!(drawn(cx, "yard again"));
 
         // The token's file is readable by others: refused before anything
         // is sent with it.
@@ -8952,6 +10199,43 @@ mod tests {
         assert_eq!(away, Away::Stopped);
         assert_eq!(far.requests(), 0);
         assert_eq!(near.requests(), 0);
+    }
+
+    /// A yard of the settings that cannot be opened leaves the others to
+    /// open: its key and the settings' row do, from where it says why.
+    #[gpui::test]
+    fn another_yard_is_opened_from_one_that_cannot_be(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let file = three_yards(dir.path(), &second, &far);
+        // The paired yard was open last, and its token is gone.
+        Settings::read(&file).opening("far").write(&file).unwrap();
+        std::fs::remove_file(dir.path().join("footplate/yard-far.token")).unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        cx.run_until_parked();
+        let (why, away) = view.read_with(cx, |v, _| (v.down.clone().unwrap(), v.away));
+        assert!(why.starts_with("This device has no token"), "{why}");
+        assert_eq!(away, Away::Stopped);
+        assert_eq!(far.requests(), 0);
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        // And back to it, as the one that still cannot be opened.
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "yard open far");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.down.is_some()));
+        assert_eq!(open_yard(&view, cx), "far");
     }
 
     /// What the yard says a secret ask asks for.

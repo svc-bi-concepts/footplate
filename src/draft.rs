@@ -1,7 +1,7 @@
-//! What is written and not sent yet: for each conversation the images
-//! attached to it, and the text typed in it while another is open. An image
-//! that is pasted or dropped is attached here and goes with Enter, in one
-//! mail with the text.
+//! What is written and not sent yet: for each conversation of each yard
+//! the images attached to it, and the text typed in it while another is
+//! open. An image that is pasted or dropped is attached here and goes with
+//! Enter, in one mail with the text.
 //!
 //! Nothing here calls the yard or draws: the window (window.rs) does both.
 
@@ -162,18 +162,52 @@ struct Draft {
     attachments: Vec<Attachment>,
 }
 
-/// The drafts of the window, by whom the conversation is with.
+/// The drafts of the window, by the yard and by whom the conversation is
+/// with there. They speak of one yard at a time, the one that is open: a
+/// name is not the same one in another yard, and what was written for one
+/// yard cannot be named from another, so it is never sent there.
 #[derive(Debug, Default)]
 pub struct Drafts {
-    of: HashMap<String, Draft>,
+    yards: HashMap<String, HashMap<String, Draft>>,
+    /// The yard whose drafts these are now.
+    open: String,
     /// The id of the attachment made last.
     last: u64,
 }
 
 impl Drafts {
+    /// From here on these are the drafts of `yard`. Those of the one
+    /// before stay as they are, for when it is open again; which that was
+    /// is answered.
+    pub fn turn_to(&mut self, yard: &str) -> String {
+        std::mem::replace(&mut self.open, yard.to_string())
+    }
+
+    /// Nothing is kept of `yard`: it is no longer among the window's.
+    pub fn forget(&mut self, yard: &str) {
+        self.yards.remove(yard);
+    }
+
+    fn of(&self, with: &str) -> Option<&Draft> {
+        self.yards.get(&self.open)?.get(with)
+    }
+
+    fn of_mut(&mut self, with: &str) -> Option<&mut Draft> {
+        self.yards.get_mut(&self.open)?.get_mut(with)
+    }
+
+    fn entry(&mut self, with: &str) -> &mut Draft {
+        let yard = self.yards.entry(self.open.clone()).or_default();
+        yard.entry(with.to_string()).or_default()
+    }
+
+    fn all_mut(&mut self) -> impl Iterator<Item = &mut Draft> {
+        self.yards.values_mut().flat_map(HashMap::values_mut)
+    }
+
     /// What is attached to the draft for `with`, in the order it came.
     pub fn attachments(&self, with: &str) -> &[Attachment] {
-        self.of.get(with).map_or(&[], |d| &d.attachments)
+        self.of(with).map_or(&[], |d| &d.attachments)
     }
 
     /// Why attachments of the draft for `with` are marked, each reason once.
@@ -194,20 +228,22 @@ impl Drafts {
     /// Attaches what was found to the draft for `with`, after what is there.
     pub fn attach(&mut self, with: &str, found: Found) -> u64 {
         self.last += 1;
-        let draft = self.of.entry(with.to_string()).or_default();
+        let id = self.last;
+        let draft = self.entry(with);
         draft.attachments.push(Attachment {
-            id: self.last,
+            id,
             name: found.name,
             bytes: found.bytes,
             size: found.size,
             refused: found.refused,
         });
-        self.last
+        id
     }
 
-    /// Takes the attachment `id` off whichever draft has it.
+    /// Takes the attachment `id` off whichever draft has it: an id is its
+    /// attachment's alone, in whichever yard.
     pub fn remove(&mut self, id: u64) -> bool {
-        self.of.values_mut().any(|d| {
+        self.all_mut().any(|d| {
             let before = d.attachments.len();
             d.attachments.retain(|a| a.id != id);
             d.attachments.len() < before
@@ -216,13 +252,13 @@ impl Drafts {
 
     /// Takes the last attachment off the draft for `with`, and says which.
     pub fn remove_last(&mut self, with: &str) -> Option<u64> {
-        let draft = self.of.get_mut(with)?;
+        let draft = self.of_mut(with)?;
         draft.attachments.pop().map(|a| a.id)
     }
 
     /// Marks the attachment `id`: it cannot go, and why.
     pub fn refuse(&mut self, id: u64, why: &str) {
-        let all = self.of.values_mut().flat_map(|d| &mut d.attachments);
+        let all = self.all_mut().flat_map(|d| &mut d.attachments);
         for a in all.filter(|a| a.id == id) {
             a.refused = Some(why.to_string());
         }
@@ -231,8 +267,7 @@ impl Drafts {
     /// The attachments of the draft for `with`, to be sent in this order.
     /// The draft has none from then on.
     pub fn take(&mut self, with: &str) -> Vec<Attachment> {
-        self.of
-            .get_mut(with)
+        self.of_mut(with)
             .map(|d| std::mem::take(&mut d.attachments))
             .unwrap_or_default()
     }
@@ -240,20 +275,19 @@ impl Drafts {
     /// Attachments that did not go are back in the draft for `with`, before
     /// what was attached since.
     pub fn restore(&mut self, with: &str, mut unsent: Vec<Attachment>) {
-        let draft = self.of.entry(with.to_string()).or_default();
+        let draft = self.entry(with);
         unsent.append(&mut draft.attachments);
         draft.attachments = unsent;
     }
 
     /// Keeps what is typed to `with` while another conversation is open.
     pub fn put_text(&mut self, with: &str, text: String) {
-        self.of.entry(with.to_string()).or_default().text = text;
+        self.entry(with).text = text;
     }
 
     /// What was typed to `with`, for the line: the conversation is open.
     pub fn take_text(&mut self, with: &str) -> String {
-        self.of
-            .get_mut(with)
+        self.of_mut(with)
             .map(|d| std::mem::take(&mut d.text))
             .unwrap_or_default()
     }
@@ -261,7 +295,7 @@ impl Drafts {
     /// A text to `with` that did not go while another conversation is open:
     /// it is back in the draft, before what was typed there since.
     pub fn unsend(&mut self, with: &str, text: String) {
-        let draft = self.of.entry(with.to_string()).or_default();
+        let draft = self.entry(with);
         draft.text = rejoin(text, std::mem::take(&mut draft.text));
     }
 }
@@ -384,6 +418,38 @@ mod tests {
         drafts.attach("assembly", image(JPEG));
         assert_eq!(drafts.take("yardmaster").len(), 1);
         assert_eq!(drafts.attachments("assembly").len(), 1);
+    }
+
+    #[test]
+    fn each_yard_has_its_own_drafts_and_none_is_named_from_another() {
+        let mut drafts = Drafts::default();
+        assert_eq!(drafts.turn_to("mac"), "");
+        let one = drafts.attach("yardmaster", image(PNG));
+        drafts.put_text("yardmaster", "For the mac.".into());
+        // Another yard has a yardmaster too, and nothing written to it.
+        assert_eq!(drafts.turn_to("plantime"), "mac");
+        assert_eq!(drafts.attachments("yardmaster"), []);
+        assert_eq!(drafts.take_text("yardmaster"), "");
+        assert_eq!(drafts.take("yardmaster"), []);
+        assert_eq!(drafts.remove_last("yardmaster"), None);
+        // What is written here stays here, and an id is given once in the
+        // whole window: a mark removes its own attachment wherever it is.
+        let two = drafts.attach("yardmaster", image(JPEG));
+        assert!(two > one);
+        drafts.put_text("yardmaster", "For plantime.".into());
+        drafts.refuse(one, "too large");
+        assert_eq!(drafts.reasons("yardmaster"), Vec::<String>::new());
+        // Back in the first, all of it is as it was left.
+        assert_eq!(drafts.turn_to("mac"), "plantime");
+        assert_eq!(ids(&drafts, "yardmaster"), [one]);
+        assert_eq!(drafts.reasons("yardmaster"), ["too large"]);
+        assert_eq!(drafts.take_text("yardmaster"), "For the mac.");
+        // A yard that is removed from the list takes its drafts with it.
+        drafts.forget("plantime");
+        drafts.turn_to("plantime");
+        assert_eq!(drafts.attachments("yardmaster"), []);
+        assert_eq!(drafts.take_text("yardmaster"), "");
+        assert!(!drafts.remove(two));
     }
 
     #[test]

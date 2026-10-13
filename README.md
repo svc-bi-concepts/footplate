@@ -172,54 +172,97 @@ is open again.
 
 ## A yard at an address
 
-The window opens one yard: this machine's, by its socket, as above, or one
+The window shows one yard at a time, of the several its settings keep:
+one of this machine, by its socket, as above, or one
 on another machine, at the address of its listener (the yard's setting
 `hook_addr`, or what stands in front of it). There it is a *device* of one
 user of that yard, as `docs/api.md` ("Over the network") and
 `docs/users.md` ("Devices") of the yardr repository have it: the same
 calls, stream and images under `<address>/user/`, each request with
 `Authorization: Bearer <the device's token>`, and `GET /user/me` for who
-the token is. Under your name the window says which yard it shows: `this
-machine's yard`, or `the yard south at https://mac.example.net, as its
-device laptop`.
+the token is. Under your name the head names the open yard as the settings
+list it, and the settings say the whole of it: `this machine's yard`, or
+`the yard south at https://mac.example.net, as its device laptop`.
 
-**Choosing it in the window.** The settings have "yard": "this machine's"
-or "a yard at an address". For the second the window asks for the address
-and a code. The yard's operator opens a pairing for the device and reads
-you both:
+**The yards in the settings.** The settings list the yards the window
+keeps, each with its kind ("on this machine" or "paired"), how it is
+reached, and whether it is the open one, with "open", "pair again" and
+"remove" beside it. A file that names none has one: `this machine`, the
+yard at this run's socket. "add a yard of this machine" takes a name and a
+socket path, for another home's yard (`<its home>/.yardr/yard.sock`), and
+needs no pairing. "add a yard at an address" takes a name, the address and
+a code. The yard's operator opens a pairing for the device and reads you
+both:
 
     yardr user device pair <user> <device> --url https://mac.example.net
 
 Type them and press Enter, or "pair". What the pairing's QR code holds,
-`<address>#<code>`, can be pasted into the address as it is. footplate
-sends the code once (`POST <address>/user/pair`), is answered with the
-device's token, keeps it, and shows that yard. What the yard says of a code
-is shown under the fields: that it is not the code (the yard counts a wrong
-one, and its fifth ends the pairing), that no pairing is open, that the
-code was used up and the device could not be added. Nothing changes then:
-the window shows the yard it showed.
+`<address>#<code>`, can be pasted into the address as it is; with no name
+the yard is called by its address's host. footplate sends the code once
+(`POST <address>/user/pair`), is answered with the device's token, keeps
+it, and opens that yard. What the yard says of a code is shown under the
+fields: that it is not the code (the yard counts a wrong one, and its fifth
+ends the pairing), that no pairing is open, that the code was used up and
+the device could not be added. Nothing changes then: the window shows the
+yard it showed. A name another yard has is refused before the code is sent,
+since the yard uses a code up.
 
-Choosing "this machine's" opens the socket again. The address and the token
-stay where they are kept, so "a yard at an address" with no code goes back
-to the yard the device is paired with.
+A paired yard is called with this device's own token, so your picks and
+approvals there count as yours, where over a peer link you only see what
+the link carries and an approval never crosses. Each yard is paired on its
+own, with a token of its own.
 
-**Where they are kept.** The address is in the settings file (`remote` and
-`address`). The token never is: it has a file of its own beside it,
-`yard.token`, written with mode 0600 and replaced by the next pairing.
-There is one such file, so the window is paired with one yard at a time.
-It is a file on macOS too, not the Keychain.
+**Switching.** The line under your name in the head is the switcher: a
+click on it, or `cmd+y` (`ctrl+y` on Linux), lists the yards under it, each
+with its kind and its state: `open`, or what it had waiting when the window
+last left it (`2 mail, 1 decision when last opened`), or `not opened yet`.
+The arrows move, Enter opens, esc leaves, a click on a row opens it, and
+`cmd+1` to `cmd+9` open the yards in the list's order from anywhere. Only
+the open yard is followed: a yard is read when it is opened, the system
+tells of the open one alone, and the counts of the others are as old as
+they say. The yard that was open is the one the next start opens.
 
-**By the environment.** Two variables, which win over the settings when
-set:
+What you wrote and did not send stays with the yard it was written for: the
+line's text, what is attached, and the words typed on a card are kept for
+each yard and are there again when it is open, and none of it can be sent
+from another yard. A mail that is on its way when you switch goes to the
+yard it was written in; if that yard refuses it, it is back in that yard's
+draft and the open one says so. Nothing typed of a secret is kept across a
+switch.
+
+**Where they are kept.** The yards are in the settings file (`yards`, each
+with its `name` and its `socket`, or its `address` and `token_file`; `open`
+is the one to open). A token never is: each paired yard has a file of its
+own, by default `yard-<name>.token` beside the settings, written with mode
+0600 and replaced by the next pairing of that yard. `token_file` is a bare
+name, for a file beside the settings, or a whole path; no two yards may
+have the same one, and two of a file edited by hand that do are refused,
+both, until they differ. Removing a yard deletes its token's file where it
+is a bare name beside the settings and no other yard's, and leaves one you
+named by a whole path. The device itself stays at the yard until its
+operator removes it (`yardr user device rm <user> <device>`), and the
+settings say so. It is a file on macOS too, not the Keychain.
+
+A settings file from before there were several yards is read as it was:
+`remote` with an `address` is one paired yard, called by the address's
+host, with `yard.token` beside the settings as its token file; anything
+else is `this machine`. The next change writes the list.
+
+**By the environment.** Two variables name the one yard of a run:
 
     FOOTPLATE_YARD=https://mac.example.net FOOTPLATE_TOKEN_FILE=~/.config/footplate/mac.token footplate
 
-`FOOTPLATE_YARD` is the address; the window's choice then says that it is
-set and changes nothing. `FOOTPLATE_TOKEN_FILE` is the file the token is
-read from, a token as `yardr user device add` printed it or as a pairing
-gave it, on one line; a pairing in the window writes to it. It names no
-yard by itself: without `FOOTPLATE_YARD` and with this machine's yard
-chosen, the socket is opened as ever.
+`FOOTPLATE_YARD` is the address. The window is of that yard alone then: it
+has no switcher, and the settings say so and list no yards.
+`FOOTPLATE_TOKEN_FILE` is the file its token is read from, a token as
+`yardr user device add` printed it or as a pairing gave it, on one line;
+without it that is `yard.token` beside the settings, and a pairing in that
+window writes the same file. It names no yard by itself, and without
+`FOOTPLATE_YARD` it says nothing: a yard of the settings is opened and
+paired with its own token file, never the environment's. (Before there were
+several yards it also applied to the yard the settings chose. A yard whose
+token lived only in that file opens as not paired now: pair it again, or
+name the file as the yard's `token_file`, whole.)
 
 **What is refused, with the reason, before anything is sent:**
 
@@ -235,14 +278,14 @@ chosen, the socket is opened as ever.
   again. A file that is missing, or holds no token, is said too.
 
 A yard that is refused is not tried again: the window says why, and the
-settings are there to choose another.
+settings, or `cmd+1` to `cmd+9`, open another.
 
 **"This device is no longer let in."** The yard answers 401 when the token
 is not a device's: the operator removed the device (`yardr user device rm`),
 or the token is another yard's. That does not pass by itself, so footplate
 says so and stops asking: no call, no stream, until the device has a token
-again. "pair again" under the words opens the settings with the address
-there, for a new code. A yard that has no device at all answers 404 under
+again. "pair again" under the words opens the settings on that yard, for a
+new code. A yard that has no device at all answers 404 under
 `/user/`, to a token as to none, and so does an address that is no yard's
 listener: the window says that, offers the same, and goes on trying every
 3 seconds, since a proxy that is being set right answers so too. When
@@ -379,6 +422,8 @@ what it printed.
 | `e`, on a card | expands it to the bead whole, or folds it again |
 | `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
+| `cmd+y` (`ctrl+y` on Linux), a click on the line under your name | lists the yards under the head: the arrows move, Enter opens the yard they are on, `esc` leaves |
+| `cmd+1`–`cmd+9` (`ctrl` on Linux) | opens the yard at that place in the list, from anywhere |
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
 | `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |
 | `cmd+shift+l` (`ctrl+shift+l` on Linux) | the next of auto, light, dark |
@@ -387,7 +432,7 @@ what it printed.
 ## Settings
 
 Two things can be set, in the settings or by their own keys, and both are
-drawn at once and kept for the next start; the third is the yard, which
+drawn at once and kept for the next start; the third is the yards, which
 [A yard at an address](#a-yard-at-an-address) has, and the fourth what the
 system tells of, which [Notifications](#notifications) has:
 
@@ -397,7 +442,7 @@ system tells of, which [Notifications](#notifications) has:
 - light, dark or auto. Auto is the desktop's look, and follows it when it
   changes while the window is open.
 
-They are kept, with the yard and the notifications that were chosen, in one
+They are kept, with the yards and the notifications that were chosen, in one
 file footplate writes on every change:
 `~/Library/Application Support/footplate/settings.json` on macOS,
 `$XDG_CONFIG_HOME/footplate/settings.json` on Linux (`~/.config` when that
@@ -500,10 +545,10 @@ options have no icon, so the program sees to it when it starts
 | File | Holds |
 |---|---|
 | `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed |
-| `src/yard.rs` | which yard is opened, as plain functions: the environment over the settings, the token's file and its mode |
+| `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode |
 | `src/session.rs` | following a yard on a thread: who the window is for, the state it starts from, trying again, or not when the device is not let in |
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
-| `src/draft.rs` | what is not sent yet, as plain functions: each conversation's attachments and text, what is refused and why |
+| `src/draft.rs` | what is not sent yet, as plain functions: for each yard each conversation's attachments and text, what is refused and why |
 | `src/window.rs` | the window: draws the model and the draft, and makes the calls they ask for |
 | `src/input.rs` | the line that is typed in |
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
