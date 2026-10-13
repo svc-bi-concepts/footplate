@@ -600,11 +600,32 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
         if state.silent.contains(&method) {
             return Ok(());
         }
+        // As the yard takes the arguments of `ApproveAsk`, where it has the
+        // call: at its listener by name, as every call's there, and on its
+        // socket in their order, since by name the socket takes only the
+        // calls its API page names.
+        let misshapen = method == "ApproveAsk"
+            && state.answers.contains_key(&method)
+            && args.is_object() != listener;
+        let refused = misshapen.then(|| {
+            let why = if listener {
+                "arguments: over the network ApproveAsk takes them as a JSON object, by name"
+            } else {
+                "arguments: ApproveAsk takes them as a JSON array: only the calls docs/api.md names take them by name"
+            };
+            Reply {
+                status: 200,
+                body: serde_json::json!({"error": {"code": "error", "message": why}}).to_string(),
+                chunk: None,
+            }
+        });
         let once = state.once.get_mut(&method).and_then(VecDeque::pop_front);
         let held = (method == "Conversation")
             .then(|| conversation(&state, &args))
             .flatten();
-        once.or(by_arg)
+        refused
+            .or(once)
+            .or(by_arg)
             .or(held)
             .or_else(|| state.answers.get(&method).cloned())
             .unwrap_or_else(|| Reply {

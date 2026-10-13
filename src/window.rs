@@ -2,15 +2,16 @@
 //! conversation and the line to write in. What it shows is the model's
 //! (model.rs); this file draws it and makes the calls the model asks for.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
 use gpui::{
-    Action, AnyWindowHandle, App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle,
-    Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit, Pixels,
-    ScrollHandle, SharedString, Task, Window, actions, div, img, prelude::*, px, relative, rems,
+    Action, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton, ObjectFit,
+    Pixels, ScrollHandle, SharedString, Task, Window, actions, div, img, prelude::*, px, relative,
+    rems,
 };
 
 use crate::api::{self, Address, BlobRef, Client};
@@ -48,6 +49,7 @@ actions!(
         ChoiceUp,
         ChoiceDown,
         Decide,
+        Approve,
         Decline,
         AskAbout,
         Expand,
@@ -222,6 +224,53 @@ fn secret_keys(bead: &str, ask: u64, writable: bool) -> String {
     }
 }
 
+/// The key that approves a run ask, as its button and its keys name it.
+const APPROVE_KEY: &str = if cfg!(target_os = "macos") {
+    "\u{2318}\u{21b5}"
+} else {
+    "ctrl+enter"
+};
+
+/// What a run ask's card says over the command, while it can be approved:
+/// the words `yardr chat` has for it.
+const RUN_RUNS: &str = "when you approve, the yard runs this as its operator, and nothing else:";
+
+/// What it says over the command of one that takes no approval any more.
+const RUN_PROPOSED: &str = "the command this ask proposed:";
+
+/// What a run ask's card says in place of the control that approves, where
+/// the yard does not have the call or does not serve it to this window.
+const APPROVE_ELSEWHERE: &str =
+    "this yard takes no approval from footplate. Approve in a terminal on the yard's machine:";
+
+/// The keys of a run ask's card. Later, Decline and expand have their
+/// buttons; Enter is named because it does nothing here.
+fn run_keys(approves: bool, writable: bool) -> String {
+    let mut keys: Vec<String> = Vec::new();
+    if approves {
+        keys.push(format!("{APPROVE_KEY} approves"));
+        keys.push("enter alone approves nothing".to_string());
+    }
+    if writable {
+        keys.push("a ask about this".to_string());
+    }
+    keys.join(" · ")
+}
+
+/// A command as a text that is drawn as one code block: whole, wrapped
+/// where the window is narrower and never cut, with the control that copies
+/// it exactly. The fence is longer than any run of backticks in the
+/// command, so nothing in it ends the block.
+fn fenced(command: &str) -> String {
+    let (mut longest, mut run) = (0, 0);
+    for c in command.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}\n{command}\n{fence}")
+}
+
 /// The keys of a dealt with: nothing is chosen by default and Enter alone
 /// sends nothing; a number then Enter replaces the pick. One taken back has
 /// no keys: nothing is sent from its card.
@@ -249,6 +298,30 @@ fn send_button(
     cx: &mut Context<Footplate>,
 ) -> impl IntoElement {
     let click = enabled.then(|| cx.listener(|this, _, _, cx| this.decide(cx)));
+    card_button(id, text, palette, click)
+}
+
+/// The button that approves a run ask, exactly as its key does, which it
+/// names: `Approve (⌘↵)`. Disabled while an approval is with the yard.
+fn approve_button(
+    id: String,
+    enabled: bool,
+    palette: Palette,
+    cx: &mut Context<Footplate>,
+) -> impl IntoElement {
+    let click = enabled.then(|| cx.listener(|this, _, _, cx| this.approve(cx)));
+    card_button(id, format!("Approve ({APPROVE_KEY})"), palette, click)
+}
+
+/// A card's one filled button, with what a click on it does. Without that
+/// it is drawn faint, and takes no click.
+fn card_button(
+    id: String,
+    text: String,
+    palette: Palette,
+    click: Option<impl Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let enabled = click.is_some();
     div()
         .id(SharedString::from(id.clone()))
         .debug_selector(|| id.clone())
@@ -286,7 +359,7 @@ fn give_label(secret: &api::Secret, typed: usize) -> String {
 /// them; with a recommendation and no pick there is no button that would
 /// send it unasked; on another yard's bead words alone go as no note.
 fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
-    if ask.secret.is_some() || ask.chosen != 0 {
+    if ask.secret.is_some() || ask.run.is_some() || ask.chosen != 0 {
         return false;
     }
     if ask.options.is_empty() {
@@ -357,6 +430,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("8", Pick8, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("9", Pick9, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("enter", Decide, Some(NO_LINE_CONTEXT)),
+        // A run ask is approved with a key no other card answers with, and
+        // never with Enter alone: the habit of answering picks must not
+        // run a command.
+        KeyBinding::new("secondary-enter", Approve, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("d", Decline, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("a", AskAbout, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
@@ -461,6 +538,12 @@ pub struct Footplate {
     secret_typed: Vec<String>,
     /// The ask the field and those values are for.
     secret_for: Option<(String, u64)>,
+    /// The run ask whose approval is with the yard and not answered yet:
+    /// no second one goes after it.
+    approving: Option<(String, u64)>,
+    /// The run asks this yard took no approval of from this window, having
+    /// no such call for it: their cards say where to approve instead.
+    approve_elsewhere: HashSet<(String, u64)>,
     /// The attachments that are images, by id, as they are drawn.
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
@@ -616,6 +699,8 @@ impl Footplate {
             secret,
             secret_typed: Vec::new(),
             secret_for: None,
+            approving: None,
+            approve_elsewhere: HashSet::new(),
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
             handle: window.window_handle(),
@@ -753,6 +838,9 @@ impl Footplate {
         self.burst = Burst::default();
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.forget_secret(cx);
+        // What another yard did not serve says nothing of this one.
+        self.approving = None;
+        self.approve_elsewhere.clear();
         cx.notify();
         let client = match opening {
             Ok(client) => client,
@@ -1352,9 +1440,15 @@ impl Footplate {
         // nothing is drawn to take them: the window has them, and `i` or a
         // click types in the field. Never the field at once: what was being
         // typed for a conversation must not go on as a secret.
-        let no_line = ask.as_ref().is_some_and(|(bead, ask)| {
+        // Nor does a run ask's, but for the words of a decline.
+        let no_line = ask.as_ref().is_some_and(|open| {
+            let (bead, ask) = open;
             let model = self.model.as_ref();
-            model.is_some_and(|m| m.secret(bead, *ask).is_some() || m.taken_back(bead, *ask))
+            model.is_some_and(|m| {
+                m.secret(bead, *ask).is_some()
+                    || m.taken_back(bead, *ask)
+                    || (m.run(bead, *ask).is_some() && self.declining.as_ref() != Some(open))
+            })
         });
         if no_line && !self.settings_open {
             let (handle, line, focus) =
@@ -1389,6 +1483,21 @@ impl Footplate {
     fn giving(&self) -> Option<api::Secret> {
         let (bead, ask) = self.open_ask()?;
         self.model.as_ref()?.giving(&bead, ask).cloned()
+    }
+
+    /// The command the control on the open card approves, when its ask is
+    /// a run ask that can be approved.
+    fn approvable(&self) -> Option<api::Run> {
+        let (bead, ask) = self.open_ask()?;
+        self.model.as_ref()?.approving(&bead, ask).cloned()
+    }
+
+    /// Whether the open card is a run ask's, open or dealt with.
+    fn run_card(&self) -> bool {
+        self.open_ask().is_some_and(|(bead, ask)| {
+            let model = self.model.as_ref();
+            model.is_some_and(|m| m.run(&bead, ask).is_some())
+        })
     }
 
     /// Nothing typed of a secret stays in the window: not in the field, and
@@ -1798,6 +1907,52 @@ impl Footplate {
         );
     }
 
+    /// Approves the open card's run ask: its key and its button. The call
+    /// names the ask and nothing of the command, which the yard runs as it
+    /// stored it. What the window says afterwards is the yard's: the
+    /// command as it ran with what it printed, or the refusal whole. A call
+    /// that ended without an answer is never said to be approved or not,
+    /// and a yard without the call for this window has its card say where
+    /// to approve.
+    fn approve(&mut self, cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        let at = (bead.clone(), ask);
+        if self.approvable().is_none()
+            || self.approve_elsewhere.contains(&at)
+            || self.approving.is_some()
+            || self.client.is_none()
+        {
+            return;
+        }
+        self.declining = None;
+        self.approving = Some(at.clone());
+        self.shown(cx);
+        self.notice(String::new(), cx);
+        self.ask(
+            cx,
+            move |client, me| client.approve_ask(&bead, ask, me),
+            move |this, approved, cx| {
+                this.approving = None;
+                let (bead, ask) = at.clone();
+                match approved {
+                    Ok(approved) => {
+                        let line = model::approved_line(&approved);
+                        this.change(cx, |m| m.approved(&bead, ask, &approved));
+                        this.schedule_return(cx);
+                        this.notice(line, cx);
+                    }
+                    Err(err) if model::approves_elsewhere(&err) => {
+                        this.approve_elsewhere.insert(at);
+                        this.notice(String::new(), cx);
+                    }
+                    Err(err) => this.notice(model::not_approved(&err), cx),
+                }
+            },
+        );
+    }
+
     /// Enter on a card: the pick with the line's words in the one answer,
     /// or the words alone. Enter with nothing chosen and a recommendation
     /// picks the recommended option.
@@ -2194,6 +2349,10 @@ impl Footplate {
             .as_ref()
             .is_some_and(|m| m.taken_back(&bead, ask))
         {
+            return;
+        }
+        // A run ask's card has a line only for the words of a decline.
+        if self.run_card() && self.declining.is_none() {
             return;
         }
         let field = match self.giving() {
@@ -3811,7 +3970,7 @@ impl Footplate {
                 ),
         );
         // The asker and the recommendation.
-        let asker = if ask.secret.is_some() {
+        let asker = if ask.secret.is_some() || ask.run.is_some() {
             format!("asked by {}", ask.asker)
         } else if ask.recommend_label.is_empty() {
             format!("asked by {} · no recommendation", ask.asker)
@@ -3822,15 +3981,21 @@ impl Footplate {
             )
         };
         card = card.child(div().text_sm().text_color(palette.faint).child(asker));
-        // The context lines.
+        // The context lines: text as it was written, and no block in it. A
+        // run ask's each begin with who says them.
         for line in &ask.context {
             card = card.child(div().child(line.clone()));
         }
         // The options numbered, each with its consequence, `you decide`
         // last as the yard lists it. A secret ask has none and wants no
         // words: what it asks for is said in the yard's line, as it is.
+        // Nor has a run ask: the yard's block is the last of its card, with
+        // the control that approves directly under it.
+        let elsewhere = self.approve_elsewhere.contains(&(bead_id.clone(), ask_seq));
         if let Some(secret) = &ask.secret {
             card = card.child(self.secret_lines(secret, palette));
+        } else if let Some(run) = &ask.run {
+            card = card.child(self.run_block(&bead_id, ask_seq, run, true, palette));
         } else if ask.options.is_empty() {
             card = card.child(
                 div()
@@ -3875,13 +4040,16 @@ impl Footplate {
                 );
             }
         }
-        // Decline is not a pick, and not "you decide".
-        card = card.child(
-            div()
-                .text_sm()
-                .text_color(palette.faint)
-                .child("Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."),
-        );
+        // Decline is not a pick, and not "you decide". A run ask has no
+        // pick to take it for.
+        card = card.when(ask.run.is_none(), |card| {
+            card.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."),
+            )
+        });
         if current {
             // A line for words, or the field of a secret in its place.
             let field = match ask.secret {
@@ -3894,21 +4062,31 @@ impl Footplate {
             } else {
                 "words"
             };
-            card = card.child(
-                div()
-                    .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(palette.line)
-                    .bg(palette.side)
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        window.focus(&focus);
-                        window.prevent_default();
-                    })
-                    .child(field),
-            );
+            // Where this yard takes no approval from this window, the card
+            // says where it does, in place of the control.
+            if ask.run.is_some() && elsewhere {
+                card = card.child(self.approve_elsewhere_lines(&bead_id, ask_seq, palette));
+            }
+            // A run ask takes words only with a decline: its card has the
+            // line while one is asked for, and at no other time.
+            let declining = self.declining.as_ref() == Some(&(bead_id.clone(), ask_seq));
+            card = card.when(ask.run.is_none() || declining, |card| {
+                card.child(
+                    div()
+                        .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(palette.line)
+                        .bg(palette.side)
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            window.focus(&focus);
+                            window.prevent_default();
+                        })
+                        .child(field),
+                )
+            });
             // Under it the button that sends the field, exactly as Enter
             // does, with Later, Decline and ask-about-this beside it. An
             // asker with no conversation has the reason in place of that
@@ -3921,6 +4099,8 @@ impl Footplate {
                     !self.secret.read(cx).text().is_empty(),
                 )),
                 (Some(_), None) => None,
+                // A run ask's one button approves, and sends no words.
+                (None, _) if ask.run.is_some() => None,
                 (None, _) => ask
                     .options
                     .iter()
@@ -3965,6 +4145,14 @@ impl Footplate {
                     .when_some(send, |el, (id, text, enabled)| {
                         el.child(send_button(id, text, enabled, palette, cx))
                     })
+                    .when(ask.run.is_some() && !elsewhere, |el| {
+                        el.child(approve_button(
+                            format!("approve {bead_id} {ask_seq}"),
+                            self.approving.is_none(),
+                            palette,
+                            cx,
+                        ))
+                    })
                     .child(
                         small_button("Later (x)".to_string(), palette)
                             .id(SharedString::from(format!("later {bead_id} {ask_seq}")))
@@ -3983,15 +4171,13 @@ impl Footplate {
             );
             // The keys. Enter with nothing chosen and a recommendation picks
             // it, and says so.
-            card = card.child(
-                div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child(match ask.secret {
-                        Some(_) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
-                        None => decision_keys(ask, foreign, unwritable.is_none()),
-                    }),
-            );
+            card = card.child(div().text_sm().text_color(palette.faint).child(
+                match (&ask.secret, &ask.run) {
+                    (Some(_), _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
+                    (None, Some(_)) => run_keys(!elsewhere, unwritable.is_none()),
+                    (None, None) => decision_keys(ask, foreign, unwritable.is_none()),
+                },
+            ));
         } else {
             let bead_click = bead_id.clone();
             card = card.child(
@@ -4047,6 +4233,95 @@ impl Footplate {
                     .child(secret.line.clone()),
             )
             .child(div().text_sm().text_color(palette.faint).child(SECRET_GOES))
+    }
+
+    /// What a run ask proposes, in the one block of its card, which is all
+    /// the yard's and none of it the asker's: the command whole, in a code
+    /// block that wraps where the window is narrower and is never cut; the
+    /// yard's sentences for what it changes; and the command that takes it
+    /// back. `open` is an ask that can still be approved.
+    fn run_block(
+        &self,
+        bead: &str,
+        ask: u64,
+        run: &api::Run,
+        open: bool,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let card_key = select::key((bead, ask));
+        let command = model::plain(&run.line());
+        let mut block = div()
+            .debug_selector(|| format!("run {bead} {ask}"))
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.side)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_sm().text_color(palette.faint).child(if open {
+                RUN_RUNS
+            } else {
+                RUN_PROPOSED
+            }))
+            .child(
+                div()
+                    .debug_selector(|| format!("run command {bead} {ask}"))
+                    .child(select::text(
+                        expanded_text_key(card_key, "run", 0, &command),
+                        fenced(&command),
+                        &self.selection,
+                    )),
+            );
+        for does in &run.does {
+            block = block.child(div().child(format!("the yard says: {}", model::plain(does))));
+        }
+        // Who may take it back is not said: the yard says it of some
+        // commands and not of others, and sends no word of it here.
+        let back = model::plain(&run.back);
+        if !back.is_empty() {
+            block = block
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child("the command that takes it back:"),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| format!("run back {bead} {ask}"))
+                        .child(select::text(
+                            expanded_text_key(card_key, "back", 0, &back),
+                            fenced(&back),
+                            &self.selection,
+                        )),
+                );
+        }
+        block
+    }
+
+    /// Where a run ask is approved when this yard takes no approval from
+    /// this window: a terminal on the yard's machine, with the command in a
+    /// block that copies it.
+    fn approve_elsewhere_lines(
+        &self,
+        bead: &str,
+        ask: u64,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let command = model::approve_command(bead, ask);
+        div()
+            .debug_selector(|| format!("approve elsewhere {bead} {ask}"))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_color(palette.warn).child(APPROVE_ELSEWHERE))
+            .child(select::text(
+                expanded_text_key(select::key((bead, ask)), "approve", 0, &command),
+                fenced(&command),
+                &self.selection,
+            ))
     }
 
     /// One dealt with: what was decided, in plain words with who and when;
@@ -4109,6 +4384,15 @@ impl Footplate {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(detail.state_line.clone()),
             );
+        // Under an approved run ask's command, what it printed.
+        let printed = detail.ran.as_ref().map(|ran| model::plain(&ran.result));
+        if let Some(printed) = printed.filter(|printed| !printed.is_empty()) {
+            body = body.child(
+                div()
+                    .debug_selector(|| format!("ran {bead} {ask}"))
+                    .child(printed),
+            );
+        }
         if !model.has_bead(bead) {
             body = body.child(div().text_color(palette.faint).child("Reading the bead."));
         } else {
@@ -4165,6 +4449,24 @@ impl Footplate {
             if let Some(secret) = &detail.secret {
                 body = body.child(self.secret_lines(secret, palette));
             }
+            // A run ask has the yard's block, and under it the control
+            // that approves while it is only put aside: one approved,
+            // declined or taken back takes no approval.
+            let approving = model.approving(bead, ask).is_some();
+            let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
+            if let Some(run) = &detail.run {
+                body = body.child(self.run_block(bead, ask, run, approving, palette));
+                if approving && elsewhere {
+                    body = body.child(self.approve_elsewhere_lines(bead, ask, palette));
+                } else if approving {
+                    body = body.child(div().flex().child(approve_button(
+                        format!("approve {bead} {ask}"),
+                        self.approving.is_none(),
+                        palette,
+                        cx,
+                    )));
+                }
+            }
             // A line for words with the later pick, or the field of a
             // secret to give it again: a declined one takes none, one taken
             // back has neither, and no
@@ -4180,7 +4482,8 @@ impl Footplate {
             } else {
                 "words"
             };
-            let fielded = !taken_back && (detail.secret.is_none() || giving.is_some());
+            let words = detail.secret.is_none() && detail.run.is_none();
+            let fielded = !taken_back && (words || giving.is_some());
             body = body.when(fielded, |body| {
                 body.child(
                     div()
@@ -4209,6 +4512,7 @@ impl Footplate {
                     !self.secret.read(cx).text().is_empty(),
                 )),
                 (Some(_), None) => None,
+                (None, _) if detail.run.is_some() => None,
                 (None, _) => detail
                     .options
                     .iter()
@@ -4237,6 +4541,7 @@ impl Footplate {
                 match detail.secret {
                     Some(_) if giving.is_some() => secret_keys(bead, ask, false),
                     Some(_) => String::new(),
+                    None if detail.run.is_some() => run_keys(approving && !elsewhere, false),
                     None => decided_keys(&detail),
                 },
             ));
@@ -4409,6 +4714,7 @@ impl Render for Footplate {
             .on_action(cx.listener(|this, _: &ChoiceUp, _, cx| this.choice(-1, cx)))
             .on_action(cx.listener(|this, _: &ChoiceDown, _, cx| this.choice(1, cx)))
             .on_action(cx.listener(|this, _: &Decide, _, cx| this.decide(cx)))
+            .on_action(cx.listener(|this, _: &Approve, _, cx| this.approve(cx)))
             .on_action(cx.listener(Self::decline))
             .on_action(cx.listener(Self::ask_about))
             .on_action(cx.listener(Self::expand))
@@ -4496,6 +4802,7 @@ mod tests {
             about: Vec::new(),
             state: "open".to_string(),
             secret: None,
+            run: None,
         };
         assert_eq!(
             decision_keys(&ask, false, true),
@@ -4535,6 +4842,7 @@ mod tests {
             about: Vec::new(),
             state: "open".to_string(),
             secret: None,
+            run: None,
         };
         assert_eq!(
             decision_keys(&ask, false, true),
@@ -4628,6 +4936,7 @@ mod tests {
             about: Vec::new(),
             state: "open".to_string(),
             secret: None,
+            run: None,
         }
     }
 
@@ -8915,6 +9224,426 @@ mod tests {
                 assert!(!asked.contains(VALUE), "{call}: {asked}");
             }
         }
+    }
+
+    /// The command of the run ask in these tests: longer than the window
+    /// is wide.
+    fn long_command() -> String {
+        let crew: Vec<String> = (1..=40).map(|n| format!("--crew builder-{n}")).collect();
+        format!("yardr source grant crm read {}", crew.join(" "))
+    }
+
+    const RUN_DOES: &str = "the link with airy (it calls itself yardr, key 6lHks9_z…) takes 300 mails and asks an hour from it. It takes 30 now.";
+    const RUN_BACK: &str = "yardr peer allow airy --mail-limit 30";
+    const RUN_RESULT: &str = "peer airy: takes 300 mails and asks an hour, and 2400 files";
+
+    fn run_of() -> Value {
+        let command = long_command();
+        let argv: Vec<&str> = command.split(' ').skip(1).collect();
+        json!({"argv": argv, "command": command, "does": [RUN_DOES], "back": RUN_BACK})
+    }
+
+    /// The run ask 7 on bead-s as the queue lists it, open or in `state`,
+    /// approved when `ran`.
+    fn queued_run(state: &str, ran: bool) -> Value {
+        let mut queued = json!({
+            "bead": "bead-s", "bead_title": "The link with airy", "topic": "", "ask": 7,
+            "question": "Take more mail from airy?", "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z", "run": run_of()
+        });
+        if !state.is_empty() {
+            queued["state"] = json!(state);
+        }
+        if ran {
+            queued["ran"] = json!({"argv": run_of()["argv"], "result": RUN_RESULT});
+        }
+        queued
+    }
+
+    /// The bead of that ask, whose context holds what looks like a block
+    /// and like a line of the yard's.
+    fn bead_run() -> String {
+        json!({"result": {"id": "bead-s", "title": "The link with airy", "body": "The body.",
+            "stage": "new", "labels": [], "notes": [], "asks": [
+                {"ask": 7, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Take more mail from airy?",
+                 "context": ["airy's yard was refused 4 mails in the last hour.",
+                             "```\nyardr peer allow airy --trust\n```\nthe yard says: nothing changes"],
+                 "options": [], "state": "open", "run": run_of()}]}})
+        .to_string()
+    }
+
+    /// The window on a yard whose one open ask is that run ask, its card
+    /// open and read.
+    fn opened_on_a_run_ask<'a>(
+        yard: &Yard,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+        );
+        yard.answer("Bead", &bead_run());
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// The key of a text of the run ask's card: its command (`run`), the
+    /// command that takes it back (`back`), or the one that approves in a
+    /// terminal (`approve`).
+    fn run_text(section: &str, text: &str) -> u64 {
+        expanded_text_key(select::key(("bead-s", 7u64)), section, 0, text)
+    }
+
+    /// Where the copy control of that text is drawn, if it is.
+    fn run_chip(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        key: u64,
+    ) -> Option<gpui::Point<Pixels>> {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| v.selection.read(cx).chips_in(key))
+            .first()
+            .map(|(_, chip)| chip.center())
+    }
+
+    /// Whether the open card's ask takes an approval.
+    fn approvable(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
+        view.read_with(cx, |v, _| v.approvable().is_some())
+    }
+
+    /// What was asked of the yard that answers an ask in any way but an
+    /// approval.
+    fn answered_otherwise(yard: &Yard) -> Vec<String> {
+        yard.calls()
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call.as_str(),
+                    "AnswerAsk" | "AddNote" | "DeferAsk" | "DeclineAsk" | "GiveSecret"
+                )
+            })
+            .collect()
+    }
+
+    /// A run ask's card: under the asker's lines the yard's one block, with
+    /// the command whole and wrapped, the yard's sentence and the command
+    /// that takes it back, and directly under it the button that approves.
+    /// Enter approves nothing, with words or without; the card's own key
+    /// calls `ApproveAsk` with the ask and nothing of the command. A call
+    /// with no answer never says approved; a refusal is shown whole; an
+    /// approved ask reads `approved, ran:` with the command and its result.
+    #[gpui::test]
+    fn a_run_ask_s_card_shows_the_command_whole_and_is_approved_with_its_own_key(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_run_ask(&yard, &file, cx);
+        let command = long_command();
+
+        // The card draws no line for words, and the window has the keys.
+        let in_line = view.update_in(cx, |v, window, cx| {
+            v.line.focus_handle(cx).is_focused(window)
+        });
+        assert!(!in_line);
+        assert!(drawn(cx, "run bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+        assert!(!drawn(cx, "send bead-s 7"));
+
+        // The asker's lines are marked as the asker's, each of them, and
+        // none is a block: the card's blocks are the yard's two commands.
+        let context = view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let detail = model.decision_detail("bead-s", &chrono::Utc::now());
+            detail.unwrap().asks[0].context.clone()
+        });
+        assert_eq!(context.len(), 5);
+        assert!(
+            context
+                .iter()
+                .all(|line| line.starts_with("yardmaster says: "))
+        );
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
+            2
+        );
+
+        // The command is whole and wraps: its block stands many lines
+        // high, where the one-line command under it stands one, and both
+        // are inside the yard's block. Its control copies it to the letter.
+        let block = bounds_of(cx, "run bead-s 7");
+        let (whole, back) = (
+            bounds_of(cx, "run command bead-s 7"),
+            bounds_of(cx, "run back bead-s 7"),
+        );
+        assert!(whole.size.height > back.size.height * 2., "{whole:?}");
+        assert!(whole.right() <= block.right(), "{whole:?} in {block:?}");
+        assert!(block.top() <= whole.top() && back.bottom() <= block.bottom());
+        assert!(whole.bottom() <= back.top());
+        let chip = run_chip(&view, cx, run_text("run", &command)).unwrap();
+        cx.simulate_click(chip, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(command.as_str()));
+
+        // The control that approves is directly under the yard's block.
+        let approve = bounds_of(cx, "approve bead-s 7");
+        assert!(
+            approve.top() >= block.bottom(),
+            "{approve:?} under {block:?}"
+        );
+        assert!(approve.top() - block.bottom() < px(24.), "{approve:?}");
+
+        // Enter alone approves nothing, and nothing typed goes with it:
+        // the card has no line to type in, and the picking keys no option.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("yes");
+        cx.simulate_keystrokes("enter 1 enter up enter");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+
+        // Its own key. The yard goes away over the call: never "approved".
+        yard.answer_nothing("ApproveAsk");
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "no answer", |cx| {
+            notice(&view, cx) == "the yard did not answer; read the card again"
+        });
+        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo"])]);
+        assert!(drawn(cx, "approve bead-s 7"));
+
+        // The yard refuses, since it changed after the ask was written:
+        // its words, whole.
+        let stale = "ask 7 says the link with airy takes 30 mails an hour now, and it takes 100: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+        yard.answer(
+            "ApproveAsk",
+            &json!({"error": {"code": "error", "message": stale}}).to_string(),
+        );
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "refused", |cx| {
+            notice(&view, cx) == format!("not approved: {stale}")
+        });
+        assert!(drawn(cx, "approve bead-s 7"));
+
+        // Approved: the command as it ran and what it printed, and the
+        // ask among the decided, which reads the same.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_run("answered", true)]}}).to_string(),
+        );
+        yard.answer(
+            "ApproveAsk",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "argv": run_of()["argv"], "does": [RUN_DOES], "result": RUN_RESULT}})
+            .to_string(),
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx) == format!("approved, ran: {command} · {RUN_RESULT}")
+        });
+        assert_eq!(yard.asked("ApproveAsk").len(), 3);
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(detail.state_line, format!("approved, ran: {command}"));
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        assert!(drawn(cx, "ran bead-s 7"));
+        assert!(drawn(cx, "run bead-s 7"));
+        // A command runs once for one ask: no control, and no key.
+        assert!(!approvable(&view, cx));
+        assert!(!drawn(cx, "words bead-s 7"));
+        cx.simulate_keystrokes("secondary-enter enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk").len(), 3);
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// Against a yard that does not have the call, by its socket, or does
+    /// not serve it to this window, at its listener, the card says to
+    /// approve at the yard's terminal, with that command in a block that
+    /// copies it, and has no control that approves. Later works as on any
+    /// card.
+    #[gpui::test]
+    fn a_yard_that_takes_no_approval_from_the_window_sends_it_to_a_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("mac.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let near = Yard::start();
+        let far = Yard::start_tcp();
+        a_yard_of_jo(&near);
+        a_far_yard_of_jo(&far);
+        for yard in [&near, &far] {
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+            );
+            yard.answer("Bead", &bead_run());
+            yard.answer("DeferAsk", "{}");
+        }
+        // The window is opened on the far yard: the near one is asked by
+        // its client, as the window asks.
+        let err = near.client().approve_ask("bead-s", 7, "jo").unwrap_err();
+        assert!(model::approves_elsewhere(&err), "{err}");
+
+        let at = Env {
+            yard: Some(far.address().to_string()),
+            token_file: Some(token),
+            socket: dir.path().join("no.sock"),
+        };
+        let (view, cx) = opened_on_the_ask(at, &file, cx);
+        assert!(drawn(cx, "approve bead-s 7"));
+        assert!(!drawn(cx, "approve elsewhere bead-s 7"));
+
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "where to approve", |cx| {
+            drawn(cx, "approve elsewhere bead-s 7")
+        });
+        assert_eq!(
+            far.asked("ApproveAsk"),
+            [json!({"bead": "bead-s", "ask": 7, "actor": "jo"})]
+        );
+        assert!(far.last_request().contains("/user/call/ApproveAsk"));
+        // In place of the control, and not beside it.
+        let elsewhere = view.read_with(cx, |v, _| {
+            v.approve_elsewhere.contains(&("bead-s".to_string(), 7))
+        });
+        assert!(elsewhere && approvable(&view, cx));
+        assert!(drawn(cx, "run bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
+        // The command that approves there, copied to the letter.
+        let terminal = "yardr bead answer bead-s 7 --approve";
+        let chip = run_chip(&view, cx, run_text("approve", terminal)).unwrap();
+        cx.simulate_click(chip, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(terminal));
+        // The key asks the yard no second time.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(far.asked("ApproveAsk").len(), 1);
+
+        // Later, as on any card.
+        cx.simulate_keystrokes("x");
+        wait(cx, "put aside", |_| {
+            far.asked("DeferAsk") == [json!({"bead": "bead-s", "ask": 7, "actor": "jo"})]
+        });
+    }
+
+    /// A run ask is declined with words as any ask is: `d` asks for them
+    /// in a line the card has for nothing else, and Enter there sends the
+    /// decline and approves nothing. One put aside is approved from its
+    /// card among the decided.
+    #[gpui::test]
+    fn a_run_ask_is_declined_with_words_and_approved_after_it_was_put_aside(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_run_ask(&yard, &file, cx);
+        yard.answer(
+            "ApproveAsk",
+            &json!({"result": {"argv": run_of()["argv"], "result": RUN_RESULT}}).to_string(),
+        );
+
+        cx.simulate_keystrokes("d");
+        wait(cx, "the line of a decline", |cx| {
+            drawn(cx, "words bead-s 7")
+        });
+        // With the line focused the card's key is the line's: nothing is
+        // approved while a decline is typed.
+        cx.simulate_input("not this week");
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        // Esc leaves the decline, and the line with it.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let (declining, in_line) = view.update_in(cx, |v, window, cx| {
+            (
+                v.declining.is_some(),
+                v.line.focus_handle(cx).is_focused(window),
+            )
+        });
+        assert!(!declining && !in_line);
+        assert!(yard.asked("DeclineAsk").is_empty());
+        view.update(cx, |v, cx| {
+            v.line.update(cx, |line, cx| line.set_text("", cx))
+        });
+
+        // Put aside, it is among the decided with its block and the
+        // control, and is approved from there.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_run("put aside", false)]}})
+                .to_string(),
+        );
+        cx.simulate_keystrokes("x");
+        wait(cx, "put aside", |_| yard.asked("DeferAsk").len() == 1);
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the card among the decided", |cx| {
+            drawn(cx, "approve bead-s 7")
+        });
+        assert!(drawn(cx, "run bead-s 7"));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_run("answered", true)]}}).to_string(),
+        );
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx).starts_with("approved, ran: yardr source grant crm read")
+        });
+        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo"])]);
+    }
+
+    /// `d` on a run ask's card, then words and Enter: `DeclineAsk` with
+    /// the words, and no approval.
+    #[gpui::test]
+    fn a_run_ask_s_decline_sends_its_words(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (_view, cx) = opened_on_a_run_ask(&yard, &file, cx);
+        cx.simulate_keystrokes("d");
+        wait(cx, "the line of a decline", |cx| {
+            drawn(cx, "words bead-s 7")
+        });
+        cx.simulate_input("not this week");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk")
+                == [json!({"bead": "bead-s", "ask": 7, "words": "not this week", "actor": "jo"})]
+        });
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn a_command_is_fenced_past_any_backticks_in_it() {
+        assert_eq!(
+            fenced("yardr peer show airy"),
+            "```\nyardr peer show airy\n```"
+        );
+        assert_eq!(fenced("a ```` b ` c"), "`````\na ```` b ` c\n`````");
+        let blocks = crate::markdown::blocks(&fenced("a\n```\nb"));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "a\n```\nb");
     }
 
     /// What the yard says an ask for a person's own address in a notify

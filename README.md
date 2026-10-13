@@ -93,6 +93,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
 | `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide"; a secret ask with none |
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
+| `ApproveAsk` | `cmd+enter` (`ctrl+enter` on Linux) or the Approve button, on a run ask's card: the ask named, and nothing of the command |
 | `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read |
 
@@ -328,6 +329,30 @@ is said so, with the command that answers in a terminal on the yard's
 machine: `yardr bead answer <bead> <ask> --secret`. One that was given can
 be given again from its card under "Decided", which replaces it.
 
+**A run ask** (`yardr bead ask --run`) proposes one yardr command that is
+the operator's to give, and approving it has the yard run that command. Its
+card has no options and no line for words. The asker's context lines each
+begin with who says them (`yardmaster says: …`) and are drawn as the text
+they are, with no block in them. Under them is the one block of the card,
+and all of it is the yard's: the command whole, in a code block that wraps
+where the window is narrower and is never cut; the yard's sentences for
+what the command changes and what is there now; and the command that takes
+the change back. Directly under the block is the Approve button, with its
+key: `cmd+enter` (`ctrl+enter` on Linux), which no other card answers to.
+Enter alone approves nothing. Approving calls `ApproveAsk`, which names the
+ask and nothing of the command: the yard runs what it stored. Afterwards
+the window says `approved, ran:` with the command and what it printed, or
+the yard's refusal whole, as when the yard has changed since the ask was
+written. When the call ends with no answer it says "the yard did not
+answer; read the card again", never that it was approved. A yard that does
+not have the call, or does not serve it to this window, has the card say so
+in place of the button, with the command that approves in a terminal on the
+yard's machine in a block that copies it: `yardr bead answer <bead> <ask>
+--approve`. `x` puts a run ask aside and `d` declines it with words, as on
+any card; one put aside can be approved from its card under "Decided". An
+approved one reads `approved, ran:` there, with the command and, under it,
+what it printed.
+
 | Key | Does |
 |---|---|
 | `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
@@ -346,6 +371,7 @@ be given again from its card under "Decided", which replaces it.
 | a click on "Decided" | folds it open, shut |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
 | `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |
+| `cmd+enter` (`ctrl+enter` on Linux), on a run ask's card | approves it: the yard runs the command the card shows. No other card answers to it, and Enter alone approves nothing |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | `x`, on an open card | puts the ask aside |
 | `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them. A secret ask is declined at once, with none |

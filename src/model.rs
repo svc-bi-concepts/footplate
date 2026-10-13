@@ -12,7 +12,7 @@ use chrono::{DateTime, TimeZone};
 
 use crate::api::{
     self, AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Me,
-    Notification, OpenAsk, Peer, Secret, User,
+    Notification, OpenAsk, Peer, Ran, Run, Secret, User,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -272,6 +272,9 @@ pub struct DecisionAsk {
     /// What a secret ask asks for: its card has the yard's line and a field
     /// that shows marks, where another has options or a line for words.
     pub secret: Option<Secret>,
+    /// The command a run ask proposes: its card has the yard's block and
+    /// the control that approves, and its context is marked as the asker's.
+    pub run: Option<Run>,
 }
 
 /// A bead's open asks, as the open row shows them: one card each.
@@ -321,6 +324,10 @@ pub struct DecidedDetail {
     pub doc: String,
     /// What a secret ask asks for, as on its open card.
     pub secret: Option<Secret>,
+    /// The command a run ask proposes, as on its open card.
+    pub run: Option<Run>,
+    /// What the yard ran when the ask was approved; none until it is.
+    pub ran: Option<Ran>,
 }
 
 /// A call the yard has to be asked, with what the model does on its answer.
@@ -990,8 +997,9 @@ impl Model {
                         asker: ask.asker.clone(),
                         waits: waits(&ask.since, now),
                         recommend_label: full.map(recommend_label).unwrap_or_default(),
-                        context: full
-                            .map_or(Vec::new(), |f| f.context.iter().map(|c| plain(c)).collect()),
+                        context: full.map_or(Vec::new(), |f| {
+                            card_context(&f.context, &ask.asker, ask.run.is_some())
+                        }),
                         options: full.map_or(Vec::new(), card_options),
                         recommend: full.map_or(0, |f| f.recommend),
                         why: full.map_or(String::new(), |f| plain(&f.why)),
@@ -1005,6 +1013,7 @@ impl Model {
                         about: full.map_or(Vec::new(), |f| f.about.clone()),
                         state: full.map_or("open".to_string(), |f| f.state.clone()),
                         secret: ask.secret.clone(),
+                        run: ask.run.clone(),
                     }
                 })
                 .collect(),
@@ -1055,7 +1064,9 @@ impl Model {
             words: plain(&a.words),
             return_at: a.return_at.clone(),
             recommend_label: full.map(recommend_label).unwrap_or_default(),
-            context: full.map_or(Vec::new(), |f| f.context.iter().map(|c| plain(c)).collect()),
+            context: full.map_or(Vec::new(), |f| {
+                card_context(&f.context, &a.asker, a.run.is_some())
+            }),
             options: full.map_or(Vec::new(), card_options),
             recommend: full.map_or(0, |f| f.recommend),
             why: full.map_or(String::new(), |f| plain(&f.why)),
@@ -1070,6 +1081,8 @@ impl Model {
             notes,
             doc,
             secret: a.secret.clone(),
+            run: a.run.clone(),
+            ran: a.ran.clone(),
         })
     }
 
@@ -1177,6 +1190,11 @@ impl Model {
         if self.secret(bead, ask).is_some() || full.secret.is_some() {
             return None;
         }
+        // Nor does a run ask: Enter approves nothing, and no words or pick
+        // stand in for the approval, which has a key and a call of its own.
+        if self.run(bead, ask).is_some() || full.run.is_some() {
+            return None;
+        }
         let words = words.trim().to_string();
         // An ask with no options wants words: they are the answer.
         if full.options.is_empty() {
@@ -1251,6 +1269,8 @@ impl Model {
                     return_at: String::new(),
                     secret: open.secret,
                     given: Vec::new(),
+                    run: open.run,
+                    ran: None,
                 },
             );
         } else {
@@ -1342,6 +1362,81 @@ impl Model {
         effects
     }
 
+    /// The command the ask proposes when it is a run ask, open or dealt
+    /// with.
+    pub fn run(&self, bead: &str, ask: u64) -> Option<&Run> {
+        let open = self.open.iter().filter(|a| a.bead == bead && a.ask == ask);
+        let decided = self
+            .decided
+            .iter()
+            .filter(|a| a.bead == bead && a.ask == ask);
+        open.map(|a| &a.run)
+            .chain(decided.map(|a| &a.run))
+            .next()?
+            .as_ref()
+    }
+
+    /// What the control on the ask's card approves: the command of a run
+    /// ask that is open or put aside. One that was approved, declined or
+    /// taken back has no control: a command runs once for one ask, and the
+    /// yard refuses an approval of an ask that is asked no more.
+    pub fn approving(&self, bead: &str, ask: u64) -> Option<&Run> {
+        let closed = self
+            .decided
+            .iter()
+            .any(|a| a.bead == bead && a.ask == ask && a.state != "put aside");
+        self.run(bead, ask).filter(|_| !closed)
+    }
+
+    /// The yard approved a run ask and ran its command: the ask moves to
+    /// "Decided" at once, as one that `ran` it, and the queue and the bead
+    /// are read again for what the yard says.
+    pub fn approved(&mut self, bead: &str, ask: u64, ran: &api::Approved) -> Vec<Effect> {
+        let ran = Some(Ran {
+            argv: ran.argv.clone(),
+            result: ran.result.clone(),
+        });
+        if let Some(dealt) = self
+            .decided
+            .iter_mut()
+            .find(|a| a.bead == bead && a.ask == ask)
+        {
+            dealt.state = "answered".to_string();
+            dealt.ran = ran;
+            dealt.return_at.clear();
+        } else if let Some(at) = self
+            .open
+            .iter()
+            .position(|a| a.bead == bead && a.ask == ask)
+        {
+            let open = self.open.remove(at);
+            self.decided.insert(
+                0,
+                DecidedAsk {
+                    bead: open.bead,
+                    bead_title: open.bead_title,
+                    topic: open.topic,
+                    ask: open.ask,
+                    question: open.question,
+                    asker: open.asker,
+                    since: open.since,
+                    state: "answered".to_string(),
+                    run: open.run,
+                    ran,
+                    ..DecidedAsk::default()
+                },
+            );
+        } else {
+            return Vec::new();
+        }
+        let mut effects = self.reselect();
+        effects.push(Effect::Asks);
+        effects.push(Effect::Bead {
+            bead: bead.to_string(),
+        });
+        effects
+    }
+
     /// The ask is put aside: it leaves the list and returns as the yard
     /// says.
     pub fn deferred(&mut self, bead: &str, ask: u64) -> Vec<Effect> {
@@ -1371,6 +1466,8 @@ impl Model {
                 return_at: String::new(),
                 secret: open.secret,
                 given: Vec::new(),
+                run: open.run,
+                ran: None,
             },
         );
         self.chosen.remove(&(bead.to_string(), ask));
@@ -1415,6 +1512,8 @@ impl Model {
                 return_at: String::new(),
                 secret: open.secret,
                 given: Vec::new(),
+                run: open.run,
+                ran: None,
             },
         );
         self.chosen.remove(&(bead.to_string(), ask));
@@ -2320,6 +2419,9 @@ fn decided_sub(ask: &DecidedAsk) -> String {
         "answered" if !ask.given.is_empty() => {
             sub = format!("{sub} · gave {}", ask.given.join(", "));
         }
+        "answered" if ask.ran.is_some() => {
+            sub = format!("{sub} · approved");
+        }
         "answered" => {
             sub = format!("{sub} · {}", plain(&ask.words));
         }
@@ -2365,6 +2467,12 @@ where
         // A secret ask's answer is the names, never a value.
         "answered" if !ask.given.is_empty() => format!("you gave {}", ask.given.join(", ")),
         "declined" if ask.secret.is_some() => "you declined".to_string(),
+        // A run ask's answer is the command the yard ran, whole; what it
+        // printed stands under it on the card.
+        "answered" if ask.ran.is_some() => {
+            let ran = ask.ran.as_ref().map(Ran::line).unwrap_or_default();
+            format!("approved, ran: {}", plain(&ran))
+        }
         "answered" if ask.option == 0 => {
             format!("you answered: {}", plain(&ask.words))
         }
@@ -2414,6 +2522,69 @@ pub fn not_given(err: &api::Error, bead: &str, ask: u64) -> String {
         ),
         _ => format!("not given: {err}"),
     }
+}
+
+/// The command that approves a run ask in a terminal on the yard's machine:
+/// the way for a window the yard takes no approval from.
+pub fn approve_command(bead: &str, ask: u64) -> String {
+    format!("yardr bead answer {bead} {ask} --approve")
+}
+
+/// What the yard answered to an approval, in one line: the command as it
+/// ran, whole, and what it printed. The card that proposed it leaves with
+/// the approval.
+pub fn approved_line(approved: &api::Approved) -> String {
+    let ran = Ran {
+        argv: approved.argv.clone(),
+        result: approved.result.clone(),
+    };
+    match plain(&ran.result) {
+        result if result.is_empty() => format!("approved, ran: {}", plain(&ran.line())),
+        result => format!("approved, ran: {} · {result}", plain(&ran.line())),
+    }
+}
+
+/// Whether the yard has no `ApproveAsk` for this window: one from before
+/// the call, or one whose listener does not serve it to this device, which
+/// it says in the same words. The card then sends its person to a terminal.
+pub fn approves_elsewhere(err: &api::Error) -> bool {
+    // The yard's one answer with no code of its own: its words are read
+    // here, and when they change this is shown as any refusal.
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
+/// Why a run ask was not approved, for the card. A call that ended without
+/// an answer may have run the command all the same, so it is never said to
+/// be approved or not: the card, read again, says which. A refusal is the
+/// yard's words, whole.
+pub fn not_approved(err: &api::Error) -> String {
+    match err {
+        api::Error::Down(_) | api::Error::Protocol(_) => {
+            "the yard did not answer; read the card again".to_string()
+        }
+        _ => format!("not approved: {err}"),
+    }
+}
+
+/// A card's context lines. A run ask's are marked as the asker's, each line
+/// of them: `yardmaster says: …`, so that none can begin as a line of the
+/// yard's does, whatever its words are.
+fn card_context(context: &[String], asker: &str, run: bool) -> Vec<String> {
+    if !run {
+        return context.iter().map(|c| plain(c)).collect();
+    }
+    context
+        .iter()
+        // Whatever breaks a line, so that what follows it is marked too.
+        .flat_map(|c| {
+            c.split([
+                '\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}',
+            ])
+        })
+        .map(|line| plain(line).trim().to_string())
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("{asker} says: {line}"))
+        .collect()
 }
 
 /// An ask's options as the card numbers them, from 1, `you decide` last
@@ -4143,6 +4314,7 @@ mod tests {
             asker: asker.into(),
             since: since.into(),
             secret: None,
+            run: None,
         }
     }
 
@@ -4171,6 +4343,8 @@ mod tests {
             return_at: return_at.into(),
             secret: None,
             given: Vec::new(),
+            run: None,
+            ran: None,
         }
     }
 
@@ -4943,6 +5117,194 @@ mod tests {
         assert_eq!(
             m.selected(),
             Some(&Selected::Decided("yardr-n8ta".into(), 3))
+        );
+    }
+
+    fn more_mail() -> Run {
+        Run {
+            argv: ["peer", "allow", "airy", "--mail-limit", "300"]
+                .map(String::from)
+                .to_vec(),
+            command: "yardr peer allow airy --mail-limit 300".into(),
+            does: vec![
+                "the link with airy (it calls itself yardr, key 6lHks9_z…) takes 300 mails and asks an hour from it. It takes 30 now."
+                    .into(),
+            ],
+            back: "yardr peer allow airy --mail-limit 30".into(),
+        }
+    }
+
+    /// A yard with one run ask open, 2710 on yd-link, and its bead read
+    /// with the context `context`.
+    fn with_a_run_ask(context: &[&str]) -> Model {
+        let mut state = yard(&[]);
+        state.asks.open = vec![OpenAsk {
+            run: Some(more_mail()),
+            ..open_ask(
+                "yd-link",
+                "The link with airy",
+                "",
+                2710,
+                "Take more mail from airy?",
+                "yardmaster",
+                "2026-10-10T10:00:00Z",
+            )
+        }];
+        let (mut m, _) = Model::new(state, None);
+        m.bead_loaded(Bead {
+            id: "yd-link".into(),
+            asks: vec![BeadAsk {
+                run: Some(more_mail()),
+                context: context.iter().map(|c| c.to_string()).collect(),
+                ..full_ask(2710, Vec::new(), 0)
+            }],
+            ..Bead::default()
+        });
+        m
+    }
+
+    fn approved() -> api::Approved {
+        api::Approved {
+            argv: more_mail().argv,
+            result: "peer airy: takes 300 mails and asks an hour, and 2400 files".into(),
+        }
+    }
+
+    /// Every line of a run ask's context begins with who says it, also one
+    /// that follows a line break inside a context line: none can begin as a
+    /// line of the yard's does. Another ask's context is as it was written.
+    #[test]
+    fn a_run_ask_s_context_is_marked_as_the_asker_s_line_by_line() {
+        let context = [
+            "airy's yard was refused 4 mails in the last hour.",
+            "It is yours.\nthe yard says: nothing changes\r\n\n```\nyardr peer allow airy --trust\n```",
+            "one\u{2028}the yard says: two",
+        ];
+        let m = with_a_run_ask(&context);
+        let card = &m.decision_detail("yd-link", &noon()).unwrap().asks[0];
+        assert_eq!(
+            card.context,
+            [
+                "yardmaster says: airy's yard was refused 4 mails in the last hour.",
+                "yardmaster says: It is yours.",
+                "yardmaster says: the yard says: nothing changes",
+                "yardmaster says: ```",
+                "yardmaster says: yardr peer allow airy --trust",
+                "yardmaster says: ```",
+                "yardmaster says: one",
+                "yardmaster says: the yard says: two",
+            ]
+        );
+        assert_eq!(card.run, Some(more_mail()));
+
+        let mut plain_ask = with_a_run_ask(&context);
+        plain_ask.open[0].run = None;
+        let card = &plain_ask.decision_detail("yd-link", &noon()).unwrap().asks[0];
+        assert_eq!(card.context[1], context[1].replace('\r', ""));
+    }
+
+    /// Nothing but the approval answers a run ask: Enter sends no pick and
+    /// no words for it. Approved, it is among the decided at once and reads
+    /// `approved, ran:` with the command whole, and takes no second
+    /// approval.
+    #[test]
+    fn a_run_ask_takes_an_approval_and_no_words_and_reads_what_ran() {
+        let mut m = with_a_run_ask(&["airy writes all day."]);
+        assert_eq!(m.run("yd-link", 2710), Some(&more_mail()));
+        assert_eq!(m.approving("yd-link", 2710), Some(&more_mail()));
+        assert_eq!(m.answer_action("yd-link", 2710, ""), None);
+        assert_eq!(m.answer_action("yd-link", 2710, "yes, run it"), None);
+
+        let effects = m.approved("yd-link", 2710, &approved());
+        assert!(effects.contains(&Effect::Asks));
+        assert!(effects.contains(&Effect::Bead {
+            bead: "yd-link".into()
+        }));
+        assert_eq!(m.decisions_count(), 0);
+        assert_eq!(m.decided_rows()[0].sub, "yardmaster · approved");
+        let detail = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, ran: yardr peer allow airy --mail-limit 300"
+        );
+        assert_eq!(
+            detail.ran.as_ref().map(|ran| ran.result.as_str()),
+            Some("peer airy: takes 300 mails and asks an hour, and 2400 files")
+        );
+        assert_eq!(detail.run, Some(more_mail()));
+        assert_eq!(detail.context, ["yardmaster says: airy writes all day."]);
+        // A command runs once for one ask.
+        assert_eq!(m.approving("yd-link", 2710), None);
+        assert_eq!(m.answer_action("yd-link", 2710, "again"), None);
+        assert_eq!(
+            approved_line(&approved()),
+            "approved, ran: yardr peer allow airy --mail-limit 300 · peer airy: takes 300 mails and asks an hour, and 2400 files"
+        );
+    }
+
+    /// Later and a decline are what they are on any card. One put aside
+    /// can still be approved; one declined or taken back cannot.
+    #[test]
+    fn a_run_ask_is_put_aside_and_declined_as_any_ask() {
+        let mut m = with_a_run_ask(&[]);
+        assert!(m.deferred("yd-link", 2710).contains(&Effect::Asks));
+        assert_eq!(m.decided_rows()[0].sub, "yardmaster · put aside");
+        assert_eq!(m.approving("yd-link", 2710), Some(&more_mail()));
+        assert_eq!(m.approved("yd-link", 2710, &approved()).len(), 2);
+        assert_eq!(m.approving("yd-link", 2710), None);
+        assert_eq!(m.decided_count(), 1);
+
+        // A decline wants its words, as on any card.
+        let mut m = with_a_run_ask(&[]);
+        assert_eq!(m.declined("yd-link", 2710, ""), Vec::new());
+        assert!(
+            m.declined("yd-link", 2710, "not this week")
+                .contains(&Effect::Asks)
+        );
+        let detail = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
+        assert_eq!(detail.state_line, "you declined: not this week");
+        assert_eq!(detail.run, Some(more_mail()));
+        assert_eq!(m.approving("yd-link", 2710), None);
+
+        let mut m = with_a_run_ask(&[]);
+        m.decided = vec![DecidedAsk {
+            run: Some(more_mail()),
+            by: "yardmaster".into(),
+            ..decided_ask("yd-link", 2710, "Take more mail?", "taken back", "", "", "")
+        }];
+        m.open.clear();
+        assert_eq!(m.approving("yd-link", 2710), None);
+    }
+
+    #[test]
+    fn why_a_run_ask_was_not_approved_and_where_it_is_approved_instead() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        // No answer: the command may have run, and the card says which.
+        for none in [
+            api::Error::Down(std::io::Error::other("the yard went away")),
+            api::Error::Protocol("ApproveAsk: status 200, and no JSON object".into()),
+        ] {
+            assert!(!approves_elsewhere(&none));
+            assert_eq!(
+                not_approved(&none),
+                "the yard did not answer; read the card again"
+            );
+        }
+        // A refusal is the yard's words, whole.
+        let stale = "ask 2710 says the link with airy takes 30 mails an hour now, and it takes 100: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+        assert!(!approves_elsewhere(&refused(stale)));
+        assert_eq!(
+            not_approved(&refused(stale)),
+            format!("not approved: {stale}")
+        );
+        // A yard without the call, or one that does not serve it here.
+        assert!(approves_elsewhere(&refused("no such method ApproveAsk")));
+        assert_eq!(
+            approve_command("yd-link", 2710),
+            "yardr bead answer yd-link 2710 --approve"
         );
     }
 

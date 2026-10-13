@@ -176,6 +176,12 @@ impl Selection {
             .map(|(_, block)| block)
     }
 
+    /// How many copy controls are drawn, in every text.
+    #[cfg(test)]
+    pub fn chip_count(&self) -> usize {
+        self.chips.iter().map(|(_, chips)| chips.len()).sum()
+    }
+
     /// Where the copy controls of the text `key` were last drawn, by
     /// block.
     #[cfg(test)]

@@ -339,6 +339,72 @@ pub struct Given {
     pub next: String,
 }
 
+/// The command a run ask proposes: one yardr command of the yard's fixed
+/// list, which the yard runs as its operator when the ask is approved with
+/// `ApproveAsk`. All of it is the yard's, written from its own records when
+/// the ask was, and none of it the asker's. Such an ask has no options and
+/// takes no words.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Run {
+    /// The command as the yard parsed it, without the leading `yardr`.
+    #[serde(default, deserialize_with = "or_default")]
+    pub argv: Vec<String>,
+    /// The command whole, as it is typed in a terminal: shown as it is,
+    /// never cut.
+    #[serde(default)]
+    pub command: String,
+    /// The yard's sentences for what the command changes and what is there
+    /// now.
+    #[serde(default, deserialize_with = "or_default")]
+    pub does: Vec<String>,
+    /// The command that takes the change back.
+    #[serde(default)]
+    pub back: String,
+}
+
+impl Run {
+    /// The command whole. A yard that sent the words alone has them put
+    /// together as it does itself.
+    pub fn line(&self) -> String {
+        if self.command.is_empty() {
+            command_line(&self.argv)
+        } else {
+            self.command.clone()
+        }
+    }
+}
+
+/// What an approved run ask ran: the command, and what it prints at a
+/// terminal.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Ran {
+    #[serde(default, deserialize_with = "or_default")]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub result: String,
+}
+
+impl Ran {
+    /// The command that ran, whole.
+    pub fn line(&self) -> String {
+        command_line(&self.argv)
+    }
+}
+
+/// A command of the yard's as it is typed in a terminal, from its words.
+fn command_line(argv: &[String]) -> String {
+    format!("yardr {}", argv.join(" "))
+}
+
+/// What `ApproveAsk` answers: the command as it ran, and what it printed.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Approved {
+    #[serde(default, deserialize_with = "or_default")]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub result: String,
+}
+
 /// One open question addressed to the user, as the queue lists it: the
 /// question in plain words, without its options or context, which the card
 /// reads with `Bead`.
@@ -363,6 +429,9 @@ pub struct OpenAsk {
     /// What a secret ask asks for; absent on any other ask.
     #[serde(default)]
     pub secret: Option<Secret>,
+    /// The command a run ask proposes; absent on any other ask.
+    #[serde(default)]
+    pub run: Option<Run>,
 }
 
 /// One that is open no more: answered, put aside or declined by the user,
@@ -408,6 +477,12 @@ pub struct DecidedAsk {
     /// The names a secret ask was given values for.
     #[serde(default, deserialize_with = "or_default")]
     pub given: Vec<String>,
+    /// The command a run ask proposes; absent on any other ask.
+    #[serde(default)]
+    pub run: Option<Run>,
+    /// What the yard ran when a run ask was approved; none until it is.
+    #[serde(default)]
+    pub ran: Option<Ran>,
 }
 
 /// The person's decisions: the open asks, oldest first, with what they
@@ -484,6 +559,12 @@ pub struct BeadAsk {
     /// The names a secret ask was given values for; none until it is given.
     #[serde(default, deserialize_with = "or_default")]
     pub given: Vec<String>,
+    /// The command a run ask proposes; absent on any other ask.
+    #[serde(default)]
+    pub run: Option<Run>,
+    /// What the yard ran when a run ask was approved; none until it is.
+    #[serde(default)]
+    pub ran: Option<Ran>,
 }
 
 /// One of the bead's notes as a client shows them: every note but the
@@ -1106,6 +1187,24 @@ impl Client {
         )
     }
 
+    /// Approves a run ask: the yard runs the command the ask holds, as its
+    /// operator, and answers the command as it ran with what it printed.
+    /// The call names the ask and nothing of the command: the yard runs
+    /// what it stored, never what a client sends.
+    pub fn approve_ask(&self, bead: &str, ask: u64, actor: &str) -> Result<Approved> {
+        // The one call whose arguments go in two forms. The yard's listener
+        // takes every call's by name and no other way. Its socket takes
+        // them by name only for the calls its API page names, and this one
+        // is on that page only once the listener serves it: until then the
+        // socket takes them in their order, which it takes of every call.
+        let args = if self.is_remote() {
+            json!({ "bead": bead, "ask": ask, "actor": actor })
+        } else {
+            json!([bead, ask, actor])
+        };
+        self.answer("ApproveAsk", args)
+    }
+
     /// Puts the ask aside: it leaves the queue and comes back as the yard
     /// says.
     pub fn defer_ask(&self, bead: &str, ask: u64, actor: &str) -> Result<()> {
@@ -1638,6 +1737,122 @@ mod tests {
             assert!(matches!(err, Error::Protocol(_)), "{way}: {err:?}");
             without(&err);
         }
+    }
+
+    /// A run ask is approved in its own call, which names the ask and
+    /// nothing of the command: in their order on the socket, by name at an
+    /// address, as the yard takes them on each.
+    #[test]
+    fn a_run_ask_is_approved_by_the_socket_and_at_an_address() {
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            let client = yard.client();
+            let way = client.place();
+            let approve = || client.approve_ask("yd-link", 2710, "jo");
+            // A yard that does not have the call, or does not serve it to
+            // this window, says so as of any method.
+            let err = approve().unwrap_err();
+            assert_eq!(err.to_string(), "no such method ApproveAsk", "{way}");
+            // One that has it answers the command as it ran and its result.
+            yard.answer(
+                "ApproveAsk",
+                r#"{"result": {"bead": "yd-link", "ask": 2710, "asker": "yardmaster",
+                    "argv": ["peer", "allow", "airy", "--mail-limit", "300"],
+                    "does": ["the link with airy takes 300 mails and asks an hour from it. It takes 30 now."],
+                    "result": "peer airy: takes 300 mails and asks an hour, and 2400 files"}}"#,
+            );
+            let approved = approve().unwrap();
+            assert_eq!(
+                approved.argv,
+                ["peer", "allow", "airy", "--mail-limit", "300"],
+                "{way}"
+            );
+            assert_eq!(
+                approved.result, "peer airy: takes 300 mails and asks an hour, and 2400 files",
+                "{way}"
+            );
+            let sent = yard.asked("ApproveAsk").last().cloned();
+            if client.is_remote() {
+                assert_eq!(
+                    sent,
+                    Some(json!({"bead": "yd-link", "ask": 2710, "actor": "jo"})),
+                    "{way}"
+                );
+            } else {
+                assert_eq!(sent, Some(json!(["yd-link", 2710, "jo"])), "{way}");
+            }
+            // The yard says no, in its words, whole.
+            let refusal = "ask 2710 says the link with airy takes 30 mails an hour now, and it takes 100: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+            yard.answer(
+                "ApproveAsk",
+                &json!({"error": {"code": "error", "message": refusal}}).to_string(),
+            );
+            assert_eq!(approve().unwrap_err().to_string(), refusal, "{way}");
+            // The yard went away over the call: no reply, and no word on
+            // whether the command ran.
+            yard.answer_nothing("ApproveAsk");
+            let err = approve().unwrap_err();
+            assert!(
+                matches!(err, Error::Down(_) | Error::Protocol(_)),
+                "{way}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_ask_in_the_queue_and_on_the_bead() {
+        let yard = Yard::start();
+        let run = json!({"argv": ["peer", "allow", "airy", "--mail-limit", "300"],
+            "command": "yardr peer allow airy --mail-limit 300",
+            "does": ["the link with airy takes 300 mails and asks an hour from it. It takes 30 now."],
+            "back": "yardr peer allow airy --mail-limit 30"});
+        let ran = json!({"argv": ["peer", "allow", "airy", "--mail-limit", "300"],
+            "result": "peer airy: takes 300 mails and asks an hour, and 2400 files"});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {
+                "open": [{"bead": "yd-link", "ask": 18, "question": "Take more mail from airy?",
+                          "asker": "yardmaster", "run": run}],
+                "decided": [{"bead": "yd-link", "ask": 17, "question": "Take more mail from airy?",
+                             "asker": "yardmaster", "state": "answered", "run": run, "ran": ran},
+                            {"bead": "yd-link", "ask": 16, "question": "Move them now?",
+                             "asker": "yardmaster", "state": "answered", "option": 1}]
+            }})
+            .to_string(),
+        );
+        let asks = yard.client().user_asks("jo").unwrap();
+        let asked = asks.open[0].run.as_ref().unwrap();
+        assert_eq!(asked.line(), "yardr peer allow airy --mail-limit 300");
+        assert_eq!(asked.does.len(), 1);
+        assert_eq!(asked.back, "yardr peer allow airy --mail-limit 30");
+        assert_eq!(asks.decided[0].run.as_ref(), Some(asked));
+        let did = asks.decided[0].ran.as_ref().unwrap();
+        assert_eq!(did.line(), "yardr peer allow airy --mail-limit 300");
+        assert!(did.result.starts_with("peer airy: takes 300 mails"));
+        // Any other ask has neither.
+        assert_eq!((&asks.decided[1].run, &asks.decided[1].ran), (&None, &None));
+        // The words alone are put together as the yard does it.
+        let words = Run {
+            argv: asked.argv.clone(),
+            ..Run::default()
+        };
+        assert_eq!(words.line(), asked.line());
+
+        yard.answer(
+            "Bead",
+            &json!({"result": {"id": "yd-link", "asks": [
+                {"ask": 18, "question": "Take more mail from airy?", "options": [],
+                 "state": "open", "run": run},
+                {"ask": 17, "question": "Take more mail from airy?", "options": [],
+                 "state": "answered", "run": run, "ran": ran},
+                {"ask": 16, "question": "Move them now?", "state": "answered", "option": 1}
+            ]}})
+            .to_string(),
+        );
+        let bead = yard.client().bead("yd-link").unwrap();
+        assert_eq!(bead.asks[0].run.as_ref(), Some(asked));
+        assert_eq!(bead.asks[0].ran, None);
+        assert_eq!(bead.asks[1].ran.as_ref(), Some(did));
+        assert_eq!(bead.asks[2].run, None);
     }
 
     #[test]
