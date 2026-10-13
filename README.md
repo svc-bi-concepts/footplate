@@ -372,6 +372,8 @@ are read there, in this order:
 The public half of the key releases are signed with is built into footplate
 (`KEY` in `src/fetch.rs`), and the signature is verified in footplate's own
 process, with the `minisign-verify` crate: no program is started for it.
+That key is yardr's makers', id `0ECCFE6E81F150B3`, and the one key
+footplate trusts: a new key means a new footplate.
 The archive is taken for yardr's because its SHA-256 is in the checksums
 that key signed. Its name is made from the version `latest.json` names, so
 an older release, whose signature is as good as it ever was, cannot be
@@ -779,8 +781,9 @@ handshake with a site of the internet.
 The fetch of yardr is tested against a stand-in for the site, a port of this
 machine, with a release the tests make and sign with a key of their own:
 the good path and each refusal. One signature in them was made by the
-`minisign` program itself, since that is what signs a release. They ask
-yardr.dev nothing.
+`minisign` program itself, since that is what signs a release. The built-in
+key is held to the checksums and signature v0.10.0 published, kept in
+`src/fixtures/yardr-v0.10.0`. They ask yardr.dev nothing.
 
 ## Licence
 

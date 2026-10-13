@@ -41,10 +41,11 @@ use crate::api::{self, Address};
 pub const SITE: &str = "https://yardr.dev";
 
 /// The public half of the minisign key yardr's releases are signed with,
-/// as the second line of its `.pub` file has it. Empty until that key is
-/// published (yardr bead yardr-4zbx): a footplate built without it fetches
-/// nothing and says so.
-const KEY: &str = "";
+/// as the second line of its `.pub` file has it: the key of yardr's
+/// makers, id 0ECCFE6E81F150B3, made on 13 Oct 2026, and v0.10.0 is the
+/// first release it signed. Nothing can replace it in a footplate that is
+/// built: a new key means a new footplate.
+const KEY: &str = "RWSzUPGBbv7MDqH+nnbNmYdOm20UTkuk7eC5e6XuVtYRwZtaEZRlV/WB";
 
 /// The oldest yardr this footplate takes. A release below it is refused
 /// though its signature is good: every release ever signed stays signed,
@@ -1448,14 +1449,55 @@ mod tests {
         assert!(target_of(env::consts::OS, env::consts::ARCH).is_some());
     }
 
-    /// What is built in: the one host, over TLS, and a key that is a key
-    /// once it is filled in.
+    /// What is built in: the one host, over TLS, and a key that is a key.
     #[test]
     fn the_site_is_yardr_dev_over_tls_and_a_built_in_key_is_a_key() {
         let site = Address::parse(SITE).unwrap();
         assert_eq!(site.to_string(), "https://yardr.dev");
-        assert!(KEY.is_empty() || PublicKey::from_base64(KEY).is_ok());
+        assert!(PublicKey::from_base64(KEY).is_ok());
         assert!(LOWEST >= Version(0, 10, 0));
+    }
+
+    /// The built-in key is the one releases are signed with, and no typo
+    /// of it: v0.10.0's checksums and their signature, as that release
+    /// published them (src/fixtures/yardr-v0.10.0), are that key's by the
+    /// function the fetch asks. The files are read into the test when it
+    /// is built, so it asks yardr.dev nothing.
+    #[test]
+    fn the_built_in_key_signed_the_checksums_of_v0_10_0() {
+        let checksums: &[u8] = include_bytes!("fixtures/yardr-v0.10.0/checksums.txt");
+        let signature: &[u8] = include_bytes!("fixtures/yardr-v0.10.0/checksums.txt.minisig");
+        let key = PublicKey::from_base64(KEY).unwrap();
+
+        signed(&key, checksums, signature).unwrap();
+        // The archive for a system is found in them as the fetch finds it.
+        let name = Version(0, 10, 0).archive("darwin_arm64");
+        assert_eq!(
+            listed(checksums, &name).unwrap(),
+            "531771e558a7cab5986adc53da6bcc3b9fe48c6e519425d1f595c65b1e05698c"
+        );
+
+        // One byte of the checksums changed, their first and then the last
+        // of their last name; and one byte of what the signature says of
+        // them.
+        for at in [0, checksums.len() - 2] {
+            let mut changed = checksums.to_vec();
+            changed[at] ^= 1;
+            assert!(matches!(
+                signed(&key, &changed, signature),
+                Err(Refusal::BadSignature)
+            ));
+        }
+        let at = signature
+            .windows(5)
+            .position(|bytes| bytes == b"file:")
+            .unwrap();
+        let mut changed = signature.to_vec();
+        changed[at] ^= 1;
+        assert!(matches!(
+            signed(&key, checksums, &changed),
+            Err(Refusal::BadSignature)
+        ));
     }
 
     /// A signature the minisign program itself made (0.12, `minisign -S`),
