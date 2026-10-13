@@ -4674,7 +4674,8 @@ mod tests {
             notification(12, "", "the release went out", false),
         ];
         let (mut m, _) = Model::new(state, None);
-        // Elsewhere than the open yard row it does nothing.
+        // Another open row is not the yard row.
+        m.select(Selected::Conversation("assembly".into()));
         assert_eq!(m.dismiss_all(), []);
         m.select(Selected::Yard);
         // One acknowledgement, through the newest unread.
