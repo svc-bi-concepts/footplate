@@ -800,7 +800,7 @@ pub struct LoginUnit {
     /// Whether the manager has it now.
     #[serde(default)]
     pub loaded: bool,
-    #[serde(default, rename = "Detail")]
+    #[serde(default)]
     pub detail: String,
     #[serde(default)]
     pub error: Option<String>,
@@ -1628,7 +1628,7 @@ mod tests {
                     {"part": "herdr", "result": "installed", "file": "/tmp/x", "loaded": true},
                     {"part": "daemon", "result": "found", "file": "/tmp/y", "loaded": true},
                     {"part": "web", "result": "left",
-                     "Detail": "the yard's web_addr setting is unset"}]}),
+                     "detail": "the yard's web_addr setting is unset"}]}),
         );
         let up = yardr.up_login().unwrap();
         assert!(up.up);
