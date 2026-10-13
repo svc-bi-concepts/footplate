@@ -706,6 +706,9 @@ pub struct Footplate {
     /// Which read of the queue a put-aside return waits for: an older
     /// timer does nothing when the queue was read since.
     ask_generation: u64,
+    /// The moment up to which the queue was read for put-aside returns: a
+    /// return at or before it does not read the queue again.
+    returns_read: Option<chrono::DateTime<chrono::Utc>>,
     /// The text size and the look, as they are drawn.
     settings: Settings,
     /// The file they are kept in, or none: then they last as long as the
@@ -882,6 +885,7 @@ impl Footplate {
             handle: window.window_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
             ask_generation: 0,
+            returns_read: None,
             settings: Settings::default(),
             kept: None,
             unkept: None,
@@ -1764,18 +1768,24 @@ impl Footplate {
 
     /// Reads the queue again when the next put-aside ask comes back, which
     /// arrives with no event. One timer waits at a time; a queue read
-    /// since replaces it.
+    /// since replaces it. The queue is read once for a return: a yard that
+    /// still lists the ask as put aside after its time is not asked again
+    /// for it, and what the stream brings says when it is back.
     fn schedule_return(&mut self, cx: &mut Context<Self>) {
         self.ask_generation += 1;
         let generation = self.ask_generation;
-        let Some(at) = self.model.as_ref().and_then(|m| m.next_return()) else {
+        let Some(at) = self
+            .model
+            .as_ref()
+            .and_then(|m| m.next_return(self.returns_read))
+        else {
             return;
         };
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(&at) else {
-            return;
-        };
-        let wait = at.timestamp() - chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now();
+        let wait = at.timestamp() - now.timestamp();
         if wait <= 0 {
+            // Every return up to now is read by this one read.
+            self.returns_read = Some(at.max(now));
             self.change(cx, |_| vec![Effect::Asks]);
             return;
         }
@@ -1784,6 +1794,7 @@ impl Footplate {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 if this.ask_generation == generation {
+                    this.returns_read = Some(at);
                     this.change(cx, |_| vec![Effect::Asks]);
                 }
             })
@@ -7514,7 +7525,9 @@ mod tests {
 
     /// Six dealt with on one bead, asked by mayor at 11:07: answered,
     /// answered with words, put aside, declined, left to the asker, and a
-    /// words answer. Ask 11's pick is `pick` with `label`.
+    /// words answer. Ask 11's pick is `pick` with `label`. The one put aside
+    /// returns in a year no run of the tests reaches: the window compares
+    /// that time with the clock.
     fn asks_decided(pick: u64, label: &str) -> String {
         json!({"result": {"open": [], "decided": [
             {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
@@ -7527,7 +7540,7 @@ mod tests {
             {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
              "ask": 13, "question": "Rebuild the index tonight?", "asker": "mayor",
              "since": "2026-10-12T11:07:00Z", "state": "put aside",
-             "return_at": "2026-10-13T09:30:00Z"},
+             "return_at": "2099-10-13T09:30:00Z"},
             {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
              "ask": 14, "question": "Take the release train?", "asker": "mayor",
              "since": "2026-10-12T11:07:00Z", "state": "declined", "words": "not mine"},
@@ -7585,6 +7598,45 @@ mod tests {
             ]
         }})
         .to_string()
+    }
+
+    /// A put-aside ask whose return is past while the yard still lists it as
+    /// put aside: the queue is read once more for it and no more. Read again
+    /// for every answer that still lists it, the window asked without end.
+    #[gpui::test]
+    fn a_return_that_is_past_reads_the_queue_once(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [
+                {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+                 "ask": 13, "question": "Rebuild the index tonight?", "asker": "mayor",
+                 "since": "2000-01-01T11:07:00Z", "state": "put aside",
+                 "return_at": "2000-01-02T09:30:00Z"}
+            ]}})
+            .to_string(),
+        );
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        // Once as the yard is opened, and once for the return that is past.
+        wait(cx, "the queue read for the return", |_| {
+            yard.asked("UserAsks").len() == 2
+        });
+        for _ in 0..20 {
+            cx.run_until_parked();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(yard.asked("UserAsks").len(), 2);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.model.as_ref().unwrap().decided_count(), 1);
+        });
     }
 
     #[gpui::test]

@@ -2316,12 +2316,19 @@ impl Model {
     }
 
     /// When a put-aside ask comes back next, if one waits: the window reads
-    /// the queue again then, since that return arrives with no event.
-    pub fn next_return(&self) -> Option<String> {
+    /// the queue again then, since that return arrives with no event. With
+    /// `after`, the returns up to that moment are left out: the window has
+    /// read the queue for them already.
+    pub fn next_return(
+        &self,
+        after: Option<DateTime<chrono::Utc>>,
+    ) -> Option<DateTime<chrono::Utc>> {
         self.decided
             .iter()
-            .filter(|a| a.state == "put aside" && !a.return_at.is_empty())
-            .map(|a| a.return_at.clone())
+            .filter(|a| a.state == "put aside")
+            .filter_map(|a| DateTime::parse_from_rfc3339(&a.return_at).ok())
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .filter(|at| after.is_none_or(|after| *at > after))
             .min()
     }
 
@@ -4621,10 +4628,21 @@ mod tests {
             decided_ask("c", 3, "Q?", "put aside", "", "", "2026-10-11T09:30:00Z"),
         ];
         let (m, _) = Model::new(state, None);
-        assert_eq!(m.next_return().as_deref(), Some("2026-10-11T09:30:00Z"));
+        let at = |at: &str| {
+            DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert_eq!(m.next_return(None), Some(at("2026-10-11T09:30:00Z")));
+        // The returns the queue was read for already are left out.
+        assert_eq!(
+            m.next_return(Some(at("2026-10-11T09:30:00Z"))),
+            Some(at("2026-10-12T09:30:00Z"))
+        );
+        assert_eq!(m.next_return(Some(at("2026-10-12T09:30:00Z"))), None);
 
         let (m, _) = Model::new(yard(&[]), None);
-        assert_eq!(m.next_return(), None);
+        assert_eq!(m.next_return(None), None);
     }
 
     #[test]
