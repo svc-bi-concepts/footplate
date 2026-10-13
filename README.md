@@ -172,6 +172,26 @@ the yard's server; any yardr command that reads the yard does
 (`yardr status`). When the server comes back, the conversation that was open
 is open again.
 
+Under those words the window offers the ways to a yard from there, and
+goes on trying the one that is away meanwhile:
+
+- **open a yard on this machine** asks for a name and a socket path. This
+  run's socket stands in the field: leave it, or change it for another
+  home's yard (`<its home>/.yardr/yard.sock`). There is no pairing.
+- **pair with a yard at an address** asks for a name, the address and the
+  code its operator reads you. This pairs footplate as a *device* of one
+  user of that yard, as "[A yard at an address](#a-yard-at-an-address)"
+  has it. It is not yardr's peer pairing, which links two yards to each
+  other and stays a command of the terminal.
+
+Both are the settings' own entries, "add a yard of this machine" and "add
+a yard at an address", in the same fields with the same rules: Enter or the
+button adds the yard to the settings' list and opens it, what keeps it out
+of the list is said under the fields, and Esc leaves them. The ways stand
+under any yard that is away, also one that no longer lets this device in,
+but not in a window of the one yard `FOOTPLATE_YARD` names, which has no
+list to add to. footplate creates no yard and starts none.
+
 ## A yard at an address
 
 The window shows one yard at a time, of the several its settings keep:
@@ -192,7 +212,7 @@ reached, and whether it is the open one, with "open", "pair again" and
 "remove" beside it. A file that names none has one: `this machine`, the
 yard at this run's socket. "add a yard of this machine" takes a name and a
 socket path, for another home's yard (`<its home>/.yardr/yard.sock`), and
-needs no pairing. That socket is trusted as that yard: footplate accepts
+needs no pairing; this run's socket stands in the field to begin with. That socket is trusted as that yard: footplate accepts
 what it says and sends there what you type for that entry, including secret
 answers. It uses no token for a socket. Drafts, ask words and approvals stay
 with their entry, so material typed for another yard does not go there.
