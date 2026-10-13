@@ -410,18 +410,28 @@ would become.
    yardr-xpf8's first step; the token is read from
    `FOOTPLATE_TOKEN_FILE` where it is set, else `yard.token` beside the
    settings, and a pairing in that window writes to the same file.
-   `FOOTPLATE_TOKEN_FILE` without `FOOTPLATE_YARD` names no yard and is
-   ignored, as today; pairing in the switcher writes each entry's own
-   resolved file and never the environment's. It costs the branches
-   that exist (`Env::address`, per-entry `token_file` with the
-   single-yard fallback). Option B, they go: every yard lives in the
-   settings, both variables are ignored, and a trial edits them; the
-   window with no home loses the fallback the no-home error names today
-   (`Env::open` in src/yard.rs:58-67). It costs every use that names a
-   yard for one run, and the tests that open a yard by environment. I
-   would take A: one run's window stays one run's, and the override
-   cannot silently lend one yard's token to another because it only
-   ever applies to the single yard it names.
+   Without `FOOTPLATE_YARD`, `FOOTPLATE_TOKEN_FILE` is ignored:
+   opening and pairing in the switcher use each entry's own resolved
+   file and never the environment's. This ignoring is a change from
+   today, where the override applies even when the address comes from
+   the settings (`Env::token_file` in src/yard.rs:47-52 is used for
+   the settings-chosen address in `Env::open`, 58-66, and for pairing
+   in src/window.rs:2618). A migrated remote entry whose token lived
+   only in that override path therefore opens as not paired ("pair
+   again") until it is paired once more, or the person names the old
+   path as the entry's absolute token file; the migration keeps
+   `yard.token` (3.1) and never copies the environment's path into the
+   settings. It costs the branches that exist (`Env::address`,
+   per-entry `token_file` with the single-yard fallback). Option B,
+   they go: every yard lives in the settings, both variables are
+   ignored, and a trial edits them; the window with no home loses the
+   fallback the no-home error names today (`Env::open` in
+   src/yard.rs:58-67). It costs every use that names a yard for one
+   run, and the tests that open a yard by environment. I would take A:
+   one run's window stays one run's, and the override cannot silently
+   lend one yard's token to another because it only ever applies to
+   the single yard it names; the one setup it breaks is named above
+   and is fixed by one pairing.
 3. **The order of the yards and which one opens at start.** Option A, the
    settings' order, opening the last-open yard (`open` in the settings),
    else the first entry, as proposed: the list is the person's order,
