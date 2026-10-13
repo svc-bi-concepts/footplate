@@ -11,12 +11,33 @@
 # and its two volumes when no shot is wanted again (the names are printed).
 set -e
 
+caller=$PWD
+out=${1:-/tmp/footplate-shot.png}
+case "$out" in
+    /*) ;;
+    *) out=$caller/$out ;;
+esac
 cd "$(dirname "$0")/.."
 root=$PWD
-out=${1:-/tmp/footplate-shot.png}
 size=${SHOT_SIZE:-1280x800}
+case "$size" in
+    *[!0-9x]*|x*|*x|*x*x*)
+        echo "shot-linux.sh: SHOT_SIZE must be WIDTHxHEIGHT using positive integers" >&2
+        exit 2
+        ;;
+esac
 width=${size%x*}
 height=${size#*x}
+case "$width" in *[1-9]*) ;; *)
+    echo "shot-linux.sh: SHOT_SIZE must be WIDTHxHEIGHT using positive integers" >&2
+    exit 2
+    ;;
+esac
+case "$height" in *[1-9]*) ;; *)
+    echo "shot-linux.sh: SHOT_SIZE must be WIDTHxHEIGHT using positive integers" >&2
+    exit 2
+    ;;
+esac
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "shot-linux.sh: docker is not on PATH" >&2
@@ -96,17 +117,8 @@ if ! docker exec "$name" sh -c '{ [ -f /tmp/shots/sway.pid ] && kill -0 "$(cat /
     sleep 5
 fi
 
-# The shot before this one's footplate, if it still runs, is stopped by pid:
-# the pidfile holds dbus-run-session's, and footplate is its child.
-docker exec "$name" sh -c 'if [ -f /tmp/shots/footplate.pid ]; then
-    pid=$(cat /tmp/shots/footplate.pid)
-    for d in /proc/[0-9]*; do
-        if [ "$(cut -d " " -f 4 "$d/stat" 2>/dev/null)" = "$pid" ] && grep -qa footplate "$d/cmdline" 2>/dev/null; then kill "${d#/proc}" 2>/dev/null || true; fi
-    done
-    kill "$pid" 2>/dev/null || true
-    rm -f /tmp/shots/footplate.pid
-    sleep 2
-fi' >&2
+# The pidfile holds dbus-run-session's PID. Stop its Footplate child first.
+docker exec "$name" sh /src/scripts/shot-linux-stop.sh /tmp/shots/footplate.pid >&2
 
 # The window opens against a throwaway home, as the README's "Trying the
 # setup without touching your yard" has it: nothing of this yard's socket or
