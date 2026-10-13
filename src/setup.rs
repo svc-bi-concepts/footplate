@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::fetch::Wanted;
+use crate::fetch::{Wanted, started};
 
 /// How long a command of yardr may take. Doctor asks the login shell, and
 /// `up` waits for three servers; none of them is near this.
@@ -98,13 +98,13 @@ impl Yardr {
     /// JSON it printed.
     pub fn run(&self, words: &[&str], names: &[&str]) -> Result<Ran, String> {
         let what = words.first().copied().unwrap_or_default();
-        let mut child = self
-            .command(words, names)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|err| format!("yardr could not be started ({err})."))?;
+        let mut child = started(
+            self.command(words, names)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|err| format!("yardr could not be started ({err})."))?;
         let out = child.stdout.take();
         let reading = thread::spawn(move || {
             let mut text = Vec::new();
@@ -672,13 +672,14 @@ pub struct Login {
 
 impl Login {
     pub fn start(yardr: &Yardr, kind: &str) -> Result<Login, String> {
-        let mut child = yardr
-            .command(&["harness", "login"], &[kind])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|err| format!("yardr could not be started ({err})."))?;
+        let mut child = started(
+            yardr
+                .command(&["harness", "login"], &[kind])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|err| format!("yardr could not be started ({err})."))?;
         let (tell, needs) = async_channel::unbounded();
         let out = child.stdout.take();
         thread::spawn(move || {

@@ -30,7 +30,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fmt, thread};
@@ -828,6 +828,24 @@ fn host_of(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
 }
 
+/// Starts `command`, a program that was written a moment ago. Linux
+/// refuses to start a file that anything still has open for writing, and
+/// a process started elsewhere at that moment holds every open file of
+/// this one until it has become its own program: the refusal passes by
+/// itself, so it is waited out, for a second at the most.
+pub fn started(command: &mut Command) -> io::Result<Child> {
+    let mut tries = 0;
+    loop {
+        match command.spawn() {
+            Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                thread::sleep(Duration::from_millis(50));
+            }
+            came => return came,
+        }
+    }
+}
+
 /// Runs a maker's installer with its arguments and gives the last of what
 /// it printed. It gets no shell and nothing on its input; one that does not
 /// end is stopped.
@@ -836,14 +854,15 @@ fn run_installer(installer: &Path, args: &[String], path: &OsStr) -> Result<Stri
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut child = Command::new(installer)
-        .args(args)
-        .env("PATH", path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("The installer of {name} could not be started ({err})."))?;
+    let mut child = started(
+        Command::new(installer)
+            .args(args)
+            .env("PATH", path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|err| format!("The installer of {name} could not be started ({err})."))?;
     let tail = |pipe: Option<Box<dyn Read + Send>>| {
         thread::spawn(move || {
             let mut text = Vec::new();
@@ -1289,6 +1308,23 @@ mod tests {
             fixture.current(),
             Err(Refusal::Answered { status: 503, .. })
         ));
+    }
+
+    /// A program that is still open for writing somewhere when it is
+    /// started, as one is on Linux while another process is on its way to
+    /// being its own program, is started once that has passed.
+    #[test]
+    fn a_program_written_a_moment_ago_is_started_once_nothing_writes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = keep(dir.path(), "script", b"#!/bin/sh\nexit 7\n").unwrap();
+        let open = OpenOptions::new().append(true).open(&script).unwrap();
+        let closing = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            drop(open);
+        });
+        let status = started(&mut Command::new(&script)).unwrap().wait().unwrap();
+        assert_eq!(status.code(), Some(7));
+        closing.join().unwrap();
     }
 
     /// What doctor names for a program on a Mac, on the tests' site.
