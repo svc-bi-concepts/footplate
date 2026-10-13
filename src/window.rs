@@ -2571,6 +2571,9 @@ impl Footplate {
                 div()
                     .flex()
                     .flex_col()
+                    // Resolve the available head width before measuring the
+                    // kept path, so truncate() can draw its ellipsis.
+                    .flex_1()
                     .min_w_0()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("settings"))
                     .child(
@@ -2578,6 +2581,7 @@ impl Footplate {
                             .text_sm()
                             .text_color(palette.faint)
                             .truncate()
+                            .debug_selector(|| "settings kept".to_string())
                             .child(kept),
                     ),
             )
@@ -6768,6 +6772,54 @@ mod tests {
             short.size.width, long.size.width,
             "the name's column hugs its content instead of filling the row"
         );
+    }
+
+    /// A kept path longer than the settings pane ends in an ellipsis
+    /// before the back button, with a gap between them, at the narrowest
+    /// window and at a wide one. The ellipsis itself is drawn by GPUI's
+    /// truncate(), which the test cannot read back; what it pins is why
+    /// the ellipsis appears. The kept path's column fills the head, so a
+    /// short path's column is as wide as a long path's. Sized to its
+    /// content instead, the path is measured full-width first, and
+    /// truncate() then cuts it hard, with no ellipsis.
+    #[gpui::test]
+    fn a_long_kept_path_ends_before_the_back_button_with_a_gap(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let long = dir
+            .path()
+            .join(format!("{}/settings.json", "long-".repeat(30)));
+        // Short enough to fit the head at the narrowest window, so its
+        // column hugs it there unless the column fills the head.
+        let short = std::path::PathBuf::from("s.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened_kept(&yard, &long, cx);
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+        assert!(settings_open(&view, cx));
+        // The narrowest window the application opens (main.rs), and a wide
+        // one: the path overflows the pane at both.
+        for (wide, high) in [(560., 360.), (1200., 800.)] {
+            cx.simulate_resize(gpui::size(px(wide), px(high)));
+            view.update(cx, |v, cx| {
+                v.kept = Some(long.clone());
+                cx.notify();
+            });
+            let kept = bounds_of(cx, "settings kept");
+            let back = bounds_of(cx, "settings back");
+            assert!(
+                kept.right() < back.left(),
+                "at {wide} px the long path touches the back button: {kept:?} {back:?}"
+            );
+            view.update(cx, |v, cx| {
+                v.kept = Some(short.clone());
+                cx.notify();
+            });
+            let brief = bounds_of(cx, "settings kept");
+            assert_eq!(
+                brief.size.width, kept.size.width,
+                "at {wide} px the kept path's column hugs its content instead of filling the head"
+            );
+        }
     }
 
     #[gpui::test]
