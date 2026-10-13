@@ -3,6 +3,7 @@
 //! there, or goes away, it says so and tries again every few seconds.
 
 use std::fmt;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -28,6 +29,53 @@ pub enum Update {
     /// It is there and does not let this device in: why, in words. The
     /// yard is not asked again; the thread has ended.
     Out(String),
+}
+
+#[derive(Default)]
+struct Following {
+    stopped: bool,
+    stream: Option<api::EventStop>,
+}
+
+/// Stops a yard follower, including an event stream blocked waiting for the
+/// next event. One is kept by the window for the currently open yard.
+#[derive(Clone, Default)]
+pub struct FollowControl(Arc<Mutex<Following>>);
+
+impl FollowControl {
+    pub fn stop(&self) {
+        let stream = {
+            let mut following = self.0.lock().unwrap();
+            following.stopped = true;
+            following.stream.take()
+        };
+        if let Some(stream) = stream {
+            stream.stop();
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.0.lock().unwrap().stopped
+    }
+
+    fn follow_stream(&self, stream: api::EventStop) {
+        let stop = {
+            let mut following = self.0.lock().unwrap();
+            if following.stopped {
+                Some(stream)
+            } else {
+                following.stream = Some(stream);
+                None
+            }
+        };
+        if let Some(stream) = stop {
+            stream.stop();
+        }
+    }
+
+    fn stream_ended(&self) {
+        self.0.lock().unwrap().stream = None;
+    }
 }
 
 /// Why there is nothing to show.
@@ -177,24 +225,49 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
 /// again, so nothing in between is lost; when that fails the window is told
 /// why, and the yard is tried again after `retry`. A yard that does not let
 /// the device in is not tried again: the window is told, and this returns.
-pub fn follow(client: &Client, name: &str, retry: Duration, mut tell: impl FnMut(Update) -> bool) {
+/// The handle stops the current stream from another thread, so switching
+/// yards does not leave an idle old yard's connection alive indefinitely.
+pub fn follow_with_control(
+    client: &Client,
+    name: &str,
+    retry: Duration,
+    control: FollowControl,
+    mut tell: impl FnMut(Update) -> bool,
+) {
     loop {
+        if control.stopped() {
+            return;
+        }
         let trouble = match load(client, name) {
             Ok(state) => {
                 let head = state.head;
                 if !tell(Update::Up(Box::new(state))) {
                     return;
                 }
+                if control.stopped() {
+                    return;
+                }
                 let mut heard = false;
-                if let Ok(events) = client.events(head) {
+                if let Ok(mut events) = client.events(head) {
+                    control.follow_stream(events.stop_handle());
                     // An event that cannot be read ends the stream as its
                     // end does: the state is read again.
-                    for event in events.map_while(Result::ok) {
-                        heard = true;
-                        if !tell(Update::Event(event)) {
-                            return;
+                    while !control.stopped() {
+                        match events.next() {
+                            Some(Ok(event)) => {
+                                heard = true;
+                                if !tell(Update::Event(event)) {
+                                    control.stream_ended();
+                                    return;
+                                }
+                            }
+                            Some(Err(_)) | None => break,
                         }
                     }
+                    control.stream_ended();
+                }
+                if control.stopped() {
+                    return;
                 }
                 // A stream that ended: a server that replaces itself is
                 // back in a moment, and the state is read again. One that
@@ -210,6 +283,9 @@ pub fn follow(client: &Client, name: &str, retry: Duration, mut tell: impl FnMut
             Err(trouble) => trouble.with(client).to_string(),
         };
         if !tell(Update::Down(trouble)) {
+            return;
+        }
+        if control.stopped() {
             return;
         }
         thread::sleep(retry);
@@ -365,9 +441,13 @@ mod tests {
             let client = yard.client();
             // The login name of this machine is nobody there.
             move || {
-                follow(&client, "mac-login", Duration::from_millis(20), |update| {
-                    tx.send(update).is_ok()
-                })
+                follow_with_control(
+                    &client,
+                    "mac-login",
+                    Duration::from_millis(20),
+                    FollowControl::default(),
+                    |update| tx.send(update).is_ok(),
+                )
             }
         });
         let wait = Duration::from_secs(10);
@@ -402,6 +482,40 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[test]
+    fn stopping_a_follower_closes_its_idle_stream() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let stop = FollowControl::default();
+        let cancel = stop.clone();
+        let (updates, received) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let follower = thread::spawn({
+            let client = yard.client();
+            move || {
+                follow_with_control(&client, "jo", Duration::from_secs(10), stop, |update| {
+                    updates.send(update).is_ok()
+                });
+                finished.send(()).unwrap();
+            }
+        });
+        assert!(matches!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Update::Up(_)
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while yard.streams_asked().is_empty() && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(!yard.streams_asked().is_empty(), "the event stream opened");
+
+        cancel.stop();
+
+        done.recv_timeout(Duration::from_secs(1))
+            .expect("stopping the follower ends its blocked read");
+        follower.join().unwrap();
+    }
+
     /// The yard's last device removed: it answers 404 then, to a token as
     /// to none. That is said as what it is, and asked again, since an
     /// address that is no yard's answers the same.
@@ -431,9 +545,13 @@ mod tests {
         yard.stop();
         let (tx, rx) = mpsc::channel();
         let follower = thread::spawn(move || {
-            follow(&client, "jo", Duration::from_millis(20), |update| {
-                tx.send(update).is_ok()
-            })
+            follow_with_control(
+                &client,
+                "jo",
+                Duration::from_millis(20),
+                FollowControl::default(),
+                |update| tx.send(update).is_ok(),
+            )
         });
         let wait = Duration::from_secs(10);
         for _ in 0..2 {
@@ -458,9 +576,13 @@ mod tests {
         let follower = thread::spawn({
             let client = Client::new(&socket);
             move || {
-                follow(&client, "jo", Duration::from_millis(20), |update| {
-                    tx.send(update).is_ok()
-                })
+                follow_with_control(
+                    &client,
+                    "jo",
+                    Duration::from_millis(20),
+                    FollowControl::default(),
+                    |update| tx.send(update).is_ok(),
+                )
             }
         });
         let wait = Duration::from_secs(10);

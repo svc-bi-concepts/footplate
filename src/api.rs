@@ -849,6 +849,41 @@ enum Conn {
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
+enum EventSocket {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+/// A handle that shuts down an event stream while its reader is blocked.
+/// Calls use their own connections and are not affected.
+#[derive(Clone)]
+pub struct EventStop(Arc<EventSocket>);
+
+impl EventStop {
+    pub fn stop(&self) {
+        use std::net::Shutdown;
+
+        match self.0.as_ref() {
+            EventSocket::Unix(socket) => {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+            EventSocket::Tcp(socket) => {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+        }
+    }
+}
+
+impl Conn {
+    fn event_stop(&self) -> io::Result<EventStop> {
+        Ok(EventStop(Arc::new(match self {
+            Conn::Unix(socket) => EventSocket::Unix(socket.try_clone()?),
+            Conn::Tcp(socket) => EventSocket::Tcp(socket.try_clone()?),
+            Conn::Tls(stream) => EventSocket::Tcp(stream.sock.try_clone()?),
+        })))
+    }
+}
+
 impl Read for Conn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -1355,8 +1390,10 @@ impl Client {
                 "the stream answered status {status}"
             )));
         }
+        let stop = body.conn.get_ref().event_stop()?;
         Ok(Events {
             lines: BufReader::new(body),
+            stop,
         })
     }
 
@@ -1435,6 +1472,13 @@ impl Client {
 /// The events of a stream, one a line, until it ends.
 pub struct Events {
     lines: BufReader<Body>,
+    stop: EventStop,
+}
+
+impl Events {
+    pub fn stop_handle(&self) -> EventStop {
+        self.stop.clone()
+    }
 }
 
 impl Iterator for Events {
@@ -1989,6 +2033,23 @@ mod tests {
             assert!(matches!(client.events(0), Err(Error::Down(_))), "{way}");
             assert!(matches!(client.blob(HASH), Err(Error::Down(_))), "{way}");
         }
+    }
+
+    #[test]
+    fn stopping_an_idle_event_stream_unblocks_its_reader() {
+        let yard = Yard::start();
+        let events = yard.client().events(0).unwrap();
+        let stop = events.stop_handle();
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = events.into_iter().next();
+            sent.send(()).unwrap();
+        });
+
+        stop.stop();
+
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        reader.join().unwrap();
     }
 
     #[test]

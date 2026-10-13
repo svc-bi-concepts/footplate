@@ -183,9 +183,20 @@ impl Drafts {
         std::mem::replace(&mut self.open, yard.to_string())
     }
 
-    /// Nothing is kept of `yard`: it is no longer among the window's.
-    pub fn forget(&mut self, yard: &str) {
-        self.yards.remove(yard);
+    /// Nothing is kept of `yard`: it is no longer among the window's. The
+    /// attachment ids let the window release their drawn image previews too.
+    pub fn forget(&mut self, yard: &str) -> Vec<u64> {
+        self.yards
+            .remove(yard)
+            .into_iter()
+            .flat_map(HashMap::into_values)
+            .flat_map(|draft| {
+                draft
+                    .attachments
+                    .into_iter()
+                    .map(|attachment| attachment.id)
+            })
+            .collect()
     }
 
     fn of(&self, with: &str) -> Option<&Draft> {
@@ -445,7 +456,7 @@ mod tests {
         assert_eq!(drafts.reasons("yardmaster"), ["too large"]);
         assert_eq!(drafts.take_text("yardmaster"), "For the mac.");
         // A yard that is removed from the list takes its drafts with it.
-        drafts.forget("plantime");
+        assert_eq!(drafts.forget("plantime"), [two]);
         drafts.turn_to("plantime");
         assert_eq!(drafts.attachments("yardmaster"), []);
         assert_eq!(drafts.take_text("yardmaster"), "");

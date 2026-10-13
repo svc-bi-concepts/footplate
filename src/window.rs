@@ -542,6 +542,14 @@ struct Counts {
     notices: usize,
 }
 
+/// What makes a yard entry the same yard while a call is away from the
+/// window. Its display name alone may be reused after the entry is removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum YardIdentity {
+    Listed(settings::Yard),
+    Environment(String, Option<PathBuf>),
+}
+
 impl Counts {
     fn of(model: &Model) -> Counts {
         Counts {
@@ -593,6 +601,9 @@ pub struct Footplate {
     /// takes its place, and the follower of the one before ends at its
     /// next word, which nobody hears: until then it holds its stream.
     following: Option<Task<()>>,
+    /// Stops that follower when the open yard changes, even while its
+    /// event stream has no new words to deliver.
+    following_stop: Option<session::FollowControl>,
     /// What the yard has, once it was read. It is kept while the yard is
     /// away, for the conversation that was open.
     model: Option<Model>,
@@ -820,6 +831,7 @@ impl Footplate {
             yard: String::new(),
             opening: 0,
             following: None,
+            following_stop: None,
             model: None,
             down: None,
             away: Away::Stopped,
@@ -994,6 +1006,9 @@ impl Footplate {
         self.yard = yard;
         self.opening += 1;
         self.switching = None;
+        if let Some(stop) = self.following_stop.take() {
+            stop.stop();
+        }
         self.following = None;
         self.model = None;
         self.said = None;
@@ -1020,10 +1035,12 @@ impl Footplate {
         // The yard is followed on a thread of its own, which blocks on the
         // socket; what it learns comes here.
         let (tell, told) = async_channel::unbounded::<Update>();
+        let stop = session::FollowControl::default();
+        self.following_stop = Some(stop.clone());
         let follower = thread::Builder::new().name("yard".into()).spawn({
             let (client, name) = (client.clone(), self.name.clone());
             move || {
-                session::follow(&client, &name, session::RETRY, |update| {
+                session::follow_with_control(&client, &name, session::RETRY, stop, |update| {
                     tell.send_blocking(update).is_ok()
                 })
             }
@@ -1953,6 +1970,16 @@ impl Footplate {
         Some((model.selected_conversation()?.to_string(), model.target()?))
     }
 
+    fn yard_identity(&self, name: &str) -> Option<YardIdentity> {
+        match &self.env.yard {
+            Some(address) => Some(YardIdentity::Environment(
+                address.clone(),
+                self.env.token_file.clone(),
+            )),
+            None => self.settings.yard(name).cloned().map(YardIdentity::Listed),
+        }
+    }
+
     /// Sends the draft of the open conversation as one mail: what is typed,
     /// and what is attached. A draft with a marked attachment is not sent.
     /// On a card Enter sends the pick with the line's words, or the words
@@ -1992,6 +2019,7 @@ impl Footplate {
             Target::Peer { name, peer } => format!("{name}@{peer}"),
         };
         let (yard, opening) = (self.yard.clone(), self.opening);
+        let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
             move |client, me| match post(client, me, &target, &text, &images) {
@@ -2016,6 +2044,12 @@ impl Footplate {
                     }
                     this.change(cx, |m| m.sent(&to))
                 }
+                Err(_) if this.yard_identity(&yard) != identity => this.notice(
+                    format!(
+                        "not sent to {at} in {yard}: that yard entry was removed or changed, so its draft was not restored"
+                    ),
+                    cx,
+                ),
                 Err(unsent) => this.unsent(&yard, &to, &at, unsent, cx),
             },
         );
@@ -2260,6 +2294,7 @@ impl Footplate {
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
         let (yard, opening) = (self.yard.clone(), self.opening);
+        let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
             move |client, me| client.answer_ask(&call_bead, ask, option, &call_words, me),
@@ -2271,6 +2306,14 @@ impl Footplate {
                 }
                 Err(err) => {
                     let said = ("not answered", err.to_string());
+                    if this.yard_identity(&yard) != identity {
+                        return this.notice(
+                            format!(
+                                "not answered in {yard}: that yard entry was removed or changed, so its words were not restored"
+                            ),
+                            cx,
+                        );
+                    }
                     this.words_back((&yard, opening), (bead, ask), words, said, cx);
                 }
             },
@@ -2284,6 +2327,7 @@ impl Footplate {
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
         let (yard, opening) = (self.yard.clone(), self.opening);
+        let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
             move |client, me| client.add_note(&call_bead, &call_words, me),
@@ -2294,6 +2338,14 @@ impl Footplate {
                 }
                 Err(err) => {
                     let said = ("not noted", err.to_string());
+                    if this.yard_identity(&yard) != identity {
+                        return this.notice(
+                            format!(
+                                "not noted in {yard}: that yard entry was removed or changed, so its words were not restored"
+                            ),
+                            cx,
+                        );
+                    }
                     this.words_back((&yard, opening), (bead, ask), words, said, cx);
                 }
             },
@@ -2329,6 +2381,7 @@ impl Footplate {
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
         let (yard, opening) = (self.yard.clone(), self.opening);
+        let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
             move |client, me| client.decline_ask(&call_bead, ask, &call_words, me),
@@ -2340,6 +2393,14 @@ impl Footplate {
                 }
                 Err(err) => {
                     let said = ("not declined", err.to_string());
+                    if this.yard_identity(&yard) != identity {
+                        return this.notice(
+                            format!(
+                                "not declined in {yard}: that yard entry was removed or changed, so its words were not restored"
+                            ),
+                            cx,
+                        );
+                    }
                     this.words_back((&yard, opening), (bead, ask), words, said, cx);
                 }
             },
@@ -2857,7 +2918,7 @@ impl Footplate {
     fn switch_to(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.switching = None;
         cx.notify();
-        if self.env.yard.is_some() || self.settings.yard(name).is_none() {
+        if self.pairing || self.env.yard.is_some() || self.settings.yard(name).is_none() {
             return;
         }
         window.focus(&self.line.focus_handle(cx));
@@ -2871,7 +2932,7 @@ impl Footplate {
     /// A yard is to be added in the settings: its fields are asked for,
     /// empty, with the focus in its name.
     fn add_yard(&mut self, far: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.env.yard.is_some() {
+        if self.pairing || self.env.yard.is_some() {
             return;
         }
         self.adding = Some(match far {
@@ -2890,6 +2951,9 @@ impl Footplate {
     /// settings, with a code to type for that yard's address. From where a
     /// yard said this device is not let in, it is the open one.
     fn pair_again(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pairing {
+            return;
+        }
         if !self.settings_open {
             self.toggle_settings(window, cx);
         }
@@ -2913,6 +2977,9 @@ impl Footplate {
     /// Adds the yard of this machine that is typed, and opens it. What
     /// keeps it out of the list is said, and nothing changed.
     fn add_near(&mut self, cx: &mut Context<Self>) {
+        if self.pairing {
+            return;
+        }
         let name = self.yard_name.read(cx).text().trim().to_string();
         let yard = settings::Yard::near(&name, self.socket.read(cx).text());
         cx.notify();
@@ -3029,8 +3096,36 @@ impl Footplate {
                         this.code.update(cx, |line, cx| line.set_text("", cx));
                         this.yard_said = Some(said);
                         this.shut_adding(cx);
-                        this.set(settings, cx);
-                        this.reopen(cx);
+                        // Pairing took place in the captured yard, but
+                        // ordinary settings (size, look, notifications)
+                        // may have changed while its answer was away.
+                        let next = match (&this.env.yard, &adding) {
+                            (Some(_), _) => Some(this.settings.clone()),
+                            (None, Adding::Far) => settings
+                                .yard(&settings.opened().name)
+                                .cloned()
+                                .and_then(|yard| {
+                                    let name = yard.name.clone();
+                                    this.settings
+                                        .clone()
+                                        .with_yard(None, yard, this.kept.as_deref())
+                                        .ok()
+                                        .map(|settings| settings.opening(&name))
+                                }),
+                            (None, Adding::Again(name)) => this
+                                .settings
+                                .yard(name)
+                                .map(|_| this.settings.clone().opening(name)),
+                            (None, Adding::Near) => None,
+                        };
+                        if let Some(settings) = next {
+                            this.set(settings, cx);
+                            this.reopen(cx);
+                        } else {
+                            this.yard_said = Some(
+                                "The yard paired this device, but its settings entry is no longer there. Add it again or remove the device at the yard: yardr user device rm <user> <device>".to_string(),
+                            );
+                        }
                     }
                     Err(why) => this.yard_said = Some(why),
                 }
@@ -3058,7 +3153,7 @@ impl Footplate {
     /// device is removed at the yard: taking it off here does not. Where
     /// it was the open one, the first of the list is opened.
     fn remove_yard(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.env.yard.is_some() {
+        if self.pairing || self.env.yard.is_some() {
             return;
         }
         // Who the device is there is known of the open yard alone.
@@ -3082,7 +3177,9 @@ impl Footplate {
         // The last yard removed leaves this machine's, which may be the
         // one that was to go: then it is still there, with what is its.
         if self.settings.yard(name).is_none() {
-            self.drafts.forget(name);
+            for id in self.drafts.forget(name) {
+                self.thumbs.remove(&id);
+            }
             self.kept_words.remove(name);
             self.counts.remove(name);
         }
@@ -5287,6 +5384,14 @@ impl Footplate {
             );
         }
         out
+    }
+}
+
+impl Drop for Footplate {
+    fn drop(&mut self) {
+        if let Some(stop) = self.following_stop.take() {
+            stop.stop();
+        }
     }
 }
 
@@ -9893,6 +9998,78 @@ mod tests {
         assert_eq!(attached(&view, cx), []);
     }
 
+    #[gpui::test]
+    fn a_failed_send_is_not_restored_to_a_new_yard_that_reuses_its_name(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let old = Yard::start_tcp();
+        a_far_yard_of_jo(&old);
+        old.answer(
+            "Mail",
+            r#"{"error": {"code": "error", "message": "mail refused"}}"#,
+        );
+        let replacement = Yard::start_tcp();
+        a_far_yard_of_jo(&replacement);
+        replacement.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [{"seq": 32, "from": "yardmaster", "to": "jo", "text": "From the replacement.", "read": false}], "unread": 1, "last": 32, "from": ["yardmaster"]}}"#,
+        );
+        replacement.answer(
+            "Conversation",
+            r#"{"result": [{"seq": 32, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "From the replacement.", "read": false}]}"#,
+        );
+        let token = dir.path().join("footplate/yard-far.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let settings = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::far("far", old.address(), "yard-far.token"),
+                Some(&file),
+            )
+            .unwrap()
+            .opening("far");
+        settings.write(&file).unwrap();
+        let env = Env::default();
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the original yard", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+
+        // Queue a failed send through the old client, then replace that
+        // settings entry under the same display name before its answer is
+        // handled by the window.
+        view.update(cx, |v, cx| {
+            assert!(v.open().is_some());
+            v.line
+                .update(cx, |line, cx| line.set_text("private to old far", cx));
+            v.send(cx);
+            let (without, _) = v.settings.clone().without("far", Some(&file));
+            yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+            let replacement = without
+                .with_yard(
+                    None,
+                    settings::Yard::far("far", replacement.address(), "yard-far.token"),
+                    Some(&file),
+                )
+                .unwrap()
+                .opening("far");
+            v.set(replacement, cx);
+            v.reopen(cx);
+        });
+
+        wait(cx, "the replacement yard", |cx| {
+            texts(&view, cx) == ["From the replacement."]
+        });
+        wait(cx, "the old send refusal", |cx| {
+            notice(&view, cx).starts_with(
+                "not sent to yardmaster in far: that yard entry was removed or changed",
+            )
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(old.asked("Mail").len(), 1);
+        assert!(replacement.asked("Mail").is_empty());
+    }
+
     /// The words of an answer that is on its way when another yard is
     /// opened, and that its yard refuses, are back with the ask they were
     /// typed for, in its own yard: never in the line of the open one.
@@ -10091,6 +10268,47 @@ mod tests {
             [settings::Yard::near(settings::HERE, "")]
         );
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+    }
+
+    #[gpui::test]
+    fn pairing_keeps_settings_changed_while_the_code_is_away(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        far.pair("K7QM-2XPD");
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "add far");
+        type_in(&view, cx, "far", far.address(), "K7QM-2XPD");
+
+        // Pairing runs away from the window. A settings change made before
+        // its answer must be kept with the new yard.
+        view.update(cx, |v, cx| {
+            v.pair(cx);
+            v.set(
+                Settings {
+                    text: 16,
+                    ..v.settings.clone()
+                },
+                cx,
+            );
+        });
+        wait(cx, "the paired yard", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(Settings::read(&file).text, 16);
+        assert_eq!(Settings::read(&file).opened().name, "far");
+        assert_eq!(far.devices().len(), 2);
     }
 
     /// `FOOTPLATE_YARD` and `FOOTPLATE_TOKEN_FILE` name the one yard of a
