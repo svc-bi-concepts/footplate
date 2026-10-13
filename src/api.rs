@@ -735,15 +735,26 @@ impl Address {
         let (host, port) = match authority.strip_prefix('[') {
             // "[::1]:8790"
             Some(v6) => {
-                let (host, port) = v6.split_once(']').ok_or_else(no_host)?;
-                (host, port.strip_prefix(':'))
+                let (host, suffix) = v6.split_once(']').ok_or_else(no_host)?;
+                if host.parse::<std::net::Ipv6Addr>().is_err() {
+                    return Err(no_host());
+                }
+                let port = match suffix {
+                    "" => None,
+                    suffix if suffix.starts_with(':') => Some(&suffix[1..]),
+                    _ => return Err(no_host()),
+                };
+                (host, port)
             }
             None => match authority.rsplit_once(':') {
                 Some((host, port)) => (host, Some(port)),
                 None => (authority, None),
             },
         };
-        if host.is_empty() || host.contains(':') && !authority.starts_with('[') {
+        if host.is_empty()
+            || host.contains(':') && !authority.starts_with('[')
+            || !authority.starts_with('[') && (host.contains('[') || host.contains(']'))
+        {
             return Err(no_host());
         }
         let port = match port {
@@ -1715,6 +1726,9 @@ mod tests {
             "https://mac.example.net:99999",
             "https://::1",
             "https://[::1",
+            "https://[::1]junk",
+            "https://[localhost]",
+            "http://[::1]junk",
             "https://jo@mac.example.net",
             "https://mac.example.net/?a=b",
             "https://mac.example.net#K7QM-2XPD",
