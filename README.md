@@ -318,7 +318,10 @@ leaves the field and nothing is sent. `d` declines with no words. The value
 is typed in that field and held nowhere else in the window: not in a
 draft, a setting, a notice or the clipboard, and it is gone when the card
 is left. Afterwards the card says the yard's words, which hold the names
-and the file and never the value. When the call ends with no answer it
+and the file and never the value. Where the ask was for a person's own
+address in a source that tells them (`--for-user`), they end with the
+yard's line of what is left to do: the command that tells that person
+through the source. When the call ends with no answer it
 says "the yard did not answer. The value may be written. Give it again.",
 never that it was sent. A yard that does not serve the call to this window
 is said so, with the command that answers in a terminal on the yard's

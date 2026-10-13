@@ -332,6 +332,11 @@ pub struct Given {
     /// What the credential still wants, in words; absent when it is whole.
     #[serde(default)]
     pub missing: String,
+    /// What is left to do with what was given, in one line of the yard's:
+    /// the command that tells a person through the source their own
+    /// address was given for. Absent when nothing is; shown as it is.
+    #[serde(default)]
+    pub next: String,
 }
 
 /// One open question addressed to the user, as the queue lists it: the
@@ -1598,6 +1603,7 @@ mod tests {
             assert_eq!(given.file, "/home/jo/.yardr/sources/books.env", "{way}");
             assert!(given.credential.starts_with("BOOKS_TOKEN is set in"));
             assert_eq!(given.missing, "", "{way}");
+            assert_eq!(given.next, "", "{way}");
             assert_eq!(
                 yard.asked("GiveSecret").last(),
                 Some(&json!({"bead": "yd-crm", "ask": 18,

@@ -2369,14 +2369,20 @@ where
 
 /// What the yard answered to a secret that was given, in one line: the
 /// names, and the yard's words for where the source's credential is set
-/// now or what it still wants.
+/// now or what it still wants. It ends with what the yard says is left to
+/// do, where it says so: the card that named it leaves with the giving.
 pub fn given_line(given: &api::Given) -> String {
     let state = [&given.credential, &given.missing]
         .into_iter()
         .find(|words| !words.is_empty())
         .cloned()
         .unwrap_or_else(|| format!("written to {}", given.file));
-    format!("gave {} · {state}", given.given.join(", "))
+    let mut line = format!("gave {} · {state}", given.given.join(", "));
+    if !given.next.is_empty() {
+        line.push_str(" · ");
+        line.push_str(&given.next);
+    }
+    line
 }
 
 /// Why a secret was not given, for the card. A call that ended without an
@@ -5129,11 +5135,20 @@ mod tests {
             file: "/home/jo/.yardr/sources/crm.env".into(),
             credential: "CRM_TOKEN is set in /home/jo/.yardr/sources/crm.env".into(),
             missing: String::new(),
+            next: String::new(),
         };
         assert_eq!(
             given_line(&given),
             "gave CRM_TOKEN, CRM_UPDATE_TOKEN · CRM_TOKEN is set in /home/jo/.yardr/sources/crm.env"
         );
+        // What the yard says is left to do ends the line, whatever is
+        // before it.
+        given.next = "yardr user set ada notify=crm tells ada through it".into();
+        assert_eq!(
+            given_line(&given),
+            "gave CRM_TOKEN, CRM_UPDATE_TOKEN · CRM_TOKEN is set in /home/jo/.yardr/sources/crm.env · yardr user set ada notify=crm tells ada through it"
+        );
+        given.next.clear();
         given.credential.clear();
         given.missing = "env_file /home/jo/.yardr/sources/crm.env does not set CRM_TOKEN".into();
         assert!(

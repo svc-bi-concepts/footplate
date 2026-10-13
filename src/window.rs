@@ -8656,6 +8656,16 @@ mod tests {
             socket: yard.socket().to_path_buf(),
             ..Env::default()
         };
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// The window at `at`, a yard whose one open ask is on bead-s, with
+    /// that ask's card open and read.
+    fn opened_on_the_ask<'a>(
+        at: Env,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
         let (view, cx) = opened_at(at, file, cx);
         wait(cx, "the decision", |cx| {
             view.read_with(cx, |v, _| {
@@ -8886,6 +8896,134 @@ mod tests {
                 assert!(!asked.contains(VALUE), "{call}: {asked}");
             }
         }
+    }
+
+    /// What the yard says an ask for a person's own address in a notify
+    /// source asks for.
+    const ADDRESS_LINE: &str = "a secret: PUSHOVER_USER, ada's own address in the source pushover (https://api.pushover.net); ada is told through pushover once it is given and yardr user set ada notify=pushover is run";
+
+    /// The ask 7 on bead-s for ada's own address in the source pushover,
+    /// as the queue lists it and as the bead has it.
+    fn an_address_ask(state: &str, given: &[&str]) -> (Value, String) {
+        let secret = json!({"source": "pushover", "env": ["PUSHOVER_USER"],
+                            "user": "ada", "line": ADDRESS_LINE});
+        let mut queued = queued_secret(&["PUSHOVER_USER"], 7, state, given);
+        queued["secret"] = secret.clone();
+        let mut bead: Value = serde_json::from_str(&bead_secret(&["PUSHOVER_USER"], &[7])).unwrap();
+        bead["result"]["asks"][0]["secret"] = secret;
+        (queued, bead.to_string())
+    }
+
+    /// An ask for a person's own address in a notify source is a secret
+    /// ask as any other: the yard's line whole, which names the person and
+    /// the command that tells them, and the field that shows marks. The
+    /// card leaves with the giving, so the notice ends with what the yard
+    /// says is left to do.
+    #[gpui::test]
+    fn an_address_given_ends_with_what_the_yard_says_is_next(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (queued, bead) = an_address_ask("", &[]);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued], "decided": []}}).to_string(),
+        );
+        yard.answer("Bead", &bead);
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_on_the_ask(at, &file, cx);
+
+        assert!(drawn(cx, ADDRESS_LINE));
+        assert!(drawn(cx, "secret bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+        assert_eq!(
+            secret_field(&view, cx).2,
+            "PUSHOVER_USER for the source pushover"
+        );
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        let (typed_in, shown, _) = secret_field(&view, cx);
+        assert_eq!(
+            (typed_in.as_str(), shown),
+            (VALUE, "\u{2022}".repeat(VALUE.len()))
+        );
+
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [
+                an_address_ask("answered", &["PUSHOVER_USER"]).0
+            ]}})
+            .to_string(),
+        );
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["PUSHOVER_USER"], "file": "/home/jo/.yardr/sources/pushover.env",
+                "user": "ada",
+                "credential": "PUSHOVER_USER is set in /home/jo/.yardr/sources/pushover.env",
+                "next": "yardr user set ada notify=pushover tells ada through it"}}"#,
+        );
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "given, and what is next", |cx| {
+            notice(&view, cx)
+                == "gave PUSHOVER_USER · PUSHOVER_USER is set in /home/jo/.yardr/sources/pushover.env · yardr user set ada notify=pushover tells ada through it"
+        });
+        assert_eq!(
+            yard.asked("GiveSecret"),
+            [
+                json!({"bead": "bead-s", "ask": 7, "values": {"PUSHOVER_USER": VALUE}, "actor": "jo"})
+            ]
+        );
+        let kept = kept_outside_the_field(&view, cx, dir.path());
+        assert!(!kept.contains(VALUE), "{kept}");
+    }
+
+    /// At its listener the yard takes a secret from the device of a user
+    /// who is not the operator only for that user's own address. For a
+    /// source's ask it answers such a device as a yard without the call
+    /// does, and the card sends its person to a terminal.
+    #[gpui::test]
+    fn a_device_the_yard_takes_no_secret_from_is_sent_to_a_terminal(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("mac.token");
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        far.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_secret(&["BOOKS_TOKEN"], 7, "", &[])], "decided": []}})
+                .to_string(),
+        );
+        far.answer("Bead", &bead_secret(&["BOOKS_TOKEN"], &[7]));
+        let at = Env {
+            yard: Some(far.address().to_string()),
+            token_file: Some(token),
+            socket: dir.path().join("no.sock"),
+        };
+        let (view, cx) = opened_on_the_ask(at, &file, cx);
+        assert!(drawn(cx, BOOKS_LINE));
+        assert!(drawn(cx, "secret bead-s 7"));
+
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "the yard that takes none from this device", |cx| {
+            notice(&view, cx)
+                == "this yard takes no secret from footplate. Answer in a terminal on the yard's machine: yardr bead answer bead-s 7 --secret"
+        });
+        assert_eq!(
+            far.asked("GiveSecret"),
+            [json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})]
+        );
+        assert!(far.last_request().contains("/user/call/"));
+        let kept = kept_outside_the_field(&view, cx, dir.path());
+        assert!(!kept.contains(VALUE), "{kept}");
     }
 
     /// An ask of two names takes one after the other and sends them
