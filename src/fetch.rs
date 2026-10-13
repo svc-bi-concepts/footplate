@@ -23,12 +23,12 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::{env, fmt};
 
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
 use minisign_verify::{PublicKey, Signature};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -129,7 +129,7 @@ impl fmt::Display for Refusal {
             ),
             Refusal::Answered { site, path, status } => write!(
                 f,
-                "{site} has no {path} (it answered {status}), so yardr was not fetched."
+                "{site} did not serve {path} directly (status {status}), so yardr was not fetched."
             ),
             Refusal::Unreadable { what, why } => {
                 write!(f, "footplate cannot read {what}: {why}. yardr was not fetched.")
@@ -452,15 +452,21 @@ pub fn member(archive: &[u8], name: &str, beside: &[&str], most: u64) -> Result<
     const BLOCK: usize = 512;
     const CUT: &str = "it ends in the middle of a file";
     let mut tar = Vec::new();
-    GzDecoder::new(archive)
-        .take(most.saturating_add(1))
-        .read_to_end(&mut tar)
-        .map_err(|err| format!("it is no gzipped archive ({err})"))?;
+    let mut compressed = Cursor::new(archive);
+    {
+        GzDecoder::new(&mut compressed)
+            .take(most.saturating_add(1))
+            .read_to_end(&mut tar)
+            .map_err(|err| format!("it is no gzipped archive ({err})"))?;
+    }
     if tar.len() as u64 > most {
         return Err(format!(
             "it unpacks to more than {} MB",
             most / (1024 * 1024)
         ));
+    }
+    if compressed.position() != archive.len() as u64 {
+        return Err("something follows its gzipped archive".into());
     }
     // A number of a tar's header: octal digits, ended by a space or a NUL.
     let number = |field: &[u8]| {
@@ -549,6 +555,21 @@ pub fn member(archive: &[u8], name: &str, beside: &[&str], most: u64) -> Result<
 /// whole beside its place and then moved there, so that what is at the
 /// path is always a whole program: the one that was there, or this one.
 pub fn keep(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    // `name` comes from the program's data for the shared fetch mechanism.
+    // Keep it one filename so a caller cannot make this helper write beyond
+    // the directory it was given.
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the program name must be one file name",
+        ));
+    }
     fs::create_dir_all(dir)?;
     let path = dir.join(name);
     let part = dir.join(format!(".{name}.part"));
@@ -1251,6 +1272,11 @@ mod tests {
         trailed.extend([0u8; 1024]);
         trailed.extend(tar_member("extra", b'0', b"x"));
         assert!(refused(&gzip(&trailed)).contains("follows its end"));
+        // The compressed stream itself must also end with the archive; a
+        // valid tar followed by unrelated bytes is not a whole release.
+        let mut compressed_trailing = gzip(&whole);
+        compressed_trailing.extend_from_slice(b"extra");
+        assert!(refused(&compressed_trailing).contains("follows its gzipped archive"));
         // A header whose sum is wrong.
         let mut wrong = whole.clone();
         wrong[0] = b'Y';
@@ -1278,6 +1304,19 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"the new one");
         assert_eq!(fs::read(&elsewhere).unwrap(), b"not to be touched");
         assert!(!dir.join(".yardr.part").exists());
+    }
+
+    #[test]
+    fn keeping_refuses_a_name_that_leaves_its_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("bin");
+
+        for name in ["../yardr", "subdir/yardr", "subdir\\yardr", ".", "..", ""] {
+            let error = keep(&dir, name, b"not written").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
+        assert!(!home.path().join("yardr").exists());
+        assert!(!dir.exists());
     }
 
     #[test]
