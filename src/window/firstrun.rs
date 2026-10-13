@@ -355,15 +355,37 @@ impl FirstRun {
             return;
         };
         let host = wanted.url.split('/').nth(2).unwrap_or_default().to_string();
+        let fetching = format!("fetching {program} {} from {host}…", wanted.version);
+        let installing = format!("installing {program}…");
+        let (send, progress) = async_channel::bounded(1);
         self.work(
-            &format!("fetching {program} {} from {host}…", wanted.version),
-            move || fetch::program(&wanted, &home, &own, &yardr.path),
+            &fetching,
+            move || fetch::program_with_progress(&wanted, &home, &own, &yardr.path, Some(send)),
             |this, fetched, cx| match fetched {
                 Ok(()) => this.check(cx),
                 Err(why) => this.said = Some(why),
             },
             cx,
         );
+        cx.spawn(async move |this, cx| {
+            while let Ok(line) = progress.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        let is_installing = this.busy.as_deref().is_some_and(|busy| {
+                            busy.starts_with("fetching ") || busy.starts_with(&installing)
+                        });
+                        if is_installing {
+                            this.busy = Some(format!("{installing} {line}"));
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Opens a page on the web: an `https://` address and nothing else.

@@ -731,7 +731,20 @@ const INSTALLER: Duration = Duration::from_secs(15 * 60);
 /// whose programs these are: the place must be under it. An installer is
 /// kept for its run in `own`, a directory of footplate's ([`dir`]), and
 /// run with `path` for its PATH, with no shell and nothing to read.
+#[cfg(test)]
 pub fn program(wanted: &Wanted, home: &Path, own: &Path, path: &OsStr) -> Result<(), String> {
+    program_with_progress(wanted, home, own, path, None)
+}
+
+/// As [`program`], sending the maker installer's output as it runs when
+/// `progress` is there. The first run shows these lines in its busy state.
+pub fn program_with_progress(
+    wanted: &Wanted,
+    home: &Path,
+    own: &Path,
+    path: &OsStr,
+    progress: Option<async_channel::Sender<String>>,
+) -> Result<(), String> {
     let place = &wanted.path;
     let name = place
         .file_name()
@@ -814,7 +827,7 @@ pub fn program(wanted: &Wanted, home: &Path, own: &Path, path: &OsStr) -> Result
         .map_err(|err| cannot(&aside, err))?;
     let ran = keep(&aside, name, &program)
         .map_err(|err| cannot(&aside, err))
-        .and_then(|installer| run_installer(&installer, &wanted.run, path));
+        .and_then(|installer| run_installer(&installer, &wanted.run, path, progress));
     let _ = fs::remove_dir_all(&aside);
     let said = ran?;
     match fs::symlink_metadata(place).is_ok() {
@@ -853,7 +866,12 @@ pub fn started(command: &mut Command) -> io::Result<Child> {
 /// Runs a maker's installer with its arguments and gives the last of what
 /// it printed. It gets no shell and nothing on its input; one that does not
 /// end is stopped.
-fn run_installer(installer: &Path, args: &[String], path: &OsStr) -> Result<String, String> {
+fn run_installer(
+    installer: &Path,
+    args: &[String],
+    path: &OsStr,
+    progress: Option<async_channel::Sender<String>>,
+) -> Result<String, String> {
     let name = installer
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -867,17 +885,46 @@ fn run_installer(installer: &Path, args: &[String], path: &OsStr) -> Result<Stri
             .stderr(Stdio::piped()),
     )
     .map_err(|err| format!("The installer of {name} could not be started ({err})."))?;
-    let tail = |pipe: Option<Box<dyn Read + Send>>| {
+    let tail = |pipe: Option<Box<dyn Read + Send>>,
+                progress: Option<async_channel::Sender<String>>| {
         thread::spawn(move || {
             let mut text = Vec::new();
-            if let Some(pipe) = pipe {
-                let _ = pipe.take(1024 * 1024).read_to_end(&mut text);
+            if let Some(mut pipe) = pipe {
+                let mut chunk = [0; 4096];
+                let mut line = Vec::new();
+                loop {
+                    let n = match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    let keep = (1024 * 1024usize).saturating_sub(text.len()).min(n);
+                    text.extend_from_slice(&chunk[..keep]);
+                    if let Some(progress) = &progress {
+                        for byte in &chunk[..n] {
+                            if matches!(*byte, b'\n' | b'\r') {
+                                send_progress(progress, &line);
+                                line.clear();
+                            } else if line.len() < 4096 {
+                                line.push(*byte);
+                            }
+                        }
+                    }
+                }
+                if let Some(progress) = &progress {
+                    send_progress(progress, &line);
+                }
             }
             String::from_utf8_lossy(&text).into_owned()
         })
     };
-    let out = tail(child.stdout.take().map(|pipe| Box::new(pipe) as _));
-    let err = tail(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+    let out = tail(
+        child.stdout.take().map(|pipe| Box::new(pipe) as _),
+        progress.clone(),
+    );
+    let err = tail(
+        child.stderr.take().map(|pipe| Box::new(pipe) as _),
+        progress,
+    );
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -909,6 +956,21 @@ fn run_installer(installer: &Path, args: &[String], path: &OsStr) -> Result<Stri
         false => Err(format!(
             "The installer of {name} failed ({status}). It said: {last}"
         )),
+    }
+}
+
+/// Sends one line of vendor output without ANSI escapes or other controls,
+/// and with a short cap for the setup screen.
+fn send_progress(progress: &async_channel::Sender<String>, line: &[u8]) {
+    let line: String = String::from_utf8_lossy(line)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(240)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if !line.is_empty() {
+        let _ = progress.send_blocking(line);
     }
 }
 
@@ -1489,6 +1551,38 @@ mod tests {
             why.ends_with("is not there. It said: nothing to do"),
             "{why}"
         );
+    }
+
+    #[test]
+    fn a_maker_s_installer_reports_progress_before_it_ends() {
+        let site = Site::start();
+        let home = tempfile::tempdir().unwrap();
+        let place = home.path().join(".local/bin/claude");
+        let installer = format!(
+            "#!/bin/sh\necho vendor progress\nsleep 1\nmkdir -p {dir}\nprintf done > {place}\n",
+            dir = place.parent().unwrap().display(),
+            place = place.display()
+        );
+        site.put("/claude", &installer);
+        let mut claude = wanted(&site, "/claude", installer.as_bytes(), &place);
+        claude.run = vec!["install".to_string()];
+
+        let home_path = home.path().to_path_buf();
+        let own = home.path().join("own");
+        let (send, progress) = async_channel::bounded(1);
+        let installer = thread::spawn(move || {
+            program_with_progress(
+                &claude,
+                &home_path,
+                &own,
+                OsStr::new("/usr/bin:/bin"),
+                Some(send),
+            )
+        });
+        assert_eq!(progress.recv_blocking().unwrap(), "vendor progress");
+        assert!(!place.exists(), "the installer has not finished yet");
+        installer.join().unwrap().unwrap();
+        assert_eq!(fs::read_to_string(place).unwrap(), "done");
     }
 
     #[test]
