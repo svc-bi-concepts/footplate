@@ -1821,6 +1821,11 @@ impl Model {
 
     /// Opens a row of the list: a bead, one dealt with, a conversation, the
     /// yard row. A row that is not there changes nothing.
+    /// Whether the yard has the row `sel` to open.
+    pub fn has_row(&self, sel: &Selected) -> bool {
+        self.order().contains(sel)
+    }
+
     pub fn select(&mut self, sel: Selected) -> Vec<Effect> {
         if !self.order().contains(&sel) {
             return Vec::new();

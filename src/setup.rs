@@ -1,0 +1,1320 @@
+//! The first run of a yard on this machine, as the commands of yardr that
+//! make it: what the window's screens (window/firstrun.rs) ask is put to
+//! the yardr that was fetched (fetch.rs), and what yardr answers is read as
+//! JSON. docs/setup.md of the yardr repository, "For a program that drives
+//! the first run", is the list this follows.
+//!
+//! Every program here is started by its whole path or its plain name with
+//! its arguments, never through a shell, with nothing on its input but
+//! what a login is answered with. What a child finds on its PATH is data:
+//! the PATH footplate was started with, and after it the directories
+//! `yardr doctor --json` names, where the person's login shell finds a
+//! program (`login_shell_path`) and where one is fetched to (`fetch`). The
+//! one login shell in all of it is doctor's own.
+
+use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::fetch::Wanted;
+
+/// How long a command of yardr may take. Doctor asks the login shell, and
+/// `up` waits for three servers; none of them is near this.
+const LONGEST: Duration = Duration::from_secs(5 * 60);
+
+/// The most that is read of what a command prints.
+const MOST: u64 = 4 * 1024 * 1024;
+
+/// The yardr that is run: the fetched one, by its whole path, on the yard
+/// whose home this is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Yardr {
+    pub program: PathBuf,
+    /// The yard's directory, which every command is told (`--home`).
+    pub home: PathBuf,
+    /// The PATH of what is started.
+    pub path: OsString,
+    /// Who the commands act as, once the person said their name: the
+    /// yard's operator, whatever the login is called.
+    pub actor: Option<String>,
+}
+
+/// What a command of yardr came to: its exit status, and the one JSON
+/// value it printed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ran {
+    pub status: i32,
+    pub json: Value,
+}
+
+impl Ran {
+    /// The command's own words for why it did not do what was asked.
+    fn error(&self) -> Option<String> {
+        self.json
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// The answer of a command that either did what was asked or says why
+    /// not.
+    fn done(self, what: &str) -> Result<Value, String> {
+        match (self.status, self.error()) {
+            (0, None) => Ok(self.json),
+            (_, Some(error)) => Err(error),
+            (status, None) => Err(format!("yardr {what} ended with status {status}.")),
+        }
+    }
+}
+
+impl Yardr {
+    /// The command line of `words` (a command and its flags) with `names`
+    /// after them: what a flag could be taken for stands behind `--`, so a
+    /// title that starts with a dash is a title.
+    fn command(&self, words: &[&str], names: &[&str]) -> Command {
+        let mut command = Command::new(&self.program);
+        command
+            .args(words)
+            .arg("--json")
+            .arg("--home")
+            .arg(&self.home);
+        if let Some(actor) = &self.actor {
+            command.arg(format!("--actor={actor}"));
+        }
+        if !names.is_empty() {
+            command.arg("--").args(names);
+        }
+        command.env("PATH", &self.path);
+        command
+    }
+
+    /// Runs one command to its end, with nothing to read, and reads the
+    /// JSON it printed.
+    pub fn run(&self, words: &[&str], names: &[&str]) -> Result<Ran, String> {
+        let what = words.first().copied().unwrap_or_default();
+        let mut child = self
+            .command(words, names)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("yardr could not be started ({err})."))?;
+        let out = child.stdout.take();
+        let reading = thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(out) = out {
+                let _ = out.take(MOST).read_to_end(&mut text);
+            }
+            text
+        });
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() > LONGEST => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "yardr {what} did not end in {} minutes, and was stopped.",
+                        LONGEST.as_secs() / 60
+                    ));
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(20)),
+                Err(err) => return Err(format!("yardr {what} was lost ({err}).")),
+            }
+        };
+        let text = reading.join().unwrap_or_default();
+        let json = serde_json::from_slice(&text).map_err(|_| {
+            format!(
+                "yardr {what} answered what footplate cannot read (status {}).",
+                status.code().unwrap_or(-1)
+            )
+        })?;
+        Ok(Ran {
+            status: status.code().unwrap_or(-1),
+            json,
+        })
+    }
+
+    /// What this machine has of what a yard needs. Asking creates nothing.
+    pub fn doctor(&self) -> Result<Doctor, String> {
+        let ran = self.run(&["doctor"], &[])?;
+        if let Some(error) = ran.error() {
+            return Err(error);
+        }
+        serde_json::from_value(ran.json)
+            .map_err(|err| format!("yardr doctor answered what footplate cannot read ({err})."))
+    }
+
+    /// Doctor's answer with the PATH it leads to: where it names
+    /// directories the PATH does not have yet, they are added and doctor is
+    /// asked once more, which then finds what is in them. The PATH only
+    /// grows: a program that is found is named by doctor no longer, and
+    /// what is started after must find it still.
+    pub fn needs(&mut self) -> Result<Doctor, String> {
+        let doctor = self.doctor()?;
+        let path = widened(&self.path, &doctor);
+        if path == self.path {
+            return Ok(doctor);
+        }
+        self.path = path;
+        self.doctor()
+    }
+
+    /// Creates the yard, and starts nothing. Run again it makes nothing
+    /// twice.
+    pub fn init(&self, form: &Form) -> Result<(), String> {
+        let mut words = vec![
+            "init".to_string(),
+            format!("--harness={}", form.harness),
+            format!("--operator={}", form.operator),
+            format!("--yardmaster={}", form.yardmaster),
+            format!("--style={}", form.style),
+        ];
+        if !form.model.is_empty() {
+            words.push(format!("--model={}", form.model));
+        }
+        if !form.about.is_empty() {
+            words.push(format!("--about={}", form.about));
+        }
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        self.run(&words, &[])?.done("init").map(|_| ())
+    }
+
+    /// Starts what the yard needs that does not run: herdr's server, the
+    /// yard's, the daemon.
+    pub fn up(&self) -> Result<Up, String> {
+        let ran = self.run(&["up"], &[])?;
+        if let Some(error) = ran.error() {
+            return Err(error);
+        }
+        serde_json::from_value(ran.json)
+            .map_err(|err| format!("yardr up answered what footplate cannot read ({err})."))
+    }
+
+    /// Makes `dir` a depot called `name` and sets it up from the yard's
+    /// pack. What the import still asks for is answered as the first run
+    /// does: a group of agents works on `harness`, and a group of people
+    /// is anyone, but for the decisions, which are the `operator`'s.
+    pub fn depot(
+        &self,
+        name: &str,
+        dir: &Path,
+        base: Option<&str>,
+        harness: &str,
+        operator: &str,
+    ) -> Result<(), String> {
+        let dir = dir.to_str().ok_or("The folder's path is no text.")?;
+        let base = base.map(|base| format!("--base={base}"));
+        let mut words = vec!["depot", "add"];
+        words.extend(base.as_deref());
+        self.run(&words, &[name, dir])?.done("depot add")?;
+
+        let mut answers: Vec<String> = Vec::new();
+        // The import asks for what it lacks, and for nothing twice: a few
+        // rounds answer it, or it is asking for what is not known here.
+        for _ in 0..4 {
+            let mut words = vec!["depot", "init", "--yes"];
+            words.extend(answers.iter().map(String::as_str));
+            let ran = self.run(&words, &[name])?;
+            let missing = match ran.json.get("missing").and_then(Value::as_array) {
+                Some(missing) if ran.status == 2 => missing.clone(),
+                _ => return ran.done("depot init").map(|_| ()),
+            };
+            let before = answers.len();
+            for flag in missing.iter().filter_map(Value::as_str) {
+                let answer = answer(flag, harness, operator).ok_or_else(|| {
+                    format!("yardr asks for something footplate has no answer to: {flag}")
+                })?;
+                for word in answer {
+                    if !answers.contains(&word) || word.starts_with("--") {
+                        answers.push(word);
+                    }
+                }
+            }
+            if answers.len() == before {
+                break;
+            }
+        }
+        Err("yardr went on asking for the depot's groups, and the depot is not set up.".to_string())
+    }
+
+    /// Creates the first bead and hands it to the builders. Its id.
+    pub fn bead(&self, depot: &str, title: &str, goal: &str) -> Result<String, String> {
+        let depot = format!("--depot={depot}");
+        let created = self
+            .run(&["bead", "create", &depot, "-b", goal], &[title])?
+            .done("bead create")?;
+        let id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("yardr created a bead and did not say which.")?
+            .to_string();
+        self.run(&["bead", "advance", "--to=new"], &[&id])?
+            .done("bead advance")?;
+        Ok(id)
+    }
+
+    /// Has `operator` told when a bead of `depot` lands.
+    pub fn subscribe(&self, operator: &str, depot: &str) -> Result<(), String> {
+        let depot = format!("--where=depot={depot}");
+        self.run(&["subscribe", "--done", &depot], &[operator, "yardr"])?
+            .done("subscribe")
+            .map(|_| ())
+    }
+}
+
+/// The flag that answers one entry of the import's `missing`, which is
+/// `--<flag> <name>=<what is wanted>`: the flag and the name are kept, and
+/// the answer put after the `=`.
+fn answer(missing: &str, harness: &str, operator: &str) -> Option<[String; 2]> {
+    let (flag, rest) = missing.split_once(' ')?;
+    let (name, _) = rest.split_once('=')?;
+    let value = match flag {
+        "--bind" => harness,
+        "--members" if name == "decisions" => operator,
+        "--members" => "",
+        _ => return None,
+    };
+    Some([flag.to_string(), format!("{name}={value}")])
+}
+
+/// `yardr doctor --json`, of which the machine's programs are read.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Doctor {
+    /// Whether the home has a yard.
+    #[serde(default)]
+    pub yard: bool,
+    #[serde(default)]
+    pub machine: Vec<Item>,
+    /// What the yard has, where there is one and its server answers.
+    #[serde(default)]
+    state: Option<State>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct State {
+    #[serde(default)]
+    yardmaster: Option<Named>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct Named {
+    #[serde(default)]
+    name: String,
+}
+
+/// A program a yard needs, as doctor found it or did not.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Item {
+    pub program: String,
+    #[serde(default, rename = "for")]
+    pub what_for: String,
+    #[serde(default)]
+    pub found: bool,
+    /// How it is installed by hand, where it is missing: a page, or a
+    /// command with one.
+    #[serde(default)]
+    pub get: Option<String>,
+    /// Where the login shell finds it, when the PATH does not.
+    #[serde(default)]
+    pub login_shell_path: Option<PathBuf>,
+    /// On a Mac: how a program fetches it.
+    #[serde(default)]
+    pub fetch: Option<Wanted>,
+    /// On the item that says no harness is installed: the ones that can be
+    /// fetched.
+    #[serde(default)]
+    pub any_of: Vec<Item>,
+    /// The kind, of a harness.
+    #[serde(default)]
+    pub harness: Option<String>,
+    /// A program can lead this kind's login.
+    #[serde(default)]
+    pub harness_login: bool,
+    /// Of herdr: whether its server answers.
+    #[serde(default)]
+    pub server: Option<Server>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Server {
+    #[serde(default)]
+    pub state: String,
+}
+
+impl Doctor {
+    fn item(&self, program: &str) -> Option<&Item> {
+        self.machine.iter().find(|item| item.program == program)
+    }
+
+    /// What the yard's yardmaster is called, where doctor read it.
+    pub fn yardmaster(&self) -> Option<&str> {
+        let named = self.state.as_ref()?.yardmaster.as_ref()?;
+        (!named.name.is_empty()).then_some(named.name.as_str())
+    }
+
+    /// The harnesses doctor speaks of: its own items, and those of the
+    /// item that says none is installed.
+    pub fn harnesses(&self) -> Vec<&Item> {
+        self.machine
+            .iter()
+            .flat_map(|item| std::iter::once(item).chain(&item.any_of))
+            .filter(|item| item.harness.is_some())
+            .collect()
+    }
+
+    /// The kinds that are installed, in doctor's order.
+    pub fn installed(&self) -> Vec<&Item> {
+        let mut found = self.harnesses();
+        found.retain(|item| item.found);
+        found
+    }
+
+    /// Whether a yard can be created: git, herdr and one harness are
+    /// installed. herdr's server may still be down, which starting the
+    /// yard sees to.
+    pub fn ready(&self) -> bool {
+        let found = |program| self.item(program).is_some_and(|item| item.found);
+        found("git") && found("herdr") && !self.installed().is_empty()
+    }
+
+    /// Whether herdr is installed and its server does not answer.
+    pub fn server_waits(&self) -> bool {
+        self.item("herdr").is_some_and(|herdr| {
+            herdr.found
+                && herdr
+                    .server
+                    .as_ref()
+                    .is_some_and(|server| server.state != "running")
+        })
+    }
+
+    /// The rows of what a yard needs: git, herdr, then the harnesses.
+    /// Where none is installed and doctor names none to choose from, its
+    /// one line for the harness stands for them.
+    pub fn rows(&self) -> Vec<&Item> {
+        let mut rows: Vec<&Item> = ["git", "herdr"]
+            .iter()
+            .filter_map(|program| self.item(program))
+            .collect();
+        let harnesses = self.harnesses();
+        match harnesses.is_empty() {
+            true => rows.extend(self.item("a harness")),
+            false => rows.extend(harnesses),
+        }
+        rows
+    }
+}
+
+impl Item {
+    /// The page its maker has for it, where doctor's hint names one: the
+    /// first `https://` address of it.
+    pub fn page(&self) -> Option<&str> {
+        let get = self.get.as_deref()?;
+        let page = &get[get.find("https://")?..];
+        let end = page
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | ',' | '"' | '\''))
+            .unwrap_or(page.len());
+        Some(&page[..end])
+    }
+}
+
+/// The PATH of what footplate starts: `inherited`, the one it has, and
+/// after it each directory doctor names that it lacks. A window
+/// opened from the desktop has neither Homebrew's nor `~/.local/bin`.
+pub fn widened(inherited: &OsStr, doctor: &Doctor) -> OsString {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(inherited).collect();
+    let items = doctor
+        .machine
+        .iter()
+        .flat_map(|item| std::iter::once(item).chain(&item.any_of));
+    for item in items {
+        let named = [
+            item.login_shell_path.as_deref(),
+            item.fetch.as_ref().map(|fetch| fetch.path.as_path()),
+        ];
+        for dir in named.into_iter().flatten().filter_map(Path::parent) {
+            if dir.is_absolute() && !dirs.iter().any(|has| has == dir) {
+                dirs.push(dir.to_path_buf());
+            }
+        }
+    }
+    // A directory with the separator in its name cannot be on a PATH.
+    dirs.retain(|dir| std::env::join_paths([dir]).is_ok());
+    std::env::join_paths(dirs).unwrap_or_else(|_| inherited.to_os_string())
+}
+
+/// How agents work with the operator: `operator_style`, with the words
+/// the onboarding has for each.
+pub const STYLES: [(&str, &str, &str); 4] = [
+    (
+        "guide",
+        "Guide me",
+        "Agents explain each step in plain words before taking it, show no commands, and ask before acting for you.",
+    ),
+    (
+        "show",
+        "Show me",
+        "Agents explain briefly, show the command they run, and ask when there is a decision to make.",
+    ),
+    (
+        "work",
+        "Work with me",
+        "Agents are terse, assume you read code and git, and decide small things themselves.",
+    ),
+    (
+        "report",
+        "Just report",
+        "Agents decide what is theirs to decide and come to you only for what is yours.",
+    ),
+];
+
+/// What the person said of the yard to create.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Form {
+    pub operator: String,
+    pub harness: String,
+    pub yardmaster: String,
+    pub model: String,
+    pub style: String,
+    pub about: String,
+}
+
+/// `yardr up --json`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Up {
+    /// Whether herdr's server, the yard's and the daemon run.
+    #[serde(default)]
+    pub up: bool,
+    #[serde(default)]
+    pub parts: Vec<Part>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Part {
+    pub part: String,
+    #[serde(default)]
+    pub running: bool,
+    /// What kept it from starting, and the one thing to do about it.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default, rename = "do")]
+    pub to_do: Option<String>,
+}
+
+impl Up {
+    /// What could not be started, each with the one thing to do, in
+    /// yardr's words.
+    pub fn troubles(&self) -> Vec<String> {
+        self.parts
+            .iter()
+            .filter_map(|part| {
+                let error = part.error.as_deref()?;
+                Some(match part.to_do.as_deref() {
+                    Some(to_do) => format!("{}: {error} {to_do}", part.part),
+                    None => format!("{}: {error}", part.part),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The base branch to offer for the folder `dir`: the branch it has
+/// checked out, where it is a git checkout. None is a folder that is none,
+/// which becomes a depot of the plain kind. git is asked two things, both
+/// of which only read.
+pub fn branch_of(dir: &Path, path: &OsStr) -> Option<String> {
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            // Nothing of the folder's own configuration is to start a
+            // program for a question about its branch.
+            .args(["-c", "core.fsmonitor=false", "-C"])
+            .arg(dir)
+            .args(args)
+            .env("PATH", path)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    if git(&["rev-parse", "--is-inside-work-tree"])? != "true" {
+        return None;
+    }
+    git(&["branch", "--show-current"])
+}
+
+/// The name a folder's depot gets to begin with: the folder's, in small
+/// letters, with what is no letter, digit, `-` or `_` as a `-`.
+pub fn depot_name(dir: &Path) -> String {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let name: String = name
+        .chars()
+        .map(|c| match c.is_alphanumeric() || matches!(c, '-' | '_') {
+            true => c,
+            false => '-',
+        })
+        .collect();
+    name.trim_matches('-').to_string()
+}
+
+/// Asks Apple's own installer for the command line tools, git among them:
+/// it shows its dialog and footplate waits for nothing.
+pub fn apple_tools() -> Result<(), String> {
+    Command::new("/usr/bin/xcode-select")
+        .arg("--install")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+        .map_err(|err| format!("Apple's installer could not be asked ({err})."))
+}
+
+/// What a login needs next of the person, or how it ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Need {
+    /// One of these ways to log in.
+    Choose { text: String, options: Vec<String> },
+    /// The page to sign in on: always an `https://` address.
+    Page(String),
+    /// What the page gave, to type in. It is kept nowhere.
+    Input { text: String },
+    /// Whether to make the one real call that proves the login.
+    Confirm { text: String },
+    /// The login is made; whether the harness was seen to answer.
+    Done { proved: bool, said: String },
+    /// The login did not come about, in yardr's words.
+    Failed(String),
+}
+
+impl Need {
+    /// One line of `yardr harness login --json`. A line that is none of
+    /// what is known asks nothing.
+    fn read(line: &str) -> Option<Need> {
+        let json: Value = serde_json::from_str(line).ok()?;
+        let text = |key: &str| {
+            json.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        if json.get("error").is_some() {
+            return Some(Need::Failed(text("error")));
+        }
+        if json.get("done").is_some() {
+            let tried = json.get("try");
+            let said = tried
+                .and_then(|tried| tried.get("output"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            return Some(Need::Done {
+                proved: json.get("proved").and_then(Value::as_bool) == Some(true),
+                said: said.to_string(),
+            });
+        }
+        match json.get("need").and_then(Value::as_str)? {
+            "choose" => Some(Need::Choose {
+                text: text("text"),
+                options: json
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|options| {
+                        options
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }),
+            // Nothing but a page on the web is ever opened.
+            "open_url" => is_page(&text("url")).then(|| Need::Page(text("url"))),
+            "input" => Some(Need::Input { text: text("text") }),
+            "confirm" => Some(Need::Confirm { text: text("text") }),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `url` is a page on the web, to hand to the system's opener: an
+/// `https://` address with no space and no control character.
+pub fn is_page(url: &str) -> bool {
+    url.strip_prefix("https://").is_some_and(|rest| {
+        !rest.is_empty() && !rest.chars().any(|c| c.is_whitespace() || c.is_control())
+    })
+}
+
+/// A harness's login, led by `yardr harness login <kind> --json`: what it
+/// needs comes out of [`Login::needs`] as yardr prints it, and what the
+/// person answers goes to its input, a line each. yardr holds the
+/// harness's own login command; footplate neither sees nor keeps what the
+/// login makes. Dropped, the login is over: its input closes, and yardr
+/// stops what it started.
+pub struct Login {
+    child: Option<Child>,
+    input: Option<ChildStdin>,
+    pub needs: async_channel::Receiver<Need>,
+}
+
+impl Login {
+    pub fn start(yardr: &Yardr, kind: &str) -> Result<Login, String> {
+        let mut child = yardr
+            .command(&["harness", "login"], &[kind])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("yardr could not be started ({err})."))?;
+        let (tell, needs) = async_channel::unbounded();
+        let out = child.stdout.take();
+        thread::spawn(move || {
+            let mut ended = false;
+            let lines = out.into_iter().flat_map(|out| BufReader::new(out).lines());
+            for line in lines.map_while(Result::ok) {
+                let Some(need) = Need::read(&line) else {
+                    continue;
+                };
+                ended = matches!(need, Need::Done { .. } | Need::Failed(_));
+                if tell.send_blocking(need).is_err() || ended {
+                    break;
+                }
+            }
+            if !ended {
+                let _ = tell.send_blocking(Need::Failed(
+                    "The login ended without saying how.".to_string(),
+                ));
+            }
+        });
+        Ok(Login {
+            input: child.stdin.take(),
+            child: Some(child),
+            needs,
+        })
+    }
+
+    fn say(&mut self, answer: Value) -> Result<(), String> {
+        let gone = || "The login is over: it takes no answer any more.".to_string();
+        let input = self.input.as_mut().ok_or_else(gone)?;
+        writeln!(input, "{answer}")
+            .and_then(|_| input.flush())
+            .map_err(|_| gone())
+    }
+
+    /// The way to log in that was chosen.
+    pub fn choose(&mut self, option: &str) -> Result<(), String> {
+        self.say(json!({ "choose": option }))
+    }
+
+    /// What the page gave. It goes to yardr's input and nowhere else.
+    pub fn input(&mut self, typed: String) -> Result<(), String> {
+        self.say(json!({ "input": typed }))
+    }
+
+    /// Whether the one real call is made.
+    pub fn confirm(&mut self, yes: bool) -> Result<(), String> {
+        self.say(json!({ "confirm": yes }))
+    }
+}
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        // Its input closing is how yardr is told to stop the login.
+        self.input = None;
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        thread::spawn(move || {
+            let started = Instant::now();
+            while let Ok(None) = child.try_wait() {
+                if started.elapsed() > Duration::from_secs(10) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+    }
+}
+
+/// A stand-in for yardr, for the tests of this module and of the window's
+/// first run: a script that answers each command with the JSON a file
+/// gives for it, and writes down what it was called with.
+#[cfg(test)]
+pub mod standin {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    const SCRIPT: &str = r#"#!/bin/sh
+# A stand-in for yardr in footplate's tests. The answer to a command is the
+# file answers/<command>.json beside this script, or answers/<command>.<n>.json
+# for its n-th call where there is one; its exit status is in a file of the
+# same name ending in .status, else 0.
+D=$(dirname "$0")
+key=$1
+case "$2" in ''|-*) ;; *) key="$1-$2" ;; esac
+{ printf 'PATH=%s\n' "$PATH"; printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$D/calls"
+if [ "$key" = harness-login ]; then
+    echo '{"need":"choose","text":"How do you log in to Claude Code?","options":["Claude subscription","Anthropic Console (API usage billing)"]}'
+    IFS= read -r line || { echo '{"error":"stdin closed before a method was chosen"}'; exit 1; }
+    printf '%s\n' "$line" >> "$D/answered"
+    echo 'not json, and passed by'
+    echo '{"need":"open_url","url":"https://claude.com/cai/oauth/authorize?code=true"}'
+    echo '{"need":"input","text":"Paste code here if prompted >","secret":true}'
+    IFS= read -r line || { echo '{"error":"stdin closed before the login command ended"}'; exit 1; }
+    printf '%s\n' "$line" >> "$D/answered"
+    case "$line" in *wrong*) echo '{"error":"claude auth login failed: Login failed: Request failed with status code 400"}'; exit 1 ;; esac
+    echo '{"need":"confirm","text":"Check that Claude Code answers? That makes one real call to it, which costs a model call on your account with it."}'
+    IFS= read -r line || { echo '{"done":true,"kind":"claude","proved":false,"try":{"state":"not_tried"}}'; exit 0; }
+    printf '%s\n' "$line" >> "$D/answered"
+    case "$line" in
+    *true*) echo '{"done":true,"kind":"claude","proved":true,"try":{"state":"ok","output":"ok"}}' ;;
+    *) echo '{"done":true,"kind":"claude","proved":false,"try":{"state":"not_tried"}}' ;;
+    esac
+    exit 0
+fi
+n=$(cat "$D/count.$key" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$D/count.$key"
+f="$D/answers/$key.$n"
+[ -e "$f.json" ] || f="$D/answers/$key"
+if [ ! -e "$f.json" ]; then
+    echo '{"error":"the stand-in has no answer to '"$key"'"}'
+    exit 1
+fi
+cat "$f.json"
+[ -e "$f.status" ] && exit "$(cat "$f.status")"
+exit 0
+"#;
+
+    /// The stand-in, in `dir`: its path.
+    pub fn make(dir: &Path) -> PathBuf {
+        let program = dir.join("yardr");
+        fs::create_dir_all(dir.join("answers")).unwrap();
+        fs::write(&program, SCRIPT).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    /// What the stand-in beside `program` answers `key` with from here on
+    /// (`doctor`, `depot-init`, or `depot-init.1` for its first call), and
+    /// its exit status.
+    pub fn answers(program: &Path, key: &str, status: i32, json: &serde_json::Value) {
+        let answers = program.parent().unwrap().join("answers");
+        fs::write(answers.join(format!("{key}.json")), json.to_string()).unwrap();
+        fs::write(answers.join(format!("{key}.status")), status.to_string()).unwrap();
+    }
+
+    /// The commands the stand-in was called with, in order: the arguments
+    /// of each, every one in brackets.
+    pub fn calls(program: &Path) -> Vec<String> {
+        let calls = fs::read_to_string(program.parent().unwrap().join("calls"));
+        calls
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("ARGS "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The PATH of each call, in order.
+    pub fn paths(program: &Path) -> Vec<String> {
+        let calls = fs::read_to_string(program.parent().unwrap().join("calls"));
+        calls
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("PATH="))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// What a login was answered with, a line each, as it reached the
+    /// stand-in's input.
+    pub fn answered(program: &Path) -> Vec<String> {
+        let answered = fs::read_to_string(program.parent().unwrap().join("answered"));
+        answered
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Doctor's answer on a Mac with git and nothing else: herdr and two
+    /// harnesses can be fetched to `home`, one harness is by hand.
+    pub fn doctor_bare(home: &Path) -> serde_json::Value {
+        let bin = home.join(".local/bin");
+        serde_json::json!({
+            "home": home.join(".yardr"), "yard": false, "tried": false,
+            "machine": [
+                {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": false,
+                 "get": "https://herdr.dev",
+                 "fetch": {"version": "0.9.4", "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.4/herdr-macos-aarch64",
+                           "sha256": "00", "size": 1, "path": bin.join("herdr"),
+                           "verified": {"from": "https://herdr.dev/docs/install/", "on": "2026-10-13"}}},
+                {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+                {"program": "claude", "for": "a harness a yard can be created on", "found": false,
+                 "get": "npm install -g @anthropic-ai/claude-code (https://claude.com/claude-code)",
+                 "harness": "claude", "harness_login": true, "optional": true,
+                 "login_shell_path": "/opt/stand-in/bin/claude"},
+                {"program": "opencode", "for": "a harness a yard can be created on", "found": false,
+                 "get": "https://opencode.ai", "harness": "opencode", "optional": true}
+            ],
+            "faults": ["herdr: not on PATH"]
+        })
+    }
+
+    /// Doctor's answer once herdr and the harnesses are there: herdr's
+    /// server is down, which keeps nothing from being created.
+    pub fn doctor_ready() -> serde_json::Value {
+        serde_json::json!({
+            "yard": false,
+            "machine": [
+                {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": true,
+                 "path": "/opt/stand-in/bin/herdr", "server": {"state": "not_running", "output": "no server"}},
+                {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+                {"program": "claude", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/claude", "harness": "claude", "harness_login": true},
+                {"program": "codex", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/codex", "harness": "codex"}
+            ],
+            "faults": []
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn yardr(dir: &Path) -> Yardr {
+        Yardr {
+            program: standin::make(dir),
+            home: dir.join("home/.yardr"),
+            path: OsString::from("/usr/bin:/bin"),
+            actor: None,
+        }
+    }
+
+    /// Doctor's rows come from its JSON, and the PATH of what is started
+    /// after it from its data: the directories the login shell found a
+    /// program in and those a program is fetched to, after the PATH
+    /// footplate has. Doctor is asked again with it, and never a shell.
+    #[test]
+    fn the_path_of_what_is_started_is_built_from_doctor_s_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut yardr = yardr(dir.path());
+        let home = dir.path().join("home");
+        standin::answers(&yardr.program, "doctor", 1, &standin::doctor_bare(&home));
+        let doctor = yardr.needs().unwrap();
+        let local = home.join(".local/bin");
+        let wide = format!("/usr/bin:/bin:{}:/opt/stand-in/bin", local.display());
+        assert_eq!(yardr.path, OsString::from(&wide));
+        // Asked twice: as footplate was started, then with what it named.
+        assert_eq!(standin::paths(&yardr.program), ["/usr/bin:/bin", &wide]);
+        let call = format!(
+            "[doctor] [--json] [--home] [{}]",
+            dir.path().join("home/.yardr").display()
+        );
+        assert_eq!(standin::calls(&yardr.program), [call.clone(), call]);
+
+        assert!(!doctor.ready());
+        let rows: Vec<&str> = doctor.rows().iter().map(|r| r.program.as_str()).collect();
+        assert_eq!(rows, ["git", "herdr", "claude", "opencode"]);
+        let herdr = doctor.item("herdr").unwrap();
+        assert_eq!(herdr.fetch.as_ref().unwrap().path, local.join("herdr"));
+        assert_eq!(herdr.page(), Some("https://herdr.dev"));
+        let claude = doctor.item("claude").unwrap();
+        assert_eq!(claude.page(), Some("https://claude.com/claude-code"));
+        assert!(claude.harness_login);
+
+        // A PATH that has them already is left as it is, and doctor asked
+        // once. Nor does it lose what it has once doctor finds the
+        // programs and names their directories no longer.
+        yardr.needs().unwrap();
+        assert_eq!(standin::calls(&yardr.program).len(), 3);
+        standin::answers(&yardr.program, "doctor", 0, &standin::doctor_ready());
+        yardr.needs().unwrap();
+        assert_eq!(yardr.path, OsString::from(&wide));
+        assert_eq!(standin::paths(&yardr.program)[3], wide);
+    }
+
+    /// A herdr whose server is down waits, and keeps nothing from being
+    /// created; a machine with no harness does.
+    #[test]
+    fn a_stopped_herdr_server_does_not_keep_a_yard_from_being_created() {
+        let doctor: Doctor = serde_json::from_value(standin::doctor_ready()).unwrap();
+        assert!(doctor.ready() && doctor.server_waits());
+        assert_eq!(doctor.yardmaster(), None);
+        let running: Doctor = serde_json::from_value(
+            json!({"yard": true, "state": {"server": "running", "yardmaster": {"name": "ym"}}}),
+        )
+        .unwrap();
+        assert_eq!(running.yardmaster(), Some("ym"));
+        let kinds: Vec<_> = doctor
+            .installed()
+            .iter()
+            .map(|item| item.harness.clone().unwrap())
+            .collect();
+        assert_eq!(kinds, ["claude", "codex"]);
+
+        // No harness, on Linux: doctor's one line for it is the row.
+        let none: Doctor = serde_json::from_value(json!({"machine": [
+            {"program": "git", "found": true}, {"program": "herdr", "found": true},
+            {"program": "a harness", "found": false, "get": "https://claude.com/claude-code"}
+        ]}))
+        .unwrap();
+        assert!(!none.ready() && !none.server_waits());
+        assert_eq!(none.rows().len(), 3);
+        // And on a Mac it names the ones that can be fetched.
+        let some: Doctor = serde_json::from_value(json!({"machine": [
+            {"program": "a harness", "found": false, "any_of": [
+                {"program": "claude", "harness": "claude", "found": false,
+                 "fetch": {"version": "1", "url": "https://x/y", "sha256": "00", "size": 1, "path": "/home/jo/.local/bin/claude"}}]}
+        ]}))
+        .unwrap();
+        assert_eq!(some.rows().len(), 1);
+        assert_eq!(some.rows()[0].program, "claude");
+        assert_eq!(
+            widened(OsStr::new("/bin"), &some),
+            OsString::from("/bin:/home/jo/.local/bin")
+        );
+    }
+
+    /// The commands of the first run, as yardr's documentation lists them
+    /// for a program: each with `--json`, the yard's home and who acts,
+    /// and what could be read as a flag behind `--`.
+    #[test]
+    fn the_first_run_s_commands_are_arguments_and_never_a_shell_s_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut yardr = yardr(dir.path());
+        yardr.actor = Some("Jo".to_string());
+        let program = yardr.program.clone();
+        let home = yardr.home.display().to_string();
+        let tail = format!("[--json] [--home] [{home}] [--actor=Jo]");
+
+        standin::answers(&program, "init", 0, &json!({"harness": "claude"}));
+        let form = Form {
+            operator: "Jo".into(),
+            harness: "claude".into(),
+            yardmaster: "yardmaster".into(),
+            model: String::new(),
+            style: "guide".into(),
+            about: "$(touch /tmp/x); `id`".into(),
+        };
+        yardr.init(&form).unwrap();
+
+        standin::answers(
+            &program,
+            "up",
+            1,
+            &json!({"up": false, "parts": [
+            {"part": "herdr", "running": false, "error": "herdr is not on PATH.", "do": "Install herdr."},
+            {"part": "server", "running": true}]}),
+        );
+        let up = yardr.up().unwrap();
+        assert!(!up.up);
+        assert_eq!(
+            up.troubles(),
+            ["herdr: herdr is not on PATH. Install herdr."]
+        );
+
+        standin::answers(
+            &program,
+            "depot-add",
+            0,
+            &json!({"name": "essays", "kind": "git"}),
+        );
+        standin::answers(
+            &program,
+            "depot-init.1",
+            2,
+            &json!({
+            "error": "depot init cannot ask without a terminal",
+            "missing": ["--bind builders=<kind>[:<model>]", "--bind reviewers=<kind>[:<model>]",
+                        "--members backlog=<users>", "--members decisions=<users>"]}),
+        );
+        standin::answers(
+            &program,
+            "depot-init",
+            0,
+            &json!({"result": {"created": 9}}),
+        );
+        let folder = dir.path().join("My Essays");
+        yardr
+            .depot("essays", &folder, Some("main"), "claude", "Jo")
+            .unwrap();
+
+        standin::answers(
+            &program,
+            "bead-create",
+            0,
+            &json!({"id": "essays-1a2b", "stage": "backlog"}),
+        );
+        standin::answers(
+            &program,
+            "bead-advance",
+            0,
+            &json!({"id": "essays-1a2b", "stage": "new"}),
+        );
+        assert_eq!(
+            yardr
+                .bead("essays", "-rf is a title", "Done when it reads well.")
+                .unwrap(),
+            "essays-1a2b"
+        );
+        standin::answers(&program, "subscribe", 0, &json!([]));
+        yardr.subscribe("Jo", "essays").unwrap();
+
+        let answers = "[--bind] [builders=claude] [--bind] [reviewers=claude] [--members] [backlog=] [--members] [decisions=Jo]";
+        assert_eq!(
+            standin::calls(&program),
+            [
+                format!(
+                    "[init] [--harness=claude] [--operator=Jo] [--yardmaster=yardmaster] [--style=guide] [--about=$(touch /tmp/x); `id`] {tail}"
+                ),
+                format!("[up] {tail}"),
+                format!(
+                    "[depot] [add] [--base=main] {tail} [--] [essays] [{}]",
+                    folder.display()
+                ),
+                format!("[depot] [init] [--yes] {tail} [--] [essays]"),
+                format!("[depot] [init] [--yes] {answers} {tail} [--] [essays]"),
+                format!(
+                    "[bead] [create] [--depot=essays] [-b] [Done when it reads well.] {tail} [--] [-rf is a title]"
+                ),
+                format!("[bead] [advance] [--to=new] {tail} [--] [essays-1a2b]"),
+                format!("[subscribe] [--done] [--where=depot=essays] {tail} [--] [Jo] [yardr]"),
+            ]
+        );
+    }
+
+    /// What yardr refuses is said in its words, and an import that asks
+    /// for what footplate has no answer to is not answered with a guess.
+    #[test]
+    fn a_refusal_is_yardr_s_words_and_an_unknown_question_ends_the_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        standin::answers(
+            &yardr.program,
+            "init",
+            1,
+            &json!({"error": "unknown harness \"hal\""}),
+        );
+        let form = Form {
+            harness: "hal".into(),
+            ..Form::default()
+        };
+        assert_eq!(yardr.init(&form).unwrap_err(), "unknown harness \"hal\"");
+
+        standin::answers(&yardr.program, "depot-add", 0, &json!({"name": "essays"}));
+        standin::answers(
+            &yardr.program,
+            "depot-init",
+            2,
+            &json!({
+            "error": "depot init cannot ask without a terminal", "missing": ["--pack <name>"]}),
+        );
+        let refused = yardr.depot("essays", dir.path(), None, "claude", "jo");
+        assert_eq!(
+            refused.unwrap_err(),
+            "yardr asks for something footplate has no answer to: --pack <name>"
+        );
+        // A dir depot has no base.
+        assert!(standin::calls(&yardr.program)[1].starts_with("[depot] [add] [--json]"));
+
+        // What is no JSON is not shown as it came.
+        std::fs::write(dir.path().join("answers/up.json"), "<html>").unwrap();
+        assert!(
+            yardr
+                .up()
+                .unwrap_err()
+                .starts_with("yardr up answered what footplate cannot read")
+        );
+    }
+
+    /// The same commands, taken by a real yardr: by hand, never in the
+    /// gate, and never on a yard a person uses. `FOOTPLATE_REAL_YARDR` is
+    /// the yardr to run and `FOOTPLATE_REAL_HOME` an empty directory with a
+    /// short path, which becomes the yard's home; the test is run with an
+    /// environment that has nothing of another yard in it (`env -i`).
+    /// Nothing is started but the yard's own server, which the test stops.
+    /// `up` and the login are not in it: they start agents and log in.
+    ///
+    ///     env -i HOME=<dir> PATH=/usr/bin:/bin FOOTPLATE_REAL_YARDR=<yardr> \
+    ///         FOOTPLATE_REAL_HOME=<dir>/.yardr <the test binary> --ignored a_real_yardr
+    #[test]
+    #[ignore = "runs a real yardr in a home of its own; see the comment"]
+    fn a_real_yardr_takes_the_first_run_s_commands() {
+        let var = |name: &str| std::env::var_os(name).expect(name);
+        assert!(
+            std::env::vars().all(|(name, _)| !name.starts_with("YARDR_")),
+            "run this with env -i: a YARDR_ variable leads to another yard"
+        );
+        let home = PathBuf::from(var("FOOTPLATE_REAL_HOME"));
+        let mut yardr = Yardr {
+            program: PathBuf::from(var("FOOTPLATE_REAL_YARDR")),
+            home: home.clone(),
+            path: std::env::var_os("PATH").unwrap_or_default(),
+            actor: None,
+        };
+        let doctor = yardr.needs().unwrap();
+        assert!(!doctor.yard);
+        assert!(doctor.rows().iter().any(|item| item.program == "git"));
+
+        yardr.actor = Some("Jo".to_string());
+        let form = Form {
+            operator: "Jo".into(),
+            harness: "claude".into(),
+            yardmaster: "yardmaster".into(),
+            model: String::new(),
+            style: "guide".into(),
+            about: "-a line that starts with a dash".into(),
+        };
+        let ran = (|| {
+            yardr.init(&form)?;
+            yardr.init(&form)?;
+            let folder = home.parent().unwrap().join("My Essays");
+            std::fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
+            let name = depot_name(&folder);
+            let base = branch_of(&folder, &yardr.path);
+            yardr.depot(&name, &folder, base.as_deref(), "claude", "Jo")?;
+            let bead = yardr.bead(&name, "-a first draft", "Done when it reads well.")?;
+            assert!(bead.starts_with(&name), "{bead}");
+            yardr.subscribe("Jo", &name)?;
+            let doctor = yardr.doctor()?;
+            assert!(doctor.yard);
+            assert_eq!(doctor.yardmaster(), Some("yardmaster"));
+            Ok::<_, String>(())
+        })();
+        // What stopping prints is not JSON, and is not read: the socket
+        // being gone is the server stopped.
+        let _ = yardr.run(&["server", "stop"], &[]);
+        ran.unwrap();
+        assert!(!home.join("yard.sock").exists());
+    }
+
+    fn next(login: &Login) -> Need {
+        login.needs.recv_blocking().unwrap()
+    }
+
+    /// A login is led by yardr's JSON alone: the ways as it names them,
+    /// the page, the code, the question before the real call, and the
+    /// end. What is typed goes to yardr's input and nowhere else.
+    #[test]
+    fn a_login_is_led_by_the_needs_yardr_prints() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        let mut login = Login::start(&yardr, "claude").unwrap();
+        let Need::Choose { options, .. } = next(&login) else {
+            panic!("no choice");
+        };
+        assert_eq!(options[0], "Claude subscription");
+        login.choose(&options[0]).unwrap();
+        assert_eq!(
+            next(&login),
+            Need::Page("https://claude.com/cai/oauth/authorize?code=true".into())
+        );
+        assert!(matches!(next(&login), Need::Input { .. }));
+        login.input("good#code".to_string()).unwrap();
+        assert!(matches!(next(&login), Need::Confirm { .. }));
+        login.confirm(true).unwrap();
+        assert_eq!(
+            next(&login),
+            Need::Done {
+                proved: true,
+                said: "ok".into()
+            }
+        );
+        assert_eq!(
+            standin::answered(&yardr.program),
+            [
+                r#"{"choose":"Claude subscription"}"#,
+                r#"{"input":"good#code"}"#,
+                r#"{"confirm":true}"#
+            ]
+        );
+        assert!(standin::calls(&yardr.program)[0].starts_with("[harness] [login] [--json]"));
+        assert!(standin::calls(&yardr.program)[0].ends_with("[--] [claude]"));
+    }
+
+    /// A code that is none ends the login with yardr's words, and a login
+    /// that is left closes yardr's input, which is how yardr stops it.
+    #[test]
+    fn a_login_that_fails_or_is_left_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        let mut login = Login::start(&yardr, "claude").unwrap();
+        next(&login);
+        login.choose("Claude subscription").unwrap();
+        next(&login);
+        next(&login);
+        login.input("wrong".to_string()).unwrap();
+        let Need::Failed(why) = next(&login) else {
+            panic!("no failure");
+        };
+        assert!(why.starts_with("claude auth login failed"), "{why}");
+
+        let left = Login::start(&yardr, "claude").unwrap();
+        let needs = left.needs.clone();
+        needs.recv_blocking().unwrap();
+        drop(left);
+        assert_eq!(
+            needs.recv_blocking().unwrap(),
+            Need::Failed("stdin closed before a method was chosen".into())
+        );
+    }
+
+    /// Only a page on the web is handed to the system's opener.
+    #[test]
+    fn only_an_https_address_is_a_page() {
+        assert!(is_page("https://claude.com/cai/oauth/authorize?x=1"));
+        for no in [
+            "http://claude.com",
+            "file:///etc/passwd",
+            "https://",
+            "https://a b",
+            "javascript:alert(1)",
+            "https://a\nb",
+        ] {
+            assert!(!is_page(no), "{no}");
+        }
+        assert_eq!(
+            Need::read(r#"{"need":"open_url","url":"file:///etc/passwd"}"#),
+            None
+        );
+    }
+
+    /// The base branch of a folder is the one it has checked out, and a
+    /// folder that is no checkout has none.
+    #[test]
+    fn a_folder_s_branch_is_read_from_git_and_a_plain_folder_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        assert_eq!(branch_of(dir.path(), &path), None);
+        let init = Command::new("git")
+            .args(["init", "-q", "-b", "trunk"])
+            .arg(dir.path())
+            .status();
+        if init.is_ok_and(|status| status.success()) {
+            assert_eq!(branch_of(dir.path(), &path).as_deref(), Some("trunk"));
+        }
+        assert_eq!(depot_name(Path::new("/Users/jo/My Essays!")), "my-essays");
+        assert_eq!(depot_name(Path::new("/")), "");
+    }
+}

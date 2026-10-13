@@ -1,6 +1,8 @@
 //! footplate: a native chat window onto a yardr yard. It is an interface over
-//! yardr's socket API, or over the same calls at a yard's address, and
-//! starts nothing of yardr's. The first slice is the
+//! yardr's socket API, or over the same calls at a yard's address. Where
+//! this machine has no yard it sets one up, with the yardr it fetches
+//! (fetch.rs, setup.rs); beside that it starts nothing of yardr's. The first
+//! slice is the
 //! conversations a person has with this yard's crew and with the crew a
 //! linked yard exposes, as `yardr chat` shows them.
 
@@ -10,9 +12,6 @@ mod dock;
 mod draft;
 #[cfg(test)]
 mod fake;
-// Nothing calls it yet: the first run's window (footplate-m1me) is its
-// first caller, and takes this line's allow away.
-#[allow(dead_code)]
 mod fetch;
 mod input;
 mod markdown;
@@ -21,6 +20,7 @@ mod notify;
 mod select;
 mod session;
 mod settings;
+mod setup;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
 mod theme;

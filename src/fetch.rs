@@ -1,6 +1,7 @@
 //! yardr itself, fetched: its latest release is read from yardr.dev, proved
-//! to be its makers', and its one binary kept in footplate's own directory.
-//! Nothing here runs what was fetched.
+//! to be its makers', and its one binary kept in footplate's own directory,
+//! to be run from there by the first run (setup.rs). A yardr that is not
+//! proved is not kept, so none is ever run.
 //!
 //! What is trusted is one thing, the public key built into footplate. The
 //! release signs its `checksums.txt` with minisign, and the archive is
@@ -11,23 +12,28 @@
 //! name is looked up in the signed checksums, so an older release cannot
 //! be handed over as a newer one.
 //!
-//! The site is the one host footplate fetches from. It is not followed
+//! The site is the one host yardr is fetched from. It is not followed
 //! elsewhere: an answer that is no 200, a redirect among them, is a
 //! refusal.
 //!
-//! The parts are plain functions, so that what `yardr doctor --json` names
-//! for a program fetched on a Mac (docs/doctor.md of the yardr repository)
-//! can go the same way: [`get`] a file, compare its [`sha256`], take the
-//! one [`member`] of a gzipped tar, and [`keep`] it. Only yardr's own
-//! fetch has the signature on top.
+//! What `yardr doctor --json` names for a program fetched on a Mac
+//! (docs/doctor.md of the yardr repository) goes the same way, by the same
+//! plain functions ([`program`]): its [`sha256`] is compared, the one
+//! [`member`] of a gzipped tar taken, and the program [`keep`]-ed. It comes
+//! from its maker's address, which may send on to another, and is trusted
+//! for its checksum alone, which the proved yardr carries. Only yardr's
+//! own fetch has the signature on top.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{env, fmt};
+use std::time::{Duration, Instant};
+use std::{env, fmt, thread};
 
 use flate2::bufread::GzDecoder;
 use minisign_verify::{PublicKey, Signature};
@@ -36,7 +42,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{self, Address};
 
-/// The site yardr's releases are on: the one host footplate ever fetches
+/// The site yardr's releases are on: the one host yardr is ever fetched
 /// from.
 pub const SITE: &str = "https://yardr.dev";
 
@@ -240,10 +246,21 @@ pub fn target_of(os: &str, arch: &str) -> Option<String> {
     Some(format!("{os}_{arch}"))
 }
 
-/// Fetches the latest yardr for this system from [`SITE`], proves it and
-/// keeps it in [`dir`]. It replaces a yardr that is kept there, and on a
-/// refusal leaves that one as it was.
-pub fn yardr() -> Result<Stored, Refusal> {
+/// The file beside the kept yardr that says which version it is: the
+/// release's tag, on one line.
+const VERSION_FILE: &str = "yardr.version";
+
+/// The yardr to run: the one that is kept, where it is the latest the
+/// site has, and else the latest, fetched from [`SITE`], proved and kept in
+/// [`dir`] in the other's place. Nothing but `latest.json` is read where
+/// the kept one is the latest. A yardr that is kept is never replaced by an
+/// older one, whatever the site says is the latest.
+///
+/// Where a newer one could not be had, for whatever reason, the kept one
+/// is still the answer, with why beside it: it was proved when it was
+/// fetched, and a yard must start without the network. With none kept, the
+/// reason is a refusal.
+pub fn current() -> Result<(Stored, Option<Refusal>), Refusal> {
     let dir = dir().ok_or(Refusal::NoHome)?;
     let site = Address::parse(SITE).map_err(|why| Refusal::Unreadable {
         what: SITE.to_string(),
@@ -258,7 +275,19 @@ pub fn yardr() -> Result<Stored, Refusal> {
         lowest: LOWEST,
         target: &target,
     }
-    .yardr(&dir)
+    .current(&dir)
+}
+
+/// The yardr that is kept in `dir`, with the version its file says: none
+/// where either is not there, or the version is not one.
+pub fn stored(dir: &Path) -> Option<Stored> {
+    let path = dir.join(PROGRAM);
+    let version = fs::read_to_string(dir.join(VERSION_FILE)).ok()?;
+    let version = Version::parse(version.trim())?;
+    fs::metadata(&path).ok()?.is_file().then(|| Stored {
+        path,
+        version: version.to_string(),
+    })
 }
 
 /// Where a release comes from and what it is held to. [`yardr`] has the
@@ -285,10 +314,42 @@ struct Target {
 }
 
 impl Source<'_> {
+    /// Fetches the latest release whatever is kept.
+    #[cfg(test)]
     fn yardr(&self, dir: &Path) -> Result<Stored, Refusal> {
+        let (version, latest) = self.latest()?;
+        self.release(dir, version, &latest)
+    }
+
+    /// [`current`], from this source and in `dir`.
+    fn current(&self, dir: &Path) -> Result<(Stored, Option<Refusal>), Refusal> {
+        let kept = stored(dir);
+        let newer = self.latest().and_then(|(version, latest)| {
+            let has = kept
+                .as_ref()
+                .and_then(|kept| Version::parse(&kept.version))
+                .is_some_and(|kept| version <= kept);
+            match has {
+                true => Ok(None),
+                false => self.release(dir, version, &latest).map(Some),
+            }
+        });
+        match (newer, kept) {
+            (Ok(Some(new)), _) => Ok((new, None)),
+            (Ok(None), Some(kept)) => Ok((kept, None)),
+            (Err(refusal), Some(kept)) => Ok((kept, Some(refusal))),
+            (Err(refusal), None) => Err(refusal),
+            // `has` is true of a kept one alone.
+            (Ok(None), None) => Err(Refusal::NoHome),
+        }
+    }
+
+    /// Which release the site says is the latest: its version, held to the
+    /// lowest one, and where its files are.
+    fn latest(&self) -> Result<(Version, Latest), Refusal> {
         // Before anything is asked of the site: without the key nothing it
         // answers could be kept.
-        let key = PublicKey::from_base64(self.key).map_err(|_| Refusal::NoKey)?;
+        PublicKey::from_base64(self.key).map_err(|_| Refusal::NoKey)?;
 
         let latest = get(self.site, LATEST, SMALL_MOST)?;
         let latest: Latest =
@@ -305,6 +366,13 @@ impl Source<'_> {
                 lowest: self.lowest.to_string(),
             });
         }
+        Ok((version, latest))
+    }
+
+    /// Fetches the release of `version` that `latest` leads to, proves it
+    /// and keeps its binary in `dir`, with its version beside it.
+    fn release(&self, dir: &Path, version: Version, latest: &Latest) -> Result<Stored, Refusal> {
+        let key = PublicKey::from_base64(self.key).map_err(|_| Refusal::NoKey)?;
         let target = latest.targets.get(self.target).ok_or(Refusal::NoSystem {
             system: self.target.to_string(),
         })?;
@@ -350,10 +418,19 @@ impl Source<'_> {
         }
         let program = member(&archive, PROGRAM, &BESIDE, UNPACKED_MOST)
             .map_err(|why| Refusal::Archive { name, why })?;
-        let path = keep(dir, PROGRAM, &program).map_err(|err| Refusal::NotKept {
+        let not_kept = |err| Refusal::NotKept {
             path: dir.join(PROGRAM),
             err,
-        })?;
+        };
+        // The version's file goes first, away: between the two writes the
+        // binary has no version, and is fetched again, never taken for
+        // another version than it is.
+        match fs::remove_file(dir.join(VERSION_FILE)) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(not_kept(err)),
+            _ => {}
+        }
+        let path = keep(dir, PROGRAM, &program).map_err(not_kept)?;
+        keep_as(dir, VERSION_FILE, format!("{version}\n").as_bytes(), 0o644).map_err(not_kept)?;
         Ok(Stored {
             path,
             version: version.to_string(),
@@ -563,6 +640,11 @@ pub fn member(archive: &[u8], name: &str, beside: &[&str], most: u64) -> Result<
 /// whole beside its place and then moved there, so that what is at the
 /// path is always a whole program: the one that was there, or this one.
 pub fn keep(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    keep_as(dir, name, bytes, 0o755)
+}
+
+/// As [`keep`], for a file of the mode `mode`.
+fn keep_as(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
     // `name` comes from the program's data for the shared fetch mechanism.
     // Keep it one filename so a caller cannot make this helper write beyond
     // the directory it was given.
@@ -601,7 +683,7 @@ pub fn keep(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         file.write_all(bytes)?;
         // Keep the file private until it is whole, then make it runnable;
         // the mode is set again because umask may have cut it.
-        file.set_permissions(fs::Permissions::from_mode(0o755))?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
         fs::rename(&part, &path)
     })();
@@ -610,6 +692,201 @@ pub fn keep(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         return Err(err);
     }
     Ok(path)
+}
+
+/// A program `yardr doctor --json` names for a Mac where it is missing
+/// (its `fetch`; docs/doctor.md of the yardr repository, "A program
+/// fetched on a Mac"): one file at its maker's address, of the size and
+/// the SHA-256 yardr wrote down when the way was verified.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Wanted {
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    /// The file is a gzipped tar, and this its one member that is the
+    /// program.
+    #[serde(default)]
+    pub member: Option<String>,
+    /// The file is the maker's installer: what it is run with.
+    #[serde(default)]
+    pub run: Vec<String>,
+    /// Where the program is afterwards.
+    pub path: PathBuf,
+}
+
+/// How long a maker's installer may take: it downloads the program again
+/// itself.
+const INSTALLER: Duration = Duration::from_secs(15 * 60);
+
+/// Puts the program `wanted` names in its place, by the six steps yardr's
+/// documentation gives a program that fetches, and says in a sentence why
+/// where it could not. Nothing is kept or run that is not the file yardr
+/// named: the address is the maker's, but what is trusted is the size and
+/// the checksum, which came with the yardr that was proved. `home` is
+/// whose programs these are: the place must be under it. An installer is
+/// kept for its run in `own`, a directory of footplate's ([`dir`]), and
+/// run with `path` for its PATH, with no shell and nothing to read.
+pub fn program(wanted: &Wanted, home: &Path, own: &Path, path: &OsStr) -> Result<(), String> {
+    let place = &wanted.path;
+    let name = place
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} is no place for a program.", place.display()))?;
+    // Installed, and not on PATH: nothing to fetch.
+    if fs::symlink_metadata(place).is_ok() {
+        return Ok(());
+    }
+    let dir = place
+        .parent()
+        .filter(|_| place.is_absolute())
+        .ok_or_else(|| format!("{} is no place for a program.", place.display()))?;
+    // The place is the person's own: under their home as it is written,
+    // and still there once every link on the way is followed.
+    let outside = || {
+        format!(
+            "{} is not under your home ({}), so nothing was put there.",
+            place.display(),
+            home.display()
+        )
+    };
+    if !dir.starts_with(home) || dir.components().any(|part| part == Component::ParentDir) {
+        return Err(outside());
+    }
+    let cannot =
+        |what: &Path, err: io::Error| format!("{} cannot be written ({err}).", what.display());
+    fs::create_dir_all(dir).map_err(|err| cannot(dir, err))?;
+    let (real_dir, real_home) = (
+        fs::canonicalize(dir).map_err(|err| cannot(dir, err))?,
+        fs::canonicalize(home).map_err(|err| cannot(home, err))?,
+    );
+    if !real_dir.starts_with(&real_home) {
+        return Err(outside());
+    }
+    if !wanted.url.starts_with("https://") && !cfg!(test) {
+        return Err(format!(
+            "{name} is not fetched: {:?} is no https address.",
+            wanted.url
+        ));
+    }
+
+    let bytes = api::download(&wanted.url, wanted.size).map_err(|err| {
+        let why = match err {
+            api::Error::Protocol(why) => why,
+            api::Error::Down(err) => format!("it does not answer ({err})"),
+            err => err.to_string(),
+        };
+        format!(
+            "{name} was not fetched from {}: {why}. This needs the network.",
+            host_of(&wanted.url)
+        )
+    })?;
+    if bytes.len() as u64 != wanted.size || !sha256(&bytes).eq_ignore_ascii_case(&wanted.sha256) {
+        return Err(format!(
+            "What {} gave for {name} is not the file yardr's makers verified: its size or checksum differs. Nothing of it is kept or run.",
+            host_of(&wanted.url)
+        ));
+    }
+    let program = match &wanted.member {
+        Some(member_name) => member(&bytes, member_name, &[], UNPACKED_MOST).map_err(|why| {
+            format!("The archive of {name} is not as expected: {why}. Nothing of it is kept.")
+        })?,
+        None => bytes,
+    };
+    if wanted.run.is_empty() {
+        keep(&real_dir, name, &program).map_err(|err| cannot(place, err))?;
+        return Ok(());
+    }
+
+    // The maker's installer: kept in a directory of footplate's own that
+    // nobody else can write to, so that the file that was checked is the
+    // file that is run, and gone afterwards.
+    let serial = NEXT_PART.fetch_add(1, Ordering::Relaxed);
+    let aside = own.join(format!(".install.{}.{serial}", std::process::id()));
+    fs::create_dir_all(own).map_err(|err| cannot(own, err))?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&aside)
+        .map_err(|err| cannot(&aside, err))?;
+    let ran = keep(&aside, name, &program)
+        .map_err(|err| cannot(&aside, err))
+        .and_then(|installer| run_installer(&installer, &wanted.run, path));
+    let _ = fs::remove_dir_all(&aside);
+    let said = ran?;
+    match fs::symlink_metadata(place).is_ok() {
+        true => Ok(()),
+        false => Err(format!(
+            "The installer of {name} ended, and {} is not there. It said: {said}",
+            place.display()
+        )),
+    }
+}
+
+/// The host of an address, to name in a sentence.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+}
+
+/// Runs a maker's installer with its arguments and gives the last of what
+/// it printed. It gets no shell and nothing on its input; one that does not
+/// end is stopped.
+fn run_installer(installer: &Path, args: &[String], path: &OsStr) -> Result<String, String> {
+    let name = installer
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut child = Command::new(installer)
+        .args(args)
+        .env("PATH", path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("The installer of {name} could not be started ({err})."))?;
+    let tail = |pipe: Option<Box<dyn Read + Send>>| {
+        thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(1024 * 1024).read_to_end(&mut text);
+            }
+            String::from_utf8_lossy(&text).into_owned()
+        })
+    };
+    let out = tail(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let err = tail(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() > INSTALLER => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "The installer of {name} did not end in {} minutes, and was stopped.",
+                    INSTALLER.as_secs() / 60
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(err) => return Err(format!("The installer of {name} was lost ({err}).")),
+        }
+    };
+    let said = format!(
+        "{}{}",
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default()
+    );
+    let lines: Vec<&str> = said
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let last = lines[lines.len().saturating_sub(4)..].join(" / ");
+    match status.success() {
+        true => Ok(last),
+        false => Err(format!(
+            "The installer of {name} failed ({status}). It said: {last}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -706,6 +983,14 @@ mod tests {
                     )?;
                     conn.write_all(&bytes)
                 }
+                // A status that sends on does so to what its file says.
+                (status @ 301..=308, Some(to)) => conn.write_all(
+                    format!(
+                        "HTTP/1.1 {status} Reply\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        String::from_utf8_lossy(&to)
+                    )
+                    .as_bytes(),
+                ),
                 (status, _) => conn.write_all(
                     format!(
                         "HTTP/1.1 {status} Reply\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -878,6 +1163,17 @@ mod tests {
             self.fetch_with(&self.key)
         }
 
+        /// The yardr to run, as the first run asks for it.
+        fn current(&self) -> Result<(Stored, Option<Refusal>), Refusal> {
+            Source {
+                site: &self.site.address,
+                key: &self.key,
+                lowest: Version(9, 0, 0),
+                target: TARGET,
+            }
+            .current(&self.dir())
+        }
+
         fn fetch_with(&self, key: &str) -> Result<Stored, Refusal> {
             Source {
                 site: &self.site.address,
@@ -905,12 +1201,18 @@ mod tests {
         assert_eq!(fs::read(&stored.path).unwrap(), BINARY);
         let mode = fs::metadata(&stored.path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
-        // The binary alone: nothing else of the archive, no part.
-        let kept: Vec<_> = fs::read_dir(fixture.dir())
+        // The binary and its version: nothing else of the archive, no
+        // part.
+        let mut kept: Vec<_> = fs::read_dir(fixture.dir())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(kept, ["yardr"]);
+        kept.sort();
+        assert_eq!(kept, ["yardr", "yardr.version"]);
+        assert_eq!(
+            fs::read_to_string(fixture.dir().join("yardr.version")).unwrap(),
+            "v9.1.0\n"
+        );
         assert_eq!(
             fixture.site.asked(),
             [
@@ -919,6 +1221,219 @@ mod tests {
                 "/releases/v9.1.0/checksums.txt.minisig",
                 "/releases/v9.1.0/yardr_9.1.0_linux_amd64.tar.gz",
             ]
+        );
+    }
+
+    /// The first run's step 0: the release is fetched where no yardr is
+    /// kept or the kept one's version is not the latest, and else the kept
+    /// one is the answer, with `latest.json` alone read.
+    #[test]
+    fn the_kept_yardr_is_the_one_to_run_while_it_is_the_latest() {
+        let fixture = Fixture::new("v9.1.0");
+        assert_eq!(stored(&fixture.dir()), None);
+        let (first, stale) = fixture.current().unwrap();
+        assert!(stale.is_none());
+        assert_eq!(first.version, "v9.1.0");
+        assert_eq!(fixture.site.asked().len(), 4);
+        assert_eq!(stored(&fixture.dir()), Some(first.clone()));
+
+        // Kept and the latest: nothing but latest.json is asked for.
+        let (again, stale) = fixture.current().unwrap();
+        assert_eq!((again, stale.is_none()), (first.clone(), true));
+        assert_eq!(fixture.site.asked()[4..], ["/releases/latest.json"]);
+
+        // A newer one is out: it is fetched, proved and kept in its place.
+        let newer = archive_of(&[("yardr", b'0', b"a newer yardr")]);
+        fixture.release("v9.2.0", &newer);
+        let (second, _) = fixture.current().unwrap();
+        assert_eq!(second.version, "v9.2.0");
+        assert_eq!(fs::read(&second.path).unwrap(), b"a newer yardr");
+        assert_eq!(fixture.site.asked().len(), 9);
+
+        // The site says an older one is the latest: the kept one is never
+        // replaced by it, and nothing of it is fetched.
+        fixture.latest("v9.1.0", &Fixture::archive_path("v9.1.0"));
+        let (kept, stale) = fixture.current().unwrap();
+        assert_eq!((kept.version.as_str(), stale.is_none()), ("v9.2.0", true));
+        assert_eq!(fs::read(&kept.path).unwrap(), b"a newer yardr");
+        assert_eq!(fixture.site.asked().len(), 10);
+    }
+
+    /// A newer release that fails its proof is not kept, and the yardr
+    /// that was proved before is still the one to run, with why beside it.
+    /// With none kept there is none to run.
+    #[test]
+    fn a_newer_release_that_fails_leaves_the_kept_one_to_run() {
+        let fixture = Fixture::new("v9.1.0");
+        fixture.current().unwrap();
+        fixture.release("v9.2.0", &archive_of(&[("yardr", b'0', b"a newer yardr")]));
+        fixture.site.put(
+            &Fixture::archive_path("v9.2.0"),
+            archive_of(&[("yardr", b'0', b"another's yardr")]),
+        );
+        let (kept, why) = fixture.current().unwrap();
+        assert_eq!(kept.version, "v9.1.0");
+        assert_eq!(fs::read(&kept.path).unwrap(), BINARY);
+        assert!(matches!(why, Some(Refusal::Differs { .. })), "{why:?}");
+        // So is it with the site away.
+        fixture.site.status(LATEST, 503);
+        let (kept, why) = fixture.current().unwrap();
+        assert_eq!(kept.version, "v9.1.0");
+        assert!(matches!(why, Some(Refusal::Answered { status: 503, .. })));
+
+        // A binary whose version's file is gone is no kept yardr: with the
+        // site away there is nothing to run.
+        fs::remove_file(fixture.dir().join(VERSION_FILE)).unwrap();
+        assert_eq!(stored(&fixture.dir()), None);
+        assert!(matches!(
+            fixture.current(),
+            Err(Refusal::Answered { status: 503, .. })
+        ));
+    }
+
+    /// What doctor names for a program on a Mac, on the tests' site.
+    fn wanted(site: &Site, file: &str, bytes: &[u8], place: &Path) -> Wanted {
+        Wanted {
+            version: "1.2.3".to_string(),
+            url: format!("{}{file}", site.address),
+            sha256: sha256(bytes),
+            size: bytes.len() as u64,
+            member: None,
+            run: Vec::new(),
+            path: place.to_path_buf(),
+        }
+    }
+
+    /// A program yardr names is fetched from its maker's address, which
+    /// may send on to another, held to yardr's size and checksum, and put
+    /// in its place to be run. One that is there already is not fetched.
+    #[test]
+    fn a_named_program_is_fetched_checked_and_put_in_its_place() {
+        let site = Site::start();
+        let home = tempfile::tempdir().unwrap();
+        let (own, path) = (home.path().join("own"), OsStr::new("/usr/bin:/bin"));
+        let place = home.path().join(".local/bin/herdr");
+        site.put("/storage/herdr?signed=yes", b"herdr itself");
+        site.put("/download/v1/herdr", format!("{}/elsewhere", site.address));
+        site.status("/download/v1/herdr", 302);
+        site.put("/elsewhere", "/storage/herdr?signed=yes");
+        site.status("/elsewhere", 307);
+        let herdr = wanted(&site, "/download/v1/herdr", b"herdr itself", &place);
+        program(&herdr, home.path(), &own, path).unwrap();
+        assert_eq!(fs::read(&place).unwrap(), b"herdr itself");
+        assert_eq!(
+            fs::metadata(&place).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            site.asked(),
+            [
+                "/download/v1/herdr",
+                "/elsewhere",
+                "/storage/herdr?signed=yes"
+            ]
+        );
+        // There already: installed, and nothing is asked of anyone.
+        program(&herdr, home.path(), &own, path).unwrap();
+        assert_eq!(site.asked().len(), 3);
+
+        // An archive gives its one member, by the name yardr has for it.
+        let codex = home.path().join(".local/bin/codex");
+        let archive = archive_of(&[("codex-aarch64-apple-darwin", b'0', b"codex itself")]);
+        site.put("/codex.tar.gz", &archive);
+        let mut named = wanted(&site, "/codex.tar.gz", &archive, &codex);
+        named.member = Some("codex-aarch64-apple-darwin".to_string());
+        program(&named, home.path(), &own, path).unwrap();
+        assert_eq!(fs::read(&codex).unwrap(), b"codex itself");
+    }
+
+    /// What is not the file yardr named is not kept and not run: another
+    /// file, a longer one, an archive with more in it, a place outside the
+    /// home, an address that sends on without end.
+    #[test]
+    fn a_program_that_is_not_the_named_file_is_neither_kept_nor_run() {
+        let site = Site::start();
+        let home = tempfile::tempdir().unwrap();
+        let (own, path) = (home.path().join("own"), OsStr::new("/usr/bin:/bin"));
+        let place = home.path().join(".local/bin/claude");
+        let ran = home.path().join("ran");
+        let installer = format!("#!/bin/sh\ntouch {}\n", ran.display());
+
+        // Another file than the one that was verified, as an installer.
+        site.put("/claude", installer.replace("touch", "tutch"));
+        let mut other = wanted(&site, "/claude", installer.as_bytes(), &place);
+        other.run = vec!["install".to_string()];
+        let why = program(&other, home.path(), &own, path).unwrap_err();
+        assert!(
+            why.contains("is not the file yardr's makers verified"),
+            "{why}"
+        );
+        // A longer one is not read to its end.
+        site.put("/claude", format!("{installer}# and more"));
+        let why = program(&other, home.path(), &own, path).unwrap_err();
+        assert!(why.contains("was not fetched"), "{why}");
+        // An archive that holds more than the program.
+        let archive = archive_of(&[("claude", b'0', b"x"), ("extra", b'0', b"y")]);
+        site.put("/claude.tar.gz", &archive);
+        let mut more = wanted(&site, "/claude.tar.gz", &archive, &place);
+        more.member = Some("claude".to_string());
+        let why = program(&more, home.path(), &own, path).unwrap_err();
+        assert!(why.contains("is not as expected"), "{why}");
+        // A place that is not under the home, as it is written or by a
+        // link on the way.
+        let outside = tempfile::tempdir().unwrap();
+        let away = wanted(&site, "/claude", b"x", &outside.path().join("bin/claude"));
+        let why = program(&away, home.path(), &own, path).unwrap_err();
+        assert!(why.contains("is not under your home"), "{why}");
+        std::os::unix::fs::symlink(outside.path(), home.path().join("link")).unwrap();
+        let linked = wanted(&site, "/claude", b"x", &home.path().join("link/bin/claude"));
+        let why = program(&linked, home.path(), &own, path).unwrap_err();
+        assert!(why.contains("is not under your home"), "{why}");
+        assert!(!outside.path().join("bin/claude").exists());
+        // An address that sends on to itself.
+        site.put("/round", "/round");
+        site.status("/round", 302);
+        let round = wanted(&site, "/round", b"x", &place);
+        let why = program(&round, home.path(), &own, path).unwrap_err();
+        assert!(why.contains("sent on more than"), "{why}");
+
+        assert!(!ran.exists() && !place.exists());
+        assert!(fs::read_dir(&own).map_or(true, |mut dir| dir.next().is_none()));
+    }
+
+    /// A program its maker's installer puts in place: the file that was
+    /// checked is run with yardr's arguments and the PATH it is given,
+    /// with nothing to read, and is gone afterwards.
+    #[test]
+    fn a_maker_s_installer_is_run_with_its_arguments_and_removed() {
+        let site = Site::start();
+        let home = tempfile::tempdir().unwrap();
+        let own = home.path().join("own");
+        let place = home.path().join(".local/bin/claude");
+        let installer = format!(
+            "#!/bin/sh\nread line && exit 9\nmkdir -p {dir}\nprintf '%s %s %s' \"$1\" \"$2\" \"$PATH\" > {place}\n",
+            dir = place.parent().unwrap().display(),
+            place = place.display()
+        );
+        site.put("/claude", &installer);
+        let mut claude = wanted(&site, "/claude", installer.as_bytes(), &place);
+        claude.run = vec!["install".to_string(), "2.1.296".to_string()];
+        program(&claude, home.path(), &own, OsStr::new("/usr/bin:/bin")).unwrap();
+        assert_eq!(
+            fs::read_to_string(&place).unwrap(),
+            "install 2.1.296 /usr/bin:/bin"
+        );
+        assert!(fs::read_dir(&own).unwrap().next().is_none());
+
+        // One that ends and leaves nothing in the place is said so.
+        fs::remove_file(&place).unwrap();
+        site.put("/quiet", "#!/bin/sh\necho nothing to do\n");
+        let mut quiet = wanted(&site, "/quiet", b"#!/bin/sh\necho nothing to do\n", &place);
+        quiet.run = vec!["install".to_string()];
+        let why = program(&quiet, home.path(), &own, OsStr::new("/usr/bin:/bin")).unwrap_err();
+        assert!(
+            why.ends_with("is not there. It said: nothing to do"),
+            "{why}"
         );
     }
 

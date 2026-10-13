@@ -28,6 +28,10 @@ use crate::settings::{self, Notify, Settings};
 use crate::theme::{Look, Palette};
 use crate::yard::{self, Env};
 
+mod firstrun;
+
+use firstrun::{Ended, FirstRun, Means};
+
 /// The application's icon, from the 1024px master in assets/icon.png.
 pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
@@ -818,6 +822,14 @@ pub struct Footplate {
     adding: Option<Adding>,
     pairing: bool,
     yard_said: Option<String>,
+    /// "Set up a yard here", while it is underway: it stands where the
+    /// yard that is not there would, and where its conversation will.
+    first_run: Option<Entity<FirstRun>>,
+    /// What the first run reaches outside the window with.
+    means: Means,
+    /// The row to open once the yard has it: the yardmaster's, after the
+    /// first run, whose yard may not have answered yet.
+    wanted_row: Option<Selected>,
     /// The system's notifications, and what it answered when it was asked
     /// whether footplate may notify: it is asked when the settings switch
     /// them on, and at the start when they are on.
@@ -962,7 +974,9 @@ impl Footplate {
         // again: the dock's icon is told there, of every yard at once and
         // with the window behind another, where nothing is drawn. The
         // item in the menu bar is told after it, and says its number.
-        cx.observe_self(|this, _| {
+        cx.observe_self(|this, cx| {
+            // And the row that is waited for is opened once it is there.
+            this.seek_wanted(cx);
             this.badge();
             #[cfg(any(target_os = "macos", target_os = "linux", test))]
             this.tray();
@@ -1032,6 +1046,9 @@ impl Footplate {
             adding: None,
             pairing: false,
             yard_said: None,
+            first_run: None,
+            means: Means::real(),
+            wanted_row: None,
             system,
             permission: None,
             _heeding: heeding,
@@ -3471,6 +3488,9 @@ impl Footplate {
         if self.settings_open {
             return self.toggle_settings(window, cx);
         }
+        if let Some(first_run) = self.first_run.clone() {
+            return first_run.update(cx, |first_run, cx| first_run.leave(cx));
+        }
         // The fields of a way to a yard, where there is none.
         if self.down.is_some() && self.adding.is_some() {
             self.yard_said = None;
@@ -3726,6 +3746,68 @@ impl Footplate {
         }
         self.set(self.settings.clone().opening(name), cx);
         self.reopen(cx);
+    }
+
+    /// Whether a yard can be set up from here: the yard that is away is
+    /// this run's own, at its socket, and nothing answers there. Another
+    /// home's yard, and one at an address, are not footplate's to make.
+    fn sets_up_here(&self) -> bool {
+        let here = self.entry.as_ref().is_some_and(|yard| {
+            !yard.is_far()
+                && (yard.socket.is_empty() || std::path::Path::new(&yard.socket) == self.env.socket)
+        });
+        here && self.env.yard.is_none() && self.away == Away::Trying
+    }
+
+    /// "Set up a yard here": the first run begins, where the window said
+    /// there is no yard. The yard goes on being asked for meanwhile, and
+    /// is followed as soon as it answers, under the first run.
+    fn set_up_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pairing || self.first_run.is_some() || !self.sets_up_here() {
+            return;
+        }
+        self.adding = None;
+        self.yard_said = None;
+        let (means, socket, name) = (
+            self.means.clone(),
+            self.env.socket.clone(),
+            self.name.clone(),
+        );
+        let handle = self.handle;
+        let first_run = cx.new(|cx| FirstRun::new(means, &socket, &name, handle, cx));
+        cx.subscribe(&first_run, |this, _, ended: &Ended, cx| {
+            this.first_run = None;
+            // The line has the keys, as when a yard is switched to.
+            let (handle, focus) = (this.handle, this.line.focus_handle(cx));
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.focus(&focus));
+            });
+            if let Ended::Talking { yardmaster } = ended {
+                this.wanted_row = Some(Selected::Conversation(yardmaster.clone()));
+                this.seek_wanted(cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        window.focus(&first_run.focus_handle(cx));
+        self.first_run = Some(first_run);
+        cx.notify();
+    }
+
+    /// Opens the row that is wanted, once the yard has it.
+    fn seek_wanted(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.wanted_row.clone() else {
+            return;
+        };
+        if self.first_run.is_some() || self.down.is_some() {
+            return;
+        }
+        if !self.model.as_ref().is_some_and(|m| m.has_row(&row)) {
+            return;
+        }
+        self.wanted_row = None;
+        self.settings_open = false;
+        self.change(cx, |m| m.select(row));
     }
 
     /// A yard is to be added, in the settings or from where there is no
@@ -4690,6 +4772,16 @@ impl Footplate {
                                 .flex_wrap()
                                 .items_center()
                                 .gap_2()
+                                // The first way makes the yard that is
+                                // not there: this run's, and no other.
+                                .children(self.sets_up_here().then(|| {
+                                    small_button("set up a yard here".to_string(), palette)
+                                        .id("way here")
+                                        .debug_selector(|| "way here".to_string())
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.set_up_here(window, cx)
+                                        }))
+                                }))
                                 .children(ways.map(|(id, text, adding)| {
                                     let far = adding == Adding::Far;
                                     small_button(text.to_string(), palette)
@@ -6395,6 +6487,8 @@ impl Render for Footplate {
             // The settings stand where the card or the notices do: the keys
             // that pick and mark read are not for what is not in view.
             _ if self.settings_open => CONTEXT,
+            // Nor are they for the first run, whose fields take names.
+            _ if self.first_run.is_some() => CONTEXT,
             // A yard that is away has no card in view either, and what is
             // typed there is a yard's name or a code: `e` and `d` are
             // letters of it, and Enter is the field's.
@@ -6466,10 +6560,18 @@ impl Render for Footplate {
         let root = root.children(beside);
         match (&self.down, &self.model) {
             (Some(_), _) if self.settings_open => root.child(self.talk_settings(palette, cx)),
-            (Some(why), _) => root.child(self.away(why, palette, cx)),
+            (Some(why), _) => match &self.first_run {
+                Some(first_run) => root.child(first_run.clone()),
+                None => root.child(self.away(why, palette, cx)),
+            },
             (None, Some(model)) if self.settings_open => root
                 .child(self.list(model, palette, cx))
                 .child(self.talk_settings(palette, cx)),
+            // The yard answers before its first run is over: its rows are
+            // there, and the first run where a conversation will be.
+            (None, Some(model)) if self.first_run.is_some() => root
+                .child(self.list(model, palette, cx))
+                .children(self.first_run.clone()),
             (None, Some(model)) => root
                 .child(self.list(model, palette, cx))
                 .child(self.talk(model, palette, cx)),
@@ -12333,6 +12435,7 @@ mod tests {
         assert!(!drawn(cx, "which yard"));
         // Nor a way to another yard: it is the one there is.
         assert!(!drawn(cx, "way near") && !drawn(cx, "way far"));
+        assert!(!drawn(cx, "way here"));
         cx.simulate_keystrokes("secondary-y");
         assert_eq!(switching(&view, cx), None);
     }
@@ -12439,6 +12542,385 @@ mod tests {
         // The line has the keys, as after a switch.
         cx.simulate_input("hello");
         assert_eq!(typed(&view, cx), "hello");
+    }
+
+    /// What the first run of a test reaches out with: a stand-in for
+    /// yardr in `dir`, which is not fetched from anywhere, a home under
+    /// `dir`, and a list in place of the browser. The stand-in's path, and
+    /// the pages that were opened.
+    fn stand_in_means(dir: &std::path::Path) -> (Means, PathBuf, Rc<RefCell<Vec<String>>>) {
+        let program = crate::setup::standin::make(&dir.join("fetched"));
+        let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+        let (fetched, pages) = (program.clone(), opened.clone());
+        let means = Means {
+            yardr: Arc::new(move || Ok((fetched.clone(), None))),
+            path: "/usr/bin:/bin".into(),
+            home: Some(dir.join("home")),
+            own: Some(dir.join("own")),
+            open: Rc::new(move |url, _| pages.borrow_mut().push(url.to_string())),
+            apple: false,
+        };
+        (means, program, opened)
+    }
+
+    fn step_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<firstrun::Step> {
+        view.read_with(cx, |v, cx| v.first_run.as_ref().map(|f| f.read(cx).step))
+    }
+
+    fn setup_said(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, cx| {
+            let said = v.first_run.as_ref().and_then(|f| f.read(cx).said.clone());
+            said.unwrap_or_default()
+        })
+    }
+
+    /// Waits until the first run stands at `step` with nothing underway.
+    fn at_step(view: &Entity<Footplate>, cx: &mut VisualTestContext, step: firstrun::Step) {
+        wait(cx, &format!("the first run at {step:?}"), |cx| {
+            view.read_with(cx, |v, cx| {
+                v.first_run.as_ref().is_some_and(|f| {
+                    let f = f.read(cx);
+                    f.step == step && f.busy.is_none()
+                })
+            })
+        });
+    }
+
+    fn type_setup(view: &Entity<Footplate>, cx: &mut VisualTestContext, field: &str, text: &str) {
+        view.update(cx, |v, cx| {
+            let first_run = v.first_run.clone().unwrap();
+            first_run.update(cx, |f, cx| f.type_in(field, text, cx));
+        });
+    }
+
+    fn setup_typed(view: &Entity<Footplate>, cx: &mut VisualTestContext, field: &str) -> String {
+        view.read_with(cx, |v, cx| {
+            v.first_run.as_ref().unwrap().read(cx).typed_in(field, cx)
+        })
+    }
+
+    /// The third way, from no yard to talking with the yardmaster: yardr
+    /// is had, what the machine lacks is listed from doctor's JSON with
+    /// how each comes, the yard is created without being started, the
+    /// harness's login is led by what yardr asks for, the yard is started,
+    /// a folder becomes its depot with a first bead, and the yardmaster's
+    /// conversation is open. Every step is a command of the stand-in for
+    /// yardr, with a PATH made from doctor's data.
+    #[gpui::test]
+    fn no_yard_offers_to_set_one_up_here_and_ends_talking_with_the_yardmaster(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (means, program, opened) = stand_in_means(dir.path());
+        let home = dir.path().join("home");
+        standin::answers(&program, "doctor", 1, &standin::doctor_bare(&home));
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+        assert!(drawn(cx, "way here") && drawn(cx, "way near") && drawn(cx, "way far"));
+        assert!(!drawn(cx, "setup step"));
+
+        // What this needs: doctor's rows, each with how it comes.
+        click_on(cx, "way here");
+        at_step(&view, cx, Step::Needs);
+        assert!(drawn(cx, "setup step"));
+        for row in ["git", "herdr", "claude", "opencode"] {
+            assert!(drawn(cx, &format!("setup row {row}")), "{row}");
+        }
+        // herdr has a way yardr names; the harnesses here have a page, and
+        // yardr's words for installing them by hand.
+        assert!(drawn(cx, "setup install herdr") && !drawn(cx, "setup install claude"));
+        assert!(drawn(cx, "setup get claude") && !drawn(cx, "setup get herdr"));
+        assert!(!drawn(cx, "setup install git") && !drawn(cx, "setup page git"));
+        click_on(cx, "setup page claude");
+        assert_eq!(*opened.borrow(), ["https://claude.com/claude-code"]);
+        // Nothing goes on while herdr and a harness are missing.
+        click_on(cx, "setup go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Needs));
+        // What is started finds what doctor found: the login shell's
+        // directory and the one a program is fetched to.
+        let wide = format!(
+            "/usr/bin:/bin:{}:/opt/stand-in/bin",
+            home.join(".local/bin").display()
+        );
+        let path = view.read_with(cx, |v, cx| v.first_run.as_ref().unwrap().read(cx).path());
+        assert_eq!(path, Some(wide.clone().into()));
+
+        // They are installed: checked again, a herdr whose server is down
+        // waits and keeps nothing back.
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        click_on(cx, "setup check");
+        wait(cx, "herdr's server waiting", |cx| {
+            drawn(cx, "setup server waits")
+        });
+        click_on(cx, "setup go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+
+        // Your yard: the login name stands in the field, the first
+        // harness is chosen, and one with no login recipe says so.
+        assert_eq!(setup_typed(&view, cx, "your name"), "jo");
+        assert!(drawn(cx, "setup harness claude") && drawn(cx, "setup harness codex"));
+        assert!(drawn(cx, "setup style guide") && drawn(cx, "setup style report"));
+        // The name is typed where the focus is: every letter of it.
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("Jo Deed");
+        assert_eq!(setup_typed(&view, cx, "your name"), "Jo Deed");
+        type_setup(&view, cx, "about you", "I teach history");
+        standin::answers(&program, "init", 0, &json!({"harness": "claude"}));
+        cx.simulate_keystrokes("enter");
+        at_step(&view, cx, Step::Login);
+        let calls = standin::calls(&program);
+        let yard = dir.path().display();
+        assert_eq!(
+            calls.last().unwrap(),
+            &format!(
+                "[init] [--harness=claude] [--operator=Jo Deed] [--yardmaster=yardmaster] [--style=guide] [--about=I teach history] [--json] [--home] [{yard}] [--actor=Jo Deed]"
+            )
+        );
+
+        // The login: the ways yardr names as buttons, the page as a
+        // button, the code in a field that keeps nothing, and the
+        // question before the one real call.
+        click_on(cx, "setup log in");
+        wait(cx, "the ways to log in", |cx| drawn(cx, "setup method 1"));
+        click_on(cx, "setup method 0");
+        wait(cx, "the page and the code's field", |cx| {
+            drawn(cx, "setup page") && drawn(cx, "setup code")
+        });
+        click_on(cx, "setup page");
+        assert_eq!(
+            opened.borrow()[1],
+            "https://claude.com/cai/oauth/authorize?code=true"
+        );
+        // The field has the keys, and shows none of what is typed.
+        cx.simulate_input("good#code");
+        assert_eq!(setup_typed(&view, cx, "code"), "good#code");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(setup_typed(&view, cx, "code"), "");
+        wait(cx, "the question before the real call", |cx| {
+            drawn(cx, "setup prove")
+        });
+        click_on(cx, "setup prove");
+        at_step(&view, cx, Step::Start);
+        assert_eq!(setup_said(&view, cx), "Logged in, and the harness answers.");
+        assert_eq!(
+            standin::answered(&program),
+            [
+                r#"{"choose":"Claude subscription"}"#,
+                r#"{"input":"good#code"}"#,
+                r#"{"confirm":true}"#
+            ]
+        );
+
+        // Start: what yardr could not start is said in its words, and the
+        // yard that then runs is followed by itself, under the first run.
+        standin::answers(
+            &program,
+            "up.1",
+            1,
+            &json!({"up": false, "parts": [
+                {"part": "herdr", "running": false, "error": "its server did not come up.", "do": "Look at herdr-server.log."}]}),
+        );
+        standin::answers(&program, "up", 0, &json!({"up": true, "parts": []}));
+        click_on(cx, "setup start");
+        wait(cx, "what could not be started", |cx| {
+            setup_said(&view, cx) == "herdr: its server did not come up. Look at herdr-server.log."
+        });
+        assert_eq!(step_of(&view, cx), Some(Step::Start));
+        let near = Yard::start_at(&dir.path().join("yard.sock"));
+        a_yard_of_jo(&near);
+        click_on(cx, "setup start");
+        at_step(&view, cx, Step::Depot);
+        wait(cx, "the yard that was started", |cx| {
+            view.read_with(cx, |v, _| v.down.is_none() && v.model.is_some())
+        });
+        assert!(view.read_with(cx, |v, _| v.first_run.is_some()));
+
+        // The folder: its name is offered, and a folder that is no git
+        // checkout has no branch. The import's questions are answered.
+        let folder = dir.path().join("My Essays");
+        std::fs::create_dir(&folder).unwrap();
+        view.update(cx, |v, cx| {
+            let first_run = v.first_run.clone().unwrap();
+            first_run.update(cx, |f, cx| f.chose(&folder, cx));
+        });
+        assert_eq!(setup_typed(&view, cx, "name"), "my-essays");
+        assert_eq!(setup_typed(&view, cx, "base branch"), "");
+        standin::answers(
+            &program,
+            "depot-add",
+            0,
+            &json!({"name": "my-essays", "kind": "dir"}),
+        );
+        standin::answers(
+            &program,
+            "depot-init.1",
+            2,
+            &json!({"error": "depot init cannot ask without a terminal",
+                    "missing": ["--bind builders=<kind>[:<model>]", "--members decisions=<users>"]}),
+        );
+        standin::answers(
+            &program,
+            "depot-init",
+            0,
+            &json!({"result": {"created": 9}}),
+        );
+        click_on(cx, "setup set up");
+        at_step(&view, cx, Step::Bead);
+
+        // The first bead, and the yardmaster's conversation.
+        type_setup(&view, cx, "title", "A first draft");
+        type_setup(&view, cx, "done when", "It reads well aloud.");
+        standin::answers(&program, "bead-create", 0, &json!({"id": "my-essays-1a2b"}));
+        standin::answers(
+            &program,
+            "bead-advance",
+            0,
+            &json!({"id": "my-essays-1a2b"}),
+        );
+        standin::answers(&program, "subscribe", 0, &json!([]));
+        click_on(cx, "setup hand on");
+        wait(cx, "the yardmaster's conversation", |cx| {
+            open_row(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
+        });
+        assert!(view.read_with(cx, |v, _| v.first_run.is_none()));
+        let tail = format!("[--json] [--home] [{yard}] [--actor=Jo Deed]");
+        let calls = standin::calls(&program);
+        let after_init: Vec<&str> = calls
+            .iter()
+            .skip_while(|call| !call.starts_with("[harness]"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            after_init,
+            [
+                format!("[harness] [login] {tail} [--] [claude]"),
+                format!("[up] {tail}"),
+                format!("[up] {tail}"),
+                format!(
+                    "[depot] [add] {tail} [--] [my-essays] [{}]",
+                    folder.display()
+                ),
+                format!("[depot] [init] [--yes] {tail} [--] [my-essays]"),
+                format!(
+                    "[depot] [init] [--yes] [--bind] [builders=claude] [--members] [decisions=Jo Deed] {tail} [--] [my-essays]"
+                ),
+                format!(
+                    "[bead] [create] [--depot=my-essays] [-b] [It reads well aloud.] {tail} [--] [A first draft]"
+                ),
+                format!("[bead] [advance] [--to=new] {tail} [--] [my-essays-1a2b]"),
+                format!(
+                    "[subscribe] [--done] [--where=depot=my-essays] {tail} [--] [Jo Deed] [yardr]"
+                ),
+            ]
+        );
+        // Every one of them with the PATH doctor's data made.
+        let paths = standin::paths(&program);
+        assert!(paths[1..].iter().all(|path| *path == wide), "{paths:?}");
+        // The line has the keys, in the yardmaster's conversation.
+        cx.simulate_input("hello");
+        assert_eq!(typed(&view, cx), "hello");
+    }
+
+    /// A home that has a yard already, which does not run: the first run
+    /// creates nothing over it and asks nothing of it again. It starts the
+    /// yard and opens its yardmaster's conversation, by the name the yard
+    /// has for it.
+    #[gpui::test]
+    fn a_yard_that_is_there_and_stopped_is_started_and_not_created_again(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (means, program, _) = stand_in_means(dir.path());
+        let mut doctor = standin::doctor_ready();
+        doctor["yard"] = json!(true);
+        standin::answers(&program, "doctor", 0, &doctor);
+        doctor["state"] = json!({"server": "running", "yardmaster": {"name": "assembly"}});
+        standin::answers(&program, "up", 0, &json!({"up": true, "parts": []}));
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+        click_on(cx, "way here");
+        at_step(&view, cx, Step::Needs);
+        click_on(cx, "setup go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Start));
+        assert!(setup_said(&view, cx).starts_with("This machine has a yard already"));
+
+        let near = Yard::start_at(&dir.path().join("yard.sock"));
+        a_yard_of_jo(&near);
+        standin::answers(&program, "doctor", 0, &doctor);
+        click_on(cx, "setup start");
+        wait(cx, "the conversation of the yard's own yardmaster", |cx| {
+            open_row(&view, cx) == Some(Selected::Conversation("assembly".into()))
+        });
+        assert!(view.read_with(cx, |v, _| v.first_run.is_none()));
+        let calls = standin::calls(&program);
+        let commands: Vec<&str> = calls
+            .iter()
+            .map(|call| call.split(' ').next().unwrap())
+            .collect();
+        assert_eq!(commands, ["[doctor]", "[up]", "[doctor]"]);
+        // Nobody said a name: the commands act as the login does.
+        assert!(
+            calls.iter().all(|call| !call.contains("--actor")),
+            "{calls:?}"
+        );
+    }
+
+    /// A yardr that was not proved is not kept and never run: the first
+    /// run says why, in the fetch's words, and tries again when asked. A
+    /// program that cannot be fetched is said so, and Esc leaves the first
+    /// run for the first screen.
+    #[gpui::test]
+    fn a_yardr_that_failed_its_proof_is_never_run(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut means, program, _) = stand_in_means(dir.path());
+        let proved = Arc::new(AtomicBool::new(false));
+        let (fetched, is_proved) = (program.clone(), proved.clone());
+        means.yardr = Arc::new(move || match is_proved.load(Ordering::SeqCst) {
+            true => Ok((fetched.clone(), None)),
+            false => Err(crate::fetch::Refusal::BadSignature.to_string()),
+        });
+        let mut doctor = standin::doctor_bare(&dir.path().join("home"));
+        // Nothing listens there: the fetch fails without leaving this
+        // machine.
+        doctor["machine"][0]["fetch"]["url"] = json!("http://127.0.0.1:1/herdr");
+        standin::answers(&program, "doctor", 1, &doctor);
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+
+        click_on(cx, "way here");
+        wait(cx, "why there is no yardr", |cx| {
+            setup_said(&view, cx).starts_with("The signature of yardr's release is not that")
+        });
+        assert_eq!(step_of(&view, cx), Some(Step::Yardr));
+        assert!(drawn(cx, "setup again") && !drawn(cx, "setup check"));
+        assert_eq!(standin::calls(&program), Vec::<String>::new());
+
+        proved.store(true, Ordering::SeqCst);
+        click_on(cx, "setup again");
+        at_step(&view, cx, Step::Needs);
+        assert_eq!(standin::calls(&program).len(), 2);
+
+        click_on(cx, "setup install herdr");
+        wait(cx, "that herdr was not fetched", |cx| {
+            setup_said(&view, cx)
+                .starts_with("herdr was not fetched from 127.0.0.1:1: it does not answer")
+        });
+        assert!(!dir.path().join("home/.local/bin/herdr").exists());
+
+        // Esc leaves it: the first screen, with its ways, and the yard
+        // still asked for.
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.first_run.is_none()));
+        assert!(drawn(cx, "way here") && drawn(cx, "away why"));
+        assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
     }
 
     /// The other way: a yard at an address, by a device pairing's code,

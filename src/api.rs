@@ -822,6 +822,14 @@ impl Address {
     }
 }
 
+impl Address {
+    /// The scheme and the host, with nothing after them.
+    fn origin(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}", self.authority)
+    }
+}
+
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let scheme = if self.tls { "https" } else { "http" };
@@ -1047,6 +1055,123 @@ pub fn read(address: &Address, path: &str, most: u64) -> Result<(u16, Vec<u8>)> 
         )));
     }
     Ok((status, bytes))
+}
+
+/// How often a download is sent on to another address before it is given
+/// up: a maker's release address answers with one or two.
+const HOPS: usize = 5;
+
+/// How long a download may take in all. The longest is a harness's
+/// installer, of some hundred megabytes.
+const DOWNLOAD_LONGEST: Duration = Duration::from_secs(30 * 60);
+
+/// The most that is read of a response's status and headers. A server that
+/// sends more is not one of those spoken with here.
+const HEAD_MOST: u64 = 64 * 1024;
+
+/// Reads the file at `url`, which is no yard and not yardr's own site: a
+/// program `yardr doctor` names for a Mac, at its maker's address (fetch.rs).
+/// Such an address may send on to the maker's storage, so a redirect is
+/// followed here, [`HOPS`] times at the most and only to another `https://`
+/// address (or one of this machine, as [`Address::parse`] has it). What is
+/// read is taken for nothing by where it came from: the caller holds it to
+/// the size and the checksum yardr wrote down. A file longer than `most`
+/// bytes is not read to its end.
+pub fn download(url: &str, most: u64) -> Result<Vec<u8>> {
+    let started = Instant::now();
+    let mut url = url.to_string();
+    let mut secure = false;
+    for _ in 0..=HOPS {
+        let (address, target) = split_url(&url)?;
+        // What began over TLS stays there: no address sends it on to a
+        // port of this machine in the clear.
+        if secure && !address.tls {
+            return Err(Error::Protocol(format!(
+                "the file is sent on to {address}, which is not https"
+            )));
+        }
+        secure = address.tls;
+        let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+        conn.write_all(
+            format!(
+                "GET {target} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {CLIENT}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+                address.authority
+            )
+            .as_bytes(),
+        )?;
+        conn.flush()?;
+        let (status, location, reply) = respond_with_location(conn)?;
+        match status {
+            200 => {
+                let mut bytes = Vec::new();
+                let mut reply = reply.take(most.saturating_add(1));
+                let mut some = vec![0u8; 64 * 1024];
+                // Each read has its own time to answer in; the whole has
+                // one too, so that a host cannot go on forever a byte at
+                // a time.
+                loop {
+                    let n = reply.read(&mut some)?;
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&some[..n]);
+                    if started.elapsed() > DOWNLOAD_LONGEST {
+                        return Err(Error::Protocol(format!(
+                            "the file at {address} took longer than {} minutes",
+                            DOWNLOAD_LONGEST.as_secs() / 60
+                        )));
+                    }
+                }
+                if bytes.len() as u64 > most {
+                    return Err(Error::Protocol(format!(
+                        "the file at {address} is longer than {most} bytes"
+                    )));
+                }
+                return Ok(bytes);
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                let to = location.ok_or_else(|| {
+                    Error::Protocol(format!("{address} sends on to nowhere (status {status})"))
+                })?;
+                // "/elsewhere" is of the same host.
+                url = match to.starts_with('/') {
+                    true => format!("{}{to}", address.origin()),
+                    false => to,
+                };
+            }
+            status => {
+                return Err(Error::Protocol(format!(
+                    "{address} has no such file (status {status})"
+                )));
+            }
+        }
+    }
+    Err(Error::Protocol(format!(
+        "the file is sent on more than {HOPS} times"
+    )))
+}
+
+/// An address of a file, as its host and what is asked of it there. The
+/// second goes into the first line of a request as it is, so it has no
+/// space and no control character; it may have a query, which a maker's
+/// storage signs its addresses with.
+fn split_url(url: &str) -> Result<(Address, String)> {
+    let no = || Error::Protocol(format!("{url:?} is no address of a file"));
+    let at = url.find("://").ok_or_else(no)? + 3;
+    let end = url[at..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |slash| at + slash);
+    let address = Address::parse(&url[..end]).map_err(Error::Protocol)?;
+    let target = url[end..].split('#').next().unwrap_or("");
+    if target.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(no());
+    }
+    let target = match target {
+        "" => "/".to_string(),
+        query if query.starts_with('?') => format!("/{query}"),
+        path => path.to_string(),
+    };
+    Ok((address, target))
 }
 
 /// How a yard is reached: by the socket of this machine's, or by the
@@ -1555,9 +1680,27 @@ impl Iterator for Events {
 
 /// Reads the status and the headers of a response, and gives its body.
 fn respond(conn: Conn) -> Result<(u16, Body)> {
+    let (status, _, body) = respond_with_location(conn)?;
+    Ok((status, body))
+}
+
+/// As [`respond`], with where the response sends on to, when it does.
+fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Body)> {
     let mut conn = BufReader::new(conn);
     let mut line = String::new();
-    conn.read_line(&mut line)?;
+    // A line of the head, read within what is left of the head's limit.
+    let mut left = HEAD_MOST;
+    let mut read_line = |conn: &mut BufReader<Conn>, line: &mut String| -> Result<usize> {
+        let n = conn.take(left).read_line(line)?;
+        left -= n as u64;
+        if left == 0 && !line.ends_with('\n') {
+            return Err(Error::Protocol(format!(
+                "the answer's head is longer than {HEAD_MOST} bytes"
+            )));
+        }
+        Ok(n)
+    };
+    read_line(&mut conn, &mut line)?;
     // "HTTP/1.1 200 OK"
     let status = line
         .split_whitespace()
@@ -1566,9 +1709,10 @@ fn respond(conn: Conn) -> Result<(u16, Body)> {
         .ok_or_else(|| Error::Protocol(format!("no HTTP status in {:?}", line.trim_end())))?;
     let mut length = None;
     let mut chunked = false;
+    let mut location = None;
     loop {
         line.clear();
-        if conn.read_line(&mut line)? == 0 {
+        if read_line(&mut conn, &mut line)? == 0 {
             return Err(Error::Down(io::ErrorKind::UnexpectedEof.into()));
         }
         let header = line.trim_end();
@@ -1583,6 +1727,8 @@ fn respond(conn: Conn) -> Result<(u16, Body)> {
             length = value.parse::<u64>().ok();
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
             chunked = value.to_ascii_lowercase().contains("chunked");
+        } else if name.eq_ignore_ascii_case("location") {
+            location = Some(value.to_string());
         }
     }
     let framing = match (chunked, length) {
@@ -1593,7 +1739,7 @@ fn respond(conn: Conn) -> Result<(u16, Body)> {
         (false, Some(n)) => Framing::Length(n),
         (false, None) => Framing::UntilClosed,
     };
-    Ok((status, Body { conn, framing }))
+    Ok((status, location, Body { conn, framing }))
 }
 
 /// The body of a response, as the server frames it. Go's server sends a
@@ -1677,6 +1823,56 @@ impl Read for Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A port of this machine that answers every connection with `reply`
+    /// and closes: its address.
+    fn answering(reply: Vec<u8>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for mut conn in listener.incoming().flatten() {
+                let mut asked = [0u8; 1024];
+                let _ = conn.read(&mut asked);
+                let _ = conn.write_all(&reply);
+            }
+        });
+        address
+    }
+
+    /// A download reads the file its address has, a query in the address
+    /// and all, and no more of an answer's head than a head is long: a
+    /// host that sends headers without end is not read without end.
+    #[test]
+    fn a_download_reads_a_file_and_not_a_head_without_end() {
+        let file = answering(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".to_vec());
+        assert_eq!(download(&format!("{file}/a?b=c"), 5).unwrap(), b"hello");
+        assert!(matches!(
+            download(&format!("{file}/a"), 4),
+            Err(Error::Protocol(_))
+        ));
+
+        let mut endless = b"HTTP/1.1 200 OK\r\nX-Long: ".to_vec();
+        endless.extend(vec![b'a'; 2 * HEAD_MOST as usize]);
+        let Err(Error::Protocol(why)) = download(&answering(endless), 5) else {
+            panic!("a head without end was read");
+        };
+        assert!(why.starts_with("the answer's head is longer than"), "{why}");
+
+        // No address but one of the web, or of this machine, is asked.
+        for no in [
+            "ftp://127.0.0.1/x",
+            "http://example.com/x",
+            "127.0.0.1/x",
+            "https://a b/x",
+        ] {
+            assert!(download(no, 5).is_err(), "{no}");
+        }
+        let (address, target) = split_url("https://example.com?x=1#top").unwrap();
+        assert_eq!(
+            (address.to_string().as_str(), target.as_str()),
+            ("https://example.com", "/?x=1")
+        );
+    }
     use crate::fake::{TOKEN, Yard};
 
     #[test]

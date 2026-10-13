@@ -1,9 +1,12 @@
 # footplate
 
 A native chat window onto a yardr yard, for macOS and Linux: the deck where
-the crew stand. It is an interface over yardr's socket API and starts nothing
-of yardr's; the yard runs as it does (`yardr status`). The yard is this
-machine's, or one at an address, which the window is paired with by a code.
+the crew stand. It is an interface over yardr's socket API; the yard runs as
+it does (`yardr status`). The yard is this machine's, or one at an address,
+which the window is paired with by a code. Where this machine has no yard,
+the window sets one up: it fetches yardr and runs its commands, with no
+terminal ([Setting up a yard here](#setting-up-a-yard-here)). Beside that
+it starts nothing of yardr's.
 The first slice is the
 conversations a person has with this yard's crew and with the crew a linked
 yard exposes, as `yardr chat` shows them in a terminal.
@@ -167,14 +170,18 @@ the images back in the draft. An image the yard took before the send failed
 stays in its store, named by no mail, until `yardr store prune`.
 
 **No yard** (the socket is missing, or nothing answers): the window says so,
-names the socket, and tries again every 3 seconds. footplate does not start
-the yard's server; any yardr command that reads the yard does
-(`yardr status`). When the server comes back, the conversation that was open
-is open again.
+names the socket, and tries again every 3 seconds. Trying again starts
+nothing: any yardr command that reads the yard starts its server
+(`yardr status`), and so does the first of the ways below. When the server
+comes back, the conversation that was open is open again.
 
 Under those words the window offers the ways to a yard from there, and
 goes on trying the one that is away meanwhile:
 
+- **set up a yard here** makes the yard that is not there and starts it:
+  [Setting up a yard here](#setting-up-a-yard-here). It stands under this
+  run's own yard alone, while nothing answers at its socket: another home's
+  yard and one at an address are not footplate's to make.
 - **open a yard on this machine** asks for a name and a socket path. This
   run's socket is filled in; leave it to try this machine's yard, or change
   it to another home's yard socket (`<its home>/.yardr/yard.sock`). There
@@ -185,13 +192,13 @@ goes on trying the one that is away meanwhile:
   has it. It is not yardr's peer pairing, which links two yards to each
   other and stays a command of the terminal.
 
-Both are the settings' own entries, "add a yard of this machine" and "add
-a yard at an address", in the same fields with the same rules: Enter or the
+The last two are the settings' own entries, "add a yard of this machine"
+and "add a yard at an address", in the same fields with the same rules: Enter or the
 button adds the yard to the settings' list and opens it, what keeps it out
 of the list is said under the fields, and Esc leaves them. The ways stand
 under any yard that is away, also one that no longer lets this device in,
 but not in a window of the one yard `FOOTPLATE_YARD` names, which has no
-list to add to. footplate creates no yard and starts none.
+list to add to. Neither of these two creates a yard or starts one.
 
 ## A yard at an address
 
@@ -352,15 +359,15 @@ the device is removed.
 
 ## yardr, fetched
 
-footplate can fetch yardr itself, for a person who has none and no terminal
-to install it with. Nothing in the window does so yet: `src/fetch.rs` is the
-mechanism, which the first run's screens will call, and nothing that was
-fetched is run.
+footplate fetches yardr itself, for a person who has none and no terminal
+to install it with: it is the first thing "set up a yard here" does, and
+the yardr it keeps is the one every step after runs, by its whole path.
+`src/fetch.rs` is the mechanism.
 
-It fetches from one host, `https://yardr.dev`, and from no other: the yards
-it talks to apart, that is the only place footplate ever asks anything of.
-An answer that sends it elsewhere is refused and not followed. Four files
-are read there, in this order:
+yardr comes from one host, `https://yardr.dev`, and from no other. An
+answer that sends footplate elsewhere is refused and not followed. Four
+files are read there, in this order, and where the yardr that is kept is
+the latest already, the first of them alone:
 
 | File | For |
 |---|---|
@@ -387,7 +394,15 @@ beside it. The binary alone is unpacked, to a `bin` beside the
 `$XDG_CONFIG_HOME/footplate/bin/yardr` on Linux (`~/.config` when that is
 not set). It is written whole beside that place and then moved there, so
 what is at the path is the yardr that was there or the new one, never half
-of one. A yardr of your own, on your PATH, is not touched or looked at.
+of one. Its version stands beside it, in `yardr.version`. A yardr of your
+own, on your PATH, is not touched or looked at.
+
+A kept yardr is replaced by a newer one alone: when the site names an older
+release as the latest, the kept one stays. When a newer one cannot be had,
+because the site is away or what it gave was refused, the kept one is still
+the one that is run, and the window says why there is no newer: it was
+proved when it was fetched, and a yard has to start without the network.
+With none kept, nothing is run.
 
 It refuses, each in a sentence for a person, and keeps nothing of what it
 refused:
@@ -402,6 +417,100 @@ refused:
 - a `latest.json` that names a file outside `/releases/`;
 - a system yardr has no release for;
 - a footplate built without the key, which then asks the site nothing.
+
+## Setting up a yard here
+
+"Set up a yard here" on the [first screen](#what-it-talks-to) takes a person
+from no yard to talking with the yardmaster, and asks them to type no
+command. Each step runs the yardr that was fetched, with `--json`, and shows
+what it answers; where yardr refuses, its own words are shown. The list of
+commands is yardr's: `docs/setup.md` of its repository, "For a program that
+drives the first run". The yard is this run's own: the home its socket is
+in, which every command is told (`--home`).
+
+| Step | What is shown | What is run |
+|---|---|---|
+| yardr itself | that it is fetched, or why not, with "try again" | the fetch [above](#yardr-fetched); nothing of yardr |
+| What this needs | a row for git, herdr and each harness: installed or not, what it is for, and how it comes. "check again" asks once more. A herdr whose server is down is said to wait, and keeps nothing back. "go on" needs git, herdr and one harness | `yardr doctor --json` |
+| Your yard | your name (the login name to begin with), the harness (the installed ones; one yardr cannot log in for you is marked "needs a terminal once to log in"), the yardmaster's name, a model, how agents work with you (the four styles, "Guide me" to begin with), a line about you | `yardr init --harness … --operator … --yardmaster … --style … [--model …] [--about …]`: it creates the yard and starts nothing |
+| Logging in | "log in", or "it is logged in already". Then what yardr asks for: the ways to log in as buttons, the page as a button, the code in a field, and the question before the one call that proves the login, which costs a model call | `yardr harness login <kind> --json`, answered on its input |
+| Start the yard | "start the yard"; what could not be started, each with the one thing to do, in yardr's words | `yardr up` |
+| A folder to work in | a folder, typed or chosen, its name and its base branch, both offered from the folder. A folder that is no git repository has no branch, and is worked in as it is | `git rev-parse --is-inside-work-tree` and `git branch --show-current` in the folder; `yardr depot add`; `yardr depot init --yes`, again with a flag for each thing its `missing` asks for: the yard's harness for a group of agents, you for the decisions, anyone for the other groups of people |
+| A first piece of work | a title, when it is done, and whether you are told when work lands | `yardr bead create`, `yardr bead advance --to new`, `yardr subscribe … --done` |
+
+Then the first run is gone and the yardmaster's conversation is open, with
+the keys in its line. The last two steps have "not now" beside their
+button, which goes to the yardmaster at once: a yard is whole without a
+depot. "leave" and Esc leave the first run where it stands; what was made
+stays, and taking the way again goes through the steps anew, each of which
+is safe to repeat. A home that has a yard already, which does not run, is
+not created over: after "What this needs" comes "Start the yard", and then
+the conversation of the yardmaster that yard has.
+
+Once you said your name, every command acts as you (`--actor <your name>`),
+whatever the login is called: the yard's operator is who its settings
+belong to.
+
+**How a missing program comes.** yardr says, per program, in doctor's JSON:
+
+- On a Mac, `fetch`: one file at its maker's own address, of one version,
+  with the size and the SHA-256 it had when yardr's makers verified the way
+  (`docs/doctor.md` of the yardr repository, "A program fetched on a Mac").
+  The row has "install", which follows that page's six steps: a program
+  that is at its place already is not fetched; the file is read over https,
+  to its named size at the most; it is kept or run only when its size and
+  checksum are the named ones; of an archive the one named member is taken,
+  and an archive holding anything else is refused; a maker's installer
+  (Claude Code's) is written to a directory of footplate's own that no one
+  else can write to, run with yardr's arguments and nothing to read, and
+  removed; every other program is moved to its place, mode 0755. The place
+  is under your home, `~/.local/bin` for all three, and is refused where it
+  is not, as written or by a link on the way.
+- git on a Mac has "install" too: `xcode-select --install`, Apple's own
+  window, which footplate does not wait for.
+- Everywhere else, and for a program yardr names no way for: the row says
+  how it is installed by hand, in yardr's words, with a button for its
+  maker's page where the words name one. On Linux that is every program:
+  there is no one way to install without a terminal there.
+
+**What this adds to what footplate reaches.** yardr's own site apart,
+"install" reads from the address yardr names and from wherever that
+address sends it on to, five times at the most and never off https: a
+maker's release address answers with its storage's. Nothing is trusted
+for where it came from. What is trusted is the checksum, which came inside
+the yardr whose signature was verified. herdr publishes no signature of its
+own, so for herdr that checksum is all there is; and Claude Code's installer
+downloads its version again itself, so the checksum is of the installer
+that is run. footplate opens a page on the web in your browser, an
+`https://` address only: a maker's page from doctor's words, and the page a
+login names.
+
+**The PATH of what is started** is made from data, not by a shell: the PATH
+footplate was started with, and after it the directory of each place doctor
+names, where your login shell finds a program that the PATH lacks
+(`login_shell_path`) and where a program is fetched to. Doctor is asked
+again with it, and then finds them. footplate runs no shell and writes no
+profile; the one login shell in all of this is doctor's own, which it runs
+once for a program missing from the PATH. A terminal opened later finds a
+fetched program only once its own PATH has `~/.local/bin`.
+
+**What footplate starts**, all of it, each with its arguments and never
+through a shell:
+
+| It starts | For |
+|---|---|
+| the fetched `yardr`, by its whole path: `doctor`, `init`, `harness login`, `up`, `depot add`, `depot init --yes`, `bead create`, `bead advance`, `subscribe`, each with `--json` | the steps above |
+| a maker's installer that yardr names, on a Mac (Claude Code's `install <version>`) | "install" on a harness's row |
+| `/usr/bin/xcode-select --install`, on a Mac | "install" on git's row |
+| `git`, to read: `rev-parse --is-inside-work-tree`, `branch --show-current` | the branch offered for a folder |
+| `notify-send`, on Linux | a [notification](#notifications) |
+
+It never runs anything as another user, types into a pane, starts herdr's
+server itself (that is `yardr up`'s), or drives a login: the login command
+is yardr's to hold, and footplate shows what it asks for. The code a login
+page gives is passed to yardr's input as it is typed and is in the field no
+longer; it is in no file, no setting and no error. The credential the login
+makes is the harness's own, kept where the harness keeps it.
 
 ## The window
 
@@ -751,12 +860,14 @@ options have no icon, so the program sees to it when it starts
 | File | Holds |
 |---|---|
 | `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed |
-| `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
+| `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
+| `src/setup.rs` | the first run as yardr's commands, with no window: each run with its arguments and its JSON read, the PATH made from doctor's data, the import's questions answered, a login led by what yardr prints |
 | `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode |
 | `src/session.rs` | following a yard on a thread, one for each yard of the settings: who the window is for, the state it starts from, trying again, or not when the device is not let in |
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
 | `src/draft.rs` | what is not sent yet, as plain functions: for each yard each conversation's attachments and text, what is refused and why |
 | `src/window.rs` | the window: draws the model and the draft, and makes the calls they ask for |
+| `src/window/firstrun.rs` | "set up a yard here": the steps of the first run, drawn where the yard will be |
 | `src/input.rs` | the line that is typed in |
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
@@ -783,7 +894,17 @@ machine, with a release the tests make and sign with a key of their own:
 the good path and each refusal. One signature in them was made by the
 `minisign` program itself, since that is what signs a release. The built-in
 key is held to the checksums and signature v0.10.0 published, kept in
-`src/fixtures/yardr-v0.10.0`. They ask yardr.dev nothing.
+`src/fixtures/yardr-v0.10.0`. They ask yardr.dev nothing. A program doctor
+names is fetched from the same stand-in: sent on from one address to
+another, checked, kept or run, and refused for each reason.
+
+The first run is tested against a stand-in for yardr, a script that answers
+each command with the JSON a test gives it and writes down what it was
+called with: the window goes from no yard to the yardmaster's conversation
+against it and the fake yard, and no test fetches or runs a real yardr. One
+test that the gate does not run puts the same commands to a real yardr, in
+a home of its own (`a_real_yardr_takes_the_first_run_s_commands` in
+`src/setup.rs` says how).
 
 ## Licence
 
