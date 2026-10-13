@@ -4149,7 +4149,8 @@ impl Footplate {
                 body = body.child(self.secret_lines(secret, palette));
             }
             // A line for words with the later pick, or the field of a
-            // secret to give it again: a declined one takes none, and no
+            // secret to give it again: a declined one takes none, nor one
+            // taken back, and no
             // line for words stands where a value could be typed in sight.
             let giving = model.giving(bead, ask);
             let field = match detail.secret {
@@ -9026,6 +9027,68 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("GiveSecret").len(), 1);
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+    }
+
+    /// A secret ask its asker took back says who took it back and why, as
+    /// the yard serves it, and its card has no field: the yard would refuse
+    /// the value. One another yard took back says where it ended.
+    #[gpui::test]
+    fn a_taken_back_secret_ask_says_who_and_why_and_offers_no_field(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let mut taken = queued_secret(&["BOOKS_TOKEN"], 7, "taken back", &[]);
+        taken["words"] = json!("the books moved");
+        taken["by"] = json!("yardmaster");
+        let mut foreign = queued_secret(&["BOOKS_TOKEN"], 8, "taken back", &[]);
+        foreign["words"] = json!("it was taken back in north's yard");
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [taken, foreign]}}).to_string(),
+        );
+        yard.answer("Bead", &bead_secret(&["BOOKS_TOKEN"], &[7, 8]));
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().decided_count() == 2)
+        });
+        let subs: Vec<String> = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decided_rows()
+                .into_iter()
+                .map(|r| r.sub)
+                .collect()
+        });
+        assert_eq!(
+            subs,
+            [
+                "yardmaster · taken back by yardmaster: the books moved",
+                "yardmaster · it was taken back in north's yard",
+            ]
+        );
+
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        assert_eq!(
+            decided_detail_of(&view, cx, "bead-s", 7).state_line,
+            "taken back by yardmaster: the books moved"
+        );
+        assert!(drawn(cx, BOOKS_LINE));
+        assert!(!drawn(cx, "secret bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        open_decided(&view, cx, "bead-s", 8);
+        assert_eq!(
+            decided_detail_of(&view, cx, "bead-s", 8).state_line,
+            "it was taken back in north's yard"
+        );
+        assert!(!drawn(cx, "secret bead-s 8"));
+        cx.run_until_parked();
+        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
         assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
     }
 

@@ -214,7 +214,7 @@ pub struct DecidedRow {
     pub ask: u64,
     /// The question in plain words.
     pub head: String,
-    /// `<asker> · <pick|declined|put aside>`.
+    /// `<asker> · <pick|declined|put aside|taken back by ...>`.
     pub sub: String,
     pub short: String,
     pub selected: bool,
@@ -297,7 +297,7 @@ pub struct DecidedDetail {
     pub ask: u64,
     pub question: String,
     pub asker: String,
-    /// `answered`, `put aside` or `declined`.
+    /// `answered`, `put aside`, `declined` or `taken back`.
     pub state: String,
     /// What was decided, in plain words.
     pub state_line: String,
@@ -1242,6 +1242,7 @@ impl Model {
                     option,
                     option_label: label,
                     words,
+                    by: String::new(),
                     return_at: String::new(),
                     secret: open.secret,
                     given: Vec::new(),
@@ -1274,13 +1275,13 @@ impl Model {
 
     /// What a field on the ask's card takes: the secret of an ask that is
     /// open, put aside or given already, where giving again replaces. A
-    /// declined one takes none.
+    /// declined one takes none, and neither does one taken back: the yard
+    /// refuses a value for an ask that is asked no more.
     pub fn giving(&self, bead: &str, ask: u64) -> Option<&Secret> {
-        let declined = self
-            .decided
-            .iter()
-            .any(|a| a.bead == bead && a.ask == ask && a.state == "declined");
-        self.secret(bead, ask).filter(|_| !declined)
+        let closed = self.decided.iter().any(|a| {
+            a.bead == bead && a.ask == ask && matches!(a.state.as_str(), "declined" | "taken back")
+        });
+        self.secret(bead, ask).filter(|_| !closed)
     }
 
     /// The yard took the values of a secret ask and answered the names it
@@ -1353,6 +1354,7 @@ impl Model {
                 option: 0,
                 option_label: String::new(),
                 words: String::new(),
+                by: String::new(),
                 return_at: String::new(),
                 secret: open.secret,
                 given: Vec::new(),
@@ -1396,6 +1398,7 @@ impl Model {
                 option: 0,
                 option_label: String::new(),
                 words,
+                by: String::new(),
                 return_at: String::new(),
                 secret: open.secret,
                 given: Vec::new(),
@@ -2313,6 +2316,9 @@ fn decided_sub(ask: &DecidedAsk) -> String {
                 sub = format!("{sub} · {}", plain(&ask.words));
             }
         }
+        "taken back" => {
+            sub = format!("{sub} · {}", taken_back(ask));
+        }
         _ => {
             sub = format!("{sub} · put aside");
         }
@@ -2320,9 +2326,22 @@ fn decided_sub(ask: &DecidedAsk) -> String {
     sub
 }
 
+/// What became of an ask its asker asks no more: `taken back by <by>:
+/// <words>`. One another yard took back names nobody, and its words alone
+/// say where it ended. It is never the person's own doing, so no "you".
+fn taken_back(ask: &DecidedAsk) -> String {
+    let words = plain(&ask.words);
+    match (ask.by.is_empty(), words.is_empty()) {
+        (true, true) => "taken back".to_string(),
+        (true, false) => words,
+        (false, true) => format!("taken back by {}", ask.by),
+        (false, false) => format!("taken back by {}: {words}", ask.by),
+    }
+}
+
 /// What one dealt with did with it, in plain words: `you picked 1 · Move
 /// them now`, `put aside, back 10-11 09:30`, `you declined: <words>`,
-/// `left to <asker>`. A pick carries no time: the yard serves none of its
+/// `left to <asker>`, `taken back by <by>: <words>`. A pick carries no time: the yard serves none of its
 /// own for an answer, and the ask's `since` is when it arrived, not when
 /// it was decided.
 fn decided_state<Tz: TimeZone>(ask: &DecidedAsk, zone: &Tz) -> String
@@ -2343,6 +2362,7 @@ where
         "put aside" if ask.return_at.is_empty() => "put aside".to_string(),
         "put aside" => format!("put aside, back {}", clock(&ask.return_at, zone)),
         "declined" => format!("you declined: {}", plain(&ask.words)),
+        "taken back" => taken_back(ask),
         _ => format!("{} · {}", ask.asker, plain(&ask.state)),
     }
 }
@@ -4128,6 +4148,7 @@ mod tests {
             option: u64::from(!option_label.is_empty()),
             option_label: option_label.into(),
             words: words.into(),
+            by: String::new(),
             return_at: return_at.into(),
             secret: None,
             given: Vec::new(),
@@ -4989,6 +5010,79 @@ mod tests {
         let mut m = with_a_secret_ask();
         m.deferred("yd-crm", 18);
         assert_eq!(m.giving("yd-crm", 18), Some(&books()));
+    }
+
+    #[test]
+    fn a_taken_back_ask_says_who_took_it_back_and_why() {
+        let taken = DecidedAsk {
+            by: "mayor".into(),
+            ..decided_ask(
+                "yd-links",
+                6,
+                "Move them now?",
+                "taken back",
+                "",
+                "the train left",
+                "",
+            )
+        };
+        // One another yard took back names nobody: its words say where it
+        // ended.
+        let foreign = decided_ask(
+            "yd-links",
+            7,
+            "Close sketch PR #3?",
+            "taken back",
+            "",
+            "it was taken back in north's yard",
+            "",
+        );
+        let mut state = yard(&[]);
+        state.asks.decided = vec![taken, foreign];
+        let (mut m, _) = Model::new(state, None);
+        m.toggle_decided();
+        let rows = m.decided_rows();
+        assert_eq!(
+            rows[0].sub,
+            "yardmaster · taken back by mayor: the train left"
+        );
+        assert_eq!(
+            rows[1].sub,
+            "yardmaster · it was taken back in north's yard"
+        );
+        let line = |ask: u64| {
+            m.decided_detail("yd-links", ask, &chrono::Utc)
+                .unwrap()
+                .state_line
+        };
+        assert_eq!(line(6), "taken back by mayor: the train left");
+        assert_eq!(line(7), "it was taken back in north's yard");
+    }
+
+    #[test]
+    fn a_taken_back_secret_ask_takes_no_value() {
+        let mut state = yard(&[]);
+        state.asks.decided = vec![DecidedAsk {
+            by: "yardmaster".into(),
+            secret: Some(books()),
+            ..decided_ask(
+                "yd-crm",
+                18,
+                "The token for the books",
+                "taken back",
+                "",
+                "the books moved",
+                "",
+            )
+        }];
+        let (m, _) = Model::new(state, None);
+        assert_eq!(m.secret("yd-crm", 18), Some(&books()));
+        assert_eq!(m.giving("yd-crm", 18), None);
+        let detail = m.decided_detail("yd-crm", 18, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "taken back by yardmaster: the books moved"
+        );
     }
 
     #[test]

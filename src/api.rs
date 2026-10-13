@@ -360,7 +360,8 @@ pub struct OpenAsk {
     pub secret: Option<Secret>,
 }
 
-/// One the user dealt with: answered, put aside or declined, newest first.
+/// One that is open no more: answered, put aside or declined by the user,
+/// or taken back by its asker, newest first.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct DecidedAsk {
     pub bead: String,
@@ -376,7 +377,7 @@ pub struct DecidedAsk {
     pub asker: String,
     #[serde(default)]
     pub since: String,
-    /// `answered`, `put aside` or `declined`.
+    /// `answered`, `put aside`, `declined` or `taken back`.
     #[serde(default)]
     pub state: String,
     /// The picked option's number; absent on a words answer, an aside ask
@@ -385,9 +386,14 @@ pub struct DecidedAsk {
     pub option: u64,
     #[serde(default)]
     pub option_label: String,
-    /// What went with the pick, the words answer, or why declined.
+    /// What went with the pick, the words answer, why declined, or why
+    /// taken back. One another yard took back says where it ended.
     #[serde(default)]
     pub words: String,
+    /// Who took it back; absent otherwise, and on one another yard took
+    /// back.
+    #[serde(default)]
+    pub by: String,
     /// When a put-aside ask comes back; absent otherwise.
     #[serde(default)]
     pub return_at: String,
@@ -453,7 +459,7 @@ pub struct BeadAsk {
     pub why: String,
     #[serde(default, deserialize_with = "or_default")]
     pub about: Vec<AboutBead>,
-    /// `open`, `answered`, `put aside` or `declined`.
+    /// `open`, `answered`, `put aside`, `declined` or `taken back`.
     #[serde(default)]
     pub state: String,
     /// The picked option's number; 0 until one is picked.
@@ -461,6 +467,10 @@ pub struct BeadAsk {
     pub option: u64,
     #[serde(default)]
     pub words: String,
+    /// Who took it back; absent otherwise, and on one another yard took
+    /// back.
+    #[serde(default)]
+    pub by: String,
     #[serde(default)]
     pub return_at: String,
     /// What a secret ask asks for; absent on any other ask.
