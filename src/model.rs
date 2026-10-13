@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, TimeZone};
 
 use crate::api::{
-    self, AboutBead, Asks, Bead, BeadAsk, BlobRef, CrewMember, DecidedAsk, Event, Letter, Me,
-    Notification, OpenAsk, Peer, Ran, Run, Secret, User,
+    self, AboutBead, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember, DecidedAsk, Event, Letter,
+    Me, Notification, OpenAsk, Peer, Ran, Run, Secret, User,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -243,6 +243,8 @@ pub struct CardOption {
 pub struct CardNote {
     pub author: String,
     pub text: String,
+    /// The images the note carries, drawn below its words.
+    pub files: Vec<BlobRef>,
 }
 
 /// One ask of a bead's open row, as its card shows it: the question,
@@ -1053,6 +1055,7 @@ impl Model {
                     .map(|n| CardNote {
                         author: n.author.clone(),
                         text: plain(&n.text),
+                        files: n.files.clone(),
                     })
                     .collect(),
                 design_doc(&b.id, &b.body, &b.notes),
@@ -1124,6 +1127,7 @@ impl Model {
                     .map(|n| CardNote {
                         author: n.author.clone(),
                         text: plain(&n.text),
+                        files: n.files.clone(),
                     })
                     .collect(),
                 design_doc(&b.id, &b.body, &b.notes),
@@ -1750,8 +1754,9 @@ impl Model {
         out
     }
 
-    /// The hash of every image the open conversation shows, each once. One
-    /// this yard did not take from a linked yard is none it has.
+    /// The hash of every image shown, each once: the open conversation's,
+    /// then the open row's expanded cards' notes'. One this yard did not
+    /// take from a linked yard is none it has.
     pub fn images(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
         let letters = match self.selected.as_ref() {
@@ -1759,11 +1764,33 @@ impl Model {
             _ => Vec::new(),
         };
         for f in letters.into_iter().flat_map(|l| &l.files) {
-            if f.not_taken.is_empty() && !out.contains(&f.hash.as_str()) {
-                out.push(&f.hash);
+            push_image(&mut out, f);
+        }
+        for note in self.expanded_notes() {
+            for f in &note.files {
+                push_image(&mut out, f);
             }
         }
         out
+    }
+
+    /// The notes the open row's expanded cards show: the bead's, where
+    /// one of its cards stands expanded, and none anywhere else.
+    fn expanded_notes(&self) -> Vec<&BeadNote> {
+        let bead = match self.selected.as_ref() {
+            Some(Selected::Decision(bead)) if self.expanded.iter().any(|(b, _)| b == bead) => {
+                Some(bead)
+            }
+            Some(Selected::Decided(bead, ask))
+                if self.expanded.iter().any(|(b, a)| b == bead && a == ask) =>
+            {
+                Some(bead)
+            }
+            _ => None,
+        };
+        bead.and_then(|bead| self.beads.get(bead))
+            .map(|b| b.notes.iter().collect())
+            .unwrap_or_default()
     }
 
     /// Where a mail the user sent stands: read or not for a crew member,
@@ -2816,6 +2843,14 @@ pub fn over_cap(bytes: usize, cap: u64) -> Option<String> {
             size(cap)
         )
     })
+}
+
+/// The hash of `file` among the images to ask for, once: one this yard
+/// did not take from a linked yard is none it has.
+fn push_image<'a>(out: &mut Vec<&'a str>, file: &'a BlobRef) {
+    if file.not_taken.is_empty() && !out.contains(&file.hash.as_str()) {
+        out.push(&file.hash);
+    }
 }
 
 /// The line for an image of mail from a linked yard that this yard did not
@@ -4454,6 +4489,53 @@ mod tests {
     }
 
     #[test]
+    fn the_images_of_an_expanded_card_s_notes_are_asked_for() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        state.asks.decided = vec![decided_ask(
+            "yardr-n8ta",
+            3,
+            "Move this yard's 64 links to the declared source now?",
+            "answered",
+            "Move them now",
+            "tonight",
+            "",
+        )];
+        let (mut m, _) = Model::new(state, None);
+        let mut bead = links_bead();
+        bead.notes[0].files = vec![
+            BlobRef {
+                hash: "aa".into(),
+                ..BlobRef::default()
+            },
+            BlobRef {
+                hash: "bb".into(),
+                ..BlobRef::default()
+            },
+        ];
+        m.bead_loaded(bead);
+        m.select(Selected::Decision("yardr-n8ta".into()));
+        // The card stands folded: its notes' images are none shown.
+        assert_eq!(m.images(), Vec::<&str>::new());
+        m.toggle_expand("yardr-n8ta", 3);
+        assert_eq!(m.images(), ["aa", "bb"]);
+        // The card carries the notes with their images.
+        let detail = m.decision_detail("yardr-n8ta", &noon()).unwrap();
+        assert_eq!(detail.notes[0].files.len(), 2);
+        // Folded again, they are asked for no longer.
+        m.toggle_expand("yardr-n8ta", 3);
+        assert_eq!(m.images(), Vec::<&str>::new());
+        // A dealt-with card's notes the same way.
+        m.toggle_decided();
+        m.select(Selected::Decided("yardr-n8ta".into(), 3));
+        assert_eq!(m.images(), Vec::<&str>::new());
+        m.toggle_expand("yardr-n8ta", 3);
+        assert_eq!(m.images(), ["aa", "bb"]);
+        let detail = m.decided_detail("yardr-n8ta", 3, &chrono::Utc).unwrap();
+        assert_eq!(detail.notes[0].files.len(), 2);
+    }
+
+    #[test]
     fn an_image_is_a_png_or_a_jpeg_by_its_bytes() {
         assert_eq!(image_type(PNG), Some("image/png"));
         assert_eq!(image_type(JPEG), Some("image/jpeg"));
@@ -5165,6 +5247,7 @@ mod tests {
                 author: "yardmaster".into(),
                 text: "the test passed on a copy".into(),
                 at: "2026-10-10T09:30:00Z".into(),
+                files: vec![],
             }],
             asks: vec![full_ask(3, links_options(), 1)],
         }

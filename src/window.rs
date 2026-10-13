@@ -109,7 +109,7 @@ const SECONDARY: &str = if cfg!(target_os = "macos") {
     "ctrl"
 };
 
-/// An image a mail of some conversation names, by its hash.
+/// An image a mail or a note names, by its hash.
 enum Picture {
     /// The yard is asked for it.
     Asked,
@@ -788,8 +788,8 @@ pub struct Footplate {
     decision: ScrollHandle,
     /// What is selected of the open conversation's messages.
     selection: Entity<Selection>,
-    /// The images of the conversations that were open, by hash: an image
-    /// never changes under its hash, so each is asked for once.
+    /// The images of the conversations and cards that were open, by hash:
+    /// an image never changes under its hash, so each is asked for once.
     images: HashMap<String, Picture>,
     /// What is attached and not sent, for each conversation of each yard,
     /// and the text typed in those that are not open; the open one's is in
@@ -2291,8 +2291,8 @@ impl Footplate {
         }
     }
 
-    /// Asks the yard for the images of the open conversation it was not
-    /// asked for yet.
+    /// Asks the yard for the images shown it was not asked for yet: the
+    /// open conversation's and the open row's expanded cards' notes'.
     fn pictures(&mut self, cx: &mut Context<Self>) {
         let Some(model) = self.model.as_ref() else {
             return;
@@ -5903,7 +5903,8 @@ impl Footplate {
             )
     }
 
-    /// An image of a mail, or the line that says why there is none.
+    /// An image of a mail or of a note, or the line that says why there
+    /// is none.
     fn picture(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
         let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
         if !file.not_taken.is_empty() {
@@ -7147,21 +7148,23 @@ impl Footplate {
             // Who wrote a note stands over it and not before it: a note's
             // first line may be a heading or an item, which begin a line.
             for (ix, note) in notes.iter().enumerate() {
-                out = out.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(note.author.clone()),
-                        )
-                        .child(select::text(
-                            expanded_text_key(card_key, "note", ix, &note.text),
-                            note.text.clone(),
-                            &self.selection,
-                        )),
-                );
+                let mut block = div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(note.author.clone()),
+                    )
+                    .child(select::text(
+                        expanded_text_key(card_key, "note", ix, &note.text),
+                        note.text.clone(),
+                        &self.selection,
+                    ));
+                for file in &note.files {
+                    block = block.child(self.picture(file, palette));
+                }
+                out = out.child(block);
             }
         }
         if !about.is_empty() {
@@ -9022,6 +9025,35 @@ mod tests {
         .to_string()
     }
 
+    fn bead_note_pictures(held: &str, gone: &str) -> String {
+        json!({"result": {
+            "id": "bead-a", "title": "Move the links",
+            "body": "The body of bead-a.",
+            "stage": "new", "labels": ["topic:linear-out"],
+            "notes": [
+                {"seq": 2, "kind": "note", "author": "yardmaster",
+                 "text": "the test passed, like this:", "at": "2026-10-10T09:30:00Z",
+                 "files": [{"hash": held, "type": "image/png", "bytes": 70},
+                           {"hash": gone, "type": "image/jpeg", "bytes": 900}]},
+                {"seq": 3, "kind": "note", "author": "yardmaster",
+                 "text": "no pictures here", "at": "2026-10-10T09:31:00Z"}
+            ],
+            "asks": [
+                {"ask": 3, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Move them now?",
+                 "context": ["The links file declares the new source."],
+                 "options": [
+                    {"label": "Move them now", "consequence": "all 64 links point tonight"},
+                    {"label": "You decide", "consequence": "leave it to yardmaster"}
+                 ],
+                 "recommend": 1, "why": "the test passed",
+                 "state": "open"}
+            ]
+        }})
+        .to_string()
+    }
+
     fn chosen_of(
         view: &Entity<Footplate>,
         cx: &mut VisualTestContext,
@@ -9209,6 +9241,55 @@ mod tests {
         cx.simulate_keystrokes("up");
         assert_eq!(chosen_of(&view, cx, "bead-a", 3), 3);
         assert_eq!(typed(&view, cx), "tonight?");
+    }
+
+    #[gpui::test]
+    fn an_expanded_card_shows_its_notes_pictures(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        // The note names two images, and the yard holds one.
+        let held = "ab".repeat(32);
+        let gone = "cd".repeat(32);
+        yard.blob(&held, &png());
+        yard.answer("Bead", &bead_note_pictures(&held, &gone));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // Folded, the card asks for none of the note's images.
+        cx.run_until_parked();
+        assert_eq!(yard.blobs_asked(), Vec::<String>::new());
+        // One key expands it: the image the yard holds is drawn, and the
+        // one it holds no longer is a line that says so.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        wait(cx, "the note's image", |cx| {
+            picture(&view, cx, &held) == "here"
+        });
+        wait(cx, "that the other image is gone", |cx| {
+            picture(&view, cx, &gone) == "image cdcdcdcd: the yard no longer has it"
+        });
+        // The window draws the expanded card and stays.
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(yard.blobs_asked().len(), 2);
     }
 
     /// The words of a card are typed in the same line as a mail: shift

@@ -135,7 +135,8 @@ impl Settings {
     }
 }
 
-/// An image mail carries, as a letter names it.
+/// An image mail carries, or a note of a bead, as a letter or a note
+/// names it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct BlobRef {
     /// The SHA-256 of its bytes, in hex: `GET /blobs/<hash>` answers them.
@@ -581,6 +582,9 @@ pub struct BeadNote {
     pub text: String,
     #[serde(default)]
     pub at: String,
+    /// The images it carries, in the order they were attached with.
+    #[serde(default, deserialize_with = "or_default")]
+    pub files: Vec<BlobRef>,
 }
 
 /// One bead whole: body, stage, labels, notes and its asks.
@@ -2758,7 +2762,10 @@ mod tests {
                 "stage": "new", "labels": ["topic:linear-out"],
                 "notes": [
                     {"seq": 2, "kind": "note", "author": "yardmaster",
-                     "text": "the test passed on a copy", "at": "2026-10-08T09:30:00Z"}
+                     "text": "the test passed on a copy", "at": "2026-10-08T09:30:00Z",
+                     "files": [{"hash": "aa", "type": "image/png", "bytes": 70}]},
+                    {"seq": 3, "kind": "note", "author": "yardmaster",
+                     "text": "shipped", "at": "2026-10-08T09:31:00Z", "files": null}
                 ],
                 "asks": [
                     {"ask": 3, "to": "jo", "asker": "yardmaster",
@@ -2785,8 +2792,19 @@ mod tests {
             ("yd-links", "Move the links")
         );
         assert_eq!(bead.labels, ["topic:linear-out"]);
-        assert_eq!(bead.notes.len(), 1);
+        assert_eq!(bead.notes.len(), 2);
         assert_eq!(bead.notes[0].author, "yardmaster");
+        assert_eq!(
+            bead.notes[0].files,
+            [BlobRef {
+                hash: "aa".into(),
+                kind: "image/png".into(),
+                bytes: 70,
+                ..BlobRef::default()
+            }]
+        );
+        // `null` where a note's images are promised is none.
+        assert_eq!(bead.notes[1].files, []);
         assert_eq!(bead.asks.len(), 2);
         let ask = &bead.asks[0];
         assert_eq!(ask.options.len(), 2);
