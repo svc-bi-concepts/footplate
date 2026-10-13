@@ -335,7 +335,9 @@ impl Source<'_> {
         let checksums = get(self.site, &latest.checksums, SMALL_MOST)?;
         let signature = format!("{}.minisig", latest.checksums);
         let signature = match get(self.site, &signature, SIGNATURE_MOST) {
-            Err(Refusal::Answered { site, .. }) => return Err(Refusal::NoSignature { site }),
+            Err(Refusal::Answered {
+                site, status: 404, ..
+            }) => return Err(Refusal::NoSignature { site }),
             other => other?,
         };
         signed(&key, &checksums, &signature)?;
@@ -629,6 +631,7 @@ mod tests {
         address: Address,
         port: u16,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        statuses: Arc<Mutex<HashMap<String, u16>>>,
         asked: Arc<Mutex<Vec<String>>>,
         stopped: Arc<AtomicBool>,
     }
@@ -638,23 +641,29 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
+            let statuses: Arc<Mutex<HashMap<String, u16>>> = Arc::default();
             let asked: Arc<Mutex<Vec<String>>> = Arc::default();
             let stopped = Arc::new(AtomicBool::new(false));
-            let (its_files, its_asked, its_stopped) =
-                (files.clone(), asked.clone(), stopped.clone());
+            let (its_files, its_statuses, its_asked, its_stopped) = (
+                files.clone(),
+                statuses.clone(),
+                asked.clone(),
+                stopped.clone(),
+            );
             thread::spawn(move || {
                 for conn in listener.incoming() {
                     if its_stopped.load(Ordering::SeqCst) {
                         return;
                     }
                     let Ok(conn) = conn else { continue };
-                    let _ = Site::answer(conn, &its_files, &its_asked);
+                    let _ = Site::answer(conn, &its_files, &its_statuses, &its_asked);
                 }
             });
             Site {
                 address: Address::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
                 port,
                 files,
+                statuses,
                 asked,
                 stopped,
             }
@@ -663,6 +672,7 @@ mod tests {
         fn answer(
             mut conn: TcpStream,
             files: &Mutex<HashMap<String, Vec<u8>>>,
+            statuses: &Mutex<HashMap<String, u16>>,
             asked: &Mutex<Vec<String>>,
         ) -> io::Result<()> {
             let mut head = Vec::new();
@@ -678,8 +688,14 @@ mod tests {
             let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
             asked.lock().unwrap().push(path.clone());
             let file = files.lock().unwrap().get(&path).cloned();
-            match file {
-                Some(bytes) => {
+            let status = statuses
+                .lock()
+                .unwrap()
+                .get(&path)
+                .copied()
+                .unwrap_or(if file.is_some() { 200 } else { 404 });
+            match (status, file) {
+                (200, Some(bytes)) => {
                     conn.write_all(
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -689,8 +705,11 @@ mod tests {
                     )?;
                     conn.write_all(&bytes)
                 }
-                None => conn.write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                (status, _) => conn.write_all(
+                    format!(
+                        "HTTP/1.1 {status} Reply\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
                 ),
             }
         }
@@ -704,6 +723,13 @@ mod tests {
 
         fn remove(&self, path: &str) {
             self.files.lock().unwrap().remove(path);
+        }
+
+        fn status(&self, path: &str, status: u16) {
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), status);
         }
 
         fn asked(&self) -> Vec<String> {
@@ -975,6 +1001,26 @@ mod tests {
 
         assert!(
             matches!(refusal, Refusal::NoSignature { .. }),
+            "{refusal:?}"
+        );
+        assert!(
+            !fixture
+                .site
+                .asked()
+                .contains(&Fixture::archive_path("v9.1.0"))
+        );
+        assert!(fixture.kept_nothing());
+    }
+
+    #[test]
+    fn a_signature_redirect_is_not_reported_as_a_missing_signature() {
+        let fixture = Fixture::new("v9.1.0");
+        let signature = "/releases/v9.1.0/checksums.txt.minisig";
+        fixture.site.status(signature, 302);
+
+        let refusal = fixture.fetch().unwrap_err();
+        assert!(
+            matches!(&refusal, Refusal::Answered { path, status: 302, .. } if path == signature),
             "{refusal:?}"
         );
         assert!(
