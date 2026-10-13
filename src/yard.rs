@@ -22,6 +22,11 @@ pub const TOKEN_FILE: &str = "yard.token";
 /// there are none.
 const NO_HOME: &str = "There is no home directory to keep this device's token in. Name a file for it: FOOTPLATE_TOKEN_FILE";
 
+/// Marks a token file that footplate wrote after a pairing. A token from
+/// elsewhere may have the same first line, but removing a yard must not
+/// remove that file.
+const FOOTPLATE_TOKEN: &str = "!footplate-token-v1";
+
 /// What the environment says of the yard, read once when footplate starts.
 #[derive(Debug, Clone, Default)]
 pub struct Env {
@@ -77,8 +82,35 @@ impl Env {
         name: &str,
         settings: Option<&Path>,
     ) -> Result<PathBuf, String> {
-        if self.yard.is_some() {
-            return self.token_file(settings).ok_or(NO_HOME.to_string());
+        if let Some(env_yard) = self.yard.as_deref() {
+            let file = self.token_file(settings).ok_or(NO_HOME.to_string())?;
+            let address = Address::parse(env_yard)?;
+            if let Some(settings_file) = settings {
+                if same_file(&file, settings_file) {
+                    return Err(format!(
+                        "The environment's token file {} is the file the settings are kept in, and cannot be used for a token.",
+                        file.display()
+                    ));
+                }
+                for listed in set.yards.iter().filter(|yard| yard.is_far()) {
+                    let Ok(listed_file) = token_path(&listed.token_file, Some(settings_file))
+                    else {
+                        continue;
+                    };
+                    let listed_address_differs = Address::parse(&listed.address)
+                        .map_or(true, |listed_address| !listed_address.is(&address));
+                    if same_file(&file, &listed_file) && listed_address_differs {
+                        return Err(format!(
+                            "The environment's yard at {address} and the listed yard {} at {} share one token file, {}, and neither may use it for the other: set FOOTPLATE_TOKEN_FILE to a different file.",
+                            listed.name,
+                            listed.address,
+                            file.display()
+                        ));
+                    }
+                }
+            }
+            check_token_file_target(&file)?;
+            return Ok(file);
         }
         if let Some((other, shared)) = set.shares(name, settings) {
             return Err(format!(
@@ -90,7 +122,9 @@ impl Env {
         let yard = set
             .yard(name)
             .ok_or_else(|| format!("The settings list no yard called {name}."))?;
-        token_path(&yard.token_file, settings)
+        let file = token_path(&yard.token_file, settings)?;
+        check_token_file_target(&file)?;
+        Ok(file)
     }
 
     /// A client of the yard to show, or why there is none: an address that
@@ -153,6 +187,24 @@ pub fn token_path(token_file: &str, settings: Option<&Path>) -> Result<PathBuf, 
         ));
     }
     Ok(path)
+}
+
+/// A pairing must not spend its one-time code on a target that cannot be a
+/// token file. A link is allowed here because pairing replaces the link
+/// itself atomically; reading follows it and checks the target's type.
+fn check_token_file_target(file: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(file) {
+        Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(format!(
+            "The token file {} is not a regular file, and is refused.",
+            file.display()
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!(
+            "The token file {} cannot be checked: {err}",
+            file.display()
+        )),
+    }
 }
 
 /// Whether two paths are one file, by whichever way its directory is
@@ -218,7 +270,14 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// is for where the file says. A file others can read is refused, as every
 /// file of a secret is in yardr: the token is all that says who a request
 /// is.
-fn kept(file: &Path) -> Result<(String, Option<Address>), String> {
+struct KeptToken {
+    token: String,
+    address: Option<Address>,
+    ends_newline: bool,
+    managed: bool,
+}
+
+fn kept(file: &Path) -> Result<KeptToken, String> {
     let at = file.display();
     let meta = match fs::metadata(file) {
         Ok(meta) => meta,
@@ -229,6 +288,11 @@ fn kept(file: &Path) -> Result<(String, Option<Address>), String> {
         }
         Err(err) => return Err(format!("The token file {at} cannot be read: {err}")),
     };
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "The token file {at} is not a regular file, and is refused."
+        ));
+    }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(format!(
@@ -237,19 +301,35 @@ fn kept(file: &Path) -> Result<(String, Option<Address>), String> {
     }
     let text = fs::read_to_string(file)
         .map_err(|err| format!("The token file {at} cannot be read: {err}"))?;
+    let ends_newline = text.ends_with('\n');
     let none = || {
         format!(
-            "The token file {at} holds no token: one is a single line, as the yard gave it, and under it at most the address of its yard."
+            "The token file {at} holds no token: one is a line, as the yard gave it, with footplate's marker and the address of its yard where it wrote them."
         )
     };
-    let mut lines = text.trim().lines();
-    let token = lines.next().unwrap_or_default().trim();
-    let given = lines.next().map(Address::parse);
-    if !api::is_token(token) || lines.next().is_some() {
+    let lines: Vec<&str> = text.trim().lines().collect();
+    let token = lines.first().copied().unwrap_or_default().trim();
+    let (managed, address_line) = match lines.get(1) {
+        Some(line) if line.trim() == FOOTPLATE_TOKEN => (true, lines.get(2).copied()),
+        Some(line) => (false, Some(*line)),
+        None => (false, None),
+    };
+    let line_count = match managed {
+        true if address_line.is_some() => 3,
+        true => 2,
+        false if address_line.is_some() => 2,
+        false => 1,
+    };
+    if !api::is_token(token) || lines.len() != line_count {
         return Err(none());
     }
-    match given.transpose() {
-        Ok(given) => Ok((token.to_string(), given)),
+    match address_line.map(Address::parse).transpose() {
+        Ok(address) => Ok(KeptToken {
+            token: token.to_string(),
+            address,
+            ends_newline,
+            managed,
+        }),
         Err(_) => Err(none()),
     }
 }
@@ -258,7 +338,17 @@ fn kept(file: &Path) -> Result<(String, Option<Address>), String> {
 /// back. A request takes its token from [`token_for`].
 #[cfg(test)]
 pub fn read_token(file: &Path) -> Result<String, String> {
-    kept(file).map(|(token, _)| token)
+    kept(file).map(|kept| kept.token)
+}
+
+/// Whether this is a regular token file that a pairing wrote. A settings
+/// entry may name an existing token from another program; removing that
+/// entry must leave it there.
+pub(crate) fn is_managed_token_file(file: &Path) -> bool {
+    if !fs::symlink_metadata(file).is_ok_and(|meta| meta.file_type().is_file()) {
+        return false;
+    }
+    kept(file).is_ok_and(|kept| kept.managed)
 }
 
 /// The token `file` holds, to call the yard at `address` with. A token is
@@ -267,11 +357,13 @@ pub fn read_token(file: &Path) -> Result<String, String> {
 /// and sent nowhere, until the device is paired there. So an address
 /// changed where the settings are kept, or a file two yards came to name,
 /// gives one yard's token to nobody else. A file that names no address
-/// yet, as a pairing leaves it and as every file was before this, is of
-/// the first yard it is opened for, and says so from then on.
+/// yet, as a pairing leaves it and as every file was before this, is bound
+/// to the first yard it is opened for only when that address can be saved;
+/// otherwise no request is sent.
 pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
-    let (token, given) = kept(file)?;
-    match given {
+    let saved = kept(file)?;
+    let mut token = saved.token;
+    match saved.address {
         Some(given) if given.is(address) => {}
         Some(given) => {
             return Err(format!(
@@ -279,19 +371,40 @@ pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
                 file.display()
             ));
         }
-        // A file that cannot be written to stays as it was, of no yard.
+        // A token without a recorded address is not safe to send until the
+        // address is durably bound to it.
         None => {
-            // Under the token, which a file from before may end without
-            // a line break.
-            let ended = fs::read(file).is_ok_and(|text| text.ends_with(b"\n"));
-            let line = match ended {
+            let line = match saved.ends_newline {
                 true => format!("{address}\n"),
                 false => format!("\n{address}\n"),
             };
-            let _ = fs::OpenOptions::new()
+            let bound = fs::OpenOptions::new()
                 .append(true)
                 .open(file)
                 .and_then(|mut out| out.write_all(line.as_bytes()));
+            if bound.is_err() {
+                return Err(format!(
+                    "The token file {} has no saved yard address and cannot be safely bound to {address}; no request was sent. Pair this device with that yard.",
+                    file.display()
+                ));
+            }
+            let verified = kept(file).map_err(|_| {
+                format!(
+                    "The token file {} could not be safely bound to {address}; no request was sent. Pair this device with that yard.",
+                    file.display()
+                )
+            })?;
+            if !verified
+                .address
+                .as_ref()
+                .is_some_and(|given| given.is(address))
+            {
+                return Err(format!(
+                    "The token file {} could not be safely bound to {address}; no request was sent. Pair this device with that yard.",
+                    file.display()
+                ));
+            }
+            token = verified.token;
         }
     }
     Ok(token)
@@ -302,6 +415,17 @@ pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
 /// written beside itself and renamed.
 pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    match fs::symlink_metadata(file) {
+        Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "token path is not a regular file",
+            ));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -330,6 +454,8 @@ pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
         };
         let written = out
             .write_all(token.as_bytes())
+            .and_then(|()| out.write_all(b"\n"))
+            .and_then(|()| out.write_all(FOOTPLATE_TOKEN.as_bytes()))
             .and_then(|()| out.write_all(b"\n"))
             .and_then(|()| out.sync_all());
         drop(out);
@@ -598,6 +724,56 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_cannot_use_the_settings_or_a_special_file_as_its_token_file() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        fs::write(&settings, "{}").unwrap();
+        let set = Settings::default();
+        let env = |token_file| Env {
+            yard: Some("https://mac.example.net".into()),
+            token_file: Some(token_file),
+            ..Env::default()
+        };
+
+        let why = env(settings.clone())
+            .token_of(&set, "", Some(&settings))
+            .unwrap_err();
+        assert!(why.contains("file the settings are kept in"), "{why}");
+
+        let socket = dir.path().join("token.socket");
+        let listener = UnixListener::bind(&socket).unwrap();
+        drop(listener);
+        let why = env(socket.clone())
+            .token_of(&set, "", Some(&settings))
+            .unwrap_err();
+        assert!(why.contains("not a regular file"), "{why}");
+        assert!(
+            fs::symlink_metadata(socket)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+    }
+
+    #[test]
+    fn only_a_well_formed_paired_token_file_is_managed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("yard.token");
+        keep_token(&file, TOKEN).unwrap();
+        assert!(is_managed_token_file(&file));
+
+        fs::write(
+            &file,
+            format!("{TOKEN}\n{FOOTPLATE_TOKEN}\nnot-an-address\nextra\n"),
+        )
+        .unwrap();
+        assert!(!is_managed_token_file(&file));
+    }
+
+    #[test]
     fn a_token_file_is_a_bare_name_beside_the_settings_or_a_whole_path() {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
@@ -780,7 +956,7 @@ mod tests {
         assert!(open("https://mac.example.net").is_ok());
         assert_eq!(
             fs::read_to_string(&token).unwrap(),
-            format!("{TOKEN}\nhttps://mac.example.net\n")
+            format!("{TOKEN}\n{FOOTPLATE_TOKEN}\nhttps://mac.example.net\n")
         );
         assert_eq!(read_token(&token).unwrap(), TOKEN);
         assert!(open("https://MAC.example.net:443/").is_ok());
@@ -821,11 +997,25 @@ mod tests {
             yard: Some("https://trial.example.net".into()),
             ..Env::default()
         };
-        let why = named.open(&listed, Some(&settings)).unwrap_err();
+        let trial = Yard::start_tcp();
+        a_yard_of_jo(&trial);
+        let named = Env {
+            yard: Some(trial.address().to_string()),
+            ..named
+        };
+        // Before the old yard has ever been opened by this version, its
+        // one-line token has no recorded address. An environment override
+        // must not claim it for another yard just because it opens first.
+        let result = named.open(&listed, Some(&settings));
+        if let Ok(client) = &result {
+            let _ = client.head();
+        }
+        let why = result.unwrap_err();
         assert!(
-            why.contains("is not sent to https://trial.example.net"),
+            why.contains("share one token file") && why.contains("listed yard mac"),
             "{why}"
         );
+        assert!(trial.asked("Head").is_empty());
 
         // Paired again, the token is the new yard's.
         keep_token(&token, "yardr-dev-plantime").unwrap();
@@ -910,11 +1100,17 @@ mod tests {
                 "{why}"
             );
         }
+        let read_only = file_of_mode(dir.path(), "mine.token", 0o400, TOKEN);
+        let why = token_for(
+            &read_only,
+            &Address::parse("https://mac.example.net").unwrap(),
+        )
+        .unwrap_err();
         assert!(
-            env(file_of_mode(dir.path(), "mine.token", 0o400, TOKEN))
-                .open(&Settings::default(), None)
-                .is_ok()
+            why.contains("cannot be safely bound") && why.contains("no request was sent"),
+            "{why}"
         );
+        assert!(env(read_only).open(&Settings::default(), None).is_err());
         // No file, and one that holds no token.
         let why = env(dir.path().join("gone.token"))
             .open(&Settings::default(), None)
@@ -943,6 +1139,58 @@ mod tests {
         keep_token(&file, "yardr-dev-two").unwrap();
         assert_eq!(read_token(&file).unwrap(), "yardr-dev-two");
         assert!(!dir.path().join("footplate/yard.token.new").exists());
+    }
+
+    #[test]
+    fn a_token_path_of_another_kind_is_refused_without_reading_or_replacing_it() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("yard.token");
+        let listener = UnixListener::bind(&socket).unwrap();
+        drop(listener);
+
+        let why =
+            token_for(&socket, &Address::parse("https://mac.example.net").unwrap()).unwrap_err();
+        assert!(why.contains("not a regular file"), "{why}");
+        assert!(keep_token(&socket, TOKEN).is_err());
+        assert!(
+            fs::symlink_metadata(&socket)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+    }
+
+    #[test]
+    fn reading_a_symlink_follows_it_but_pairing_replaces_only_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = file_of_mode(dir.path(), "external.token", 0o600, TOKEN);
+        let link = dir.path().join("yard.token");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let address = Address::parse("https://mac.example.net").unwrap();
+
+        assert_eq!(token_for(&link, &address).unwrap(), TOKEN);
+        assert!(
+            fs::read_to_string(&target)
+                .unwrap()
+                .contains("https://mac.example.net")
+        );
+
+        keep_token(&link, "yardr-dev-new").unwrap();
+        assert!(
+            !fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_token(&link).unwrap(), "yardr-dev-new");
+        assert!(
+            fs::read_to_string(target)
+                .unwrap()
+                .contains("https://mac.example.net")
+        );
     }
 
     #[test]

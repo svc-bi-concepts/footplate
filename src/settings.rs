@@ -444,8 +444,8 @@ impl Settings {
 
     /// Without the yard called `name`, and what became of its token's
     /// file. That is deleted only where it is a bare name beside the
-    /// settings and no other yard's token is in it; one named by a whole
-    /// path is the person's own, and is left. A list is never empty: the
+    /// settings, footplate wrote it for a pairing, and no other yard's
+    /// token is in it; other files are left. A list is never empty: the
     /// last yard removed leaves this machine's.
     pub fn without(mut self, name: &str, file: Option<&Path>) -> (Settings, TokenLeft) {
         let Some(yard) = self.yard(name).cloned() else {
@@ -456,10 +456,21 @@ impl Settings {
             Err(_) => TokenLeft::None,
             Ok(path) => match self.shares(name, file) {
                 Some((other, _)) => TokenLeft::Shared(path, other.name.clone()),
-                None if yard::is_bare(&yard.token_file) => match fs::remove_file(&path) {
-                    Ok(()) => TokenLeft::Deleted(path),
+                None if yard::is_bare(&yard.token_file) => match fs::symlink_metadata(&path) {
                     Err(err) if err.kind() == io::ErrorKind::NotFound => TokenLeft::Deleted(path),
                     Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
+                    Ok(meta)
+                        if meta.file_type().is_file() && yard::is_managed_token_file(&path) =>
+                    {
+                        match fs::remove_file(&path) {
+                            Ok(()) => TokenLeft::Deleted(path),
+                            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                                TokenLeft::Deleted(path)
+                            }
+                            Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
+                        }
+                    }
+                    Ok(_) => TokenLeft::Unmanaged(path),
                 },
                 None => TokenLeft::Elsewhere(path),
             },
@@ -500,6 +511,8 @@ pub enum TokenLeft {
     Deleted(PathBuf),
     /// It was a bare name, but the file could not be removed.
     DeleteFailed(PathBuf, String),
+    /// It was a bare name, but footplate did not write this file.
+    Unmanaged(PathBuf),
     /// Named by a whole path, and left where the person keeps it.
     Elsewhere(PathBuf),
     /// Left: the yard of this name keeps its token in it.
@@ -524,6 +537,10 @@ impl TokenLeft {
             ),
             TokenLeft::DeleteFailed(path, why) => format!(
                 "{name} is removed from the list, but its token's file {} could not be removed ({why}). {stays}",
+                path.display()
+            ),
+            TokenLeft::Unmanaged(path) => format!(
+                "{name} is removed. Its file {} is left alone: footplate did not write it as a token file. {stays}",
                 path.display()
             ),
             TokenLeft::Elsewhere(path) => format!(
@@ -1022,7 +1039,7 @@ mod tests {
             beside("yard-plantime.token"),
             own.clone(),
         ] {
-            fs::write(token, "yardr-dev-kept\n").unwrap();
+            crate::yard::keep_token(&token, "yardr-dev-kept").unwrap();
         }
 
         // A bare name beside the settings, and no other yard's: deleted.
@@ -1099,9 +1116,65 @@ mod tests {
             )
             .unwrap();
         let (_, left) = blocked_set.without("blocked", Some(&file));
-        assert!(matches!(&left, TokenLeft::DeleteFailed(path, _) if path == &blocked));
-        assert!(left.said("blocked", None).contains("could not be removed"));
+        assert_eq!(left, TokenLeft::Unmanaged(blocked.clone()));
+        assert!(left.said("blocked", None).contains("left alone"));
         assert!(blocked.is_dir());
+    }
+
+    #[test]
+    fn removing_a_yard_leaves_a_bare_file_it_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let token = dir.path().join("device.token");
+        // A valid token on one line may have been kept by another program.
+        fs::write(&token, format!("{}\n", crate::fake::TOKEN)).unwrap();
+        let set = Settings::default()
+            .with_yard(
+                None,
+                Yard::far("external", "https://external.example.net", "device.token"),
+                Some(&file),
+            )
+            .unwrap();
+
+        let (less, left) = set.without("external", Some(&file));
+        assert_eq!(left, TokenLeft::Unmanaged(token.clone()));
+        assert_eq!(
+            fs::read_to_string(token).unwrap(),
+            format!("{}\n", crate::fake::TOKEN)
+        );
+        assert!(less.yard("external").is_none());
+    }
+
+    #[test]
+    fn removing_an_unpaired_symlink_leaves_it_and_its_target_alone() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let target = dir.path().join("external.token");
+        let link = dir.path().join("yard-link.token");
+        fs::write(&target, format!("{}\n", crate::fake::TOKEN)).unwrap();
+        symlink(&target, &link).unwrap();
+        let set = Settings::default()
+            .with_yard(
+                None,
+                Yard::far("linked", "https://linked.example.net", "yard-link.token"),
+                Some(&file),
+            )
+            .unwrap();
+
+        let (_, left) = set.without("linked", Some(&file));
+        assert_eq!(left, TokenLeft::Unmanaged(link.clone()));
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(target).unwrap(),
+            format!("{}\n", crate::fake::TOKEN)
+        );
     }
 
     #[test]

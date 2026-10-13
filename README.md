@@ -190,9 +190,12 @@ reached, and whether it is the open one, with "open", "pair again" and
 "remove" beside it. A file that names none has one: `this machine`, the
 yard at this run's socket. "add a yard of this machine" takes a name and a
 socket path, for another home's yard (`<its home>/.yardr/yard.sock`), and
-needs no pairing. "add a yard at an address" takes a name, the address and
-a code. The yard's operator opens a pairing for the device and reads you
-both:
+needs no pairing. That socket is trusted as that yard: footplate accepts
+what it says and sends there what you type for that entry, including secret
+answers. It uses no token for a socket. Drafts, ask words and approvals stay
+with their entry, so material typed for another yard does not go there.
+"add a yard at an address" takes a name, the address and a code. The yard's
+operator opens a pairing for the device and reads you both:
 
     yardr user device pair <user> <device> --url https://mac.example.net
 
@@ -239,19 +242,24 @@ name, for a file beside the settings, or a whole path; no two yards may
 have the same one, and two of a file edited by hand that do are refused,
 both, until they differ; the settings file itself is no yard's token file,
 and two yards of one name in a file edited by hand are told apart when it is
-read (`mac`, `mac 2`). Removing a yard deletes its token's file where it
-is a bare name beside the settings and no other yard's, and leaves one you
-named by a whole path. The device itself stays at the yard until its
-operator removes it (`yardr user device rm <user> <device>`), and the
-settings say so. It is a file on macOS too, not the Keychain.
+read (`mac`, `mac 2`). Removing a yard deletes a bare token file only when
+footplate wrote it for a pairing and no other yard names it. An existing
+file it did not write, a link, and a file you named by a whole path are left
+alone. The device itself stays at the yard until its operator removes it
+(`yardr user device rm <user> <device>`), and the settings say so. It is a
+file on macOS too, not the Keychain.
 
 A token is for the yard that gave it. The first time a token file is opened
 for a yard, footplate writes that yard's address under the token, and from
 then on the token is sent to that address alone: with another address, in
 the settings or in `FOOTPLATE_YARD`, the yard is refused and nothing is
-sent, until the device is paired there. A pairing writes the file anew. A
-file footplate cannot write to stays without an address, and is of whatever
-yard it is opened for, as before.
+sent, until the device is paired there. A pairing writes a private marker
+and replaces the file. If footplate cannot save an address for an older
+token file, it refuses to send that token until the file can be written or
+the device is paired again. Reading follows a link and requires its target
+to be a regular, private file; pairing replaces a link itself and leaves
+its target alone. A direct non-regular file, such as a directory or socket,
+is refused before pairing.
 
 A settings file from before there were several yards is read as it was:
 `remote` with an `address` is one paired yard, called by the address's
@@ -265,9 +273,11 @@ else is `this machine`. The next change writes the list.
 `FOOTPLATE_YARD` is the address. The window is of that yard alone then: it
 has no switcher, and the settings say so and list no yards.
 `FOOTPLATE_TOKEN_FILE` is the file its token is read from, a token as
-`yardr user device add` printed it or as a pairing gave it, on one line;
+`yardr user device add` printed it on one line, or the file a pairing wrote;
 without it that is `yard.token` beside the settings, and a pairing in that
-window writes the same file. It names no yard by itself, and without
+window writes the same file. If that path is also used by a listed yard at
+another address, footplate refuses to use it for both; name a separate file
+with `FOOTPLATE_TOKEN_FILE`. It names no yard by itself, and without
 `FOOTPLATE_YARD` it says nothing: a yard of the settings is opened and
 paired with its own token file, never the environment's. (Before there were
 several yards it also applied to the yard the settings chose. A yard whose
@@ -288,6 +298,7 @@ name the file as the yard's `token_file`, whole.)
   again. A file that is missing, or holds no token, is said too;
 - a token whose file names another yard's address than the one it would be
   sent to: pair the device with this yard;
+- a token file that cannot be bound to an address, or is not a regular file;
 - a socket of a yard of this machine that is no whole path, in a settings
   file edited by hand.
 
