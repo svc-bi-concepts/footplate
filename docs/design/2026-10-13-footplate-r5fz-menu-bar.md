@@ -32,9 +32,19 @@ window; design footplate-5wz5 fixed "one footplate, one window".
 Cargo.toml, offers `Window::on_window_should_close` (src/window.rs:4329):
 a callback whose false leaves the window open, wired on macOS to
 `windowShouldClose:`. It offers `App::hide` (src/app.rs:984), the
-platform's hide: on macOS the application hides with its window, keeps
-running, and a click on its dock icon or `cmd+tab` back shows it again,
-with no code for either. It offers no tray, status-item or dock-badge
+platform's hide: on macOS the application hides with its window and
+keeps running. Coming back is three roads: a dock click and `cmd+tab`
+unhide a hidden application by the system's own hand, while starting the
+application again while it is hidden reaches only a registered callback,
+`App::on_reopen` (src/app.rs:198), which the Mac delegate calls when no
+window is visible (src/platform/mac/platform.rs, `should_handle_reopen`);
+footplate registers none today. gpui offers no unhide of its own (only
+`unhide_other_apps`), and `App::activate` (src/app.rs:979) is
+`activateIgnoringOtherApps:`
+(src/platform/mac/platform.rs:564-569), which the builder must prove
+restores a hidden window or pair with `NSApplication::unhide`, whose
+binding the tree already has (objc2-app-kit 0.3.2, generated
+NSApplication.rs:507). It offers no tray, status-item or dock-badge
 call: a search of its sources for badge, dock tile, tray and status finds
 none.
 
@@ -91,13 +101,27 @@ the tray and the badge say the same number.
 `Footplate::heed` (src/window.rs:991-1003) takes activations off the
 system's channel and `come_forward` (1080-1098) brings the window forward
 on the row, opening that yard first where another is open. A menu row's
-click is the same shape: an event from outside gpui that ends in
-`come_forward`. `notify::system` (src/notify.rs) is the seam: macOS
+click is the same shape only in its first half: an event from outside
+gpui that must activate the application and its window. Its second half
+differs: a notification names a row, while a menu row names a yard, and
+the yard opens on its own row, below. `come_forward` is not the menu's
+road, because it takes a `Selected` the menu does not have.
+`notify::system` (src/notify.rs) is the seam: macOS
 through `UNUserNotificationCenter`, which knows an application by its
 bundle, so notifications need `Footplate.app` (scripts/bundle-mac.sh) and
 say so from a bare binary; Linux through `notify-send`, whose activation
 opens nothing. A status item needs no bundle: `NSStatusItem` works from a
 bare binary, so the tray is also there from `cargo run`.
+
+**A shown yard opens on its own row.** `show` (src/window.rs:1160-1171)
+puts the held yard back and `arrive` (1319-1345) opens it through
+`Model::back_to` (src/model.rs:571-577) on the row it was left on, kept
+in `places` (src/window.rs:1249-1256), falling back per `Model::row`
+(src/model.rs:535-555): an open decision, else the yardmaster's
+conversation, else the first row from the top. So switching yards, as
+the switcher does through `switch_to` (src/window.rs:3537-3549),
+always lands on a defined row without naming one: the existing
+selection, or the yard's own fallback where that is gone.
 
 **The window knows when it is in front.** `front` (src/window.rs:819) is
 kept by `observe_window_activation` (916-918); `notify::wanted`
@@ -139,9 +163,15 @@ stops costing a reload and starts costing the followers' keep-up, which
 section 2 priced. `cmd+q`, the menu's "Quit footplate", and the tray
 menu's Quit all quit: quitting is the only way out, as in any Mac
 application that stays up with no window. The dock icon stays a regular
-dock icon: its click and `cmd+tab` bring the window back with no code,
-and the badge bead's number sits on it. The builder checks that quitting
-never consults the close veto, so Quit always quits.
+dock icon: its click and `cmd+tab` bring the window back, a start while
+hidden reaches the reopen handler, and the badge bead's number sits on
+it. Coming back is specified, not hoped for: `main` keeps the window's
+handle and registers `cx.on_reopen` to activate the application and that
+window again, calling `NSApplication::unhide` first where activation
+alone leaves it hidden. The builder proves all three roads on the
+machine: the dock click, `cmd+tab`, and starting the application again
+while it is hidden, each showing the window. The builder also checks
+that quitting never consults the close veto, so Quit always quits.
 
 With the item off, or off macOS, closing quits, exactly as today. The
 rule is absolute, because the alternative is a trap: never hidden with
@@ -155,15 +185,22 @@ The item shows one number: how many things wait over every yard
 footplate follows, the same total the dock badge shows (mail plus
 decisions; what the total counts is the badge bead's to settle, and the
 tray follows it, so the two never disagree). Nothing waits: the title is
-empty and the item stands as a narrow gap; a prettier empty state is left
-out. On a click the item opens a menu, one row per yard in the settings'
-order, each row the yard's name with its waiting line ("plantime · 2
-mail, 1 decision", "shop · not reached: nothing answers"), reusing
-`Counts::line` and the switcher's whys, then a separator, then "Show
-window" and "Quit footplate". Choosing a yard row opens the window on
-that yard: the click travels the notification's road and ends in
-`come_forward`, which opens the yard where another is open. Choosing
-"Show window" brings the window forward on whatever is open.
+empty, and a small glyph that is always there, the application's own mark
+made from assets/icon.png as `dock_icon` makes the dock icon, keeps the
+item a clickable width; whether it is a template-masked silhouette or the
+plain mark is the builder's to choose. The item never depends on its
+title for its target, so "Show window" and "Quit footplate" stay
+reachable while the window is hidden. On a click the item opens a menu,
+one row per yard in the settings' order, each row the yard's name with
+its waiting line ("plantime · 2 mail, 1 decision", "shop · not reached:
+nothing answers"), reusing `Counts::line` and the switcher's whys, then
+a separator, then "Show window" and "Quit footplate". Choosing a yard
+row opens the window on that yard, as the switcher does through
+`switch_to`: the yard shows the row it was left on, or its own fallback
+where that is gone (an open decision, the yardmaster's conversation, the
+first row, per `Model::row`). The menu promises no narrower target: it
+opens yards, never a named card or conversation. Choosing "Show window"
+brings the window forward on whatever is open.
 
 What the person sees, with two yards followed and three things waiting:
 
@@ -231,9 +268,16 @@ total, and the badge bead left notices out (they tell of every bead that
 moves). If the decided direction wants them, both change together; the
 tray never counts differently from the badge.
 
-**A prettier empty state.** With nothing waiting the item is a narrow
-gap. Hiding the item while empty, or a dimmed glyph, is polish for later;
-it must never strand a hidden window, per section 3.1.
+**Rows for named cards or conversations.** The menu lists yards, one row
+each, and opens the yard's own row. A row per waiting card would carry
+the menu past a glance, and across yards would mix rows of two yards
+together, which design footplate-5wz5 refused. The menu opens; the
+window's list chooses.
+
+**Hiding the item while empty.** The glyph stays whatever the count,
+section 3.2, so the way back into a hidden window is always where it
+was; an item that comes and goes would hide the application's only
+visible sign with it.
 
 **Linux tray, start at login.** Each is an open question with its own
 later bead; neither blocks the sign on the Mac.
@@ -310,35 +354,46 @@ Goal: with the menu-bar item on, the red button hides the application
 and everything goes on (followers, models, drafts, notifications); with
 it off, or off macOS, closing quits as today. Where to look: the
 `on_window_closed` handler in src/main.rs:56-61; gpui 0.2.2's
-`Window::on_window_should_close` and `App::hide`; the `Notify` switch in
-src/settings.rs:211-261 for the new boolean beside it; the `front` flag
-in src/window.rs:819 and its `observe_window_activation` at 916-918,
-which must read inactive while hidden. Depends on nothing. Done when:
-on macOS, closing with the item on leaves the process running, arrivals
-still notify by the settings' kinds, and the dock click brings the
-window back; closing with it off quits; `cmd+q` and the menu's Quit quit
-from either state (the builder proves the close veto is never consulted
-by Quit); on Linux nothing changes; the README's key table no longer
-says closing quits unconditionally; and `.yardr/test` passes.
+`Window::on_window_should_close`, `App::hide` and `App::on_reopen`
+(src/app.rs:198), the last reactivating the kept window handle, with
+`NSApplication::unhide` where activation alone leaves it hidden; the
+`Notify` switch in src/settings.rs:211-261 for the new boolean beside
+it; the `front` flag in src/window.rs:819 and its
+`observe_window_activation` at 916-918, which must read inactive while
+hidden. Depends on nothing. Done when: on macOS, closing with the item
+on leaves the process running, arrivals still notify by the settings'
+kinds, and the dock click, `cmd+tab`, and starting the application
+again while hidden each show the window, seen on the machine and said
+so in the hand-on note; closing with it off quits; `cmd+q` and the
+menu's Quit quit from either state (the builder proves the close veto
+is never consulted by Quit); on Linux nothing changes; the README's
+key table no longer says closing quits unconditionally; and
+`.yardr/test` passes.
 
 **Footplate 2. The menu-bar item and its menu.** Goal: the sign in the
-menu bar from section 3.2: the total while anything waits, a menu of the
-yards with their waiting lines, "Show window" and "Quit footplate", a
-yard row opening the window on that yard. Where to look: Footplate 1 for
+menu bar from section 3.2: the total while anything waits beside a glyph
+that is always there, a menu of the yards with their waiting lines,
+"Show window" and "Quit footplate", a yard row opening the window on
+that yard's row, never a named card. Where to look: Footplate 1 for
 the setting and the hide behaviour; the badge bead footplate-k4jr for
 the total function, which this bead reuses and never recomputes;
-`Counts::line` (src/window.rs:599-619) for the rows; `come_forward`
-(1080-1098) and `heed` (991-1003) for the road a row's click takes;
-src/taskbar.rs for the shape of the new mac-only src/tray.rs (plain
-functions tested anywhere, Cocoa behind them); the `NSStatusBar`,
+`Counts::line` (src/window.rs:599-619) for the rows; `heed` (991-1003)
+for the road an outside event takes into the window, and `switch_to`
+(3537-3549) with `arrive` (1323-1345) for what a yard row opens (the
+row it was left on, per `Model::back_to`, or its `Model::row`
+fallback); src/taskbar.rs for the shape of the new mac-only src/tray.rs
+(plain functions tested anywhere, Cocoa behind them); assets/icon.png
+with `dock_icon` (src/main.rs:97-113) for the glyph; the `NSStatusBar`,
 `NSStatusItem` and `NSMenu` features of the `objc2-app-kit` in Cargo.toml.
 Depends on Footplate 1 and on footplate-k4jr. Done when: the title and
 the rows are plain functions with tests (no yard, one, several, one not
-reached, nothing waiting); the item updates where the badge updates; a
-row's click opens its yard on its row; Linux builds with no item and
-close quitting; the README says what the item shows and that, unlike
-notifications, it needs no bundle; the hand-on note says the item was
-seen or that it was not; and `.yardr/test` passes.
+reached, nothing waiting); the item updates where the badge updates;
+the empty item keeps its glyph and opens the menu; a yard row's click
+shows that yard on the row it was left on, or its fallback where that
+is gone; Linux builds with no item and close quitting; the README says
+what the item shows and that, unlike notifications, it needs no bundle;
+the hand-on note says the item was seen or that it was not; and
+`.yardr/test` passes.
 
 **Footplate 3 (only if open question 4 goes B). A tray on Linux.**
 Goal: the same total and the same per-yard menu through the desktop's
@@ -355,6 +410,7 @@ login through a `LaunchAgent` property list the program writes and
 removes itself. Where to look: Footplate 1's setting for the pattern;
 src/taskbar.rs `install` for writing a desktop file from the program
 itself; `~/Library/LaunchAgents` and `launchctl` on the Mac. Depends on
-Footplate 1. Done when: switching on writes the list and a fresh login
-starts footplate with the tray; switching off removes it; Linux is
-untouched; the README says it; and `.yardr/test` passes.
+Footplate 1 and Footplate 2, the second for the tray it starts with.
+Done when: switching on writes the list and a fresh login starts
+footplate with the tray; switching off removes it; Linux is untouched;
+the README says it; and `.yardr/test` passes.
