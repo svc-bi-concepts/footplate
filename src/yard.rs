@@ -480,9 +480,11 @@ impl TokenPlace {
     /// the one that was there, with the address of the yard that gave it
     /// under it: a token is never on disk without its yard. The file is
     /// whole or not there: it is written beside itself and renamed.
-    /// Without an address it is as every file was before one was written,
-    /// bound to the first yard it is opened for ([`token_for`]).
-    pub fn keep(mut self, token: &str, address: Option<&Address>) -> io::Result<()> {
+    pub fn keep(self, token: &str, address: &Address) -> io::Result<()> {
+        self.keep_with_address(token, Some(address))
+    }
+
+    fn keep_with_address(mut self, token: &str, address: Option<&Address>) -> io::Result<()> {
         let mut text = format!("{token}\n{FOOTPLATE_TOKEN}\n");
         if let Some(address) = address {
             text.push_str(&format!("{address}\n"));
@@ -506,11 +508,11 @@ impl Drop for TokenPlace {
     }
 }
 
-/// A token alone in `file`, as a pairing left it before it wrote the
-/// yard's address too, and as a test sets one up.
+/// A legacy token alone in `file`, for tests that need a file before its
+/// address has been bound by [`token_for`].
 #[cfg(test)]
 pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
-    token_place(file)?.keep(token, None)
+    token_place(file)?.keep_with_address(token, None)
 }
 
 /// The address and the code as they were typed. What a pairing's QR code
@@ -1200,7 +1202,7 @@ mod tests {
         drop(place);
         assert_eq!(beside(), 0);
 
-        token_place(&file).unwrap().keep(TOKEN, Some(&mac)).unwrap();
+        token_place(&file).unwrap().keep(TOKEN, &mac).unwrap();
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             format!("{TOKEN}\n{FOOTPLATE_TOKEN}\nhttps://mac.example.net\n")

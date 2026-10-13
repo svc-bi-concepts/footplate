@@ -3113,7 +3113,7 @@ impl Footplate {
                     let paired = api::pair(&address, &code).map_err(|err| err.to_string())?;
                     // The token goes from the yard's answer into its file
                     // with the address the code went to, and nowhere else.
-                    place.keep(&paired.token, Some(&address)).map_err(|err| {
+                    place.keep(&paired.token, &address).map_err(|err| {
                         format!(
                             "The yard gave this device its token, and {} could not be written ({err}). The token is lost: its operator removes the device (yardr user device rm {} {}) and opens another pairing.",
                             file.display(),
