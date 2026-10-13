@@ -367,6 +367,12 @@ the device is removed.
 footplate fetches yardr itself, for a person who has none and no terminal
 to install it with: it is the first thing "set up a yard here" does, and
 the yardr it keeps is the one every step after runs, by its whole path.
+[The switch in the head](#starting-and-stopping-the-yard) runs the same
+yardr, so the window also fetches it, with no click, when it opens a yard
+of this machine: `latest.json` is read, until the switch has its yardr
+for this run of footplate, and a yardr is downloaded where none is kept or
+a newer one is out. A yardr you
+installed yourself is not used by the window, and is not touched.
 `src/fetch.rs` is the mechanism.
 
 yardr comes from one host, `https://yardr.dev`, and from no other. An
@@ -506,7 +512,7 @@ through a shell:
 | It starts | For |
 |---|---|
 | the fetched `yardr`, by its whole path: `doctor`, `init`, `harness login`, `up`, `depot add`, `depot init --yes`, `bead create`, `bead advance`, `subscribe`, each with `--json` | the steps above |
-| the fetched `yardr`, by its whole path: `status`, `up`, `down`, `up --login`, `daemon uninstall`, each with `--json` | [the switch in the head](#starting-and-stopping-the-yard) |
+| the fetched `yardr`, by its whole path: `doctor` (once per run of footplate, for the PATH above; its one login shell with it) and `status` when a yard of this machine is opened, with no click; `up`, `down`, `up --login`, `daemon uninstall` on a click; each with `--json` | [the switch in the head](#starting-and-stopping-the-yard) |
 | a maker's installer that yardr names, on a Mac (Claude Code's `install <version>`) | "install" on a harness's row |
 | `/usr/bin/xcode-select --install`, on a Mac | "install" on git's row |
 | `git`, to read: `rev-parse --is-inside-work-tree`, `branch --show-current` | the branch offered for a folder |
@@ -584,6 +590,11 @@ minus `yard.sock` as `--home`. This run's yard, whose socket is empty,
 takes no flag, so yardr resolves it as footplate did. A yard at an address
 has no switch: its processes are elsewhere. A socket that names no yard
 home says so, and starts nothing.
+
+The home is the one the settings entry names, and yardr runs on it as you:
+Start starts that home's yard with that home's settings, its harnesses and
+its agents. List the socket of a home that is yours alone; yardr does not
+ask whose a home is.
 
 ## The window
 
