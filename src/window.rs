@@ -935,6 +935,22 @@ impl Footplate {
             this.front = window.is_window_active()
         })
         .detach();
+        // The window's close button asks here first. Where closing hides,
+        // the window is kept and the application hidden with it, so this
+        // view, its followers, its models and its drafts go on; else the
+        // window closes, and the application quits with its one window.
+        // Quitting does not ask here.
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            let hides = this.read_with(cx, |this, _| this.closing_hides());
+            if !hides.unwrap_or(false) {
+                return true;
+            }
+            // A test hides nothing: gpui's test platform has no hide.
+            #[cfg(not(test))]
+            cx.hide();
+            false
+        });
         // Whatever changes what waits in a yard has the window drawn
         // again: the dock's icon is told there, of every yard at once and
         // with the window behind another, where nothing is drawn.
@@ -3481,6 +3497,23 @@ impl Footplate {
         cx.notify();
     }
 
+    /// Whether closing the window hides footplate where it would else
+    /// quit, on this system and by the settings.
+    fn closing_hides(&self) -> bool {
+        self.settings.closing_hides(cfg!(target_os = "macos"))
+    }
+
+    /// footplate has its item in the menu bar, or no longer.
+    fn menu_bar_on(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                menu_bar: on,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
     /// The system tells of what arrives, or no longer.
     fn notify_on(&mut self, on: bool, cx: &mut Context<Self>) {
         self.set(
@@ -4054,6 +4087,32 @@ impl Footplate {
                 );
             }
         }
+        // The menu bar is a Mac's: elsewhere there is nothing to switch,
+        // and closing quits.
+        let menu_bar = cfg!(target_os = "macos").then(|| {
+            setting(
+                "menu bar item",
+                format!(
+                    "while it is on, closing the window hides footplate, which goes on following its yards: a click on its icon in the dock shows it again, {SECONDARY}+q quits · off, closing quits"
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .children([("off", false), ("on", true)].map(|(name, on)| {
+                        chosen(
+                            small_button(name.to_string(), palette)
+                                .id(SharedString::from(format!("menu bar {name}"))),
+                            on == self.settings.menu_bar,
+                        )
+                        .debug_selector(move || format!("menu bar {name}"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.menu_bar_on(on, cx)))
+                    })),
+            )
+        });
         pane.child(head)
             .child(
                 div()
@@ -4068,7 +4127,8 @@ impl Footplate {
                     .child(size)
                     .child(look)
                     .child(yard)
-                    .child(notifications),
+                    .child(notifications)
+                    .children(menu_bar),
             )
             .when_some(self.unkept.clone(), |el, why| {
                 el.child(
@@ -9449,6 +9509,48 @@ mod tests {
             texts(&view, cx) == ["Shall I land it?"]
         });
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn closing_the_window_hides_on_a_mac_while_the_menu_bar_item_is_on_and_else_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let mac = cfg!(target_os = "macos");
+
+        // Nobody chose: the item is on. On a Mac the close button is
+        // refused, and the window with all it holds stays (hidden, which a
+        // test does not do); elsewhere it closes, as it always did.
+        assert!(settings_of(&view, cx).menu_bar);
+        assert_eq!(cx.simulate_close(), !mac);
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+
+        // The switch is a Mac's alone: elsewhere there is none to draw.
+        cx.simulate_keystrokes("secondary-,");
+        assert_eq!(drawn(cx, "menu bar off"), mac);
+        if mac {
+            // Switched off, it is kept, and closing closes: the
+            // application then quits with its one window.
+            click_on(cx, "menu bar off");
+            assert!(!settings_of(&view, cx).menu_bar);
+            assert!(!Settings::read(&file).menu_bar);
+            assert!(cx.simulate_close());
+            // On again, closing hides again.
+            click_on(cx, "menu bar on");
+            assert!(Settings::read(&file).menu_bar);
+            assert!(!cx.simulate_close());
+        }
+        // Off, however it came to be, closing closes on every system.
+        view.update(cx, |v, cx| v.menu_bar_on(false, cx));
+        assert!(cx.simulate_close());
     }
 
     fn settings_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Settings {

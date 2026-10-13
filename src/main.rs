@@ -23,6 +23,9 @@ mod theme;
 mod window;
 mod yard;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowOptions, actions, px, size,
@@ -40,7 +43,23 @@ fn main() {
     let env = yard::Env::read();
     let name = session::login_name();
 
-    Application::new().run(move |cx: &mut App| {
+    let application = Application::new();
+    // The system unhides a hidden footplate by itself on a click in the
+    // dock and on cmd+tab. Started again while it is hidden, it is only
+    // told so, here, and shows its window itself. The window is opened
+    // once the application runs, and is known here from then on.
+    let window = Rc::new(Cell::new(None));
+    let opened_window = window.clone();
+    application.on_reopen(move |cx| {
+        let Some(window) = window.get() else {
+            return;
+        };
+        unhide();
+        cx.activate(true);
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .ok();
+    });
+    application.run(move |cx: &mut App| {
         dock_icon();
         input::bind_keys(cx);
         window::bind_keys(cx);
@@ -54,7 +73,9 @@ fn main() {
                 MenuItem::action("Quit footplate", Quit),
             ],
         }]);
-        // The one window is the application.
+        // The one window is the application: once it has closed, footplate
+        // quits. Where closing hides instead (the window asks its view,
+        // Footplate::closing_hides), it never closes, and only Quit quits.
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -84,7 +105,10 @@ fn main() {
             view
         });
         match opened {
-            Ok(_) => cx.activate(true),
+            Ok(window) => {
+                opened_window.set(Some(window.into()));
+                cx.activate(true);
+            }
             Err(err) => {
                 eprintln!("footplate: the window could not be opened: {err}");
                 cx.quit();
@@ -113,6 +137,23 @@ fn dock_icon() {
     // the application keeps its own reference to it.
     unsafe { NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&image)) };
 }
+
+/// Shows the application again where closing its window hid it. gpui can
+/// hide but has no call that unhides, and activating alone does not promise
+/// it.
+#[cfg(target_os = "macos")]
+fn unhide() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    if let Some(main_thread) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(main_thread).unhide(None);
+    }
+}
+
+/// Only macOS hides footplate.
+#[cfg(not(target_os = "macos"))]
+fn unhide() {}
 
 /// On Linux it is the desktop entry of the window's id, and under X11 a
 /// property of the window too.

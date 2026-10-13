@@ -463,14 +463,16 @@ what it printed.
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
 | `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |
 | `cmd+shift+l` (`ctrl+shift+l` on Linux) | the next of auto, light, dark |
-| `cmd+q` (`ctrl+q` on Linux) | quits; so does closing the window |
+| `cmd+q` (`ctrl+q` on Linux) | quits. On Linux so does closing the window; on macOS closing hides footplate while the menu bar item is on, and quits while it is off ([Closing the window](#closing-the-window)) |
 
 ## Settings
 
 Two things can be set, in the settings or by their own keys, and both are
 drawn at once and kept for the next start; the third is the yards, which
-[A yard at an address](#a-yard-at-an-address) has, and the fourth what the
-system tells of, which [Notifications](#notifications) has:
+[A yard at an address](#a-yard-at-an-address) has, the fourth what the
+system tells of, which [Notifications](#notifications) has, and the fifth,
+on macOS, the menu bar item, which
+[Closing the window](#closing-the-window) has:
 
 - the text size, 11 to 20 pixels, a pixel a step; 14 is the usual size.
   Everything that goes with the text goes with it: the left column, the
@@ -478,12 +480,26 @@ system tells of, which [Notifications](#notifications) has:
 - light, dark or auto. Auto is the desktop's look, and follows it when it
   changes while the window is open.
 
-They are kept, with the yards and the notifications that were chosen, in one
-file footplate writes on every change:
+They are kept, with the yards, the notifications that were chosen and the
+menu bar item where it is switched off, in one file footplate writes on every change:
 `~/Library/Application Support/footplate/settings.json` on macOS,
 `$XDG_CONFIG_HOME/footplate/settings.json` on Linux (`~/.config` when that
 is not set). Without the file, or with one footplate cannot read, the window
 is as it was before there were settings: 14 pixels, auto.
+
+## Closing the window
+
+On macOS, closing the window hides footplate and does not quit it: it goes
+on following every yard, keeps what you typed and did not send, counts
+what waits on the dock's icon and notifies as the settings say. A click on
+its icon in the dock, `cmd+tab` to it, or opening `Footplate.app` again
+shows the window as it was. `cmd+q` and "Quit footplate" in the menu quit,
+and nothing else does.
+
+This goes with the menu bar item, a setting that is on to begin with (the
+item itself is not built yet; the setting already says what closing does).
+Switch it off in the settings (`cmd+,`), under "menu bar item", and closing
+the window quits, as it does on Linux, where there is no such setting.
 
 ## Notifications
 

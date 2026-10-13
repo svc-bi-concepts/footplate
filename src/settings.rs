@@ -1,6 +1,6 @@
 //! What a person set and the window keeps between runs: the text size, the
-//! look, the yards it can show and which of them is open, and what the
-//! system tells of. One small JSON file where the platform has a program's own
+//! look, the yards it can show and which of them is open, what the system
+//! tells of, and whether footplate stays up in the menu bar. One small JSON file where the platform has a program's own
 //! configuration: `~/Library/Application Support/footplate/settings.json`
 //! on macOS, `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere
 //! (`~/.config` when that is not set). It is footplate's to write, on every
@@ -122,6 +122,16 @@ pub struct Settings {
     /// chosen, as the yards are.
     #[serde(skip_serializing_if = "Notify::is_usual")]
     pub notifications: Notify,
+    /// Whether footplate has its item in the menu bar, which macOS alone
+    /// has. On until a person switches it off, and left out of the file
+    /// while it is on. It governs what closing the window does
+    /// ([`Settings::closing_hides`]).
+    #[serde(skip_serializing_if = "is_on")]
+    pub menu_bar: bool,
+}
+
+fn is_on(on: &bool) -> bool {
+    *on
 }
 
 fn nobody_chose(yards: &[Yard]) -> bool {
@@ -140,6 +150,7 @@ struct Kept {
     remote: bool,
     address: String,
     notifications: Notify,
+    menu_bar: bool,
 }
 
 impl Default for Kept {
@@ -152,6 +163,7 @@ impl Default for Kept {
             remote: false,
             address: String::new(),
             notifications: Notify::default(),
+            menu_bar: true,
         }
     }
 }
@@ -190,6 +202,7 @@ impl From<Kept> for Settings {
             look: kept.look,
             open,
             notifications: kept.notifications,
+            menu_bar: kept.menu_bar,
         }
     }
 }
@@ -282,6 +295,7 @@ impl Default for Settings {
             yards: vec![Yard::near(HERE, "")],
             open: String::new(),
             notifications: Notify::default(),
+            menu_bar: true,
         }
     }
 }
@@ -308,6 +322,15 @@ impl Settings {
         let mut text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         text.push('\n');
         fs::write(file, text)
+    }
+
+    /// Whether closing the window hides footplate, which then goes on
+    /// following its yards, where it would else quit: on a Mac (`mac`),
+    /// while the menu bar item is on. The item is the way back that is
+    /// seen, so without it nothing is ever hidden: a person who switched
+    /// it off, or whose system has none, quits by closing.
+    pub fn closing_hides(&self, mac: bool) -> bool {
+        mac && self.menu_bar
     }
 
     /// The yard the window opens: the one it had open last, else the first
@@ -1272,6 +1295,38 @@ mod tests {
         // A file that names one of them keeps the others as they are usual.
         fs::write(&file, "{\"notifications\": {\"on\": true}}").unwrap();
         assert_eq!(Settings::read(&file).notifications, on);
+    }
+
+    #[test]
+    fn the_menu_bar_item_is_on_until_it_is_switched_off_and_closing_hides_with_it_on_a_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Nobody chose: it is on, a file from before it says nothing of it
+        // and has it on, and the file of a person who changes something
+        // else still says nothing.
+        let usual = Settings::default();
+        assert!(usual.menu_bar);
+        fs::write(&file, "{\"text\": 15}").unwrap();
+        assert!(Settings::read(&file).menu_bar);
+        usual.write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("menu_bar"));
+        // Closing hides on a Mac alone, and only while the item is on.
+        assert!(usual.closing_hides(true));
+        assert!(!usual.closing_hides(false));
+
+        // Switched off, it is kept, and closing quits wherever it is.
+        let off = Settings {
+            menu_bar: false,
+            ..Settings::default()
+        };
+        off.write(&file).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"menu_bar\": false\n}\n"
+        );
+        assert_eq!(Settings::read(&file), off);
+        assert!(!off.closing_hides(true));
+        assert!(!off.closing_hides(false));
     }
 
     #[test]
