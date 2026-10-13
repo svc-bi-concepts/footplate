@@ -1069,6 +1069,9 @@ impl Footplate {
         self.images.clear();
         self.declining = None;
         self.back_position = None;
+        // A paging request and its scroll position belonged to the yard
+        // just left; a returning yard may need to ask for the same page.
+        self.older_at = None;
         // What arrived in the yard before is not told of as this one's.
         self.burst = Burst::default();
         self.line.update(cx, |line, cx| line.set_text("", cx));
@@ -1516,6 +1519,19 @@ impl Footplate {
         if !laid || self.bottom_pending {
             self.returning = Some((place, true));
             window.request_animation_frame();
+            return;
+        }
+        if matches!(&place.row, Selected::Conversation(_))
+            && place.off > self.conversation.max_offset().height
+            && model.top() == Top::Older
+        {
+            // The saved position is beyond the newest page. Reach the
+            // oldest loaded mail to fetch older pages, then try the saved
+            // distance again after each page is laid out.
+            let mut at = self.conversation.offset();
+            at.y = px(0.);
+            self.conversation.set_offset(at);
+            self.returning = Some((place, true));
             return;
         }
         match place.row {
@@ -13188,5 +13204,59 @@ mod tests {
         });
         assert!(decided_detail_of(&view, cx, "bead-a", 3).expanded);
         view.read_with(cx, |v, _| assert!(v.returning.is_none()));
+    }
+
+    /// A saved conversation position can be older than the newest page
+    /// loaded when the yard is reopened. Older pages are fetched until the
+    /// same distance from the newest can be restored.
+    #[gpui::test]
+    fn a_yard_opened_again_loads_older_pages_to_restore_its_conversation_scroll(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        long_conversation(&near, 120);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the newest page", |cx| texts(&view, cx).len() == 50);
+        let newest_page = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        scroll_to(&view, cx, 0.);
+        wait(cx, "the older page", |cx| texts(&view, cx).len() == 100);
+        frames(cx);
+
+        let target = newest_page + px(200.);
+        let loaded = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(
+            loaded > target,
+            "the saved position is beyond the loaded mail"
+        );
+        view.read_with(cx, |v, _| {
+            let mut at = v.conversation.offset();
+            at.y = target - v.conversation.max_offset().height;
+            v.conversation.set_offset(at);
+        });
+        frames(cx);
+        assert_eq!(above_newest(&view, cx), target);
+
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the older page", |cx| {
+            cx.update(|window, _| window.refresh());
+            texts(&view, cx).len() == 100
+        });
+        frames(cx);
+        assert_eq!(above_newest(&view, cx), target);
+        assert!(view.read_with(cx, |v, _| v.returning.is_none()));
     }
 }
