@@ -9300,8 +9300,8 @@ mod tests {
         asked: Rc<Cell<usize>>,
         shown: Rc<RefCell<Vec<notify::Telling>>>,
         activated: (
-            async_channel::Sender<(String, Selected)>,
-            async_channel::Receiver<(String, Selected)>,
+            async_channel::Sender<notify::Activated>,
+            async_channel::Receiver<notify::Activated>,
         ),
     }
 
@@ -9344,7 +9344,7 @@ mod tests {
             self.shown.borrow_mut().push(telling.clone());
         }
 
-        fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
+        fn activated(&self) -> async_channel::Receiver<notify::Activated> {
             self.activated.1.clone()
         }
     }

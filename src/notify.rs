@@ -202,6 +202,10 @@ fn row_in_yard(name: &str) -> Option<Selected> {
     }
 }
 
+/// A notification that was activated: the yard it told of, and the row it
+/// leads to there.
+pub type Activated = (String, Selected);
+
 /// Whether the system lets footplate notify, as it answered when asked.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Permission {
@@ -224,7 +228,7 @@ pub trait System {
     /// The rows of the notifications a person activates, as they do, each
     /// with the yard it is a row of. On a system with no way back into the
     /// program nothing ever comes.
-    fn activated(&self) -> async_channel::Receiver<(String, Selected)>;
+    fn activated(&self) -> async_channel::Receiver<Activated>;
 }
 
 /// A system whose notifications footplate does not send, which says so.
@@ -239,7 +243,7 @@ impl System for Nowhere {
 
     fn show(&self, _: &Telling) {}
 
-    fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
+    fn activated(&self) -> async_channel::Receiver<Activated> {
         async_channel::bounded(1).1
     }
 }
@@ -283,7 +287,7 @@ mod linux {
     use std::process::{Command, Stdio};
     use std::thread;
 
-    use super::{Nowhere, Permission, Selected, System, Telling};
+    use super::{Activated, Nowhere, Permission, System, Telling};
 
     /// The desktop's notification service, by way of `notify-send`.
     pub struct Desktop;
@@ -326,7 +330,7 @@ mod linux {
             });
         }
 
-        fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
+        fn activated(&self) -> async_channel::Receiver<Activated> {
             Nowhere("").activated()
         }
     }
@@ -347,7 +351,7 @@ mod mac {
         UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
 
-    use super::{Permission, Selected, System, Telling};
+    use super::{Activated, Permission, System, Telling};
 
     const NO_BUNDLE: &str = "macOS notifies for an application, not for a bare program: build Footplate.app (scripts/bundle-mac.sh) and open that.";
     const DENIED: &str = "macOS does not let footplate notify: allow it in System Settings, Notifications, Footplate.";
@@ -358,7 +362,7 @@ mod mac {
         // is in front.
         #[unsafe(super(NSObject))]
         #[name = "FootplateNotifications"]
-        #[ivars = async_channel::Sender<(String, Selected)>]
+        #[ivars = async_channel::Sender<Activated>]
         struct Delegate;
 
         unsafe impl NSObjectProtocol for Delegate {}
@@ -396,7 +400,7 @@ mod mac {
     );
 
     impl Delegate {
-        fn new(tell: async_channel::Sender<(String, Selected)>) -> Retained<Self> {
+        fn new(tell: async_channel::Sender<Activated>) -> Retained<Self> {
             let this = Self::alloc().set_ivars(tell);
             // SAFETY: NSObject's init, on an object just allocated with
             // its ivars set.
@@ -408,8 +412,8 @@ mod mac {
     /// the system's is touched before a person switched notifications on.
     pub struct Center {
         activated: (
-            async_channel::Sender<(String, Selected)>,
-            async_channel::Receiver<(String, Selected)>,
+            async_channel::Sender<Activated>,
+            async_channel::Receiver<Activated>,
         ),
         /// The center keeps no reference of its own to its delegate.
         delegate: OnceCell<Retained<Delegate>>,
@@ -506,7 +510,7 @@ mod mac {
             center.addNotificationRequest_withCompletionHandler(&request, None);
         }
 
-        fn activated(&self) -> async_channel::Receiver<(String, Selected)> {
+        fn activated(&self) -> async_channel::Receiver<Activated> {
             self.activated.1.clone()
         }
     }
