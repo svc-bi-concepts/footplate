@@ -32,10 +32,11 @@ rustls-native-certs = "0.8"
 socket2 = "0.6"
 
 # gpui's window options have no icon: on macOS the dock's is set on the
-# application, with the bindings gpui itself is built on.
+# application, with the bindings gpui itself is built on. So is the number
+# on it (dock.rs), which gpui has no call for either.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSError", "NSString"] }
 # A notification of the system's (notify.rs) goes through the user
 # notifications framework, whose answers come to blocks. block2 is in

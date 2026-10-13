@@ -5,6 +5,8 @@
 //! linked yard exposes, as `yardr chat` shows them.
 
 mod api;
+#[cfg(any(target_os = "macos", test))]
+mod dock;
 mod draft;
 #[cfg(test)]
 mod fake;

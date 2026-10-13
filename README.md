@@ -571,6 +571,14 @@ options have no icon, so the program sees to it when it starts
   (`cargo run`) has to show in the dock. Finder, Spotlight and the dock
   while footplate is not running show the icon of the bundle, when there is
   one: see "Building".
+
+  The dock's icon also carries a number, when something waits for you: the
+  mail you have not read plus the cards to decide, over every yard footplate
+  follows. They are the numbers the switcher says per yard, summed; the
+  notices of a yard are not in it. It changes as they do, with the window
+  behind another or hidden, and it is gone when nothing waits. A yard that
+  is not reached counts what it last had (`src/dock.rs`). There is no
+  setting for it, and no count on a Linux taskbar.
 - Linux: a desktop shows the icon and the name of the desktop entry whose id
   is the window's (`footplate`). There is no installer to put one there, so
   footplate writes its own, for you alone: `footplate.desktop` under
@@ -598,6 +606,7 @@ options have no icon, so the program sees to it when it starts
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
+| `src/dock.rs` | macOS: the number on the dock's icon, of what waits |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON |
 

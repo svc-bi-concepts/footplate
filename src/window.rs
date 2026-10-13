@@ -596,6 +596,13 @@ impl Counts {
         }
     }
 
+    /// How many things of the yard wait for the person: the mail that is
+    /// not read and the cards to decide. A notice of the yard asks nothing
+    /// of them.
+    fn waiting(&self) -> usize {
+        self.mail + self.decisions
+    }
+
     /// In words.
     fn line(&self) -> String {
         let some = |n: usize, one: &str, more: &str| match n {
@@ -616,6 +623,15 @@ impl Counts {
             false => parts.join(", "),
         }
     }
+}
+
+/// How many things wait for the person over every yard that is followed,
+/// which the dock's icon says (dock.rs): each yard's as the switcher counts
+/// them, summed. A yard has none to count until it was reached once; one
+/// that was and is not reached now counts what it last had, which waits
+/// there still.
+fn waiting(yards: impl IntoIterator<Item = Option<Counts>>) -> usize {
+    yards.into_iter().flatten().map(|c| c.waiting()).sum()
 }
 
 /// A yard as the window follows it, and all that is of it and not of the
@@ -817,6 +833,8 @@ pub struct Footplate {
     burst_generation: u64,
     /// Whether the window is the one in front.
     front: bool,
+    /// How many things the dock's icon says wait ([`waiting`]).
+    waiting: usize,
 }
 
 impl Footplate {
@@ -917,6 +935,10 @@ impl Footplate {
             this.front = window.is_window_active()
         })
         .detach();
+        // Whatever changes what waits in a yard has the window drawn
+        // again: the dock's icon is told there, of every yard at once and
+        // with the window behind another, where nothing is drawn.
+        cx.observe_self(|this, _| this.badge()).detach();
         let system = notify::system();
         let heeding = Self::heed(system.as_ref(), cx);
 
@@ -983,6 +1005,20 @@ impl Footplate {
             burst: Burst::default(),
             burst_generation: 0,
             front: window.is_window_active(),
+            waiting: 0,
+        }
+    }
+
+    /// Says on the dock's icon how many things wait, where that is another
+    /// number than it says now.
+    fn badge(&mut self) {
+        let open = std::iter::once(self.model.as_ref());
+        let held = self.held.values().map(|held| held.model.as_ref());
+        let waiting = waiting(open.chain(held).map(|model| model.map(Counts::of)));
+        if waiting != self.waiting {
+            self.waiting = waiting;
+            #[cfg(all(target_os = "macos", not(test)))]
+            crate::dock::badge(waiting);
         }
     }
 
@@ -10158,6 +10194,9 @@ mod tests {
         assert_eq!(tellings(cx), []);
         let (loads, streams) = (second.asked("Head").len(), second.streams_asked().len());
         assert_eq!(streams, 1);
+        // The dock's icon says what waits over both yards: nothing in the
+        // open one, whose mail is read, and the two of the other.
+        assert_eq!(badge_of(&view, cx), 2);
 
         // Mail arrives in the yard that is not open, with the window in
         // front on the other: it is counted where the switcher says what
@@ -10182,6 +10221,8 @@ mod tests {
             )]
         );
         assert_eq!(second.asked("AckUserInbox").len(), 0);
+        // The icon counts it, of a yard that is not shown.
+        assert_eq!(badge_of(&view, cx), 3);
 
         // A card: one notification, naming the yard it waits in.
         second.answer("UserAsks", &asks_one());
@@ -10199,6 +10240,8 @@ mod tests {
             )]
         );
 
+        assert_eq!(badge_of(&view, cx), 4);
+
         // A notice of the yard, which the settings here have tell too.
         second.answer("UserNotifications", &notices_many(1));
         second.emit(r#"{"seq": 32, "kind": "created", "actor": "yard", "bead": "yd-shed", "data": {"notified": {"jo": "all"}}, "at": "2026-10-08T09:32:00Z"}"#);
@@ -10214,6 +10257,9 @@ mod tests {
                 Selected::Yard
             )]
         );
+
+        // A notice asks nothing of the person: the icon's number stays.
+        assert_eq!(badge_of(&view, cx), 4);
 
         // A burst of both yards is one notification, each yard's part by
         // itself: a sender of one name in both is not one sender. It leads
@@ -10253,6 +10299,9 @@ mod tests {
         assert_eq!(second.streams_asked().len(), streams);
         // The yard that was left is followed still, and says what waits.
         assert_eq!(state_of(&view, cx, "this machine"), "1 mail");
+        // The icon's number is of every yard, whichever is open: the one
+        // of the yard that was left, and five mail and the card of this.
+        assert_eq!(badge_of(&view, cx), 7);
         near.emit(&mail_event(22, "assembly", "And pushed."));
         wait(cx, "mail in the yard that was left", |cx| {
             state_of(&view, cx, "this machine") == "2 mail"
@@ -10338,6 +10387,10 @@ mod tests {
             state_of(&view, cx, "second home"),
             "not reached: nothing answers"
         );
+        // The dock's icon counts on: the one that arrived in the open
+        // yard, and the two the yard that is not reached last had, which
+        // wait there still.
+        assert_eq!(badge_of(&view, cx), 3);
 
         // It is started again: asked again by itself, it says what waits
         // in it, with no switch to it.
@@ -10461,6 +10514,11 @@ mod tests {
         view.read_with(cx, |v, _| v.yard_state(v.settings.yard(name).unwrap()))
     }
 
+    /// The number the dock's icon was last told.
+    fn badge_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> usize {
+        view.read_with(cx, |v, _| v.waiting)
+    }
+
     fn switching(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<usize> {
         view.read_with(cx, |v, _| v.switching)
     }
@@ -10483,6 +10541,32 @@ mod tests {
             "Conversation",
             r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "From the second home.", "read": false}]}"#,
         );
+    }
+
+    #[test]
+    fn what_waits_over_the_yards_is_their_mail_and_decisions_summed() {
+        let counts = |mail, decisions, notices| {
+            Some(Counts {
+                mail,
+                decisions,
+                notices,
+            })
+        };
+        // No yard, and one where nothing waits.
+        assert_eq!(waiting([]), 0);
+        assert_eq!(waiting([counts(0, 0, 0)]), 0);
+        // One yard: its mail and its decisions, and not its notices.
+        assert_eq!(waiting([counts(2, 1, 0)]), 3);
+        assert_eq!(waiting([counts(0, 0, 4)]), 0);
+        // Several.
+        assert_eq!(
+            waiting([counts(2, 1, 5), counts(0, 3, 0), counts(1, 0, 0)]),
+            7
+        );
+        // One that was not reached yet has nothing to count, and takes
+        // nothing from the others.
+        assert_eq!(waiting([counts(2, 1, 0), None, counts(0, 3, 0)]), 6);
+        assert_eq!(waiting([None]), 0);
     }
 
     #[test]
