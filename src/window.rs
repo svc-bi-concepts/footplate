@@ -5241,25 +5241,38 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let checked = status.starts_at_login();
+        small_button(self.login_words(status), palette)
+            .id("switch login")
+            .debug_selector(|| "switch login".to_string())
+            .text_size(rems(0.8))
+            .when(checked, |el| {
+                el.bg(palette.open)
+                    .text_color(palette.text)
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+            .when(self.switch_busy.is_some(), |el| el.opacity(0.5))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)))
+            .into_any_element()
+    }
+
+    /// The words beside "start at login". Where the yard is stopped
+    /// and the box is off, checking starts the yard now as well as at
+    /// every login (`up --login` starts a stopped yard), so it says so
+    /// before the click.
+    fn login_words(&self, status: &setup::Status) -> String {
+        let checked = status.starts_at_login();
         let mark = match checked {
             true => "☑",
             false => "☐",
         };
-        small_button(
-            format!("{mark} start at login (and herdr's server, shared)"),
-            palette,
-        )
-        .id("switch login")
-        .debug_selector(|| "switch login".to_string())
-        .text_size(rems(0.8))
-        .when(checked, |el| {
-            el.bg(palette.open)
-                .text_color(palette.text)
-                .font_weight(FontWeight::SEMIBOLD)
-        })
-        .when(self.switch_busy.is_some(), |el| el.opacity(0.5))
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)))
-        .into_any_element()
+        // While the switch is busy a click starts nothing, so the box
+        // names only login then.
+        match !checked && self.yard_is_stopped() && self.switch_busy.is_none() {
+            true => format!(
+                "{mark} start at login (starts the yard now and at every login; herdr's server shared)"
+            ),
+            false => format!("{mark} start at login (and herdr's server, shared)"),
+        }
     }
 
     /// The question before stopping: the agents in the middle of
@@ -14080,6 +14093,65 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    /// Where the yard is stopped, "start at login" says checking starts
+    /// the yard now and at every login; where it runs, or the box is
+    /// checked, it names only login.
+    #[gpui::test]
+    fn start_at_login_says_it_starts_a_stopped_yard_now(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(false, false));
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the stopped yard read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+        assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
+        view.read_with(cx, |v, _| {
+            let words = v.login_words(v.switch_status.as_ref().unwrap());
+            assert!(
+                words.contains("starts the yard now and at every login"),
+                "{words}"
+            );
+        });
+
+        // The yard answers: Running, and the box names only login.
+        let yard = Yard::start_at(&dir.path().join("yard.sock"));
+        a_yard_of_jo(&yard);
+        wait(cx, "the yard running", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_none() && v.model.is_some())
+        });
+        view.read_with(cx, |v, _| {
+            let words = v.login_words(v.switch_status.as_ref().unwrap());
+            assert!(!words.contains("starts the yard now"), "{words}");
+        });
+
+        // Checked on a stopped yard: unchecking starts nothing, so it
+        // names only login too.
+        standin::answers(&program, "status", 0, &standin::status(false, true));
+        yard.stop();
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the login read on", |cx| {
+            settled(&view, cx)
+                && view.read_with(cx, |v, _| {
+                    v.switch_status
+                        .as_ref()
+                        .is_some_and(|status| status.starts_at_login())
+                })
+        });
+        wait(cx, "the yard stopped", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_some())
+        });
+        view.read_with(cx, |v, _| {
+            let words = v.login_words(v.switch_status.as_ref().unwrap());
+            assert!(!words.contains("starts the yard now"), "{words}");
+        });
     }
 
     /// A yard that is only stopped says that, and offers Start instead of

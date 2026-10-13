@@ -570,7 +570,9 @@ nothing.
 
 Beside the switch, "start at login (and herdr's server, shared)": checked,
 the yard starts at login. Checking installs the login services with
-`up --login`: the daemon's and herdr's server's. herdr's is one service for
+`up --login`: the daemon's and herdr's server's. Where the yard is stopped,
+checking starts it now as well as at every login, so the box says that
+before the click. herdr's is one service for
 every yard on the machine, the user's and not the yard's. Unchecking
 removes the daemon's service; herdr's shared service is left, and its
 server still starts at login. Where removing the daemon's service stops the
