@@ -528,6 +528,19 @@ struct Anchor {
     off: Pixels,
 }
 
+/// Where a yard stood when it was left for another: the row that was open
+/// and the scroll of what it showed. Of a conversation and the yard row
+/// that is how far above its newest the view stood, since a yard opened
+/// again has the newest of a conversation first and the older above it;
+/// of a card, how far below its top, with the cards that stood expanded:
+/// folded again, a card is shorter than where it stood.
+#[derive(Clone, Debug, PartialEq)]
+struct Place {
+    row: Selected,
+    off: Pixels,
+    expanded: HashSet<(String, u64)>,
+}
+
 /// Whether a yard that is away is asked again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Away {
@@ -672,6 +685,13 @@ pub struct Footplate {
     kept_words: HashMap<String, HashMap<(String, u64), String>>,
     /// What each yard had waiting when it was last left, by yard.
     counts: HashMap<String, Counts>,
+    /// Where each yard stood when it was last left, by yard.
+    places: HashMap<String, Place>,
+    /// The place the open yard is to be put back to, which it is not
+    /// yet: the yard has not answered for what the row shows, or the
+    /// layout has not had it. Whether it was laid out as long as it now
+    /// is. See [`Footplate::come_back`].
+    returning: Option<(Place, bool)>,
     /// What there was to say while a yard was being opened and nothing
     /// showed to say it in: it is said when the yard shows.
     late: Option<String>,
@@ -872,6 +892,8 @@ impl Footplate {
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
             counts: HashMap::new(),
+            places: HashMap::new(),
+            returning: None,
             late: None,
             switching: None,
             declining: None,
@@ -1007,8 +1029,8 @@ impl Footplate {
     /// Follows `yard` behind the client from here on, and no longer the
     /// one before it. Nothing of that one is shown, since a name there is
     /// not the same one here; what was written in it and not sent is kept
-    /// aside for it, with what it had waiting, and what was written for
-    /// this one before is its again. Nothing typed of a secret is kept for
+    /// aside for it, with what it had waiting and where it stood, and what
+    /// was written for this one before is its again. Nothing typed of a secret is kept for
     /// either. Without a client the window says why there is none, and
     /// waits for another yard to be chosen.
     fn follow(&mut self, yard: String, opening: Result<Client, String>, cx: &mut Context<Self>) {
@@ -1017,9 +1039,17 @@ impl Footplate {
         if let Some(model) = self.model.as_ref() {
             self.counts.insert(self.yard.clone(), Counts::of(model));
             if let Some(from) = model.selected().cloned() {
+                // A yard left before it was put back where it stood has
+                // nothing newer to say of that: its place stays the kept
+                // one.
+                if self.returning.is_none() {
+                    let place = self.place(from.clone());
+                    self.places.insert(self.yard.clone(), place);
+                }
                 self.keep_typed(&from, cx);
             }
         }
+        self.returning = None;
         let words = std::mem::take(&mut self.ask_words);
         if !words.is_empty() {
             self.kept_words.insert(self.yard.clone(), words);
@@ -1161,10 +1191,21 @@ impl Footplate {
                 self.said = state.yard.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
-                let (model, effects) = match self.model.as_ref() {
+                // The yard was opened: on the row it was left on, where
+                // that is still there.
+                let kept = self.places.get(&self.yard).filter(|_| fresh).cloned();
+                let (mut model, effects) = match self.model.as_ref() {
                     Some(before) => before.resumed(state),
-                    None => Model::new(state, None),
+                    None => Model::new(state, kept.as_ref().map(|place| place.row.clone())),
                 };
+                if fresh {
+                    if let Some(place) = &kept {
+                        model.expand(&place.expanded);
+                    }
+                    self.returning = kept
+                        .filter(|place| model.selected() == Some(&place.row))
+                        .map(|place| (place, false));
+                }
                 self.model = Some(model);
                 self.down = None;
                 if fresh {
@@ -1185,7 +1226,11 @@ impl Footplate {
                 self.turned(open, cx);
                 self.new_below = 0;
                 self.scroll_to_newest();
-                self.decision.scroll_to_item(0);
+                // A card that is to be put back where it stood is not
+                // told to its top after that.
+                if self.returning.is_none() {
+                    self.decision.scroll_to_item(0);
+                }
                 // What the yard did not give while it was away is asked for
                 // again.
                 self.images
@@ -1241,6 +1286,8 @@ impl Footplate {
             _ => None,
         };
         if before_sel != after_sel {
+            // Another row is open than the one the yard was left on.
+            self.returning = None;
             match &after_sel {
                 Some(Selected::Decision(_)) | Some(Selected::Decided(_, _)) => {
                     self.decision.scroll_to_item(0);
@@ -1405,6 +1452,7 @@ impl Footplate {
             }
             None => {}
         }
+        self.come_back(window);
         if self.bottom_pending {
             self.bottom_pending = false;
             return;
@@ -1413,6 +1461,70 @@ impl Footplate {
             self.new_below = 0;
         }
         self.reach_top(cx);
+    }
+
+    /// Where the open yard stands, on `row`: what is kept of it when
+    /// another yard is opened.
+    fn place(&self, row: Selected) -> Place {
+        let off = match &row {
+            // A jump to the newest that the layout has not applied yet
+            // is where it stands all the same.
+            Selected::Conversation(_) | Selected::Yard if self.bottom_pending => px(0.),
+            Selected::Conversation(_) | Selected::Yard => {
+                self.conversation.max_offset().height + self.conversation.offset().y
+            }
+            Selected::Decision(_) | Selected::Decided(_, _) => px(0.) - self.decision.offset().y,
+        };
+        let model = self.model.as_ref();
+        Place {
+            row,
+            off: off.max(px(0.)),
+            expanded: model.map(|m| m.expanded().clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Puts what is shown where it stood when its yard was left for
+    /// another. Not before the yard has answered for what the row shows:
+    /// until then the row is shorter than it was, and the layout would
+    /// hold the view within that. A conversation's place is counted from
+    /// its newest, and how long it is the layout says: so the frame that
+    /// first has it whole lays it out, and the one after moves the view.
+    fn come_back(&mut self, window: &mut Window) {
+        let Some((place, laid)) = self.returning.take() else {
+            return;
+        };
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let here = match &place.row {
+            Selected::Conversation(_) | Selected::Yard => model.answered(),
+            Selected::Decision(bead) | Selected::Decided(bead, _) => model.has_bead(bead),
+        };
+        // Under the settings nothing of the row is laid out.
+        if !here || self.settings_open {
+            self.returning = Some((place, false));
+            return;
+        }
+        // A jump to the newest asked for since is applied by this frame's
+        // layout, over any offset set here: the next one has the place.
+        if !laid || self.bottom_pending {
+            self.returning = Some((place, true));
+            window.request_animation_frame();
+            return;
+        }
+        match place.row {
+            Selected::Conversation(_) | Selected::Yard => {
+                let mut at = self.conversation.offset();
+                at.y = (place.off - self.conversation.max_offset().height).min(px(0.));
+                self.conversation.set_offset(at);
+            }
+            // Where the card is shorter now, the layout stops at its end.
+            Selected::Decision(_) | Selected::Decided(_, _) => {
+                let mut at = self.decision.offset();
+                at.y = px(0.) - place.off;
+                self.decision.set_offset(at);
+            }
+        }
     }
 
     /// Asks for the older mail of the open conversation when its view
@@ -1467,6 +1579,8 @@ impl Footplate {
         }
         Self::to_newest(&self.conversation);
         self.new_below = 0;
+        // The reader chose a place since the yard was opened.
+        self.returning = None;
         window.focus(&self.line.focus_handle(cx));
         cx.notify();
     }
@@ -1504,6 +1618,8 @@ impl Footplate {
         }
         at.y = at.y.clamp(px(0.) - max.height, px(0.));
         shown.set_offset(at);
+        // The reader chose a place since the yard was opened.
+        self.returning = None;
         cx.notify();
     }
 
@@ -3222,6 +3338,7 @@ impl Footplate {
             }
             self.kept_words.remove(name);
             self.counts.remove(name);
+            self.places.remove(name);
         }
         cx.notify();
     }
@@ -12824,5 +12941,182 @@ mod tests {
         let yard = Yard::start();
         let (_view, cx) = opened_on_the_yard_row(&yard, 0, cx);
         assert!(!drawn(cx, "mark all read"));
+    }
+
+    /// How far above its newest the open conversation stands.
+    fn above_newest(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> gpui::Pixels {
+        view.read_with(cx, |v, _| {
+            v.conversation.max_offset().height + v.conversation.offset().y
+        })
+    }
+
+    fn open_row(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<Selected> {
+        view.read_with(cx, |v, _| {
+            v.model.as_ref().and_then(|m| m.selected().cloned())
+        })
+    }
+
+    /// A yard opened again is on the row it was left on, and that row's
+    /// conversation as far above its newest as it stood: not on the row a
+    /// yard opens on, at its newest. Each yard has its own.
+    #[gpui::test]
+    fn a_yard_opened_again_is_on_its_row_where_its_conversation_stood(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let full = ["A long enough letter to make the conversation scroll."; 30];
+        mails(&near, &full);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| texts(&view, cx) == full);
+        let yardmaster = Some(Selected::Conversation("yardmaster".into()));
+        let assembly = Some(Selected::Conversation("assembly".into()));
+        assert_eq!(open_row(&view, cx), yardmaster);
+
+        // Another row than the one the yard opens on, forty pixels above
+        // its newest.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Conversation("assembly".into()), window, cx)
+        });
+        wait(cx, "the other conversation", |cx| {
+            cx.update(|window, _| window.refresh());
+            texts(&view, cx) == full && above_newest(&view, cx) == px(0.)
+        });
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > px(40.), "the conversation does not scroll: {over:?}");
+        scroll_up(&view, cx);
+        assert_eq!(above_newest(&view, cx), px(40.));
+
+        // The second home's yard opens on its own row, at its newest.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(open_row(&view, cx), yardmaster);
+
+        // This machine's again: the row it was left on, where it stood.
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the place it was left at", |cx| {
+            cx.update(|window, _| window.refresh());
+            texts(&view, cx) == full && above_newest(&view, cx) == px(40.)
+        });
+        assert_eq!(open_row(&view, cx), assembly);
+        assert!(shows_jump(&view, cx));
+        view.read_with(cx, |v, _| assert!(v.returning.is_none()));
+        // And it stays there over the frames that follow.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(above_newest(&view, cx), px(40.));
+
+        // The second home's again: its row, at its newest as it was left.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard again", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), yardmaster);
+        assert!(at_bottom(&view, cx));
+
+        // A yard left before it was put back keeps the place it had.
+        cx.simulate_keystrokes("secondary-1");
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard once more", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the place it was left at, still", |cx| {
+            cx.update(|window, _| window.refresh());
+            texts(&view, cx) == full && above_newest(&view, cx) == px(40.)
+        });
+        assert_eq!(open_row(&view, cx), assembly);
+    }
+
+    /// A yard left on a card is on that card again, expanded as it was
+    /// and as far down it as it stood. A row that is gone when the yard is opened again is not
+    /// opened: the yard opens as one opened for the first time.
+    #[gpui::test]
+    fn a_yard_opened_again_is_on_its_card_where_it_stood_or_as_new_when_the_row_is_gone(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        near.answer("UserAsks", &asks_one());
+        near.answer("Bead", &bead_of_notes(60));
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        let card = Some(Selected::Decision("bead-a".into()));
+        wait(cx, "the decision", |cx| open_row(&view, cx) == card);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        cx.run_until_parked();
+        // Expanded over sixty notes the card scrolls, further than it is
+        // long when folded.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let over = view.read_with(cx, |v, _| v.decision.max_offset().height);
+        assert!(over > px(400.), "the card does not scroll: {over:?}");
+        view.read_with(cx, |v, _| {
+            v.decision.set_offset(gpui::point(px(0.), px(-400.)))
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(-400.));
+
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the card where it stood", |cx| {
+            cx.update(|window, _| window.refresh());
+            open_row(&view, cx) == card && card_offset_of(&view, cx).y == px(-400.)
+        });
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        view.read_with(cx, |v, _| assert!(v.returning.is_none()));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(-400.));
+
+        // Its asks are dealt with elsewhere while the other yard is open:
+        // the card is gone, and the yard opens on the yardmaster's
+        // conversation at its newest, with nothing to be put back.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard again", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        near.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard without the card", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+        assert!(at_bottom(&view, cx));
+        view.read_with(cx, |v, _| assert!(v.returning.is_none()));
     }
 }

@@ -633,6 +633,17 @@ impl Model {
         sources.len() > 1 && sources.iter().any(|s| !self.loaded.contains(s))
     }
 
+    /// Whether the yard has answered for all the mail the open row shows:
+    /// before that the row is shorter than it will be. A row that shows no
+    /// mail waits for none.
+    pub fn answered(&self) -> bool {
+        self.selected.as_ref().is_some_and(|sel| {
+            self.sources(sel)
+                .iter()
+                .all(|name| self.loaded.contains(name))
+        })
+    }
+
     /// The names of the conversations, in order: the crew, the addresses
     /// of those the linked yards expose, then the users of this yard.
     fn conversation_names(&self) -> Vec<String> {
@@ -1155,6 +1166,17 @@ impl Model {
         if !self.expanded.remove(&key) {
             self.expanded.insert(key);
         }
+    }
+
+    /// The asks whose card stands expanded, by bead and ask.
+    pub fn expanded(&self) -> &HashSet<(String, u64)> {
+        &self.expanded
+    }
+
+    /// The cards of `asks` stand expanded too: those that did before the
+    /// yard was left for another.
+    pub fn expand(&mut self, asks: &HashSet<(String, u64)>) {
+        self.expanded.extend(asks.iter().cloned());
     }
 
     /// One bead whole, as read. What is no longer open or dealt with leaves
