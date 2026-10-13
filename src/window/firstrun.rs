@@ -344,6 +344,12 @@ impl FirstRun {
             cx.notify();
             return;
         }
+        // Doctor's fetch data is a Mac installer road. Linux must stay a
+        // list with the maker's page and yardr's instructions, even if a
+        // later yardr release accidentally includes that data there.
+        if !self.means.apple {
+            return;
+        }
         let wanted = doctor
             .rows()
             .into_iter()
@@ -767,8 +773,10 @@ impl FirstRun {
     /// yardr has for it.
     fn row(&self, item: &Item, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let program = item.program.clone();
-        let can_fetch =
-            item.fetch.is_some() && self.means.home.is_some() && self.means.own.is_some();
+        let can_fetch = self.means.apple
+            && item.fetch.is_some()
+            && self.means.home.is_some()
+            && self.means.own.is_some();
         let installs = !item.found && (can_fetch || (program == "git" && self.means.apple));
         let state = match (item.found, item.harness.is_some()) {
             (true, _) => "installed",

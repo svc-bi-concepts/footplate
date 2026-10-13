@@ -12548,7 +12548,10 @@ mod tests {
     /// yardr in `dir`, which is not fetched from anywhere, a home under
     /// `dir`, and a list in place of the browser. The stand-in's path, and
     /// the pages that were opened.
-    fn stand_in_means(dir: &std::path::Path) -> (Means, PathBuf, Rc<RefCell<Vec<String>>>) {
+    fn stand_in_means(
+        dir: &std::path::Path,
+        apple: bool,
+    ) -> (Means, PathBuf, Rc<RefCell<Vec<String>>>) {
         let program = crate::setup::standin::make(&dir.join("fetched"));
         let opened: Rc<RefCell<Vec<String>>> = Rc::default();
         let (fetched, pages) = (program.clone(), opened.clone());
@@ -12558,7 +12561,7 @@ mod tests {
             home: Some(dir.join("home")),
             own: Some(dir.join("own")),
             open: Rc::new(move |url, _| pages.borrow_mut().push(url.to_string())),
-            apple: false,
+            apple,
         };
         (means, program, opened)
     }
@@ -12599,6 +12602,29 @@ mod tests {
         })
     }
 
+    /// A fetch is a Mac road from yardr's data. Even if a doctor answer
+    /// includes one on Linux, the row stays a list with the vendor's page.
+    #[gpui::test]
+    fn linux_keeps_a_doctor_fetch_as_a_page_and_never_offers_install(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (means, program, _) = stand_in_means(dir.path(), false);
+        let home = dir.path().join("home");
+        standin::answers(&program, "doctor", 1, &standin::doctor_bare(&home));
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+
+        click_on(cx, "way here");
+        at_step(&view, cx, Step::Needs);
+
+        assert!(!drawn(cx, "setup install herdr"));
+        assert!(drawn(cx, "setup page herdr"));
+        assert!(drawn(cx, "setup get herdr"));
+        assert!(!home.join(".local/bin/herdr").exists());
+    }
+
     /// The third way, from no yard to talking with the yardmaster: yardr
     /// is had, what the machine lacks is listed from doctor's JSON with
     /// how each comes, the yard is created without being started, the
@@ -12614,7 +12640,7 @@ mod tests {
         use firstrun::Step;
 
         let dir = tempfile::tempdir().unwrap();
-        let (means, program, opened) = stand_in_means(dir.path());
+        let (means, program, opened) = stand_in_means(dir.path(), true);
         let home = dir.path().join("home");
         standin::answers(&program, "doctor", 1, &standin::doctor_bare(&home));
         let (view, cx) = no_yard(dir.path(), cx);
@@ -12834,7 +12860,7 @@ mod tests {
         use firstrun::Step;
 
         let dir = tempfile::tempdir().unwrap();
-        let (means, program, _) = stand_in_means(dir.path());
+        let (means, program, _) = stand_in_means(dir.path(), true);
         let mut doctor = standin::doctor_ready();
         doctor["yard"] = json!(true);
         standin::answers(&program, "doctor", 0, &doctor);
@@ -12880,7 +12906,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
-        let (mut means, program, _) = stand_in_means(dir.path());
+        let (mut means, program, _) = stand_in_means(dir.path(), true);
         let proved = Arc::new(AtomicBool::new(false));
         let (fetched, is_proved) = (program.clone(), proved.clone());
         means.yardr = Arc::new(move || match is_proved.load(Ordering::SeqCst) {
