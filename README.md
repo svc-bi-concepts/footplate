@@ -176,8 +176,9 @@ Under those words the window offers the ways to a yard from there, and
 goes on trying the one that is away meanwhile:
 
 - **open a yard on this machine** asks for a name and a socket path. This
-  run's socket stands in the field: leave it, or change it for another
-  home's yard (`<its home>/.yardr/yard.sock`). There is no pairing.
+  run's socket is filled in; leave it to try this machine's yard, or change
+  it to another home's yard socket (`<its home>/.yardr/yard.sock`). There
+  is no pairing.
 - **pair with a yard at an address** asks for a name, the address and the
   code its operator reads you. This pairs footplate as a *device* of one
   user of that yard, as "[A yard at an address](#a-yard-at-an-address)"

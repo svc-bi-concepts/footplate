@@ -4486,7 +4486,7 @@ impl Footplate {
                     typed("socket", &self.socket, cx).into_any_element(),
                     submit("add (enter)", cx).into_any_element(),
                     faint(
-                        "A yard of this machine is reached by its socket, as whoever runs footplate: no token and no pairing. The socket that stands there is this machine's own yard's, and so is none; a path is another home's, <its home>/.yardr/yard.sock."
+                        "A yard of this machine is reached by its socket: no token or pairing. This field starts at this run's socket; change it to another home's yard socket (<its home>/.yardr/yard.sock)."
                             .to_string(),
                     )
                     .into_any_element(),
