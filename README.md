@@ -66,6 +66,20 @@ application's [notifications](#notifications) under; it is not notarized,
 so it is for the Mac that built it. The script needs `sips` and `iconutil`, which
 macOS has, and says so on another system.
 
+A builder with a bead to prove takes a picture of the window with
+`scripts/shot-linux.sh`, from the worktree, after the last commit:
+
+    scripts/shot-linux.sh /tmp/footplate-shot.png
+
+It draws footplate in a Debian container on this Mac: headless sway,
+Mesa's software Vulkan driver, grim, against a throwaway home. The first
+run provisions the container and builds footplate, which takes minutes;
+later runs shoot in seconds. It shows the first screen only for now.
+Attach the PNG to the note with `yardr bead note <bead> --file`, naming
+the short SHA of the commit it was shot from. Evidence is never left in
+/tmp: the yard's /private/tmp was emptied on 13 Oct, cause unknown — the
+note's file is the record.
+
 ## What it talks to
 
 The yard's server, over its unix socket: `$YARDR_HOME/yard.sock` when
