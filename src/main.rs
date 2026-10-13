@@ -20,6 +20,8 @@ mod settings;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
 mod theme;
+#[cfg(any(target_os = "macos", test))]
+mod tray;
 mod window;
 mod yard;
 

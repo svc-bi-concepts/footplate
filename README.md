@@ -491,15 +491,42 @@ is as it was before there were settings: 14 pixels, auto.
 
 On macOS, closing the window hides footplate and does not quit it: it goes
 on following every yard, keeps what you typed and did not send, counts
-what waits on the dock's icon and notifies as the settings say. A click on
-its icon in the dock, `cmd+tab` to it, or opening `Footplate.app` again
-shows the window as it was. `cmd+q` and "Quit footplate" in the menu quit,
-and nothing else does.
+what waits on the dock's icon and notifies as the settings say. Its item
+in the menu bar, a click on its icon in the dock, `cmd+tab` to it, or
+opening `Footplate.app` again shows the window as it was. `cmd+q` and "Quit
+footplate", in the application's menu or the item's, quit, and nothing else
+does.
 
-This goes with the menu bar item, a setting that is on to begin with (the
-item itself is not built yet; the setting already says what closing does).
-Switch it off in the settings (`cmd+,`), under "menu bar item", and closing
-the window quits, as it does on Linux, where there is no such setting.
+This goes with the menu bar item, a setting that is on to begin with.
+Switch it off in the settings (`cmd+,`), under "menu bar item", and the item
+is gone and closing the window quits, as it does on Linux, where there is
+no item and no such setting.
+
+### The menu bar item
+
+On macOS footplate has an item in the menu bar: its mark, which is always
+there, and beside it the number of things that wait for you, while any do.
+It is the number on the dock's icon (mail you have not read plus the cards
+to decide, over every yard footplate follows), and changes as that does. A
+click opens a menu:
+
+```text
+mac · 1 mail
+plantime · 1 mail, 1 decision
+─────────────
+Show window
+Quit footplate
+```
+
+There is a row for each yard of the settings, in their order, with what the
+switcher says waits in it, or that it is not reached and why. A yard's row
+shows the window on that yard, as the switcher opens it: on the row you
+left it on, or the yard's own where that is gone. The menu opens yards, and
+never a card or a conversation by name; nothing is answered from it. "Show
+window" shows the window on whatever is open, also when closing hid it.
+
+Unlike the notifications the item needs no bundle: it is there from a bare
+binary (`cargo run`) too (`src/tray.rs`).
 
 ## Notifications
 
@@ -624,6 +651,7 @@ options have no icon, so the program sees to it when it starts
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
 | `src/dock.rs` | macOS: the number on the dock's icon, of what waits |
+| `src/tray.rs` | macOS: the item in the menu bar, what it says as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON |
 

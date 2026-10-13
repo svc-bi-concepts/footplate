@@ -33,11 +33,13 @@ socket2 = "0.6"
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on. So is the number
-# on it (dock.rs), which gpui has no call for either.
+# on it (dock.rs), which gpui has no call for either, and the item in the
+# menu bar with its menu (tray.rs): more features of the same crates, and
+# no crate more.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSError", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSDockTile", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSError", "NSGeometry", "NSString"] }
 # A notification of the system's (notify.rs) goes through the user
 # notifications framework, whose answers come to blocks. block2 is in
 # gpui's tree already; the framework's bindings are the one crate footplate

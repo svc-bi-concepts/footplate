@@ -835,6 +835,13 @@ pub struct Footplate {
     front: bool,
     /// How many things the dock's icon says wait ([`waiting`]).
     waiting: usize,
+    /// The item in the menu bar, which a Mac alone has (tray.rs).
+    #[cfg(any(target_os = "macos", test))]
+    tray: crate::tray::Tray,
+    /// Hands on what a person chooses in the item's menu, for as long as
+    /// it is held here.
+    #[cfg(any(target_os = "macos", test))]
+    _tray_heeding: Task<()>,
 }
 
 impl Footplate {
@@ -953,10 +960,20 @@ impl Footplate {
         });
         // Whatever changes what waits in a yard has the window drawn
         // again: the dock's icon is told there, of every yard at once and
-        // with the window behind another, where nothing is drawn.
-        cx.observe_self(|this, _| this.badge()).detach();
+        // with the window behind another, where nothing is drawn. The
+        // item in the menu bar is told after it, and says its number.
+        cx.observe_self(|this, _| {
+            this.badge();
+            #[cfg(any(target_os = "macos", test))]
+            this.tray();
+        })
+        .detach();
         let system = notify::system();
         let heeding = Self::heed(system.as_ref(), cx);
+        #[cfg(any(target_os = "macos", test))]
+        let tray = crate::tray::Tray::default();
+        #[cfg(any(target_os = "macos", test))]
+        let tray_heeding = Self::heed_tray(tray.chosen(), cx);
 
         Footplate {
             client: None,
@@ -1022,6 +1039,10 @@ impl Footplate {
             burst_generation: 0,
             front: window.is_window_active(),
             waiting: 0,
+            #[cfg(any(target_os = "macos", test))]
+            tray,
+            #[cfg(any(target_os = "macos", test))]
+            _tray_heeding: tray_heeding,
         }
     }
 
@@ -1036,6 +1057,51 @@ impl Footplate {
             #[cfg(all(target_os = "macos", not(test)))]
             crate::dock::badge(waiting);
         }
+    }
+
+    /// Says in the menu bar what waits, while the settings have the item
+    /// there: the number the dock's icon was just told ([`Footplate::badge`]
+    /// goes first), and each yard that is followed with what the switcher
+    /// says of it. With the item switched off there is none.
+    #[cfg(any(target_os = "macos", test))]
+    fn tray(&mut self) {
+        let said = self.settings.menu_bar.then(|| {
+            // A yard the environment names is the one that is followed.
+            let named = self.env.yard.as_deref().map(|_| self.yard.as_str());
+            let listed = self.settings.yards.iter().map(|yard| yard.name.as_str());
+            let yards: Vec<&str> = match named {
+                Some(named) => vec![named],
+                None => listed.collect(),
+            };
+            crate::tray::said(
+                self.waiting,
+                yards.into_iter().map(|yard| (yard, self.yard_waits(yard))),
+            )
+        });
+        self.tray.say(said);
+    }
+
+    /// Does what a person chooses in the menu of the menu bar's item, as
+    /// they choose it.
+    #[cfg(any(target_os = "macos", test))]
+    fn heed_tray(
+        chosen: async_channel::Receiver<crate::tray::Chosen>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        use crate::tray::Chosen;
+
+        cx.spawn(async move |this, cx| {
+            while let Ok(chosen) = chosen.recv().await {
+                let done = this.update(cx, |this, cx| match chosen {
+                    Chosen::Yard(yard) => this.forward(Some(yard), None, cx),
+                    Chosen::Show => this.forward(None, None, cx),
+                    Chosen::Quit => cx.quit(),
+                });
+                if done.is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     /// Brings the window forward on the row of each notification of
@@ -1130,6 +1196,19 @@ impl Footplate {
     /// that name in the open yard is another, where what is typed would
     /// reach this one.
     fn come_forward(&mut self, yard: String, row: Selected, cx: &mut Context<Self>) {
+        self.forward(Some(yard), Some(row), cx);
+    }
+
+    /// Brings the window forward, out of hiding where closing hid it. With
+    /// a `yard` and a `row` it is on that row of that yard, as a
+    /// notification asks. With a yard alone, as its row in the menu bar
+    /// asks, it is on the yard as the switcher opens it
+    /// ([`Footplate::switch_to`]): on the row it was left on, or the yard's
+    /// own where that is gone. With neither it is on whatever is open.
+    fn forward(&mut self, yard: Option<String>, row: Option<Selected>, cx: &mut Context<Self>) {
+        // A test hides nothing, and has nothing to show again.
+        #[cfg(not(test))]
+        crate::unhide();
         cx.activate(true);
         let (this, handle) = (cx.weak_entity(), self.handle);
         // Afterwards: the window is not to be had from here.
@@ -1138,10 +1217,15 @@ impl Footplate {
             let _ = handle.update(cx, |_, window, cx| {
                 window.activate_window();
                 this.update(cx, |this, cx| {
-                    if this.yard != yard {
+                    let Some(yard) = yard else {
+                        return;
+                    };
+                    if row.is_none() || this.yard != yard {
                         this.switch_to(&yard, window, cx);
                     }
-                    if this.yard == yard {
+                    if let Some(row) = row
+                        && this.yard == yard
+                    {
                         this.select(row, window, cx);
                     }
                 })
@@ -4093,7 +4177,7 @@ impl Footplate {
             setting(
                 "menu bar item",
                 format!(
-                    "while it is on, closing the window hides footplate, which goes on following its yards: a click on its icon in the dock shows it again, {SECONDARY}+q quits · off, closing quits"
+                    "while it is on, closing the window hides footplate, which goes on following its yards: its item in the menu bar says what waits and shows it again, as a click on its icon in the dock does, {SECONDARY}+q quits · off, there is no item and closing quits"
                 ),
             )
             .child(
@@ -4156,10 +4240,22 @@ impl Footplate {
     /// followed, so one that is not reached is asked again by itself, and
     /// says so until it answers.
     fn yard_state(&self, yard: &settings::Yard) -> String {
-        let model = self.held.get(&yard.name).and_then(|h| h.model.as_ref());
-        match (self.unreached.get(&yard.name), model) {
+        match yard.name == self.yard && !self.unreached.contains_key(&yard.name) {
+            true => "open".to_string(),
+            false => self.yard_waits(&yard.name),
+        }
+    }
+
+    /// What is said of the yard called `name` wherever its being open goes
+    /// without saying, as in the menu bar's menu: that it is not reached,
+    /// with the short why, or what waits in it now, the open yard's too.
+    fn yard_waits(&self, name: &str) -> String {
+        let model = match name == self.yard {
+            true => self.model.as_ref(),
+            false => self.held.get(name).and_then(|h| h.model.as_ref()),
+        };
+        match (self.unreached.get(name), model) {
             (Some(why), _) => format!("not reached: {why}"),
-            _ if yard.name == self.yard => "open".to_string(),
             (None, Some(model)) => Counts::of(model).line(),
             (None, None) => "looking for the yard".to_string(),
         }
@@ -10443,6 +10539,123 @@ mod tests {
             open_row(cx),
             Some(Selected::Conversation("assembly".into()))
         );
+    }
+
+    /// What the menu bar's item was last told to say: its title, and what
+    /// each yard's row says. None while there is no item.
+    fn tray_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(String, Vec<String>)> {
+        view.read_with(cx, |v, _| {
+            let said = v.tray.told()?;
+            let rows = said.rows.iter().map(|row| row.says.clone()).collect();
+            Some((said.title.clone(), rows))
+        })
+    }
+
+    /// The menu bar's item says the number the dock's icon says, and has a
+    /// row for each yard with what waits in it, the open one's too, as it
+    /// changes. A yard's row shows the window on that yard, on the row it
+    /// was left on, and "Show window" on whatever is open. Switched off in
+    /// the settings, there is no item.
+    #[gpui::test]
+    fn the_menu_bar_item_says_what_waits_in_each_yard_and_a_yard_s_row_opens_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::tray::Chosen;
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let told = Told::new();
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &told, false, cx);
+        let open_row = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned())
+        };
+        let choose = |chosen: Chosen, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.tray.choose(chosen));
+            cx.run_until_parked();
+        };
+        let said = |title: &str, rows: [&str; 2]| {
+            Some((title.to_string(), rows.map(str::to_string).to_vec()))
+        };
+        assert_eq!(
+            tray_of(&view, cx),
+            said(
+                "2",
+                ["this machine · nothing waiting", "second home · 2 mail"]
+            )
+        );
+
+        // What arrives is said where the dock's icon is told: in the yard
+        // that is not open, and in the open one.
+        second.emit(&mail_event(21, "assembly", "Built."));
+        wait(cx, "the mail in the second home's yard", |cx| {
+            badge_of(&view, cx) == 3
+        });
+        near.emit(&mail_event(21, "assembly", "Built here."));
+        wait(cx, "the mail in this machine's yard", |cx| {
+            badge_of(&view, cx) == 4
+        });
+        assert_eq!(
+            tray_of(&view, cx),
+            said("4", ["this machine · 1 mail", "second home · 3 mail"])
+        );
+
+        // The row of the yard that is not open shows the window on it, on
+        // the yard's own row: it was not left on one. The yard is the one
+        // to open at the next start, as from the switcher.
+        let here = open_row(cx);
+        choose(Chosen::Yard("second home".into()), cx);
+        assert_eq!(open_yard(&view, cx), "second home");
+        let own = open_row(cx);
+        assert!(own.is_some());
+        assert_eq!(settings_of(&view, cx).opened().name, "second home");
+        // It is left on another row, for the yard it came from, whose row
+        // shows the row that one was left on.
+        let left_on = Selected::Conversation("assembly".into());
+        assert_ne!(own, Some(left_on.clone()));
+        let row = left_on.clone();
+        cx.update(|window, cx| view.update(cx, |v, cx| v.select(row, window, cx)));
+        choose(Chosen::Yard("this machine".into()), cx);
+        assert_eq!(open_yard(&view, cx), "this machine");
+        assert_eq!(open_row(cx), here);
+        // And back: on the row it was left on, not a row the menu names.
+        choose(Chosen::Yard("second home".into()), cx);
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(open_row(cx), Some(left_on.clone()));
+
+        // "Show window", the open yard's own row, and the row of a yard
+        // that is listed no longer leave open what is open.
+        choose(Chosen::Show, cx);
+        choose(Chosen::Yard("second home".into()), cx);
+        choose(Chosen::Yard("gone".into()), cx);
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(open_row(cx), Some(left_on));
+
+        // A yard that is not reached says so in its row, and what it last
+        // had is in the number still.
+        choose(Chosen::Yard("this machine".into()), cx);
+        let waits = badge_of(&view, cx);
+        second.stop();
+        wait(cx, "that the second home's yard is not reached", |cx| {
+            state_of(&view, cx, "second home") == "not reached: nothing answers"
+        });
+        let (title, rows) = tray_of(&view, cx).unwrap();
+        assert_eq!(title, waits.to_string());
+        assert_eq!(rows[1], "second home · not reached: nothing answers");
+
+        // The item follows its setting: off, there is none, and on again
+        // it says what it said.
+        view.update(cx, |v, cx| v.menu_bar_on(false, cx));
+        cx.run_until_parked();
+        assert_eq!(tray_of(&view, cx), None);
+        view.update(cx, |v, cx| v.menu_bar_on(true, cx));
+        cx.run_until_parked();
+        assert_eq!(tray_of(&view, cx), Some((title, rows)));
     }
 
     /// One yard that goes away changes nothing of the others: the stream,
