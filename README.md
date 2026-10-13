@@ -69,19 +69,25 @@ macOS has, and says so on another system.
 A builder with a bead to prove takes a picture of the window with
 `scripts/shot-linux.sh`, from the worktree, after the last commit:
 
-    scripts/shot-linux.sh /tmp/footplate-shot.png
+    shot=$(mktemp -d)/footplate-shot.png
+    scripts/shot-linux.sh "$shot"
+
+The picture goes into a directory of its own, made for this shot: every
+builder on this Mac shares /tmp, and under one fixed name there a builder
+would attach, or remove, another builder's picture.
 
 It draws footplate in a Debian container on this Mac: headless sway,
 Mesa's software Vulkan driver, grim, against a throwaway home. The first
 run provisions the container and builds footplate, which takes minutes;
 later runs shoot in seconds. It shows the first screen only for now.
 Attach it to a note that names the short SHA of the commit it was shot from,
-passing the PNG path after `--file`:
+passing the PNG path after `--file`, in the same shell command as the
+shot, since `$shot` does not outlive it:
 
     yardr bead note "$YARDR_BEAD" \
       "Screenshot from $(git rev-parse --short HEAD)" \
-      --file /tmp/footplate-shot.png &&
-      rm /tmp/footplate-shot.png
+      --file "$shot" &&
+      rm -r "$(dirname "$shot")"
 
 The temporary PNG is removed after attachment; evidence is never left in
 /tmp. The yard's /private/tmp was emptied on 13 Oct, cause unknown — the
