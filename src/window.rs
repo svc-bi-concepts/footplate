@@ -12553,12 +12553,14 @@ mod tests {
         apple: bool,
     ) -> (Means, PathBuf, Rc<RefCell<Vec<String>>>) {
         let program = crate::setup::standin::make(&dir.join("fetched"));
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
         let opened: Rc<RefCell<Vec<String>>> = Rc::default();
         let (fetched, pages) = (program.clone(), opened.clone());
         let means = Means {
             yardr: Arc::new(move || Ok((fetched.clone(), None))),
             path: "/usr/bin:/bin".into(),
-            home: Some(dir.join("home")),
+            home: Some(home),
             own: Some(dir.join("own")),
             open: Rc::new(move |url, _| pages.borrow_mut().push(url.to_string())),
             apple,
