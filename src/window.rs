@@ -835,12 +835,12 @@ pub struct Footplate {
     front: bool,
     /// How many things the dock's icon says wait ([`waiting`]).
     waiting: usize,
-    /// The item in the menu bar, which a Mac alone has (tray.rs).
-    #[cfg(any(target_os = "macos", test))]
+    /// The item in the Mac's menu bar or a Linux desktop's tray (tray.rs).
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     tray: crate::tray::Tray,
     /// Hands on what a person chooses in the item's menu, for as long as
     /// it is held here.
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     _tray_heeding: Task<()>,
 }
 
@@ -964,15 +964,15 @@ impl Footplate {
         // item in the menu bar is told after it, and says its number.
         cx.observe_self(|this, _| {
             this.badge();
-            #[cfg(any(target_os = "macos", test))]
+            #[cfg(any(target_os = "macos", target_os = "linux", test))]
             this.tray();
         })
         .detach();
         let system = notify::system();
         let heeding = Self::heed(system.as_ref(), cx);
-        #[cfg(any(target_os = "macos", test))]
+        #[cfg(any(target_os = "macos", target_os = "linux", test))]
         let tray = crate::tray::Tray::default();
-        #[cfg(any(target_os = "macos", test))]
+        #[cfg(any(target_os = "macos", target_os = "linux", test))]
         let tray_heeding = Self::heed_tray(tray.chosen(), cx);
 
         Footplate {
@@ -1039,9 +1039,9 @@ impl Footplate {
             burst_generation: 0,
             front: window.is_window_active(),
             waiting: 0,
-            #[cfg(any(target_os = "macos", test))]
+            #[cfg(any(target_os = "macos", target_os = "linux", test))]
             tray,
-            #[cfg(any(target_os = "macos", test))]
+            #[cfg(any(target_os = "macos", target_os = "linux", test))]
             _tray_heeding: tray_heeding,
         }
     }
@@ -1059,11 +1059,12 @@ impl Footplate {
         }
     }
 
-    /// Says in the menu bar what waits, while the settings have the item
-    /// there: the number the dock's icon was just told ([`Footplate::badge`]
-    /// goes first), and each yard that is followed with what the switcher
-    /// says of it. With the item switched off there is none.
-    #[cfg(any(target_os = "macos", test))]
+    /// Says in the menu bar, or the tray, what waits, while the settings
+    /// have the item there: the number the dock's icon was just told
+    /// ([`Footplate::badge`] goes first), what it is of in words, and each
+    /// yard that is followed with what the switcher says of it. With the
+    /// item switched off there is none.
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     fn tray(&mut self) {
         let said = self.settings.menu_bar.then(|| {
             // A yard the environment names is the one that is followed.
@@ -1073,8 +1074,21 @@ impl Footplate {
                 Some(named) => vec![named],
                 None => listed.collect(),
             };
+            // What waits over every yard, as the switcher says it of one;
+            // the notices are not of the number, so not of its words.
+            let open = std::iter::once(self.model.as_ref());
+            let held = self.held.values().map(|held| held.model.as_ref());
+            let waits = open.chain(held).flatten().map(Counts::of).fold(
+                Counts::default(),
+                |waits, yard| Counts {
+                    mail: waits.mail + yard.mail,
+                    decisions: waits.decisions + yard.decisions,
+                    notices: 0,
+                },
+            );
             crate::tray::said(
                 self.waiting,
+                &waits.line(),
                 yards.into_iter().map(|yard| (yard, self.yard_waits(yard))),
             )
         });
@@ -1083,7 +1097,7 @@ impl Footplate {
 
     /// Does what a person chooses in the menu of the menu bar's item, as
     /// they choose it.
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     fn heed_tray(
         chosen: async_channel::Receiver<crate::tray::Chosen>,
         cx: &mut Context<Self>,
@@ -4171,14 +4185,17 @@ impl Footplate {
                 );
             }
         }
-        // The menu bar is a Mac's: elsewhere there is nothing to switch,
-        // and closing quits.
-        let menu_bar = cfg!(target_os = "macos").then(|| {
+        // The item is in a Mac's menu bar and in a Linux desktop's tray.
+        // Closing hides on a Mac alone: elsewhere it quits either way.
+        let menu_bar = {
             setting(
-                "menu bar item",
-                format!(
-                    "while it is on, closing the window hides footplate, which goes on following its yards: its item in the menu bar says what waits and shows it again, as a click on its icon in the dock does, {SECONDARY}+q quits · off, there is no item and closing quits"
-                ),
+                "menu bar or tray item",
+                match cfg!(target_os = "macos") {
+                    true => format!(
+                        "while it is on, closing the window hides footplate, which goes on following its yards: its item in the menu bar says what waits and shows it again, as a click on its icon in the dock does, {SECONDARY}+q quits · off, there is no item and closing quits"
+                    ),
+                    false => "while it is on, footplate has an item in the desktop's tray, where a bar or a panel draws one: its icon says how many things wait, a click on it shows the window, and its menu lists the yards · off, there is no item".to_string(),
+                },
             )
             .child(
                 div()
@@ -4196,7 +4213,7 @@ impl Footplate {
                         .on_click(cx.listener(move |this, _, _, cx| this.menu_bar_on(on, cx)))
                     })),
             )
-        });
+        };
         pane.child(head)
             .child(
                 div()
@@ -4212,7 +4229,7 @@ impl Footplate {
                     .child(look)
                     .child(yard)
                     .child(notifications)
-                    .children(menu_bar),
+                    .child(menu_bar),
             )
             .when_some(self.unkept.clone(), |el, why| {
                 el.child(
@@ -9629,21 +9646,17 @@ mod tests {
         assert_eq!(cx.simulate_close(), !mac);
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
 
-        // The switch is a Mac's alone: elsewhere there is none to draw.
+        // The switch is there on every system, for the menu bar's item
+        // or the tray's. Switched off, it is kept, and closing closes: the
+        // application then quits with its one window.
         cx.simulate_keystrokes("secondary-,");
-        assert_eq!(drawn(cx, "menu bar off"), mac);
-        if mac {
-            // Switched off, it is kept, and closing closes: the
-            // application then quits with its one window.
-            click_on(cx, "menu bar off");
-            assert!(!settings_of(&view, cx).menu_bar);
-            assert!(!Settings::read(&file).menu_bar);
-            assert!(cx.simulate_close());
-            // On again, closing hides again.
-            click_on(cx, "menu bar on");
-            assert!(Settings::read(&file).menu_bar);
-            assert!(!cx.simulate_close());
-        }
+        click_on(cx, "menu bar off");
+        assert!(!settings_of(&view, cx).menu_bar);
+        assert!(!Settings::read(&file).menu_bar);
+        // On again, closing hides again, on a Mac alone.
+        click_on(cx, "menu bar on");
+        assert!(Settings::read(&file).menu_bar);
+        assert_eq!(cx.simulate_close(), !mac);
         // Off, however it came to be, closing closes on every system.
         view.update(cx, |v, cx| v.menu_bar_on(false, cx));
         assert!(cx.simulate_close());
@@ -10554,6 +10567,12 @@ mod tests {
         })
     }
 
+    /// What the item was last told to say in words, as a tray's tooltip
+    /// has it.
+    fn tip_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
+        view.read_with(cx, |v, _| Some(v.tray.told()?.tip.clone()))
+    }
+
     /// The menu bar's item says the number the dock's icon says, and has a
     /// row for each yard with what waits in it, the open one's too, as it
     /// changes. A yard's row shows the window on that yard, on the row it
@@ -10589,6 +10608,7 @@ mod tests {
                 ["this machine · nothing waiting", "second home · 2 mail"]
             )
         );
+        assert_eq!(tip_of(&view, cx).as_deref(), Some("2 wait: 2 mail"));
 
         // What arrives is said where the dock's icon is told: in the yard
         // that is not open, and in the open one.
@@ -10604,6 +10624,8 @@ mod tests {
             tray_of(&view, cx),
             said("4", ["this machine · 1 mail", "second home · 3 mail"])
         );
+        // In words it is of every yard at once.
+        assert_eq!(tip_of(&view, cx).as_deref(), Some("4 wait: 4 mail"));
 
         // The row of the yard that is not open shows the window on it, on
         // the yard's own row: it was not left on one. The yard is the one

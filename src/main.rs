@@ -5,7 +5,7 @@
 //! linked yard exposes, as `yardr chat` shows them.
 
 mod api;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod dock;
 mod draft;
 #[cfg(test)]
@@ -20,7 +20,7 @@ mod settings;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
 mod theme;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tray;
 mod window;
 mod yard;

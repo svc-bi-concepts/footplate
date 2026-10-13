@@ -60,6 +60,13 @@ x11rb = "0.13"
 # does not see it. Drop this when a libc has it again or gpui's tree no
 # longer asks.
 libc = ">=0.2.170, <0.2.190"
+# The item in a desktop's tray (tray.rs) is a StatusNotifierItem, spoken
+# over D-Bus by ksni, in Rust alone: no library of the system's is built
+# against. It speaks through zbus, which is in gpui's tree already, and
+# with async-io as gpui's has it: ksni's usual tokio would turn the one
+# zbus of the tree to tokio under gpui too. blocking has it run on a thread
+# of its own.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
 
 [dev-dependencies]
 # The window's own test opens it on gpui's test platform, without a screen.

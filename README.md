@@ -463,15 +463,15 @@ what it printed.
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
 | `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |
 | `cmd+shift+l` (`ctrl+shift+l` on Linux) | the next of auto, light, dark |
-| `cmd+q` (`ctrl+q` on Linux) | quits. On Linux so does closing the window; on macOS closing hides footplate while the menu bar item is on, and quits while it is off ([Closing the window](#closing-the-window)) |
+| `cmd+q` (`ctrl+q` on Linux) | quits. On Linux so does closing the window, with the tray's item on or off; on macOS closing hides footplate while the menu bar item is on, and quits while it is off ([Closing the window](#closing-the-window)) |
 
 ## Settings
 
 Two things can be set, in the settings or by their own keys, and both are
 drawn at once and kept for the next start; the third is the yards, which
 [A yard at an address](#a-yard-at-an-address) has, the fourth what the
-system tells of, which [Notifications](#notifications) has, and the fifth,
-on macOS, the menu bar item, which
+system tells of, which [Notifications](#notifications) has, and the fifth
+the menu bar item, on Linux the tray's, which
 [Closing the window](#closing-the-window) has:
 
 - the text size, 11 to 20 pixels, a pixel a step; 14 is the usual size.
@@ -498,9 +498,10 @@ footplate", in the application's menu or the item's, quit, and nothing else
 does.
 
 This goes with the menu bar item, a setting that is on to begin with.
-Switch it off in the settings (`cmd+,`), under "menu bar item", and the item
-is gone and closing the window quits, as it does on Linux, where there is
-no item and no such setting.
+Switch it off in the settings (`cmd+,`), under "menu bar or tray item", and
+the item is gone and closing the window quits. On Linux closing the window
+quits whatever the setting says: there it switches
+[the item in the tray](#the-tray-item-on-linux) alone.
 
 ### The menu bar item
 
@@ -527,6 +528,41 @@ window" shows the window on whatever is open, also when closing hid it.
 
 Unlike the notifications the item needs no bundle: it is there from a bare
 binary (`cargo run`) too (`src/tray.rs`).
+
+### The tray item on Linux
+
+On Linux footplate has an item in the desktop's tray, with the same menu,
+and it follows the same setting ("menu bar or tray item", on to begin
+with). It needs a tray that takes StatusNotifier items, over the session's
+D-Bus: waybar's `tray` module under sway, KDE's panel, GNOME with the
+AppIndicator extension. Where Telegram or Discord show an icon, footplate
+does. Without such a tray, or without a session bus, there is no item and
+nothing else changes; a bar that starts later, or again, gets the item
+then.
+
+A tray draws the icon and no title, so the count is on the icon:
+
+- nothing waits: footplate's mark alone;
+- something waits: the mark with the number on it, white on a red badge
+  in its lower right corner. The number is the one of the Mac's item:
+  mail you have not read plus the cards to decide, over every yard;
+- a dot in place of the number where it would not be read: on an icon of
+  16 pixels, three digits on one under 32, and four digits or more.
+
+The icon is offered at 16, 22, 24, 32, 48 and 64 pixels, each with its own
+sign, and the tray takes the one it draws. The tooltip says it in words:
+"3 wait: 2 mail, 1 decision", or "nothing waiting".
+
+A click on the item shows the window, as "Show window" in its menu does; a
+yard's row shows it on that yard. Whether the window then comes to the
+front is the compositor's to say: footplate asks, and under Wayland a
+compositor may answer by marking the window urgent and leaving the focus
+where it is (sway's `focus_on_window_activation` says which). Closing the
+window still quits on Linux: the item is there while the window is.
+
+It is spoken by the `ksni` crate, in Rust alone, over the D-Bus library
+gpui's tree already has: nothing of the system's is built against
+(`src/tray.rs`).
 
 ## Notifications
 
@@ -651,7 +687,7 @@ options have no icon, so the program sees to it when it starts
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
 | `src/dock.rs` | macOS: the number on the dock's icon, of what waits |
-| `src/tray.rs` | macOS: the item in the menu bar, what it says as plain functions, and its menu of the yards |
+| `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON |
 

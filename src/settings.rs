@@ -122,10 +122,10 @@ pub struct Settings {
     /// chosen, as the yards are.
     #[serde(skip_serializing_if = "Notify::is_usual")]
     pub notifications: Notify,
-    /// Whether footplate has its item in the menu bar, which macOS alone
-    /// has. On until a person switches it off, and left out of the file
-    /// while it is on. It governs what closing the window does
-    /// ([`Settings::closing_hides`]).
+    /// Whether footplate has its item in the Mac's menu bar or a Linux
+    /// desktop's tray. On until a person switches it off, and left out of
+    /// the file while it is on. On a Mac it governs what closing the
+    /// window does ([`Settings::closing_hides`]).
     #[serde(skip_serializing_if = "is_on")]
     pub menu_bar: bool,
 }
