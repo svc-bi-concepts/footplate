@@ -54,6 +54,7 @@ impl Means {
     /// This machine's.
     pub fn real() -> Means {
         Means {
+            #[cfg(not(test))]
             yardr: Arc::new(|| match fetch::current() {
                 Ok((stored, stale)) => Ok((
                     stored.path,
@@ -66,6 +67,10 @@ impl Means {
                 )),
                 Err(refusal) => Err(refusal.to_string()),
             }),
+            // Tests fetch nothing: a test that reaches out for yardr
+            // stands in for it.
+            #[cfg(test)]
+            yardr: Arc::new(|| Err("yardr is not fetched in tests".to_string())),
             path: std::env::var_os("PATH").unwrap_or_default(),
             home: std::env::home_dir(),
             own: fetch::dir(),
@@ -291,7 +296,7 @@ impl FirstRun {
                 Ok((program, stale)) => {
                     this.yardr = Some(Yardr {
                         program,
-                        home,
+                        home: Some(home),
                         path,
                         actor: None,
                     });

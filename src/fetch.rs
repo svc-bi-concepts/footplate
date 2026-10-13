@@ -264,6 +264,7 @@ const VERSION_FILE: &str = "yardr.version";
 /// is still the answer, with why beside it: it was proved when it was
 /// fetched, and a yard must start without the network. With none kept, the
 /// reason is a refusal.
+#[cfg_attr(test, allow(dead_code))]
 pub fn current() -> Result<(Stored, Option<Refusal>), Refusal> {
     let dir = dir().ok_or(Refusal::NoHome)?;
     let site = Address::parse(SITE).map_err(|why| Refusal::Unreadable {

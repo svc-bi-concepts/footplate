@@ -5,8 +5,10 @@ the crew stand. It is an interface over yardr's socket API; the yard runs as
 it does (`yardr status`). The yard is this machine's, or one at an address,
 which the window is paired with by a code. Where this machine has no yard,
 the window sets one up: it fetches yardr and runs its commands, with no
-terminal ([Setting up a yard here](#setting-up-a-yard-here)). Beside that
-it starts nothing of yardr's.
+terminal ([Setting up a yard here](#setting-up-a-yard-here)). Its head
+starts and stops the open yard the same way
+([Starting and stopping the yard](#starting-and-stopping-the-yard)).
+Beside those two it starts nothing of yardr's.
 The first slice is the
 conversations a person has with this yard's crew and with the crew a linked
 yard exposes, as `yardr chat` shows them in a terminal.
@@ -170,18 +172,21 @@ the images back in the draft. An image the yard took before the send failed
 stays in its store, named by no mail, until `yardr store prune`.
 
 **No yard** (the socket is missing, or nothing answers): the window says so,
-names the socket, and tries again every 3 seconds. Trying again starts
-nothing: any yardr command that reads the yard starts its server
-(`yardr status`), and so does the first of the ways below. When the server
-comes back, the conversation that was open is open again.
+names the socket, and tries again every 3 seconds. Where the home holds a
+yard that is only stopped, it says that instead, and Start in the head
+starts it. Trying again starts nothing, and what the head reads starts
+nothing either: `status` starts no server. The first of the ways below
+starts the yard. When the server comes back, the conversation that was
+open is open again.
 
 Under those words the window offers the ways to a yard from there, and
 goes on trying the one that is away meanwhile:
 
 - **set up a yard here** makes the yard that is not there and starts it:
   [Setting up a yard here](#setting-up-a-yard-here). It stands under this
-  run's own yard alone, while nothing answers at its socket: another home's
-  yard and one at an address are not footplate's to make.
+  run's own yard alone, while nothing answers at its socket and no yard is
+  there yet: another home's yard and one at an address are not footplate's
+  to make, and one that is only stopped is started from the head instead.
 - **open a yard on this machine** asks for a name and a socket path. This
   run's socket is filled in; leave it to try this machine's yard, or change
   it to another home's yard socket (`<its home>/.yardr/yard.sock`). There
@@ -501,6 +506,7 @@ through a shell:
 | It starts | For |
 |---|---|
 | the fetched `yardr`, by its whole path: `doctor`, `init`, `harness login`, `up`, `depot add`, `depot init --yes`, `bead create`, `bead advance`, `subscribe`, each with `--json` | the steps above |
+| the fetched `yardr`, by its whole path: `status`, `up`, `down`, `up --login`, `daemon uninstall`, each with `--json` | [the switch in the head](#starting-and-stopping-the-yard) |
 | a maker's installer that yardr names, on a Mac (Claude Code's `install <version>`) | "install" on a harness's row |
 | `/usr/bin/xcode-select --install`, on a Mac | "install" on git's row |
 | `git`, to read: `rev-parse --is-inside-work-tree`, `branch --show-current` | the branch offered for a folder |
@@ -542,6 +548,40 @@ if [ -x "$scratch/home/.local/bin/herdr" ]; then
 fi
 rm -rf "$scratch"
 ```
+
+## Starting and stopping the yard
+
+Under the yard's line in the head, the switch: the yard's state, read from
+`yardr status --json`, with Start and Stop, which run `yardr up` and
+`yardr down`. The yard answers: Running. Nothing runs: Stopped. Between
+them, Starting while it is started, Stopping while it is stopped. Where a
+start could not start something, the head says that in yardr's words, with
+Start to try again. Start and Stop are safe to repeat, as `up` and `down`
+are. Where the home holds no yard, the head says No yard, and the first
+screen offers setting one up. Reading the switch starts nothing.
+
+Stop first asks `down` without its yes-flag, which stops nothing on a yard
+with agents and answers what it would stop. The window asks then: the
+agents in the middle of something by name, the idle ones as a count, and
+that what they have not committed stays in their worktrees while the turn
+they are in is lost. "Stop them" runs `down` again with the flag; "Leave
+running", or Esc, stops nothing. With no agent, Stop stops at once and asks
+nothing.
+
+Beside the switch, "start at login (and herdr's server, shared)": checked,
+the yard starts at login. Checking installs the login services with
+`up --login`: the daemon's and herdr's server's. herdr's is one service for
+every yard on the machine, the user's and not the yard's. Unchecking
+removes the daemon's service; herdr's shared service is left, and its
+server still starts at login. Where removing the daemon's service stops the
+daemon it ran, the switch starts it again while the yard runs, so the yard
+runs on.
+
+Every one of the switch's calls names the open yard's home: its socket
+minus `yard.sock` as `--home`. This run's yard, whose socket is empty,
+takes no flag, so yardr resolves it as footplate did. A yard at an address
+has no switch: its processes are elsewhere. A socket that names no yard
+home says so, and starts nothing.
 
 ## The window
 

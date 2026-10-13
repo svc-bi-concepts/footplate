@@ -37,7 +37,9 @@ const MOST: u64 = 4 * 1024 * 1024;
 pub struct Yardr {
     pub program: PathBuf,
     /// The yard's directory, which every command is told (`--home`).
-    pub home: PathBuf,
+    /// None is this run's yard: no flag, so the command resolves it as
+    /// footplate did.
+    pub home: Option<PathBuf>,
     /// The PATH of what is started.
     pub path: OsString,
     /// Who the commands act as, once the person said their name: the
@@ -79,11 +81,10 @@ impl Yardr {
     /// title that starts with a dash is a title.
     fn command(&self, words: &[&str], names: &[&str]) -> Command {
         let mut command = Command::new(&self.program);
-        command
-            .args(words)
-            .arg("--json")
-            .arg("--home")
-            .arg(&self.home);
+        command.args(words).arg("--json");
+        if let Some(home) = &self.home {
+            command.arg("--home").arg(home);
+        }
         if let Some(actor) = &self.actor {
             command.arg(format!("--actor={actor}"));
         }
@@ -196,6 +197,66 @@ impl Yardr {
         }
         serde_json::from_value(ran.json)
             .map_err(|err| format!("yardr up answered what footplate cannot read ({err})."))
+    }
+
+    /// What of the yard runs, and what of it starts at login. Asking
+    /// starts nothing. [`StatusError::NoYard`] where the home holds no
+    /// yard: `status` exits 2 there, and 0 wherever one is.
+    pub fn status(&self) -> Result<Status, StatusError> {
+        let ran = self.run(&["status"], &[]).map_err(StatusError::Failed)?;
+        if ran.status == 2 {
+            return Err(StatusError::NoYard);
+        }
+        if let Some(error) = ran.error() {
+            return Err(StatusError::Failed(error));
+        }
+        serde_json::from_value(ran.json).map_err(|err| {
+            StatusError::Failed(format!(
+                "yardr status answered what footplate cannot read ({err})."
+            ))
+        })
+    }
+
+    /// Stops the yard: its agents, the daemon and the server. Without
+    /// `yes`, on a yard with any agent, nothing is stopped: the answer
+    /// asks to confirm, with the agents it would stop. With `yes` it stops
+    /// them. herdr's server runs on either way. Safe to repeat.
+    pub fn down(&self, yes: bool) -> Result<Down, String> {
+        let words: &[&str] = match yes {
+            true => &["down", "--yes"],
+            false => &["down"],
+        };
+        let ran = self.run(words, &[])?;
+        if let Some(error) = ran.error() {
+            return Err(error);
+        }
+        serde_json::from_value(ran.json)
+            .map_err(|err| format!("yardr down answered what footplate cannot read ({err})."))
+    }
+
+    /// Starts what does not run, and installs the login services: herdr's
+    /// server's and the daemon's, with the web view's and the BDP
+    /// server's where their settings name an address. One that is
+    /// installed already is found, not installed again.
+    pub fn up_login(&self) -> Result<Up, String> {
+        let ran = self.run(&["up", "--login"], &[])?;
+        if let Some(error) = ran.error() {
+            return Err(error);
+        }
+        serde_json::from_value(ran.json)
+            .map_err(|err| format!("yardr up answered what footplate cannot read ({err})."))
+    }
+
+    /// Removes the daemon's login service. The manager stops the daemon
+    /// it ran; one started any other way runs on.
+    pub fn daemon_uninstall(&self) -> Result<Uninstalled, String> {
+        let ran = self.run(&["daemon", "uninstall"], &[])?;
+        if let Some(error) = ran.error() {
+            return Err(error);
+        }
+        serde_json::from_value(ran.json).map_err(|err| {
+            format!("yardr daemon uninstall answered what footplate cannot read ({err}).")
+        })
     }
 
     /// Makes `dir` a depot called `name` and sets it up from the yard's
@@ -495,6 +556,10 @@ pub struct Up {
     pub up: bool,
     #[serde(default)]
     pub parts: Vec<Part>,
+    /// With `--login`: the login services, what was installed, found or
+    /// left. Empty otherwise.
+    #[serde(default)]
+    pub login: Vec<LoginUnit>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -524,6 +589,266 @@ impl Up {
             })
             .collect()
     }
+}
+
+/// `yardr status --json`, of which the switch reads what runs and what
+/// starts at login.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Status {
+    #[serde(default)]
+    server: Runs,
+    #[serde(default)]
+    daemon: DaemonRuns,
+    /// The login service for herdr's server: the user's, shared by every
+    /// yard on the machine.
+    #[serde(default, rename = "herdr_login_service")]
+    herdr_login: Service,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct Runs {
+    #[serde(default)]
+    running: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct DaemonRuns {
+    #[serde(default)]
+    running: bool,
+    #[serde(default)]
+    service: Service,
+}
+
+/// A login service as `status` reports it: the daemon's, or herdr's
+/// server's.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Service {
+    /// The system has a service manager yardr writes to.
+    #[serde(default)]
+    pub supported: bool,
+    /// Its file is written.
+    #[serde(default)]
+    pub installed: bool,
+    /// The manager has it now.
+    #[serde(default)]
+    pub loaded: bool,
+    /// Of herdr's: service files for its server that are not yardr's.
+    #[serde(default)]
+    pub foreign: Vec<String>,
+}
+
+impl Status {
+    /// Whether the yard's server answers.
+    pub fn server_running(&self) -> bool {
+        self.server.running
+    }
+
+    /// Whether the daemon holds the yard's lock.
+    pub fn daemon_running(&self) -> bool {
+        self.daemon.running
+    }
+
+    /// The daemon's login service: whether the yard starts at login.
+    pub fn daemon_service(&self) -> &Service {
+        &self.daemon.service
+    }
+
+    /// The login service for herdr's server.
+    pub fn herdr_service(&self) -> &Service {
+        &self.herdr_login
+    }
+
+    /// Whether the yard starts at login: the daemon's service is
+    /// installed, and herdr's server starts with it, by yardr's service
+    /// or one that is not yardr's. Without herdr's server the daemon
+    /// starts to a yard whose agents fail.
+    pub fn starts_at_login(&self) -> bool {
+        self.daemon_service().installed
+            && (self.herdr_service().installed || !self.herdr_service().foreign.is_empty())
+    }
+}
+
+/// What `status` came to instead of the yard: the home holds no yard, or
+/// yardr failed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatusError {
+    /// The home holds no yard: `status` exits 2 there.
+    NoYard,
+    Failed(String),
+}
+
+/// `yardr down --json`: without `--yes` what it would stop, with it what
+/// it stopped or could not.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Down {
+    /// Whether the yard is stopped now: no daemon, no server, and no
+    /// agent of it left that down could not stop.
+    #[serde(default)]
+    pub down: bool,
+    /// Nothing was stopped: the agents below have to be agreed to first,
+    /// by the same command with `--yes`.
+    #[serde(default)]
+    pub confirm: bool,
+    /// The agents the yard started: those it would stop, else those it
+    /// stopped or could not.
+    #[serde(default)]
+    pub agents: Vec<Agent>,
+    /// Those of them in the middle of something.
+    #[serde(default)]
+    pub working: usize,
+    /// Those that are not.
+    #[serde(default)]
+    pub idle: usize,
+    #[serde(default)]
+    pub parts: Vec<Part>,
+}
+
+/// An agent the yard started and down stops: a bead's session or a crew
+/// member.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Agent {
+    /// bead or crew.
+    #[serde(default)]
+    pub kind: String,
+    /// The bead, or the crew member.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub stage: String,
+    /// What it is doing: working (in the middle of a turn), idle,
+    /// blocked (it waits at a question in its pane), unknown (it could
+    /// not be asked) or gone.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub stopped: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default, rename = "do")]
+    pub to_do: Option<String>,
+}
+
+impl Down {
+    /// The agents to name before stopping: those in the middle of
+    /// something, in the order yardr lists them. The idle ones are a
+    /// count ([`Down::idle`]), and one whose pane is gone is stopped
+    /// already.
+    pub fn named(&self) -> Vec<&Agent> {
+        self.agents.iter().filter(|agent| agent.busy()).collect()
+    }
+
+    /// What could not be stopped, each with the one thing to do, in
+    /// yardr's words.
+    pub fn troubles(&self) -> Vec<String> {
+        let agents = self.agents.iter().filter_map(|agent| {
+            let error = agent.error.as_deref()?;
+            Some(match agent.to_do.as_deref() {
+                Some(to_do) => format!("{}: {error} {to_do}", agent.said()),
+                None => format!("{}: {error}", agent.said()),
+            })
+        });
+        let parts = self.parts.iter().filter_map(|part| {
+            let error = part.error.as_deref()?;
+            Some(match part.to_do.as_deref() {
+                Some(to_do) => format!("{}: {error} {to_do}", part.part),
+                None => format!("{}: {error}", part.part),
+            })
+        });
+        agents.chain(parts).collect()
+    }
+}
+
+impl Agent {
+    /// Whether stopping it now may cost something: it is in a turn, at
+    /// a question, or could not be asked.
+    pub fn busy(&self) -> bool {
+        matches!(self.state.as_str(), "working" | "blocked" | "unknown")
+    }
+
+    /// The agent as the warning names it: a crew member by its name, a
+    /// bead by its own with its stage, and what it waits at where that
+    /// is not a turn.
+    pub fn said(&self) -> String {
+        let mut said = match self.kind.as_str() {
+            "crew" => format!("crew member {}", self.name),
+            _ => match self.stage.is_empty() {
+                true => format!("bead {}", self.name),
+                false => format!("bead {} (stage {})", self.name, self.stage),
+            },
+        };
+        match self.state.as_str() {
+            "blocked" => said.push_str(", waits at a question in its pane"),
+            "unknown" => said.push_str(", could not be asked"),
+            _ => {}
+        }
+        said
+    }
+}
+
+/// One login service in the answer of `up --login`: what was installed,
+/// found or left.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct LoginUnit {
+    /// herdr, daemon, web, bdp.
+    #[serde(default)]
+    pub part: String,
+    /// What this run did: installed, found or left. Empty with an error.
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub file: String,
+    /// Whether the manager has it now.
+    #[serde(default)]
+    pub loaded: bool,
+    #[serde(default, rename = "Detail")]
+    pub detail: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default, rename = "do")]
+    pub to_do: Option<String>,
+}
+
+impl LoginUnit {
+    /// The unit in a line, in yardr's words.
+    pub(crate) fn said(&self) -> String {
+        let part = match self.part.as_str() {
+            "herdr" => "herdr's server",
+            "daemon" => "daemon",
+            "web" => "web view",
+            "bdp" => "BDP server",
+            part => part,
+        };
+        if let Some(error) = self.error.as_deref() {
+            return match self.to_do.as_deref() {
+                Some(to_do) => format!("{part}: NOT {error} {to_do}"),
+                None => format!("{part}: NOT {error}"),
+            };
+        }
+        let mut said = match self.result.as_str() {
+            "installed" => format!("{part}: installed"),
+            "found" => format!("{part}: installed already"),
+            "left" => format!("{part}: left as it is"),
+            result => format!("{part}: {result}"),
+        };
+        if !self.file.is_empty() {
+            said.push_str(&format!(": {}", self.file));
+        }
+        if !self.detail.is_empty() {
+            said.push_str(&format!(": {}", self.detail));
+        }
+        said
+    }
+}
+
+/// `yardr daemon uninstall --json`: what went.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Uninstalled {
+    /// A service was installed, and is removed.
+    #[serde(default)]
+    pub removed: bool,
+    /// The manager had it, and has stopped what it ran.
+    #[serde(default)]
+    pub unloaded: bool,
 }
 
 /// The base branch to offer for the folder `dir`: the branch it has
@@ -879,6 +1204,61 @@ exit 0
         })
     }
 
+    /// Status's answer for a yard that runs, or one that is stopped: the
+    /// server and the daemon, and the login services where `login` says
+    /// the yard starts at login.
+    pub fn status(up: bool, login: bool) -> serde_json::Value {
+        let service = |installed: bool| {
+            serde_json::json!({"supported": true, "manager": "launchd",
+                "name": "dev.yardr.test", "file": "/tmp/test.plist",
+                "installed": installed, "loaded": installed})
+        };
+        serde_json::json!({
+            "home": "/tmp/test-yard", "name": "test", "operator": "Jo",
+            "server": {"running": up, "cli_build": "test"},
+            "daemon": {"running": up, "pid": 0, "service": service(login)},
+            "herdr_login_service": service(login),
+            "web": {"views": [], "service": service(false)},
+        })
+    }
+
+    /// Down's answer without `--yes` on a yard with agents: nothing is
+    /// stopped, and the agents it would stop ask to be agreed to. One
+    /// bead's session is in the middle of a turn, another waits at a
+    /// question, two are idle, and one's pane is gone.
+    pub fn down_confirm() -> serde_json::Value {
+        serde_json::json!({
+            "home": "/tmp/test-yard", "down": false, "confirm": true,
+            "agents": [
+                {"kind": "bead", "name": "essays-1a2b", "stage": "new",
+                 "group": "builders", "state": "working", "stopped": false},
+                {"kind": "crew", "name": "yardmaster", "state": "blocked", "stopped": false},
+                {"kind": "bead", "name": "essays-3c4d", "stage": "review",
+                 "group": "builders", "state": "idle", "stopped": false},
+                {"kind": "bead", "name": "essays-5e6f", "stage": "new",
+                 "group": "builders", "state": "idle", "stopped": false},
+                {"kind": "bead", "name": "essays-7g8h", "stage": "new",
+                 "group": "builders", "state": "gone", "stopped": false}
+            ],
+            "working": 2, "idle": 2,
+            "parts": [{"part": "daemon", "running": true}]
+        })
+    }
+
+    /// Down's answer with `--yes`: the agents it stopped, and the yard
+    /// stopped.
+    pub fn down_done() -> serde_json::Value {
+        serde_json::json!({
+            "home": "/tmp/test-yard", "down": true, "confirm": false,
+            "agents": [
+                {"kind": "bead", "name": "essays-1a2b", "stage": "new",
+                 "group": "builders", "state": "working", "stopped": true}
+            ],
+            "working": 1, "idle": 0,
+            "parts": [{"part": "daemon", "running": false, "stopped": true}]
+        })
+    }
+
     /// Doctor's answer once herdr and the harnesses are there: herdr's
     /// server is down, which keeps nothing from being created.
     pub fn doctor_ready() -> serde_json::Value {
@@ -906,7 +1286,7 @@ mod tests {
     fn yardr(dir: &Path) -> Yardr {
         Yardr {
             program: standin::make(dir),
-            home: dir.join("home/.yardr"),
+            home: Some(dir.join("home/.yardr")),
             path: OsString::from("/usr/bin:/bin"),
             actor: None,
         }
@@ -1006,7 +1386,7 @@ mod tests {
         let mut yardr = yardr(dir.path());
         yardr.actor = Some("Jo".to_string());
         let program = yardr.program.clone();
-        let home = yardr.home.display().to_string();
+        let home = yardr.home.as_deref().unwrap().display().to_string();
         let tail = format!("[--json] [--home] [{home}] [--actor=Jo]");
 
         standin::answers(&program, "init", 0, &json!({"harness": "claude"}));
@@ -1105,6 +1485,186 @@ mod tests {
         );
     }
 
+    /// The switch's commands are arguments too: status, down with and
+    /// without the yes-flag, up with login, and the daemon's uninstall.
+    /// This run's yard takes no `--home`; another home's takes its own.
+    #[test]
+    fn the_switch_s_commands_take_a_home_or_none_as_the_yard_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = standin::make(dir.path());
+        let home = dir.path().join("second/.yardr");
+        let mut yardr = Yardr {
+            program: program.clone(),
+            home: None,
+            path: OsString::from("/usr/bin:/bin"),
+            actor: None,
+        };
+        standin::answers(&program, "status", 0, &standin::status(false, false));
+        let status = yardr.status().unwrap();
+        assert!(!status.server_running() && !status.daemon_running());
+        assert!(!status.daemon_service().installed);
+
+        standin::answers(&program, "down", 0, &standin::down_done());
+        let down = yardr.down(true).unwrap();
+        assert!(down.down && !down.confirm);
+
+        // Another home's yard: its socket minus `yard.sock`.
+        yardr.home = Some(home.clone());
+        standin::answers(&program, "up", 0, &json!({"up": true, "parts": []}));
+        assert!(yardr.up().unwrap().up);
+        assert_eq!(
+            standin::calls(&program),
+            [
+                "[status] [--json]".to_string(),
+                "[down] [--yes] [--json]".to_string(),
+                format!("[up] [--json] [--home] [{}]", home.display()),
+            ]
+        );
+    }
+
+    /// Status on a home with no yard is exit 2, which is no yard and no
+    /// failure; any other refusal is yardr's words.
+    #[test]
+    fn status_on_a_home_with_no_yard_is_no_yard() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        standin::answers(
+            &yardr.program,
+            "status",
+            2,
+            &json!({"error": "no yard in /tmp/x yet: create one with `yardr init --harness <kind>`"}),
+        );
+        assert_eq!(yardr.status().unwrap_err(), StatusError::NoYard);
+        standin::answers(
+            &yardr.program,
+            "status",
+            1,
+            &json!({"error": "the store cannot be read"}),
+        );
+        assert_eq!(
+            yardr.status().unwrap_err(),
+            StatusError::Failed("the store cannot be read".to_string())
+        );
+    }
+
+    /// Starting at login is both halves: the daemon's service, and
+    /// herdr's server starting with it, by yardr's service or one that is
+    /// not yardr's. Either half missing is off: checking installs what is
+    /// missing.
+    #[test]
+    fn starting_at_login_is_the_daemon_s_service_and_herdr_s() {
+        let status = |daemon: bool, herdr: bool, foreign: &[&str]| {
+            serde_json::from_value::<Status>(json!({
+                "daemon": {"running": false,
+                           "service": {"supported": true, "installed": daemon}},
+                "herdr_login_service": {"supported": true, "installed": herdr,
+                                        "foreign": foreign},
+            }))
+            .unwrap()
+        };
+        assert!(status(true, true, &[]).starts_at_login());
+        assert!(status(true, false, &["/tmp/herdr.plist"]).starts_at_login());
+        assert!(!status(true, false, &[]).starts_at_login());
+        assert!(!status(false, true, &[]).starts_at_login());
+        assert!(!status(false, false, &[]).starts_at_login());
+    }
+
+    /// Down without the flag asks first: the agents in the middle of
+    /// something are named, the idle ones counted, and one's gone pane is
+    /// neither. What could not be stopped is yardr's words.
+    #[test]
+    fn down_without_yes_names_what_it_would_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        standin::answers(&yardr.program, "down", 1, &standin::down_confirm());
+        let down = yardr.down(false).unwrap();
+        assert!(!down.down && down.confirm);
+        assert_eq!(down.working, 2);
+        assert_eq!(down.idle, 2);
+        let named: Vec<String> = down.named().iter().map(|agent| agent.said()).collect();
+        assert_eq!(
+            named,
+            [
+                "bead essays-1a2b (stage new)",
+                "crew member yardmaster, waits at a question in its pane",
+            ]
+        );
+        assert!(down.troubles().is_empty());
+
+        standin::answers(
+            &yardr.program,
+            "down",
+            1,
+            &json!({"down": false, "confirm": false,
+                "agents": [{"kind": "crew", "name": "yardmaster", "state": "working",
+                            "stopped": false, "error": "herdr does not answer"}],
+                "working": 1, "idle": 0,
+                "parts": [{"part": "daemon", "running": true,
+                           "error": "the daemon would not stop", "do": "kill it"}]}),
+        );
+        let down = yardr.down(true).unwrap();
+        assert!(!down.down && !down.confirm);
+        assert_eq!(
+            down.troubles(),
+            [
+                "crew member yardmaster: herdr does not answer",
+                "daemon: the daemon would not stop kill it",
+            ]
+        );
+    }
+
+    /// Up with login says per service what it did, in yardr's words; the
+    /// daemon's uninstall says what went.
+    #[test]
+    fn up_login_installs_and_the_daemon_s_uninstall_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        standin::answers(
+            &yardr.program,
+            "up",
+            0,
+            &json!({"up": true, "parts": [],
+                "login": [
+                    {"part": "herdr", "result": "installed", "file": "/tmp/x", "loaded": true},
+                    {"part": "daemon", "result": "found", "file": "/tmp/y", "loaded": true},
+                    {"part": "web", "result": "left",
+                     "Detail": "the yard's web_addr setting is unset"}]}),
+        );
+        let up = yardr.up_login().unwrap();
+        assert!(up.up);
+        let said: Vec<String> = up.login.iter().map(|unit| unit.said()).collect();
+        assert_eq!(
+            said,
+            [
+                "herdr's server: installed: /tmp/x",
+                "daemon: installed already: /tmp/y",
+                "web view: left as it is: the yard's web_addr setting is unset",
+            ]
+        );
+
+        standin::answers(
+            &yardr.program,
+            "daemon-uninstall",
+            0,
+            &json!({"kind": "daemon", "name": "x", "file": "/tmp/y",
+                    "removed": true, "unloaded": true}),
+        );
+        let uninstalled = yardr.daemon_uninstall().unwrap();
+        assert!(uninstalled.removed && uninstalled.unloaded);
+
+        let home = dir.path().join("home/.yardr");
+        assert_eq!(
+            standin::calls(&yardr.program),
+            [
+                format!("[up] [--login] [--json] [--home] [{}]", home.display()),
+                format!(
+                    "[daemon] [uninstall] [--json] [--home] [{}]",
+                    home.display()
+                ),
+            ]
+        );
+    }
+
     /// What yardr refuses is said in its words, and an import that asks
     /// for what footplate has no answer to is not answered with a guess.
     #[test]
@@ -1154,8 +1714,9 @@ mod tests {
     /// the yardr to run and `FOOTPLATE_REAL_HOME` an empty directory with a
     /// short path, which becomes the yard's home; the test is run with an
     /// environment that has nothing of another yard in it (`env -i`).
-    /// Nothing is started but the yard's own server, which the test stops.
-    /// `up` and the login are not in it: they start agents and log in.
+    /// Nothing is started but the yard's own server, which down stops
+    /// again: no agent runs, so it asks nothing. `up` and the login are
+    /// not in it: they start agents and log in.
     ///
     ///     env -i HOME=<dir> PATH=/usr/bin:/bin FOOTPLATE_REAL_YARDR=<yardr> \
     ///         FOOTPLATE_REAL_HOME=<dir>/.yardr <the test binary> --ignored a_real_yardr
@@ -1170,7 +1731,7 @@ mod tests {
         let home = PathBuf::from(var("FOOTPLATE_REAL_HOME"));
         let mut yardr = Yardr {
             program: PathBuf::from(var("FOOTPLATE_REAL_YARDR")),
-            home: home.clone(),
+            home: Some(home.clone()),
             path: std::env::var_os("PATH").unwrap_or_default(),
             actor: None,
         };
@@ -1201,6 +1762,15 @@ mod tests {
             let doctor = yardr.doctor()?;
             assert!(doctor.yard);
             assert_eq!(doctor.yardmaster(), Some("yardmaster"));
+            let status = yardr.status().map_err(|err| match err {
+                StatusError::NoYard => "the yard is gone".to_string(),
+                StatusError::Failed(why) => why,
+            })?;
+            assert!(status.server_running());
+            // No agent runs, so down without the flag stops the yard and
+            // asks nothing.
+            let down = yardr.down(false)?;
+            assert!(down.down && !down.confirm);
             Ok::<_, String>(())
         })();
         // What stopping prints is not JSON, and is not read: the socket
