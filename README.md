@@ -75,9 +75,16 @@ It draws footplate in a Debian container on this Mac: headless sway,
 Mesa's software Vulkan driver, grim, against a throwaway home. The first
 run provisions the container and builds footplate, which takes minutes;
 later runs shoot in seconds. It shows the first screen only for now.
-Attach the PNG to the note with `yardr bead note <bead> --file`, naming
-the short SHA of the commit it was shot from. Evidence is never left in
-/tmp: the yard's /private/tmp was emptied on 13 Oct, cause unknown — the
+Attach it to a note that names the short SHA of the commit it was shot from,
+passing the PNG path after `--file`:
+
+    yardr bead note "$YARDR_BEAD" \
+      "Screenshot from $(git rev-parse --short HEAD)" \
+      --file /tmp/footplate-shot.png &&
+      rm /tmp/footplate-shot.png
+
+The temporary PNG is removed after attachment; evidence is never left in
+/tmp. The yard's /private/tmp was emptied on 13 Oct, cause unknown — the
 note's file is the record.
 
 ## What it talks to
