@@ -191,10 +191,14 @@ the shared file, until they differ. Today's single-token resolution
 each entry carries its own resolved file instead, and `Env` opens per
 entry.
 
-An existing settings file with one yard becomes one entry, on read,
-once: `remote` with an `address` becomes a far entry named for the
-address's host, keeping `yard.token` as its token file; anything else
-becomes the near entry "this machine". The deprecated `remote` and
+An existing settings file with one yard is moved on read, once:
+`remote` with an `address` becomes two entries, first a far entry named
+for the address's host, keeping `yard.token` as its token file, which
+stays the one that opens, then the near entry "this machine", since the
+window offered both before the list; anything else becomes the near
+entry "this machine" alone. Nothing is added to a file that already has
+a list: a person who removed this machine's yard does not get it back.
+The deprecated `remote` and
 `address` fields are still read, so mckean's own file opens, and the
 next write keeps the new shape. Compatibility with anyone else's file is
 not needed. Two entries may not share a name; the settings say so where

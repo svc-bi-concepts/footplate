@@ -157,17 +157,18 @@ impl Default for Kept {
 }
 
 impl From<Kept> for Settings {
-    /// A file that lists no yards has one: the yard at its address, where
-    /// it chose that, with the token file a pairing wrote then, else this
-    /// machine's. The next write keeps it as a list.
+    /// A file that lists no yards is one from before the list. Where it
+    /// chose the yard at its address, that is the first, with the token
+    /// file a pairing wrote then, and so the one that opens; this machine's
+    /// follows it, which the window offered beside it then. Else it has
+    /// this machine's alone. The next write keeps it as a list.
     fn from(kept: Kept) -> Settings {
         let yards = match kept.yards.is_empty() {
             false => kept.yards,
-            true if kept.remote && !kept.address.is_empty() => vec![Yard::far(
-                &host_of(&kept.address),
-                &kept.address,
-                yard::TOKEN_FILE,
-            )],
+            true if kept.remote && !kept.address.is_empty() => vec![
+                Yard::far(&host_of(&kept.address), &kept.address, yard::TOKEN_FILE),
+                Yard::near(HERE, ""),
+            ],
             true => vec![Yard::near(HERE, "")],
         };
         Settings {
@@ -731,8 +732,10 @@ mod tests {
     fn a_file_of_one_yard_from_before_there_were_several_opens_as_it_was() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
-        // Paired with the yard at an address: one far yard, called by the
-        // address's host, with the token file the pairing wrote then.
+        // Paired with the yard at an address: that far yard first, called
+        // by the address's host, with the token file the pairing wrote
+        // then, and this machine's after it, which the window offered
+        // beside it before there was a list.
         fs::write(
             &file,
             "{\n  \"text\": 15,\n  \"look\": \"dark\",\n  \"remote\": true,\n  \"address\": \"https://mac.example.net:8443/yard\"\n}\n",
@@ -741,14 +744,23 @@ mod tests {
         let set = Settings::read(&file);
         assert_eq!(
             set.yards,
-            [Yard::far(
-                "mac.example.net",
-                "https://mac.example.net:8443/yard",
-                "yard.token"
-            )]
+            [
+                Yard::far(
+                    "mac.example.net",
+                    "https://mac.example.net:8443/yard",
+                    "yard.token"
+                ),
+                Yard::near(HERE, "")
+            ]
+        );
+        assert_eq!(
+            [set.yards[0].kind(), set.yards[1].kind()],
+            ["paired", "on this machine"]
         );
         assert_eq!((set.text, set.look), (15, Look::Dark));
+        // The paired one opens, as it did.
         assert_eq!(set.opened().name, "mac.example.net");
+        assert_eq!(set.opened().kind(), "paired");
         assert_eq!(
             yard::token_path(&set.opened().token_file, Some(&file)).unwrap(),
             dir.path().join("yard.token")

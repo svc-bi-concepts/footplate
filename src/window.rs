@@ -10810,8 +10810,9 @@ mod tests {
             which_yard(&view, cx),
             format!("the yard south at {}, as its device laptop", far.address())
         );
+        // This machine's yard is in the list beside it now, so it is
+        // followed for what waits there; the open one is still the far.
         assert_eq!(open_yard(&view, cx), "127.0.0.1");
-        assert_eq!(near.requests(), 0);
         assert!(
             far.last_request()
                 .contains(&format!("Authorization: Bearer {}\r\n", crate::fake::TOKEN))
@@ -10822,11 +10823,10 @@ mod tests {
         let kept = Settings::read(&file);
         assert_eq!(
             kept.yards,
-            [settings::Yard::far(
-                "127.0.0.1",
-                far.address(),
-                "yard.token"
-            )]
+            [
+                settings::Yard::far("127.0.0.1", far.address(), "yard.token"),
+                settings::Yard::near(settings::HERE, "")
+            ]
         );
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(

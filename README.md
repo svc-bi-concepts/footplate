@@ -268,9 +268,10 @@ its target alone. A direct non-regular file, such as a directory or socket,
 is refused before pairing.
 
 A settings file from before there were several yards is read as it was:
-`remote` with an `address` is one paired yard, called by the address's
-host, with `yard.token` beside the settings as its token file; anything
-else is `this machine`. The next change writes the list.
+`remote` with an `address` is a paired yard, called by the address's
+host, with `yard.token` beside the settings as its token file, and it
+opens as before; `this machine` is listed after it. Anything else is
+`this machine` alone. The next change writes the list.
 
 **By the environment.** Two variables name the one yard of a run:
 

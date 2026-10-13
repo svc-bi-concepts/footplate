@@ -918,7 +918,8 @@ mod tests {
         .unwrap();
         file_of_mode(dir.path(), "yard.token", 0o600, &format!("{TOKEN}\n"));
         let set = Settings::read(&settings);
-        assert_eq!(set.yards.len(), 1);
+        // This machine's yard is listed after it, and it is the one opened.
+        assert_eq!(set.yards.len(), 2);
         assert_eq!(set.opened().name, "127.0.0.1");
         let client = Env::default().open(&set, Some(&settings)).unwrap();
         assert_eq!(client.place(), format!("The yard: {}", far.address()));
