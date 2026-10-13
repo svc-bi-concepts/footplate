@@ -100,14 +100,26 @@ impl Env {
     pub fn open(&self, set: &Settings, settings: Option<&Path>) -> Result<Client, String> {
         let opened = set.opened();
         let Some(address) = self.address(set) else {
-            return Ok(Client::new(match opened.socket.is_empty() {
-                true => &self.socket,
-                false => Path::new(&opened.socket),
-            }));
+            let socket = Path::new(&opened.socket);
+            if opened.socket.is_empty() {
+                return Ok(Client::new(&self.socket));
+            }
+            // The settings take no such socket where one is typed, and a
+            // list edited by hand is held to the same: a path from
+            // wherever footplate was started would be whoever's socket
+            // lies there.
+            if !socket.is_absolute() {
+                return Err(format!(
+                    "{:?} is no path of a socket: the yard {} wants it whole, from /, where the settings are kept.",
+                    opened.socket, opened.name
+                ));
+            }
+            return Ok(Client::new(socket));
         };
         let address = Address::parse(address)?;
         let file = self.token_of(set, &opened.name, settings)?;
-        Ok(Client::remote(address, read_token(&file)?))
+        let token = token_for(&file, &address)?;
+        Ok(Client::remote(address, token))
     }
 }
 
@@ -124,15 +136,23 @@ pub fn is_bare(token_file: &str) -> bool {
 /// started would be another file the next time.
 pub fn token_path(token_file: &str, settings: Option<&Path>) -> Result<PathBuf, String> {
     let name = token_file.trim();
-    if Path::new(name).is_absolute() && !name.ends_with('/') {
-        return Ok(PathBuf::from(name));
-    }
-    if !is_bare(name) {
+    let path = if Path::new(name).is_absolute() && !name.ends_with('/') {
+        PathBuf::from(name)
+    } else if is_bare(name) {
+        settings.ok_or(NO_HOME)?.with_file_name(name)
+    } else {
         return Err(format!(
             "{name:?} names no token file: one is a bare name, for a file beside the settings, or a whole path from /."
         ));
+    };
+    // A pairing writes this file and removing the yard deletes it: the
+    // settings' own is neither's to take.
+    if settings.is_some_and(|settings| same_file(&path, settings)) {
+        return Err(format!(
+            "{name:?} names no token file: it is the file the settings are kept in."
+        ));
     }
-    Ok(settings.ok_or(NO_HOME)?.with_file_name(name))
+    Ok(path)
 }
 
 /// Whether two paths are one file, by whichever way its directory is
@@ -194,10 +214,11 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-/// Reads a device's token from its file. A file others can read is
-/// refused, as every file of a secret is in yardr: the token is all that
-/// says who a request is.
-pub fn read_token(file: &Path) -> Result<String, String> {
+/// Reads a device's token from its file, and the address of the yard it
+/// is for where the file says. A file others can read is refused, as every
+/// file of a secret is in yardr: the token is all that says who a request
+/// is.
+fn kept(file: &Path) -> Result<(String, Option<Address>), String> {
     let at = file.display();
     let meta = match fs::metadata(file) {
         Ok(meta) => meta,
@@ -216,13 +237,64 @@ pub fn read_token(file: &Path) -> Result<String, String> {
     }
     let text = fs::read_to_string(file)
         .map_err(|err| format!("The token file {at} cannot be read: {err}"))?;
-    let token = text.trim();
-    if !api::is_token(token) {
-        return Err(format!(
-            "The token file {at} holds no token: one is a single line, as the yard gave it."
-        ));
+    let none = || {
+        format!(
+            "The token file {at} holds no token: one is a single line, as the yard gave it, and under it at most the address of its yard."
+        )
+    };
+    let mut lines = text.trim().lines();
+    let token = lines.next().unwrap_or_default().trim();
+    let given = lines.next().map(Address::parse);
+    if !api::is_token(token) || lines.next().is_some() {
+        return Err(none());
     }
-    Ok(token.to_string())
+    match given.transpose() {
+        Ok(given) => Ok((token.to_string(), given)),
+        Err(_) => Err(none()),
+    }
+}
+
+/// The token `file` holds, whichever yard it is for: what a test reads
+/// back. A request takes its token from [`token_for`].
+#[cfg(test)]
+pub fn read_token(file: &Path) -> Result<String, String> {
+    kept(file).map(|(token, _)| token)
+}
+
+/// The token `file` holds, to call the yard at `address` with. A token is
+/// for the yard that gave it and for no other: the file names that yard's
+/// address under the token, and with another address the token is refused
+/// and sent nowhere, until the device is paired there. So an address
+/// changed where the settings are kept, or a file two yards came to name,
+/// gives one yard's token to nobody else. A file that names no address
+/// yet, as a pairing leaves it and as every file was before this, is of
+/// the first yard it is opened for, and says so from then on.
+pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
+    let (token, given) = kept(file)?;
+    match given {
+        Some(given) if given.is(address) => {}
+        Some(given) => {
+            return Err(format!(
+                "The token in {} is of this device at {given}, and is not sent to {address}: whoever answers there would call that yard as you. Pair this device with the yard at {address} in the settings, with a code its operator opens: yardr user device pair <user> <device>",
+                file.display()
+            ));
+        }
+        // A file that cannot be written to stays as it was, of no yard.
+        None => {
+            // Under the token, which a file from before may end without
+            // a line break.
+            let ended = fs::read(file).is_ok_and(|text| text.ends_with(b"\n"));
+            let line = match ended {
+                true => format!("{address}\n"),
+                false => format!("\n{address}\n"),
+            };
+            let _ = fs::OpenOptions::new()
+                .append(true)
+                .open(file)
+                .and_then(|mut out| out.write_all(line.as_bytes()));
+        }
+    }
+    Ok(token)
 }
 
 /// Keeps a device's token in `file`, for its user alone (mode 0600), in
@@ -648,10 +720,10 @@ mod tests {
     #[test]
     fn plain_http_off_this_machine_is_refused_with_the_reason() {
         let dir = tempfile::tempdir().unwrap();
-        let token = file_of_mode(dir.path(), "mac.token", 0o600, TOKEN);
+        // A token as a pairing left it, of no yard yet, for each address.
         let env = |yard: &str| Env {
             yard: Some(yard.into()),
-            token_file: Some(token.clone()),
+            token_file: Some(file_of_mode(dir.path(), "mac.token", 0o600, TOKEN)),
             ..Env::default()
         };
         let why = env("http://mac.example.net:8790")
@@ -681,6 +753,138 @@ mod tests {
             env("mac.example.net")
                 .open(&Settings::default(), None)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn a_token_goes_to_the_yard_it_was_first_opened_for_and_to_no_other_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let token = dir.path().join("yard-mac.token");
+        keep_token(&token, TOKEN).unwrap();
+        let at = |address: &str| {
+            Settings::default()
+                .with_yard(
+                    None,
+                    settings::Yard::far("mac", address, "yard-mac.token"),
+                    Some(&settings),
+                )
+                .unwrap()
+                .opening("mac")
+        };
+        let env = Env::default();
+        let open = |address: &str| env.open(&at(address), Some(&settings));
+
+        // Opened once, the file says whose the token is, and it is the
+        // same yard by another spelling of its address.
+        assert!(open("https://mac.example.net").is_ok());
+        assert_eq!(
+            fs::read_to_string(&token).unwrap(),
+            format!("{TOKEN}\nhttps://mac.example.net\n")
+        );
+        assert_eq!(read_token(&token).unwrap(), TOKEN);
+        assert!(open("https://MAC.example.net:443/").is_ok());
+
+        // The address changed where the settings are kept: the token is
+        // of the yard that gave it, and is not read out for another host,
+        // port, path or scheme, nor named in the refusal.
+        for other in [
+            "https://plantime.example.net",
+            "https://mac.example.net:8443",
+            "https://mac.example.net/yard",
+        ] {
+            let why = open(other).unwrap_err();
+            assert!(
+                why.contains(&format!(
+                    "is of this device at https://mac.example.net, and is not sent to {other}"
+                )),
+                "{why}"
+            );
+            assert!(!why.contains(TOKEN), "{why}");
+            assert_eq!(token_for(&token, &Address::parse(other).unwrap()), Err(why));
+        }
+        // Nor for the one yard the environment names, whose token file
+        // without FOOTPLATE_TOKEN_FILE is the one beside the settings: a
+        // yard of the settings may keep its token there.
+        let beside = dir.path().join(TOKEN_FILE);
+        keep_token(&beside, TOKEN).unwrap();
+        let listed = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::far("mac", "https://mac.example.net", TOKEN_FILE),
+                Some(&settings),
+            )
+            .unwrap()
+            .opening("mac");
+        assert!(env.open(&listed, Some(&settings)).is_ok());
+        let named = Env {
+            yard: Some("https://trial.example.net".into()),
+            ..Env::default()
+        };
+        let why = named.open(&listed, Some(&settings)).unwrap_err();
+        assert!(
+            why.contains("is not sent to https://trial.example.net"),
+            "{why}"
+        );
+
+        // Paired again, the token is the new yard's.
+        keep_token(&token, "yardr-dev-plantime").unwrap();
+        assert!(open("https://plantime.example.net").is_ok());
+        assert!(open("https://mac.example.net").is_err());
+
+        // A file from before ends as it was written, and is told the same.
+        let old = file_of_mode(dir.path(), "old.token", 0o600, TOKEN);
+        let mac = Address::parse("https://mac.example.net").unwrap();
+        assert_eq!(token_for(&old, &mac).unwrap(), TOKEN);
+        assert_eq!(
+            fs::read_to_string(&old).unwrap(),
+            format!("{TOKEN}\nhttps://mac.example.net\n")
+        );
+        // What stands under a token and is no address is no token file.
+        for none in [format!("{TOKEN}\nmac"), format!("{TOKEN}\n{mac}\n{mac}")] {
+            let file = file_of_mode(dir.path(), "none.token", 0o600, &none);
+            let why = token_for(&file, &mac).unwrap_err();
+            assert!(why.contains("holds no token"), "{why}");
+        }
+    }
+
+    #[test]
+    fn the_settings_file_is_no_token_file_and_a_socket_is_a_whole_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        // Only a list edited by hand comes to either.
+        fs::write(
+            &settings,
+            r#"{"yards": [{"name": "mac", "address": "https://mac.example.net", "token_file": "settings.json"},
+                          {"name": "shop", "socket": "run/yard.sock"}]}"#,
+        )
+        .unwrap();
+        let set = Settings::read(&settings);
+        let whole = settings.to_str().unwrap();
+        let link = dir.path().join("link.token");
+        std::os::unix::fs::symlink(&settings, &link).unwrap();
+        for own in ["settings.json", whole, "link.token"] {
+            let why = token_path(own, Some(&settings)).unwrap_err();
+            assert!(
+                why.contains("it is the file the settings are kept in"),
+                "{own}: {why}"
+            );
+        }
+        let env = Env::default();
+        assert!(env.token_of(&set, "mac", Some(&settings)).is_err());
+        assert!(
+            env.open(&set.clone().opening("mac"), Some(&settings))
+                .is_err()
+        );
+        // Removing that yard leaves the settings where they are.
+        let (less, left) = set.clone().without("mac", Some(&settings));
+        assert_eq!(left, settings::TokenLeft::None);
+        assert!(settings.exists() && less.yard("mac").is_none());
+
+        let why = env.open(&set.opening("shop"), Some(&settings)).unwrap_err();
+        assert!(
+            why.starts_with("\"run/yard.sock\" is no path of a socket: the yard shop"),
+            "{why}"
         );
     }
 

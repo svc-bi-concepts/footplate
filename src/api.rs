@@ -769,6 +769,16 @@ impl Address {
         })
     }
 
+    /// Whether `other` is the same yard's address: what is connected to
+    /// and what is asked for there, however the host's letters are cased
+    /// and whether or not the usual port is written out.
+    pub fn is(&self, other: &Address) -> bool {
+        self.tls == other.tls
+            && self.host.eq_ignore_ascii_case(&other.host)
+            && self.port == other.port
+            && self.path == other.path
+    }
+
     fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
         let mut last = io::Error::new(
             io::ErrorKind::NotFound,

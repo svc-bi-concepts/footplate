@@ -171,13 +171,37 @@ impl From<Kept> for Settings {
             true => vec![Yard::near(HERE, "")],
         };
         Settings {
+            yards: told_apart(yards),
             text: kept.text,
             look: kept.look,
-            yards,
             open: kept.open,
             notifications: kept.notifications,
         }
     }
+}
+
+/// The yards of a file with a name each that no other has. Where they are
+/// typed the settings refuse a name that is taken or empty; a list edited
+/// by hand may have both, and a yard is opened, paired and removed by its
+/// name: two of one name would be the first of them whichever was meant,
+/// with the other's address beside it in the list. The later one is called
+/// by its name and its place among them.
+fn told_apart(mut yards: Vec<Yard>) -> Vec<Yard> {
+    for place in 0..yards.len() {
+        let name = match yards[place].name.trim() {
+            "" => "yard",
+            name => name,
+        };
+        let taken = |name: &str| yards[..place].iter().any(|other| other.name == name);
+        let mut told = name.to_string();
+        let mut n = 1;
+        while taken(&told) {
+            n += 1;
+            told = format!("{name} {n}");
+        }
+        yards[place].name = told;
+    }
+    yards
 }
 
 /// Whether the system shows a notification for what arrives while the
@@ -738,6 +762,50 @@ mod tests {
         assert_eq!(host_of("http://[::1]:8790"), "::1");
         assert_eq!(host_of("http://127.0.0.1:8790/"), "127.0.0.1");
         assert_eq!(host_of("https://mac.example.net"), "mac.example.net");
+    }
+
+    #[test]
+    fn yards_of_one_name_or_of_none_in_a_file_are_told_apart_when_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Only a list edited by hand comes to this.
+        fs::write(
+            &file,
+            r#"{"yards": [{"name": "mac", "address": "https://mac.example.net", "token_file": "yard.token"},
+                          {"name": " mac ", "address": "https://twin.example.net", "token_file": "yard.token"},
+                          {"name": "mac", "socket": "/home/mac/.yardr/yard.sock"},
+                          {"name": "mac 2"},
+                          {"address": "https://shop.example.net", "token_file": "shop.token"},
+                          {"name": "  "}],
+                "open": "mac"}"#,
+        )
+        .unwrap();
+        let set = Settings::read(&file);
+        let names: Vec<&str> = set.yards.iter().map(|yard| yard.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["mac", "mac 2", "mac 3", "mac 2 2", "yard", "yard 2"]
+        );
+        // Each is itself by its name: the one the switcher's row opens,
+        // and the one whose address stands beside it.
+        for yard in &set.yards {
+            assert_eq!(set.clone().opening(&yard.name).opened(), yard);
+            assert_eq!(set.yard(&yard.name), Some(yard));
+        }
+        assert_eq!(set.opened().address, "https://mac.example.net");
+        // Two of them on one token file are found from either, as they
+        // are refused to be opened and paired.
+        assert_eq!(set.shares("mac", Some(&file)).unwrap().0.name, "mac 2");
+        assert_eq!(set.shares("mac 2", Some(&file)).unwrap().0.name, "mac");
+        // Removing one leaves the other, and the file both name.
+        fs::write(dir.path().join("yard.token"), "yardr-dev-kept\n").unwrap();
+        let (less, left) = set.clone().without("mac 2", Some(&file));
+        assert_eq!(
+            left,
+            TokenLeft::Shared(dir.path().join("yard.token"), "mac".into())
+        );
+        assert_eq!(less.yard("mac"), set.yard("mac"));
+        assert!(dir.path().join("yard.token").exists());
     }
 
     fn two_far(file: &Path) -> Settings {

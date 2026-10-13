@@ -237,11 +237,21 @@ own, by default `yard-<name>.token` beside the settings, written with mode
 0600 and replaced by the next pairing of that yard. `token_file` is a bare
 name, for a file beside the settings, or a whole path; no two yards may
 have the same one, and two of a file edited by hand that do are refused,
-both, until they differ. Removing a yard deletes its token's file where it
+both, until they differ; the settings file itself is no yard's token file,
+and two yards of one name in a file edited by hand are told apart when it is
+read (`mac`, `mac 2`). Removing a yard deletes its token's file where it
 is a bare name beside the settings and no other yard's, and leaves one you
 named by a whole path. The device itself stays at the yard until its
 operator removes it (`yardr user device rm <user> <device>`), and the
 settings say so. It is a file on macOS too, not the Keychain.
+
+A token is for the yard that gave it. The first time a token file is opened
+for a yard, footplate writes that yard's address under the token, and from
+then on the token is sent to that address alone: with another address, in
+the settings or in `FOOTPLATE_YARD`, the yard is refused and nothing is
+sent, until the device is paired there. A pairing writes the file anew. A
+file footplate cannot write to stays without an address, and is of whatever
+yard it is opened for, as before.
 
 A settings file from before there were several yards is read as it was:
 `remote` with an `address` is one paired yard, called by the address's
@@ -275,7 +285,11 @@ name the file as the yard's `token_file`, whole.)
   trusts, for the address's host;
 - a token file that anyone but you can read or write (any bit of mode 077):
   whoever reads it calls the yard as you. `chmod 600 <file>` and start
-  again. A file that is missing, or holds no token, is said too.
+  again. A file that is missing, or holds no token, is said too;
+- a token whose file names another yard's address than the one it would be
+  sent to: pair the device with this yard;
+- a socket of a yard of this machine that is no whole path, in a settings
+  file edited by hand.
 
 A yard that is refused is not tried again: the window says why, and the
 settings, or `cmd+1` to `cmd+9`, open another.
