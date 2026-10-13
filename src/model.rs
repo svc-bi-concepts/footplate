@@ -470,6 +470,17 @@ impl Model {
     /// there. Else the yardmaster's conversation is, as in `yardr chat`,
     /// else the first row from the top.
     pub fn new(state: State, selected: Option<Selected>) -> (Model, Vec<Effect>) {
+        Self::new_returning(state, selected, false)
+    }
+
+    /// The model of a state read when returning to a yard. The folded
+    /// "Decided" list must be open before `selected` is checked, since its
+    /// rows do not exist in the order while it is folded.
+    pub fn new_returning(
+        state: State,
+        selected: Option<Selected>,
+        decided_expanded: bool,
+    ) -> (Model, Vec<Effect>) {
         let mut m = Model {
             me: state.me,
             parties: parties(&state.peers),
@@ -480,6 +491,7 @@ impl Model {
             notifications: state.notifications,
             open: state.asks.open,
             decided: state.asks.decided,
+            decided_expanded,
             ..Model::default()
         };
         m.set_users(state.users);
@@ -493,21 +505,26 @@ impl Model {
             );
         }
         let order = m.order();
-        m.selected = selected
-            .filter(|s| order.contains(s))
-            .or_else(|| {
-                order
-                    .iter()
-                    .find(|s| matches!(s, Selected::Decision(_)))
-                    .cloned()
-            })
-            .or_else(|| {
-                order.iter().find_map(|s| match s {
-                    Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
-                    _ => None,
+        m.selected = selected.filter(|s| order.contains(s)).or_else(|| {
+            // A kept expansion makes dealt-with rows visible, but a saved
+            // row that disappeared falls back as it did before that list
+            // was kept: to an open decision, yardmaster, or first row.
+            let order: Vec<Selected> = order
+                .into_iter()
+                .filter(|s| !matches!(s, Selected::Decided(_, _)))
+                .collect();
+            order
+                .iter()
+                .find(|s| matches!(s, Selected::Decision(_)))
+                .cloned()
+                .or_else(|| {
+                    order.iter().find_map(|s| match s {
+                        Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
+                        _ => None,
+                    })
                 })
-            })
-            .or_else(|| order.into_iter().next());
+                .or_else(|| order.into_iter().next())
+        });
         m.opened();
         let effects = m.open();
         (m, effects)
@@ -2877,6 +2894,20 @@ mod tests {
         assert_eq!(rows[1].line, "working");
         assert_eq!(rows[2].line, "crew member: Keeps the books");
         assert_eq!(rows[3].line, "person");
+    }
+
+    #[test]
+    fn a_missing_saved_decided_row_falls_back_as_a_single_yard_does() {
+        let mut state = State::default();
+        state.asks.decided.push(DecidedAsk {
+            bead: "another".into(),
+            ask: 2,
+            ..DecidedAsk::default()
+        });
+        let (model, _) =
+            Model::new_returning(state, Some(Selected::Decided("gone".into(), 1)), true);
+        assert_eq!(model.selected(), Some(&Selected::Yard));
+        assert!(model.decided_expanded());
     }
 
     #[test]

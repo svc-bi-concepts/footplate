@@ -539,6 +539,7 @@ struct Place {
     row: Selected,
     off: Pixels,
     expanded: HashSet<(String, u64)>,
+    decided_expanded: bool,
 }
 
 /// Whether a yard that is away is asked again.
@@ -1196,7 +1197,11 @@ impl Footplate {
                 let kept = self.places.get(&self.yard).filter(|_| fresh).cloned();
                 let (mut model, effects) = match self.model.as_ref() {
                     Some(before) => before.resumed(state),
-                    None => Model::new(state, kept.as_ref().map(|place| place.row.clone())),
+                    None => Model::new_returning(
+                        state,
+                        kept.as_ref().map(|place| place.row.clone()),
+                        kept.as_ref().is_some_and(|place| place.decided_expanded),
+                    ),
                 };
                 if fresh {
                     if let Some(place) = &kept {
@@ -1480,6 +1485,7 @@ impl Footplate {
             row,
             off: off.max(px(0.)),
             expanded: model.map(|m| m.expanded().clone()).unwrap_or_default(),
+            decided_expanded: model.is_some_and(Model::decided_expanded),
         }
     }
 
@@ -13117,6 +13123,70 @@ mod tests {
             Some(Selected::Conversation("yardmaster".into()))
         );
         assert!(at_bottom(&view, cx));
+        view.read_with(cx, |v, _| assert!(v.returning.is_none()));
+    }
+
+    /// A dealt-with decision is a row too: its containing list must be
+    /// open before the saved selection can be restored.
+    #[gpui::test]
+    fn a_yard_opened_again_restores_a_scrolled_decided_card(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        mails(&near, &["Shall I land it?"]);
+        near.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                "since": "2026-10-10T10:00:00Z", "state": "answered",
+                "option": 1, "option_label": "Move them now"
+            }]}})
+            .to_string(),
+        );
+        near.answer("Bead", &bead_of_notes(60));
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the dealt-with ask", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 1)
+            })
+        });
+        let card = Some(Selected::Decided("bead-a".into(), 3));
+        open_decided(&view, cx, "bead-a", 3);
+        wait(cx, "the dealt-with card", |cx| open_row(&view, cx) == card);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        view.update_in(cx, |v, _, cx| v.expand_for("bead-a".into(), 3, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let over = view.read_with(cx, |v, _| v.decision.max_offset().height);
+        assert!(over > px(400.), "the card does not scroll: {over:?}");
+        view.read_with(cx, |v, _| {
+            v.decision.set_offset(gpui::point(px(0.), px(-400.)))
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(card_offset_of(&view, cx).y, px(-400.));
+        assert!(decided_detail_of(&view, cx, "bead-a", 3).expanded);
+
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the dealt-with card where it stood", |cx| {
+            cx.update(|window, _| window.refresh());
+            open_row(&view, cx) == card && card_offset_of(&view, cx).y == px(-400.)
+        });
+        assert!(decided_detail_of(&view, cx, "bead-a", 3).expanded);
         view.read_with(cx, |v, _| assert!(v.returning.is_none()));
     }
 }
