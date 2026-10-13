@@ -26,6 +26,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fmt};
 
 use flate2::bufread::GzDecoder;
@@ -71,6 +72,10 @@ const SMALL_MOST: u64 = 64 * 1024;
 const SIGNATURE_MOST: u64 = 4 * 1024;
 const ARCHIVE_MOST: u64 = 64 * 1024 * 1024;
 const UNPACKED_MOST: u64 = 256 * 1024 * 1024;
+
+/// Each writer gets its own temporary file before atomically replacing the
+/// stored program. The pid also keeps names distinct across footplate runs.
+static NEXT_PART: AtomicU64 = AtomicU64::new(0);
 
 /// Why nothing was fetched, or why what was fetched is not kept. Each is
 /// said in words for a person (`Display`), and nothing that is refused is
@@ -572,21 +577,27 @@ pub fn keep(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     }
     fs::create_dir_all(dir)?;
     let path = dir.join(name);
-    let part = dir.join(format!(".{name}.part"));
-    // One a run that was ended left behind. `create_new` then opens a new
-    // file or nothing: never what a link at that name points to.
-    match fs::remove_file(&part) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
-        _ => {}
-    }
-    let written = (|| {
-        let mut file = OpenOptions::new()
+    // Do not share a fixed `.part` name: two first-run windows can fetch at
+    // once. `create_new` also refuses a link or a stale name without
+    // following or removing it.
+    let (part, mut file) = loop {
+        let serial = NEXT_PART.fetch_add(1, Ordering::Relaxed);
+        let part = dir.join(format!(".{name}.part.{}.{serial}", std::process::id()));
+        match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o755)
-            .open(&part)?;
+            .mode(0o600)
+            .open(&part)
+        {
+            Ok(file) => break (part, file),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    };
+    let written = (|| {
         file.write_all(bytes)?;
-        // The mode again: the one it was opened with is cut by the umask.
+        // Keep the file private until it is whole, then make it runnable;
+        // the mode is set again because umask may have cut it.
         file.set_permissions(fs::Permissions::from_mode(0o755))?;
         file.sync_all()?;
         fs::rename(&part, &path)
@@ -603,7 +614,7 @@ mod tests {
     use std::io::Cursor;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
     use flate2::Compression;
@@ -1295,7 +1306,7 @@ mod tests {
         let elsewhere = home.path().join("elsewhere");
         fs::write(&elsewhere, b"not to be touched").unwrap();
         fs::create_dir_all(&dir).unwrap();
-        // A part a run left behind, as a link to a file elsewhere.
+        // A stale part from the older fixed-name scheme, as a link elsewhere.
         std::os::unix::fs::symlink(&elsewhere, dir.join(".yardr.part")).unwrap();
         fs::write(dir.join("yardr"), b"the old one").unwrap();
 
@@ -1303,7 +1314,40 @@ mod tests {
         assert_eq!(path, dir.join("yardr"));
         assert_eq!(fs::read(&path).unwrap(), b"the new one");
         assert_eq!(fs::read(&elsewhere).unwrap(), b"not to be touched");
-        assert!(!dir.join(".yardr.part").exists());
+        assert!(
+            fs::symlink_metadata(dir.join(".yardr.part"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn concurrent_keeps_publish_whole_programs() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("bin");
+        let start = Arc::new(Barrier::new(3));
+        let first = vec![b'a'; 1024 * 1024];
+        let second = vec![b'b'; 1024 * 1024];
+        let save = |bytes: Vec<u8>| {
+            let dir = dir.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                keep(&dir, "yardr", &bytes).unwrap()
+            })
+        };
+        let a = save(first.clone());
+        let b = save(second.clone());
+        start.wait();
+        let a = a.join().unwrap();
+        let b = b.join().unwrap();
+
+        assert_eq!(a, dir.join("yardr"));
+        assert_eq!(b, a);
+        let stored = fs::read(a).unwrap();
+        assert!(stored == first || stored == second);
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
     }
 
     #[test]
