@@ -3028,8 +3028,9 @@ impl Footplate {
     /// yard as the device the code was for: a yard that is added, at the
     /// address that is typed, or one of the list whose device is paired
     /// again. The token goes into that yard's own file and no other's.
-    /// What keeps a yard out of the list is said before anything is sent:
-    /// a code is used up by the yard it is sent to.
+    /// What keeps a yard out of the list is said before anything is sent,
+    /// and so is a token file that cannot be written: a code is used up by
+    /// the yard it is sent to.
     fn pair(&mut self, cx: &mut Context<Self>) {
         if self.pairing {
             return;
@@ -3100,10 +3101,19 @@ impl Footplate {
             let answer = cx
                 .background_executor()
                 .spawn(async move {
+                    // The file is made ready before the code is sent: a
+                    // code is used up by the yard it is sent to, and a
+                    // token with no file to go in is lost.
+                    let place = yard::token_place(&file).map_err(|err| {
+                        format!(
+                            "The token file {} cannot be written ({err}). The code was not sent, and is still good: name another file for this yard's token.",
+                            file.display()
+                        )
+                    })?;
                     let paired = api::pair(&address, &code).map_err(|err| err.to_string())?;
-                    // The token goes from the yard's answer into its file,
-                    // and nowhere else.
-                    yard::keep_token(&file, &paired.token).map_err(|err| {
+                    // The token goes from the yard's answer into its file
+                    // with the address the code went to, and nowhere else.
+                    place.keep(&paired.token, Some(&address)).map_err(|err| {
                         format!(
                             "The yard gave this device its token, and {} could not be written ({err}). The token is lost: its operator removes the device (yardr user device rm {} {}) and opens another pairing.",
                             file.display(),
@@ -10352,6 +10362,147 @@ mod tests {
             [settings::Yard::near(settings::HERE, "")]
         );
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+    }
+
+    /// A pairing writes the address the code went to under the token: the
+    /// file is of that yard from the moment it is there.
+    #[gpui::test]
+    fn a_pairing_writes_the_yard_s_address_with_the_token(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("footplate/yard-far.token");
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        far.pair("K7QM-2XPD");
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "add far");
+        type_in(&view, cx, "far", far.address(), "K7QM-2XPD");
+        click_on(cx, "yard pair");
+        wait(cx, "the pairing", |cx| {
+            yard_said(&view, cx).starts_with("Paired")
+        });
+        assert_eq!(
+            std::fs::read_to_string(&token).unwrap(),
+            format!(
+                "{}\n!footplate-token-v1\n{}\n",
+                far.devices()[1],
+                Address::parse(far.address()).unwrap()
+            )
+        );
+        assert_eq!(mode_of(&token), 0o600);
+        // Nothing else is left beside it.
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("footplate"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+
+    /// A token file typed by hand that cannot be written is found before
+    /// the code is sent: the yard is asked nothing, adds no device, and
+    /// its pairing stays open for the code.
+    #[gpui::test]
+    fn a_token_file_that_cannot_be_written_keeps_the_code_from_the_yard(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let tokens = dir.path().join("tokens");
+        let token = tokens.join("yard.token");
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        far.pair("K7QM-2XPD");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::far("far", far.address(), token.to_str().unwrap()),
+                Some(&file),
+            )
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        let pair = |cx: &mut VisualTestContext| {
+            view.update_in(cx, |v, window, cx| {
+                v.pair_again(Some("far".into()), window, cx);
+                v.code.update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
+                v.pair(cx);
+            });
+        };
+        let unasked = |cx: &mut VisualTestContext| {
+            assert_eq!(far.requests(), 0);
+            assert_eq!(far.devices(), [crate::fake::TOKEN]);
+            assert!(far.pairing_open());
+            assert_eq!(which_yard(&view, cx), "this machine's yard");
+        };
+
+        // A directory where the token's file would be.
+        std::fs::create_dir_all(&token).unwrap();
+        pair(cx);
+        wait(cx, "that a directory is no token file", |cx| {
+            yard_said(&view, cx).contains("is not a regular file")
+        });
+        unasked(cx);
+        assert!(token.is_dir());
+
+        // A file where its directory would be.
+        std::fs::remove_dir_all(&tokens).unwrap();
+        std::fs::write(&tokens, "").unwrap();
+        pair(cx);
+        wait(cx, "that the file cannot be checked", |cx| {
+            yard_said(&view, cx).contains("cannot be checked")
+        });
+        unasked(cx);
+
+        // A directory that cannot be written to, and nothing is left in it.
+        std::fs::remove_file(&tokens).unwrap();
+        std::fs::create_dir(&tokens).unwrap();
+        let mode = |mode| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tokens, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(0o500);
+        pair(cx);
+        wait(cx, "that the directory cannot be written to", |cx| {
+            !view.read_with(cx, |v, _| v.pairing) && !yard_said(&view, cx).is_empty()
+        });
+        let said = yard_said(&view, cx);
+        assert!(
+            said.starts_with(&format!(
+                "The token file {} cannot be written (",
+                token.display()
+            )) && said.contains("The code was not sent"),
+            "{said}"
+        );
+        unasked(cx);
+        mode(0o700);
+        assert_eq!(std::fs::read_dir(&tokens).unwrap().count(), 0);
+
+        // The same code pairs once the file can be written.
+        pair(cx);
+        wait(cx, "the yard that was paired", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(yard::read_token(&token).unwrap(), far.devices()[1]);
+        assert_eq!(std::fs::read_dir(&tokens).unwrap().count(), 1);
     }
 
     #[gpui::test]

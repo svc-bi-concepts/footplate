@@ -356,8 +356,9 @@ pub(crate) fn is_managed_token_file(file: &Path) -> bool {
 /// address under the token, and with another address the token is refused
 /// and sent nowhere, until the device is paired there. So an address
 /// changed where the settings are kept, or a file two yards came to name,
-/// gives one yard's token to nobody else. A file that names no address
-/// yet, as a pairing leaves it and as every file was before this, is bound
+/// gives one yard's token to nobody else. A pairing writes the address
+/// with the token. A file that names no address, as every file was before
+/// this and as one from another program is, is bound
 /// to the first yard it is opened for only when that address can be saved;
 /// otherwise no request is sent.
 pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
@@ -410,10 +411,22 @@ pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
     Ok(token)
 }
 
-/// Keeps a device's token in `file`, for its user alone (mode 0600), in
-/// place of the one that was there. The file is whole or not there: it is
-/// written beside itself and renamed.
-pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
+/// Where a pairing's token will go: the private sibling of its file (mode
+/// 0600) that is renamed into place once the yard has given the token. It
+/// is made before the code is sent, since a code is used up by the yard it
+/// is sent to: a file that cannot be written is found while the code is
+/// still good. Dropped without a token, it leaves nothing behind.
+pub struct TokenPlace {
+    file: PathBuf,
+    new: PathBuf,
+    out: fs::File,
+    kept: bool,
+}
+
+/// Makes the place a token is written to before it becomes `file`, or says
+/// why `file` cannot be written: something other than a file is there, or
+/// its directory cannot be made or written to.
+pub fn token_place(file: &Path) -> io::Result<TokenPlace> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     match fs::symlink_metadata(file) {
         Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => {}
@@ -442,33 +455,62 @@ pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
         let mut candidate = name.clone();
         candidate.push(format!("-{sequence}.new"));
         let new = file.with_file_name(candidate);
-        let mut out = match fs::OpenOptions::new()
+        match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&new)
         {
-            Ok(out) => out,
+            Ok(out) => {
+                return Ok(TokenPlace {
+                    file: file.to_path_buf(),
+                    new,
+                    out,
+                    kept: false,
+                });
+            }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
-        };
-        let written = out
-            .write_all(token.as_bytes())
-            .and_then(|()| out.write_all(b"\n"))
-            .and_then(|()| out.write_all(FOOTPLATE_TOKEN.as_bytes()))
-            .and_then(|()| out.write_all(b"\n"))
-            .and_then(|()| out.sync_all());
-        drop(out);
-        if let Err(err) = written {
-            let _ = fs::remove_file(&new);
-            return Err(err);
         }
-        if let Err(err) = fs::rename(&new, file) {
-            let _ = fs::remove_file(&new);
-            return Err(err);
-        }
-        return Ok(());
     }
+}
+
+impl TokenPlace {
+    /// Keeps a device's token in the file, for its user alone, in place of
+    /// the one that was there, with the address of the yard that gave it
+    /// under it: a token is never on disk without its yard. The file is
+    /// whole or not there: it is written beside itself and renamed.
+    /// Without an address it is as every file was before one was written,
+    /// bound to the first yard it is opened for ([`token_for`]).
+    pub fn keep(mut self, token: &str, address: Option<&Address>) -> io::Result<()> {
+        let mut text = format!("{token}\n{FOOTPLATE_TOKEN}\n");
+        if let Some(address) = address {
+            text.push_str(&format!("{address}\n"));
+        }
+        self.out.write_all(text.as_bytes())?;
+        self.out.sync_all()?;
+        fs::rename(&self.new, &self.file)?;
+        self.kept = true;
+        Ok(())
+    }
+}
+
+impl Drop for TokenPlace {
+    /// What was not renamed into place is removed: no pairing, or a write
+    /// that failed. Once it is the token file its old name is not touched,
+    /// which may by then be another's.
+    fn drop(&mut self) {
+        if !self.kept {
+            let _ = fs::remove_file(&self.new);
+        }
+    }
+}
+
+/// A token alone in `file`, as a pairing left it before it wrote the
+/// yard's address too, and as a test sets one up.
+#[cfg(test)]
+pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
+    token_place(file)?.keep(token, None)
 }
 
 /// The address and the code as they were typed. What a pairing's QR code
@@ -1139,6 +1181,43 @@ mod tests {
         keep_token(&file, "yardr-dev-two").unwrap();
         assert_eq!(read_token(&file).unwrap(), "yardr-dev-two");
         assert!(!dir.path().join("footplate/yard.token.new").exists());
+    }
+
+    #[test]
+    fn a_token_is_kept_with_the_address_of_its_yard_before_it_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tokens/yard.token");
+        let mac = Address::parse("https://mac.example.net").unwrap();
+        let other = Address::parse("https://plantime.example.net").unwrap();
+
+        // The place is there before the token is, and private; without a
+        // token it leaves nothing, and the file that was there stays.
+        let place = token_place(&file).unwrap();
+        let beside = || fs::read_dir(dir.path().join("tokens")).unwrap().count();
+        assert_eq!(beside(), 1);
+        assert!(!file.exists());
+        assert_eq!(fs::metadata(&place.new).unwrap().mode() & 0o777, 0o600);
+        drop(place);
+        assert_eq!(beside(), 0);
+
+        token_place(&file).unwrap().keep(TOKEN, Some(&mac)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            format!("{TOKEN}\n{FOOTPLATE_TOKEN}\nhttps://mac.example.net\n")
+        );
+        assert_eq!(beside(), 1);
+        assert!(is_managed_token_file(&file));
+        // It was never opened, and is of its yard alone already.
+        assert!(
+            token_for(&file, &other)
+                .unwrap_err()
+                .contains("is not sent to")
+        );
+        assert_eq!(token_for(&file, &mac).unwrap(), TOKEN);
+
+        // What cannot be a token's file is said before there is a token.
+        assert!(token_place(dir.path()).is_err());
+        assert!(token_place(&file.join("yard.token")).is_err());
     }
 
     #[test]
