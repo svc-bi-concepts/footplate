@@ -95,7 +95,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
 | `ApproveAsk` | `cmd+enter` (`ctrl+enter` on Linux) or the Approve button, on a run ask's card: the ask named, and nothing of the command |
 | `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
-| `AckUserNotifications` | `x`, on the open `yard` row: one notice read |
+| `AckUserNotifications` | `x`, on the open `yard` row: one notice read; shift-`x` or the head's button: every notice read |
 
 It follows the stream and asks nothing of the yard in a loop: `mail`,
 `mail_read`, `notifications_read` and `crew_status` are applied as they
@@ -373,6 +373,7 @@ what it printed.
 | `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |
 | `cmd+enter` (`ctrl+enter` on Linux), on a run ask's card | approves it: the yard runs the command the card shows. No other card answers to it, and Enter alone approves nothing |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
+| shift-`x`, on the open `yard` row | marks every notice read, as the button in the row's head does, shown with their count while one is unread |
 | `x`, on an open card | puts the ask aside |
 | `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them. A secret ask is declined at once, with none |
 | `e`, on a card | expands it to the bead whole, or folds it again |

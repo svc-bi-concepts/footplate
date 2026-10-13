@@ -37,6 +37,7 @@ actions!(
         Next,
         Previous,
         Dismiss,
+        DismissAll,
         Pick1,
         Pick2,
         Pick3,
@@ -415,11 +416,12 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("pagedown", PageDown, Some(context)),
         ]);
     }
-    // Where no line is typed in: one key marks one notice read, and on a
-    // card the same keys pick, put aside, decline and expand. With the
-    // line focused those keys are the line's text.
+    // Where no line is typed in: one key marks one notice read and with
+    // shift every one, and on a card the same keys pick, put aside, decline
+    // and expand. With the line focused those keys are the line's text.
     cx.bind_keys([
         KeyBinding::new("x", Dismiss, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("shift-x", DismissAll, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("1", Pick1, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("2", Pick2, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("3", Pick3, Some(NO_LINE_CONTEXT)),
@@ -2216,6 +2218,12 @@ impl Footplate {
         self.later_now(cx);
     }
 
+    /// Marks every notice read, on the open yard row: shift-x and the
+    /// button in the row's head. Elsewhere it does nothing.
+    fn dismiss_all(&mut self, cx: &mut Context<Self>) {
+        self.change(cx, |m| m.dismiss_all());
+    }
+
     /// Puts the open card's current ask aside: the `x` key and the Later
     /// button. Later takes no words: only an open ask, never one dealt with.
     fn later_now(&mut self, cx: &mut Context<Self>) {
@@ -3552,7 +3560,7 @@ impl Footplate {
             Some(Selected::Conversation(with)) => self
                 .talk_conversation(model, with, palette, cx)
                 .into_any_element(),
-            Some(Selected::Yard) => self.talk_yard(model, palette).into_any_element(),
+            Some(Selected::Yard) => self.talk_yard(model, palette, cx).into_any_element(),
             Some(Selected::Decision(bead)) => self
                 .talk_decision(model, bead, palette, cx)
                 .into_any_element(),
@@ -3752,16 +3760,38 @@ impl Footplate {
     }
 
     /// The yard row open: the notices, oldest first, and no line to type
-    /// in. One key marks one read.
-    fn talk_yard(&self, model: &Model, palette: Palette) -> impl IntoElement {
+    /// in. One key marks one read, and with shift every one, as the button
+    /// in the head does while a notice is unread.
+    fn talk_yard(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let unread = model.notices().iter().filter(|n| !n.read).count();
         let head = div()
             .p_3()
             .border_b_1()
             .border_color(palette.line)
             .flex()
             .flex_col()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("yard"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("yard"))
+                    .when(unread > 0, |el| {
+                        el.child(
+                            small_button(format!("mark {unread} read (X)"), palette)
+                                .id("mark all read")
+                                .debug_selector(|| "mark all read".to_string())
+                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_all(cx))),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .text_sm()
@@ -3852,7 +3882,7 @@ impl Footplate {
                     .py_2()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child("x marks one notice read; mail is read when shown here"),
+                    .child("x marks one notice read, X all of them; mail is read when shown here"),
             )
     }
 
@@ -4702,6 +4732,7 @@ impl Render for Footplate {
             .on_action(cx.listener(|this, _: &Previous, window, cx| this.step(-1, window, cx)))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(|this, _: &DismissAll, _, cx| this.dismiss_all(cx)))
             .on_action(cx.listener(|this, _: &Pick1, _, cx| this.pick(1, cx)))
             .on_action(cx.listener(|this, _: &Pick2, _, cx| this.pick(2, cx)))
             .on_action(cx.listener(|this, _: &Pick3, _, cx| this.pick(3, cx)))
@@ -10878,5 +10909,68 @@ mod tests {
         cx.simulate_keystrokes("secondary-end");
         cx.run_until_parked();
         assert!(at_bottom(&view, cx));
+    }
+
+    /// The window on the yard row of a yard with `n` unread notices.
+    fn opened_on_the_yard_row<'a>(
+        yard: &Yard,
+        n: usize,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer("UserNotifications", &notices_many(n));
+        mails(yard, &["Hello."]);
+        let (view, cx) = opened(yard, &["Hello."], cx);
+        view.update_in(cx, |v, window, cx| v.select(Selected::Yard, window, cx));
+        wait(cx, "the yard row", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.selected() == Some(&Selected::Yard) && m.notices().len() == n
+                })
+            })
+        });
+        (view, cx)
+    }
+
+    /// The yard row's head has a button that marks every notice read, only
+    /// while one is unread: a click asks the yard once, through the newest.
+    #[gpui::test]
+    fn the_yard_row_has_a_button_that_marks_every_notice_read(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        let (view, cx) = opened_on_the_yard_row(&yard, 3, cx);
+        assert!(drawn(cx, "mark all read"));
+
+        click_on(cx, "mark all read");
+        wait(cx, "every notice read", |_| {
+            yard.asked("AckUserNotifications") == [json!({"name": "jo", "through": 12})]
+        });
+        // Whether it is still drawn the test cannot ask: what was drawn
+        // once keeps its place in the test window's record. The head draws
+        // it by this count.
+        wait(cx, "none unread", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().yard_unread() == 0)
+        });
+    }
+
+    /// Shift-x marks every notice read, as the button does.
+    #[gpui::test]
+    fn shift_x_marks_every_notice_read(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        let (view, cx) = opened_on_the_yard_row(&yard, 3, cx);
+        cx.simulate_keystrokes("shift-x");
+        wait(cx, "every notice read", |_| {
+            yard.asked("AckUserNotifications") == [json!({"name": "jo", "through": 12})]
+        });
+        wait(cx, "none unread", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().yard_unread() == 0)
+        });
+    }
+
+    /// With no notice unread the head has no button.
+    #[gpui::test]
+    fn the_yard_row_has_no_button_with_no_notice_unread(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        let (_view, cx) = opened_on_the_yard_row(&yard, 0, cx);
+        assert!(!drawn(cx, "mark all read"));
     }
 }

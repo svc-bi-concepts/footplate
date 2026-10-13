@@ -2247,6 +2247,20 @@ impl Model {
         }
     }
 
+    /// Marks every notice read: one key and the button in the yard row's
+    /// head, through the newest unread. Elsewhere than the open yard row it
+    /// does nothing.
+    pub fn dismiss_all(&mut self) -> Vec<Effect> {
+        if self.selected.as_ref() != Some(&Selected::Yard) {
+            return Vec::new();
+        }
+        let unread = self.notifications.iter().filter(|n| !n.read);
+        match unread.map(|n| n.seq).max() {
+            Some(through) => vec![Effect::AckNotifications { through }],
+            None => Vec::new(),
+        }
+    }
+
     /// The user's notifications through `through` are read: by this window,
     /// or by anything else that acknowledged them (`yardr inbox --ack`).
     pub fn notifications_acked(&mut self, through: u64) {
@@ -2255,8 +2269,8 @@ impl Model {
         }
     }
 
-    /// The yard did not take the acknowledgement: the notice stays unread,
-    /// and the next `x` asks again.
+    /// The yard did not take the acknowledgement: the notices stay unread,
+    /// and the next key asks again.
     pub fn notifications_ack_failed(&mut self, why: &str) {
         self.notice = format!("your notices could not be marked read: {why}");
     }
@@ -4644,6 +4658,48 @@ mod tests {
         assert_eq!(m.dismiss(), []);
         // A refused acknowledgement keeps the notice unread and says so.
         m.notifications_ack_failed("the yard does not answer");
+        assert!(
+            m.notice.contains("could not be marked read"),
+            "{}",
+            m.notice
+        );
+    }
+
+    #[test]
+    fn one_key_marks_every_notice_read() {
+        let mut state = yard(&[]);
+        state.notifications = vec![
+            notification(10, "yd-shed", "yd-shed created", false),
+            notification(11, "yd-shed", "yd-shed noted", false),
+            notification(12, "", "the release went out", false),
+        ];
+        let (mut m, _) = Model::new(state, None);
+        // Elsewhere than the open yard row it does nothing.
+        assert_eq!(m.dismiss_all(), []);
+        m.select(Selected::Yard);
+        // One acknowledgement, through the newest unread.
+        assert_eq!(m.dismiss_all(), [Effect::AckNotifications { through: 12 }]);
+        m.notifications_acked(12);
+        assert_eq!(m.yard_unread(), 0);
+        assert!(m.notices().iter().all(|n| n.read));
+        // With none unread there is nothing to acknowledge.
+        assert_eq!(m.dismiss_all(), []);
+    }
+
+    #[test]
+    fn every_notice_is_marked_through_the_newest_unread_and_no_further() {
+        let mut state = yard(&[]);
+        state.notifications = vec![
+            notification(10, "yd-shed", "yd-shed created", false),
+            notification(11, "yd-shed", "yd-shed noted", false),
+            notification(12, "", "the release went out", true),
+        ];
+        let (mut m, _) = Model::new(state, None);
+        m.select(Selected::Yard);
+        assert_eq!(m.dismiss_all(), [Effect::AckNotifications { through: 11 }]);
+        // A refused acknowledgement keeps them unread and says so.
+        m.notifications_ack_failed("the yard does not answer");
+        assert_eq!(m.yard_unread(), 2);
         assert!(
             m.notice.contains("could not be marked read"),
             "{}",
