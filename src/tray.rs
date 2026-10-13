@@ -99,7 +99,7 @@ fn unit(digits: usize, size: u32) -> u32 {
 pub fn tip(waiting: usize, what: &str) -> String {
     match waiting {
         0 => "nothing waiting".to_string(),
-        1 => format!("1 waits: {what}"),
+        1 => format!("1 wait: {what}"),
         n => format!("{n} wait: {what}"),
     }
 }
@@ -657,7 +657,7 @@ mod tests {
         // One yard.
         let one = said(1, "1 mail", [("mac", "1 mail".to_string())]);
         assert_eq!(one.title, "1");
-        assert_eq!((one.waiting, one.tip.as_str()), (1, "1 waits: 1 mail"));
+        assert_eq!((one.waiting, one.tip.as_str()), (1, "1 wait: 1 mail"));
         assert_eq!(rows(&one), [("mac", "mac · 1 mail")]);
 
         // Several, in the order they are given in.
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn the_tooltip_says_in_words_how_many_wait_and_what_they_are() {
         assert_eq!(tip(0, "nothing waiting"), "nothing waiting");
-        assert_eq!(tip(1, "1 decision"), "1 waits: 1 decision");
+        assert_eq!(tip(1, "1 decision"), "1 wait: 1 decision");
         assert_eq!(tip(3, "2 mail, 1 decision"), "3 wait: 2 mail, 1 decision");
     }
 
