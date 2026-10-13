@@ -593,20 +593,18 @@ impl TokenLeft {
 }
 
 /// Where the settings are kept, or nowhere for a person without a home.
-/// An `$XDG_CONFIG_HOME` that is no absolute path is ignored, as the XDG
-/// base directory specification has it.
+/// An absolute `$XDG_CONFIG_HOME` wins on either platform; a relative one
+/// is ignored, as the XDG base directory specification has it.
 pub fn file_under(
     macos: bool,
     xdg_config_home: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
     let absolute = |dir: OsString| Some(PathBuf::from(dir)).filter(|dir| dir.is_absolute());
-    let dir = if macos {
-        home.and_then(absolute)?.join("Library/Application Support")
-    } else {
-        xdg_config_home
-            .and_then(absolute)
-            .or_else(|| Some(home.and_then(absolute)?.join(".config")))?
+    let dir = match xdg_config_home.and_then(absolute) {
+        Some(dir) => dir,
+        None if macos => home.and_then(absolute)?.join("Library/Application Support"),
+        None => home.and_then(absolute)?.join(".config"),
     };
     Some(dir.join(crate::NAME).join("settings.json"))
 }
@@ -1334,6 +1332,16 @@ mod tests {
         let os = |s: &str| Some(OsString::from(s));
         assert_eq!(
             file_under(true, os("/elsewhere"), os("/Users/jo")),
+            Some(PathBuf::from("/elsewhere/footplate/settings.json"))
+        );
+        assert_eq!(
+            file_under(true, None, os("/Users/jo")),
+            Some(PathBuf::from(
+                "/Users/jo/Library/Application Support/footplate/settings.json"
+            ))
+        );
+        assert_eq!(
+            file_under(true, os("relative"), os("/Users/jo")),
             Some(PathBuf::from(
                 "/Users/jo/Library/Application Support/footplate/settings.json"
             ))
@@ -1351,6 +1359,9 @@ mod tests {
             Some(PathBuf::from("/home/jo/.config/footplate/settings.json"))
         );
         assert_eq!(file_under(false, None, None), None);
-        assert_eq!(file_under(true, os("/elsewhere"), None), None);
+        assert_eq!(
+            file_under(true, os("/elsewhere"), None),
+            Some(PathBuf::from("/elsewhere/footplate/settings.json"))
+        );
     }
 }

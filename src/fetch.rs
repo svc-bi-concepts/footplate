@@ -227,7 +227,11 @@ pub struct Stored {
 /// Where footplate keeps the programs it fetched: a `bin` beside its
 /// settings. Nowhere for a person without a home.
 pub fn dir() -> Option<PathBuf> {
-    Some(crate::settings::file()?.parent()?.join("bin"))
+    directory_for(&crate::settings::file()?)
+}
+
+fn directory_for(settings: &Path) -> Option<PathBuf> {
+    Some(settings.parent()?.join("bin"))
 }
 
 /// A system as yardr's releases name it, Go's GOOS and GOARCH: `os` and
@@ -921,6 +925,20 @@ mod tests {
     use minisign::KeyPair;
 
     use super::*;
+
+    #[test]
+    fn yardr_is_kept_beside_settings_under_an_isolated_config_home() {
+        let settings = crate::settings::file_under(
+            true,
+            Some("/tmp/footplate-test/config".into()),
+            Some("/Users/jo".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            directory_for(&settings),
+            Some(PathBuf::from("/tmp/footplate-test/config/footplate/bin"))
+        );
+    }
 
     /// A stand-in for the site: a port of this machine that answers each
     /// path with the file it was given, and 404 for every other.

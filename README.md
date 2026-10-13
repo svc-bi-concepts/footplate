@@ -390,12 +390,13 @@ footplate (`LOWEST`, there too) is refused whatever is signed.
 The archive holds `yardr`, and may hold `README.md`, `LICENSE` and `NOTICE`
 beside it. The binary alone is unpacked, to a `bin` beside the
 [settings](#settings), mode 0755:
-`~/Library/Application Support/footplate/bin/yardr` on macOS,
-`$XDG_CONFIG_HOME/footplate/bin/yardr` on Linux (`~/.config` when that is
-not set). It is written whole beside that place and then moved there, so
-what is at the path is the yardr that was there or the new one, never half
-of one. Its version stands beside it, in `yardr.version`. A yardr of your
-own, on your PATH, is not touched or looked at.
+`$XDG_CONFIG_HOME/footplate/bin/yardr` when `XDG_CONFIG_HOME` is set,
+`~/Library/Application Support/footplate/bin/yardr` on macOS otherwise,
+and `~/.config/footplate/bin/yardr` on Linux otherwise. It is written
+whole beside that place and then moved there, so what is at the path is
+the yardr that was there or the new one, never half of one. Its version
+stands beside it, in `yardr.version`. A yardr of your own, on your PATH,
+is not touched or looked at.
 
 A kept yardr is replaced by a newer one alone: when the site names an older
 release as the latest, the kept one stays. When a newer one cannot be had,
@@ -511,6 +512,36 @@ is yardr's to hold, and footplate shows what it asks for. The code a login
 page gives is passed to yardr's input as it is typed and is in the field no
 longer; it is in no file, no setting and no error. The credential the login
 makes is the harness's own, kept where the harness keeps it.
+
+### Trying the setup without touching your yard
+
+Set `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `YARDR_HOME` to a
+temporary directory before opening Footplate. This keeps its settings and
+fetched yardr, the new yard, the desktop entry and any fetched prerequisites
+under that directory. The restricted PATH also keeps the test from using
+programs already installed in your usual home:
+
+```sh
+scratch="$(mktemp -d)"
+mkdir -p "$scratch/home" "$scratch/config" "$scratch/data"
+HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" XDG_DATA_HOME="$scratch/data" YARDR_HOME="$scratch/yard" \
+  PATH="$scratch/home/.local/bin:/usr/bin:/bin" ./target/debug/footplate
+```
+
+After closing Footplate, stop the test yard and its Herdr server if you
+completed setup, then remove the temporary directory:
+
+```sh
+if [ -x "$scratch/config/footplate/bin/yardr" ]; then
+  HOME="$scratch/home" YARDR_HOME="$scratch/yard" \
+    "$scratch/config/footplate/bin/yardr" down --yes
+fi
+if [ -x "$scratch/home/.local/bin/herdr" ]; then
+  HOME="$scratch/home" PATH="$scratch/home/.local/bin:/usr/bin:/bin" \
+    "$scratch/home/.local/bin/herdr" server stop
+fi
+rm -rf "$scratch"
+```
 
 ## The window
 
@@ -664,11 +695,13 @@ the menu bar item, on Linux the tray's, which
   changes while the window is open.
 
 They are kept, with the yards, the notifications that were chosen and the
-menu bar item where it is switched off, in one file footplate writes on every change:
-`~/Library/Application Support/footplate/settings.json` on macOS,
-`$XDG_CONFIG_HOME/footplate/settings.json` on Linux (`~/.config` when that
-is not set). Without the file, or with one footplate cannot read, the window
-is as it was before there were settings: 14 pixels, auto.
+menu bar item where it is switched off, in one file footplate writes on
+every change: `$XDG_CONFIG_HOME/footplate/settings.json` when
+`XDG_CONFIG_HOME` is set, `~/Library/Application Support/footplate/settings.json`
+on macOS otherwise, and `~/.config/footplate/settings.json` on Linux
+otherwise. A relative `XDG_CONFIG_HOME` is ignored. Without the file, or
+with one footplate cannot read, the window is as it was before there were
+settings: 14 pixels, auto.
 
 ## Closing the window
 
