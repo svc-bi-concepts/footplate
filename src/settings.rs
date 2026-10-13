@@ -432,11 +432,11 @@ impl Settings {
             Err(_) => TokenLeft::None,
             Ok(path) => match self.shares(name, file) {
                 Some((other, _)) => TokenLeft::Shared(path, other.name.clone()),
-                None if yard::is_bare(&yard.token_file) => {
-                    // One that is gone already is as deleted as it gets.
-                    let _ = fs::remove_file(&path);
-                    TokenLeft::Deleted(path)
-                }
+                None if yard::is_bare(&yard.token_file) => match fs::remove_file(&path) {
+                    Ok(()) => TokenLeft::Deleted(path),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => TokenLeft::Deleted(path),
+                    Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
+                },
                 None => TokenLeft::Elsewhere(path),
             },
         };
@@ -474,6 +474,8 @@ pub enum TokenLeft {
     /// It had none: a yard of this machine, or one whose file was no file.
     None,
     Deleted(PathBuf),
+    /// It was a bare name, but the file could not be removed.
+    DeleteFailed(PathBuf, String),
     /// Named by a whole path, and left where the person keeps it.
     Elsewhere(PathBuf),
     /// Left: the yard of this name keeps its token in it.
@@ -494,6 +496,10 @@ impl TokenLeft {
             TokenLeft::None => format!("{name} is removed from the list. Its yard is as it was."),
             TokenLeft::Deleted(path) => format!(
                 "{name} is removed, and its token's file {} with it. {stays}",
+                path.display()
+            ),
+            TokenLeft::DeleteFailed(path, why) => format!(
+                "{name} is removed from the list, but its token's file {} could not be removed ({why}). {stays}",
                 path.display()
             ),
             TokenLeft::Elsewhere(path) => format!(
@@ -1008,6 +1014,26 @@ mod tests {
         let (none, left) = less.without("mac", Some(&file));
         assert_eq!(left, TokenLeft::Deleted(beside("yard.token")));
         assert_eq!(none.yards, [Yard::near(HERE, "")]);
+
+        // A path that cannot be removed is reported honestly; the settings
+        // must not say it deleted a token file that is still there.
+        let blocked = beside("yard-blocked.token");
+        fs::create_dir(&blocked).unwrap();
+        let blocked_set = Settings::default()
+            .with_yard(
+                None,
+                Yard::far(
+                    "blocked",
+                    "https://blocked.example.net",
+                    "yard-blocked.token",
+                ),
+                Some(&file),
+            )
+            .unwrap();
+        let (_, left) = blocked_set.without("blocked", Some(&file));
+        assert!(matches!(&left, TokenLeft::DeleteFailed(path, _) if path == &blocked));
+        assert!(left.said("blocked", None).contains("could not be removed"));
+        assert!(blocked.is_dir());
     }
 
     #[test]

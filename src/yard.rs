@@ -6,8 +6,9 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{self, Address, Client};
 use crate::settings::Settings;
@@ -137,14 +138,60 @@ pub fn token_path(token_file: &str, settings: Option<&Path>) -> Result<PathBuf, 
 /// Whether two paths are one file, by whichever way its directory is
 /// named: a link to the directory is the directory.
 pub fn same_file(a: &Path, b: &Path) -> bool {
-    let whole = |path: &Path| {
-        let dir = path.parent().and_then(|dir| fs::canonicalize(dir).ok());
-        match (dir, path.file_name()) {
-            (Some(dir), Some(name)) => dir.join(name),
-            _ => path.to_path_buf(),
-        }
+    if let (Ok(a_meta), Ok(b_meta)) = (fs::metadata(a), fs::metadata(b)) {
+        return a_meta.dev() == b_meta.dev() && a_meta.ino() == b_meta.ino();
+    }
+    resolved_path(a) == resolved_path(b)
+}
+
+/// The canonical path when it exists; otherwise, the longest existing
+/// prefix resolved through links, with the rest normalized and appended.
+/// Token files may not exist yet when two settings entries are compared.
+fn resolved_path(path: &Path) -> PathBuf {
+    if let Ok(path) = fs::canonicalize(path) {
+        return path;
+    }
+
+    let mut prefix = path.to_path_buf();
+    let mut suffix = Vec::new();
+    while !prefix.exists() {
+        let Some(name) = prefix.file_name() else {
+            return normalize_path(path);
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = prefix.parent() else {
+            return normalize_path(path);
+        };
+        prefix = parent.to_path_buf();
+    }
+
+    let Ok(mut resolved) = fs::canonicalize(&prefix) else {
+        return normalize_path(path);
     };
-    whole(a) == whole(b)
+    for name in suffix.into_iter().rev() {
+        resolved.push(name);
+    }
+    normalize_path(&resolved)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.file_name().is_some_and(|name| name != "..") {
+                    normalized.pop();
+                } else if !normalized.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Reads a device's token from its file. A file others can read is
@@ -182,23 +229,48 @@ pub fn read_token(file: &Path) -> Result<String, String> {
 /// place of the one that was there. The file is whole or not there: it is
 /// written beside itself and renamed.
 pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir)?;
     }
-    let mut name = file.file_name().unwrap_or_default().to_os_string();
-    name.push(".new");
-    let new = file.with_file_name(name);
-    // One left by a run that was killed between the two steps.
-    let _ = fs::remove_file(&new);
-    let mut out = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&new)?;
-    out.write_all(token.as_bytes())?;
-    out.write_all(b"\n")?;
-    out.sync_all()?;
-    fs::rename(&new, file)
+    let mut name = std::ffi::OsString::from(".footplate-token-");
+    name.push(std::process::id().to_string());
+    name.push("-");
+    name.push(file.file_name().unwrap_or_default());
+
+    // Never clear a fixed sibling: a settings entry may name that path as
+    // its own token file. Create a private candidate and leave collisions
+    // untouched, including leftovers from an interrupted write.
+    loop {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let mut candidate = name.clone();
+        candidate.push(format!("-{sequence}.new"));
+        let new = file.with_file_name(candidate);
+        let mut out = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&new)
+        {
+            Ok(out) => out,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        };
+        let written = out
+            .write_all(token.as_bytes())
+            .and_then(|()| out.write_all(b"\n"))
+            .and_then(|()| out.sync_all());
+        drop(out);
+        if let Err(err) = written {
+            let _ = fs::remove_file(&new);
+            return Err(err);
+        }
+        if let Err(err) = fs::rename(&new, file) {
+            let _ = fs::remove_file(&new);
+            return Err(err);
+        }
+        return Ok(());
+    }
 }
 
 /// The address and the code as they were typed. What a pairing's QR code
@@ -489,6 +561,53 @@ mod tests {
             &dir.path().join("yard.token"),
             &dir.path().join("yard-2.token")
         ));
+    }
+
+    #[test]
+    fn token_paths_that_are_file_links_or_hard_links_are_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = file_of_mode(dir.path(), "yard.token", 0o600, TOKEN);
+        let symbolic = dir.path().join("symbolic.token");
+        let hard = dir.path().join("hard.token");
+        std::os::unix::fs::symlink(&token, &symbolic).unwrap();
+        std::fs::hard_link(&token, &hard).unwrap();
+
+        assert!(same_file(&token, &symbolic));
+        assert!(same_file(&token, &hard));
+
+        let settings = dir.path().join("settings.json");
+        let set = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::far("mac", "https://mac.example.net", "yard.token"),
+                Some(&settings),
+            )
+            .unwrap();
+        for alias in ["symbolic.token", "hard.token"] {
+            let why = set
+                .clone()
+                .with_yard(
+                    None,
+                    settings::Yard::far("plantime", "https://plantime.example.net", alias),
+                    Some(&settings),
+                )
+                .unwrap_err();
+            assert!(why.contains("two yards may not share one"), "{why}");
+        }
+    }
+
+    #[test]
+    fn keeping_a_token_does_not_remove_a_neighboring_yard_s_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("yard-mac.token");
+        let other = dir.path().join("yard-mac.token.new");
+        fs::write(&other, "yardr-dev-other\n").unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o600)).unwrap();
+
+        keep_token(&token, "yardr-dev-mac").unwrap();
+
+        assert_eq!(read_token(&token).unwrap(), "yardr-dev-mac");
+        assert_eq!(read_token(&other).unwrap(), "yardr-dev-other");
     }
 
     #[test]
