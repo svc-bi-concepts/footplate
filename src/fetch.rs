@@ -288,7 +288,8 @@ pub fn stored(dir: &Path) -> Option<Stored> {
     let path = dir.join(PROGRAM);
     let version = fs::read_to_string(dir.join(VERSION_FILE)).ok()?;
     let version = Version::parse(version.trim())?;
-    fs::metadata(&path).ok()?.is_file().then(|| Stored {
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    (metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0).then(|| Stored {
         path,
         version: version.to_string(),
     })
@@ -750,10 +751,6 @@ pub fn program_with_progress(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("{} is no place for a program.", place.display()))?;
-    // Installed, and not on PATH: nothing to fetch.
-    if fs::symlink_metadata(place).is_ok() {
-        return Ok(());
-    }
     let dir = place
         .parent()
         .filter(|_| place.is_absolute())
@@ -772,13 +769,51 @@ pub fn program_with_progress(
     }
     let cannot =
         |what: &Path, err: io::Error| format!("{} cannot be written ({err}).", what.display());
+    if !dir.starts_with(home) || dir.components().any(|part| part == Component::ParentDir) {
+        return Err(outside());
+    }
+    let real_home = fs::canonicalize(home).map_err(|err| cannot(home, err))?;
+    // Check the nearest existing ancestor before making any directories.
+    // In particular, `~/.local` can be a symlink elsewhere; creating
+    // `~/.local/bin` first would write outside the home before noticing.
+    let mut existing = dir;
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or_else(|| cannot(existing, err))?;
+            }
+            Err(err) => return Err(cannot(existing, err)),
+        }
+    }
+    let real_existing = fs::canonicalize(existing).map_err(|err| cannot(existing, err))?;
+    if !real_existing.starts_with(&real_home) {
+        return Err(outside());
+    }
     fs::create_dir_all(dir).map_err(|err| cannot(dir, err))?;
-    let (real_dir, real_home) = (
-        fs::canonicalize(dir).map_err(|err| cannot(dir, err))?,
-        fs::canonicalize(home).map_err(|err| cannot(home, err))?,
-    );
+    let real_dir = fs::canonicalize(dir).map_err(|err| cannot(dir, err))?;
     if !real_dir.starts_with(&real_home) {
         return Err(outside());
+    }
+    // Doctor's PATH check should already have noticed a runnable file at
+    // this place. Preserve the useful no-fetch behavior if one is there,
+    // but do not let a stale link, directory or non-runnable file make the
+    // person retry an install that can never succeed.
+    match fs::symlink_metadata(place) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            return Err(format!(
+                "The place for {name}, {}, is a folder. Move it out of the way before installing {name}.",
+                place.display()
+            ));
+        }
+        Ok(metadata)
+            if metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0 =>
+        {
+            return Ok(());
+        }
+        Ok(_) => {} // A verified install below atomically replaces it.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(cannot(place, err)),
     }
     if !wanted.url.starts_with("https://") && !cfg!(test) {
         return Err(format!(
@@ -1390,6 +1425,33 @@ mod tests {
         ));
     }
 
+    /// A version marker does not make a symlink or a non-runnable file a
+    /// fetched yardr. The next check fetches the verified binary back into
+    /// footplate's directory before anything can run it.
+    #[test]
+    fn a_kept_yardr_must_be_a_regular_executable() {
+        let fixture = Fixture::new("v9.1.0");
+        let (first, _) = fixture.current().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let target = keep(other.path(), "yardr", b"not yardr").unwrap();
+
+        fs::remove_file(&first.path).unwrap();
+        std::os::unix::fs::symlink(&target, &first.path).unwrap();
+        assert_eq!(stored(&fixture.dir()), None);
+        let (replaced, _) = fixture.current().unwrap();
+        assert_eq!(fs::read(&replaced.path).unwrap(), BINARY);
+        assert_eq!(fs::read(&target).unwrap(), b"not yardr");
+
+        fs::set_permissions(&replaced.path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(stored(&fixture.dir()), None);
+        let (executable, _) = fixture.current().unwrap();
+        assert_eq!(fs::read(&executable.path).unwrap(), BINARY);
+        assert_eq!(
+            fs::metadata(&executable.path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
     /// A program that is still open for writing somewhere when it is
     /// started, as one is on Linux while another process is on its way to
     /// being its own program, is started once that has passed.
@@ -1463,6 +1525,37 @@ mod tests {
         assert_eq!(fs::read(&codex).unwrap(), b"codex itself");
     }
 
+    /// A stale non-executable destination can be repaired by the named
+    /// installer; a directory is left intact with a clear reason.
+    #[test]
+    fn an_unusable_program_place_does_not_make_install_retry_forever() {
+        let site = Site::start();
+        let home = tempfile::tempdir().unwrap();
+        let (own, path) = (home.path().join("own"), OsStr::new("/usr/bin:/bin"));
+        let place = home.path().join(".local/bin/herdr");
+        fs::create_dir_all(place.parent().unwrap()).unwrap();
+        fs::write(&place, b"old non-executable file").unwrap();
+        fs::set_permissions(&place, fs::Permissions::from_mode(0o644)).unwrap();
+        site.put("/herdr", b"verified herdr");
+        let herdr = wanted(&site, "/herdr", b"verified herdr", &place);
+
+        program(&herdr, home.path(), &own, path).unwrap();
+        assert_eq!(fs::read(&place).unwrap(), b"verified herdr");
+        assert_eq!(site.asked(), ["/herdr"]);
+
+        let folder = home.path().join(".local/bin/codex");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("keep"), b"user data").unwrap();
+        site.put("/codex", b"verified codex");
+        let codex = wanted(&site, "/codex", b"verified codex", &folder);
+        let before = site.asked().len();
+        let why = program(&codex, home.path(), &own, path).unwrap_err();
+
+        assert!(why.contains("is a folder"), "{why}");
+        assert_eq!(site.asked().len(), before);
+        assert_eq!(fs::read(folder.join("keep")).unwrap(), b"user data");
+    }
+
     /// What is not the file yardr named is not kept and not run: another
     /// file, a longer one, an archive with more in it, a place outside the
     /// home, an address that sends on without end.
@@ -1506,6 +1599,7 @@ mod tests {
         let why = program(&linked, home.path(), &own, path).unwrap_err();
         assert!(why.contains("is not under your home"), "{why}");
         assert!(!outside.path().join("bin/claude").exists());
+        assert!(!outside.path().join("bin").exists());
         // An address that sends on to itself.
         site.put("/round", "/round");
         site.status("/round", 302);
