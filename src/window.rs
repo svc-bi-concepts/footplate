@@ -250,8 +250,25 @@ const APPROVE_KEY: &str = if cfg!(target_os = "macos") {
 };
 
 /// What a run ask's card says over the command, while it can be approved:
-/// the words `yardr chat` has for it.
-const RUN_RUNS: &str = "when you approve, the yard runs this as its operator, and nothing else:";
+/// the words `yardr chat` has for it, led by the yard the command runs in
+/// and with the user it runs as, who is the one the approval is called as.
+/// With several yards in one window, the sentence over a command is where
+/// it must be plain which of them runs it.
+fn run_runs(yard: &str, user: &str) -> String {
+    format!("in {yard}, when you approve, the yard runs this as {user}, and nothing else:")
+}
+
+/// The header of a card: the yard it is of first, then the bead and how
+/// long it waits or which ask it is. No card is read without its yard.
+fn card_head(yard: &str, bead: &str, rest: &str) -> String {
+    format!("{yard} · {bead} · {rest}")
+}
+
+/// What the control that approves a run ask reads: the yard its command
+/// runs in, and its key.
+fn approve_label(yard: &str) -> String {
+    format!("Approve in {yard} ({APPROVE_KEY})")
+}
 
 /// What it says over the command of one that takes no approval any more.
 const RUN_PROPOSED: &str = "the command this ask proposed:";
@@ -320,15 +337,17 @@ fn send_button(
 }
 
 /// The button that approves a run ask, exactly as its key does, which it
-/// names: `Approve (⌘↵)`. Disabled while an approval is with the yard.
+/// names with the yard that runs the command: `Approve in plantime (⌘↵)`.
+/// Disabled while an approval is with the yard.
 fn approve_button(
     id: String,
+    yard: &str,
     enabled: bool,
     palette: Palette,
     cx: &mut Context<Footplate>,
 ) -> impl IntoElement {
     let click = enabled.then(|| cx.listener(|this, _, _, cx| this.approve(cx)));
-    card_button(id, format!("Approve ({APPROVE_KEY})"), palette, click)
+    card_button(id, approve_label(yard), palette, click)
 }
 
 /// A card's one filled button, with what a click on it does. Without that
@@ -4665,7 +4684,8 @@ impl Footplate {
         let ask_seq = ask.ask;
         let current = ask.current;
         let mut card = div().flex().flex_col().gap_2();
-        // The question, with the bead small and how long it waits.
+        // The question, with the yard, the bead small and how long it
+        // waits.
         let short = detail
             .bead
             .rsplit('-')
@@ -4683,10 +4703,11 @@ impl Footplate {
                 )
                 .child(
                     div()
+                        .debug_selector(|| format!("in {} {bead_id} {ask_seq}", self.yard))
                         .flex_none()
                         .text_sm()
                         .text_color(palette.faint)
-                        .child(format!("{short} · {}", ask.waits)),
+                        .child(card_head(&self.yard, short, &ask.waits)),
                 ),
         );
         // The asker and the recommendation.
@@ -4868,6 +4889,7 @@ impl Footplate {
                     .when(ask.run.is_some() && !elsewhere, |el| {
                         el.child(approve_button(
                             format!("approve {bead_id} {ask_seq}"),
+                            &self.yard,
                             self.approving.is_none(),
                             palette,
                             cx,
@@ -4970,6 +4992,12 @@ impl Footplate {
     ) -> impl IntoElement + use<> {
         let card_key = select::key((bead, ask));
         let command = model::plain(&run.line());
+        // The user the approval is called as, and so the one it runs as.
+        let user = self.model.as_ref().map(|m| m.me()).unwrap_or_default();
+        let over = match open {
+            true => run_runs(&self.yard, user),
+            false => RUN_PROPOSED.to_string(),
+        };
         let mut block = div()
             .debug_selector(|| format!("run {bead} {ask}"))
             .p_3()
@@ -4980,11 +5008,13 @@ impl Footplate {
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().text_sm().text_color(palette.faint).child(if open {
-                RUN_RUNS
-            } else {
-                RUN_PROPOSED
-            }))
+            .child(
+                div()
+                    .debug_selector(|| over.clone())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(over.clone()),
+            )
             .child(
                 div()
                     .debug_selector(|| format!("run command {bead} {ask}"))
@@ -5078,9 +5108,10 @@ impl Footplate {
             )
             .child(
                 div()
+                    .debug_selector(|| format!("in {} {bead} {ask}", self.yard))
                     .text_sm()
                     .text_color(palette.faint)
-                    .child(format!("{} · ask {ask}", detail.bead)),
+                    .child(card_head(&self.yard, &detail.bead, &format!("ask {ask}"))),
             );
         let mut body = div()
             .id("decided")
@@ -5181,6 +5212,7 @@ impl Footplate {
                 } else if approving {
                     body = body.child(div().flex().child(approve_button(
                         format!("approve {bead} {ask}"),
+                        &self.yard,
                         self.approving.is_none(),
                         palette,
                         cx,
@@ -11001,6 +11033,121 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk").len(), 3);
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// Every card names the yard it is of, and a run ask's block and its
+    /// control name it again; with one yard in the settings as with
+    /// several. The approval goes to the yard the card names and to no
+    /// other, after a switch too: each yard here holds the same ask on the
+    /// same bead, so only the yard tells them apart.
+    #[gpui::test]
+    fn a_run_ask_is_approved_in_the_yard_its_card_names_after_a_switch_too(
+        cx: &mut TestAppContext,
+    ) {
+        assert_eq!(card_head("plantime", "k3vd", "2h"), "plantime · k3vd · 2h");
+        assert_eq!(
+            run_runs("plantime", "mckean"),
+            "in plantime, when you approve, the yard runs this as mckean, and nothing else:"
+        );
+        assert_eq!(
+            approve_label("plantime"),
+            format!("Approve in plantime ({APPROVE_KEY})")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        let second = Yard::start();
+        let far = Yard::start_tcp();
+        a_yard_of_jo(&near);
+        a_yard_of_jo(&second);
+        a_far_yard_of_jo(&far);
+        let yards = [
+            ("this machine", &near),
+            ("second home", &second),
+            ("far", &far),
+        ];
+        for (name, yard) in yards {
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+            );
+            yard.answer("Bead", &bead_run());
+            // Each refuses in words of its own: what the window says then
+            // is the word of the yard that was asked.
+            yard.answer(
+                "ApproveAsk",
+                &json!({"error": {"code": "error", "message": format!("{name} refuses")}})
+                    .to_string(),
+            );
+        }
+        let approvals = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            yards.map(|(_, yard)| yard.asked("ApproveAsk").len())
+        };
+        // On the card: the header and the sentence over the command. That
+        // it is the open yard's is asked of the window, since what was
+        // drawn once is found by its selector in every frame after.
+        fn names(view: &Entity<Footplate>, cx: &mut VisualTestContext, name: &str) -> bool {
+            let read = view.read_with(cx, |v, _| {
+                v.yard == name && v.model.as_ref().is_some_and(|m| m.has_bead("bead-s"))
+            });
+            cx.update(|window, _| window.refresh());
+            read && drawn(cx, &format!("in {name} bead-s 7")) && drawn(cx, &run_runs(name, "jo"))
+        }
+
+        // One yard in the settings: its name is on the card all the same.
+        let alone = dir.path().join("alone/settings.json");
+        let at = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_on_the_ask(at.clone(), &alone, cx);
+        assert_eq!(settings_of(&view, cx).yards.len(), 1);
+        assert!(names(&view, cx, "this machine"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        cx.update(|window, _| window.remove_window());
+
+        // Several: the approval goes to the yard on the card.
+        let file = three_yards(dir.path(), &second, &far);
+        let (view, cx) = opened_on_the_ask(at, &file, cx);
+        assert!(names(&view, cx, "this machine"));
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "this machine's refusal", |cx| {
+            notice(&view, cx) == "not approved: this machine refuses"
+        });
+        assert_eq!(approvals(cx), [1, 0, 0]);
+
+        // After a switch the card names the other yard, and its key and
+        // its button approve there.
+        for (key, name, asked) in [
+            ("secondary-2", "second home", [1, 1, 0]),
+            ("secondary-3", "far", [1, 1, 1]),
+        ] {
+            cx.simulate_keystrokes(key);
+            wait(cx, "the other yard's card", |cx| names(&view, cx, name));
+            cx.simulate_keystrokes("secondary-enter");
+            wait(cx, "that yard's refusal", |cx| {
+                notice(&view, cx) == format!("not approved: {name} refuses")
+            });
+            assert_eq!(approvals(cx), asked);
+        }
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "a second call in the far yard", |cx| {
+            let _ = cx;
+            far.asked("ApproveAsk").len() == 2
+        });
+        assert_eq!(approvals(cx), [1, 1, 2]);
+
+        // And back: the first yard's card, and its yard alone is asked.
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's card again", |cx| {
+            names(&view, cx, "this machine")
+        });
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "this machine's refusal again", |cx| {
+            notice(&view, cx) == "not approved: this machine refuses"
+        });
+        assert_eq!(approvals(cx), [2, 1, 2]);
     }
 
     /// Against a yard that does not have the call, by its socket, or does

@@ -380,8 +380,12 @@ they are, with no block in them. Under them is the one block of the card,
 and all of it is the yard's: the command whole, in a code block that wraps
 where the window is narrower and is never cut; the yard's sentences for
 what the command changes and what is there now; and the command that takes
-the change back. Directly under the block is the Approve button, with its
-key: `cmd+enter` (`ctrl+enter` on Linux), which no other card answers to.
+the change back. Every card's header leads with the name of the open yard,
+before the bead and how long it waits, and a run ask's block leads with it
+too, with the user the command runs as: "in plantime, when you approve, the
+yard runs this as mckean, and nothing else:". Directly under the block is
+the Approve button, which names the yard and its key, "Approve in plantime
+(⌘↵)": `cmd+enter` (`ctrl+enter` on Linux), which no other card answers to.
 Enter alone approves nothing. Approving calls `ApproveAsk`, which names the
 ask and nothing of the command: the yard runs what it stored. Afterwards
 the window says `approved, ran:` with the command and what it printed, or
