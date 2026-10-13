@@ -163,6 +163,7 @@ impl From<Kept> for Settings {
     /// follows it, which the window offered beside it then. Else it has
     /// this machine's alone. The next write keeps it as a list.
     fn from(kept: Kept) -> Settings {
+        let moved_remote = kept.yards.is_empty() && kept.remote && !kept.address.is_empty();
         let yards = match kept.yards.is_empty() {
             false => kept.yards,
             true if kept.remote && !kept.address.is_empty() => vec![
@@ -171,11 +172,23 @@ impl From<Kept> for Settings {
             ],
             true => vec![Yard::near(HERE, "")],
         };
+        let yards = told_apart(yards);
+        // Before the list, an unmatched `open` fell back to the paired
+        // yard. Keep that behavior if it happens to match the new near yard.
+        let open = if moved_remote
+            && yards
+                .iter()
+                .any(|yard| yard.name == kept.open && !yard.is_far())
+        {
+            String::new()
+        } else {
+            kept.open
+        };
         Settings {
-            yards: told_apart(yards),
+            yards,
             text: kept.text,
             look: kept.look,
-            open: kept.open,
+            open,
             notifications: kept.notifications,
         }
     }
@@ -765,6 +778,17 @@ mod tests {
             yard::token_path(&set.opened().token_file, Some(&file)).unwrap(),
             dir.path().join("yard.token")
         );
+
+        // An old unmatched open name also fell back to the only yard. Once
+        // the near yard is added, it must not start matching that name.
+        fs::write(
+            &file,
+            "{\"remote\": true, \"address\": \"https://mac.example.net:8443/yard\", \"open\": \"this machine\"}",
+        )
+        .unwrap();
+        let moved = Settings::read(&file);
+        assert_eq!(moved.opened().name, "mac.example.net");
+
         // The next write keeps it as a list, and reads back the same.
         set.write(&file).unwrap();
         let text = fs::read_to_string(&file).unwrap();
@@ -773,6 +797,22 @@ mod tests {
             "{text}"
         );
         assert_eq!(Settings::read(&file), set);
+
+        // An existing list is respected even if legacy fields remain: a
+        // person who removed this machine's yard does not get it back.
+        fs::write(
+            &file,
+            r#"{"remote": true, "address": "https://mac.example.net:8443/yard", "yards": [{"name": "mac.example.net", "address": "https://mac.example.net:8443/yard", "token_file": "yard.token"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::read(&file).yards,
+            [Yard::far(
+                "mac.example.net",
+                "https://mac.example.net:8443/yard",
+                "yard.token"
+            )]
+        );
 
         // This machine's yard was chosen, or nothing ever was: the one
         // yard is this machine's, and the file says nothing of it.

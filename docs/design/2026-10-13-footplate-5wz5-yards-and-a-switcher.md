@@ -196,13 +196,11 @@ An existing settings file with one yard is moved on read, once:
 for the address's host, keeping `yard.token` as its token file, which
 stays the one that opens, then the near entry "this machine", since the
 window offered both before the list; anything else becomes the near
-entry "this machine" alone. Nothing is added to a file that already has
-a list: a person who removed this machine's yard does not get it back.
-The deprecated `remote` and
-`address` fields are still read, so mckean's own file opens, and the
-next write keeps the new shape. Compatibility with anyone else's file is
-not needed. Two entries may not share a name; the settings say so where
-one is added or renamed.
+entry "this machine" alone. The deprecated `remote` and `address` fields
+are still read, so mckean's own file opens, and the next write keeps the
+new shape.
+Compatibility with anyone else's file is not needed. Two entries may not
+share a name; the settings say so where one is added or renamed.
 
 ### 3.2. One open yard
 
@@ -282,6 +280,8 @@ one line. Above the list, one sentence says what a pairing gives over a
 peer link: "A paired yard is called with this device's own token, so
 your picks and approvals there count as yours, where over a peer link
 you only see what the link carries and an approval never crosses."
+Nothing is added to a list that exists: a person who removed this
+machine's yard does not get it back.
 
 ### 3.6. A yard that is not reached
 
