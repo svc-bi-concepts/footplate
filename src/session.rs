@@ -40,7 +40,8 @@ struct Following {
 }
 
 /// Stops a yard follower, including an event stream blocked waiting for the
-/// next event. One is kept by the window for the currently open yard.
+/// next event. The window keeps one for each yard it follows, which is every
+/// yard of its settings.
 #[derive(Clone, Default)]
 pub struct FollowControl(Arc<Mutex<Following>>);
 

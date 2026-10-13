@@ -460,6 +460,10 @@ pub struct Model {
     status_at: HashMap<String, u64>,
     /// What arrived and the window has not taken yet, oldest first.
     news: Vec<News>,
+    /// The window shows another yard: no row of this one is open, and none
+    /// is opened by what arrives, so nothing of it is seen or marked read
+    /// until the window is back ([`Model::back_to`]).
+    aside: bool,
     /// What went wrong last, in words; empty when nothing.
     pub notice: String,
 }
@@ -481,6 +485,24 @@ impl Model {
         selected: Option<Selected>,
         decided_expanded: bool,
     ) -> (Model, Vec<Effect>) {
+        let mut m = Self::of(state, decided_expanded);
+        m.selected = m.row(selected);
+        m.opened();
+        let effects = m.open();
+        (m, effects)
+    }
+
+    /// The model of a state just read of a yard the window does not show:
+    /// it has what waits there, and no row of it is open.
+    pub fn new_aside(state: State) -> Model {
+        Model {
+            aside: true,
+            ..Self::of(state, false)
+        }
+    }
+
+    /// What a state just read has, with no row open yet.
+    fn of(state: State, decided_expanded: bool) -> Model {
         let mut m = Model {
             me: state.me,
             parties: parties(&state.peers),
@@ -504,8 +526,15 @@ impl Model {
                 },
             );
         }
-        let order = m.order();
-        m.selected = selected.filter(|s| order.contains(s)).or_else(|| {
+        m
+    }
+
+    /// The row to open: `selected` where it is still there, else an open
+    /// decision, else the yardmaster's conversation, else the first row
+    /// from the top.
+    fn row(&self, selected: Option<Selected>) -> Option<Selected> {
+        let order = self.order();
+        selected.filter(|s| order.contains(s)).or_else(|| {
             // A kept expansion makes dealt-with rows visible, but a saved
             // row that disappeared falls back as it did before that list
             // was kept: to an open decision, yardmaster, or first row.
@@ -524,10 +553,27 @@ impl Model {
                     })
                 })
                 .or_else(|| order.into_iter().next())
-        });
-        m.opened();
-        let effects = m.open();
-        (m, effects)
+        })
+    }
+
+    /// The window shows another yard from here on: the open row is shut,
+    /// and what arrives opens none. What it holds stays as it is, and goes
+    /// on with the yard; what went wrong last was said while it showed.
+    pub fn leave(&mut self) {
+        self.selected = None;
+        self.aside = true;
+        self.notice.clear();
+    }
+
+    /// The window shows this yard again: on `selected`, the row it was left
+    /// on, where that is still there, as [`Model::new_returning`] opens
+    /// one.
+    pub fn back_to(&mut self, selected: Option<Selected>, decided_expanded: bool) -> Vec<Effect> {
+        self.aside = false;
+        self.decided_expanded |= decided_expanded;
+        self.selected = self.row(selected);
+        self.opened();
+        self.open()
     }
 
     /// The model of a state read again after the yard was lost: what was
@@ -535,7 +581,12 @@ impl Model {
     /// back to from a decision stays that one.
     pub fn resumed(&self, state: State) -> (Model, Vec<Effect>) {
         let unread = state.unread.clone();
-        let (mut m, mut effects) = Model::new(state, self.selected.clone());
+        // Of a yard the window does not show, no row is open afterwards
+        // either.
+        let (mut m, mut effects) = match self.aside {
+            true => (Model::new_aside(state), Vec::new()),
+            false => Model::new(state, self.selected.clone()),
+        };
         if m.back.is_none() {
             m.back = self.back.clone();
         }
@@ -2376,6 +2427,10 @@ impl Model {
     /// leads back to where it was opened from. With none before it, or
     /// when that one is gone too, the first row from the top is opened.
     fn reselect(&mut self) -> Vec<Effect> {
+        // No row is open of a yard the window does not show.
+        if self.aside {
+            return Vec::new();
+        }
         let order = self.order();
         if self.selected.as_ref().is_some_and(|s| order.contains(s)) {
             return Vec::new();
@@ -2894,6 +2949,61 @@ mod tests {
         assert_eq!(rows[1].line, "working");
         assert_eq!(rows[2].line, "crew member: Keeps the books");
         assert_eq!(rows[3].line, "person");
+    }
+
+    /// A yard the window does not show has no open row: its mail counts,
+    /// is news of a row that is not open, and is never seen or marked read
+    /// until the window is back on it, whatever arrives or is read again.
+    #[test]
+    fn a_yard_held_aside_sees_nothing_until_the_window_is_back_on_its_row() {
+        let (mut m, _) = Model::new(yard(&[]), Some(Selected::Conversation("assembly".into())));
+        m.conversation("assembly", Vec::new());
+        m.leave();
+        assert_eq!(m.selected(), None);
+        assert_eq!(m.event(&mail_to_jo(21, "assembly")), []);
+        assert_eq!(m.unread("assembly"), 1);
+        let news = m.take_news();
+        assert_eq!(news.len(), 1);
+        assert!(!news[0].open);
+        assert_eq!(news[0].target, Selected::Conversation("assembly".into()));
+
+        // The stream ends and the yard is read again: still no row, and
+        // what arrived meanwhile is news as it is of an open yard.
+        let (mut m, effects) = m.resumed(yard(&[(21, "assembly"), (22, "yardmaster")]));
+        assert_eq!(effects, []);
+        assert_eq!(m.selected(), None);
+        assert_eq!(m.take_news().len(), 1);
+        // A yard read for the first time while another is shown is the same.
+        let mut fresh = Model::new_aside(yard(&[(21, "assembly")]));
+        assert_eq!(fresh.selected(), None);
+        assert_eq!(fresh.unread("assembly"), 1);
+        assert_eq!(fresh.event(&mail_to_jo(23, "assembly")), []);
+        assert_eq!(fresh.unread("assembly"), 2);
+
+        // Back on the row it was left on: its mail is read and marked so.
+        assert_eq!(
+            m.back_to(Some(Selected::Conversation("assembly".into())), false),
+            [page("assembly", 0)]
+        );
+        assert_eq!(
+            m.selected(),
+            Some(&Selected::Conversation("assembly".into()))
+        );
+        assert_eq!(
+            m.page(
+                "assembly",
+                0,
+                vec![letter(21, "assembly", "jo", "unread")],
+                false
+            ),
+            [Effect::Ack { through: 21 }]
+        );
+        // With no row kept it opens as a yard opened for the first time.
+        assert!(!fresh.back_to(None, false).is_empty());
+        assert_eq!(
+            fresh.selected(),
+            Some(&Selected::Conversation("yardmaster".into()))
+        );
     }
 
     #[test]

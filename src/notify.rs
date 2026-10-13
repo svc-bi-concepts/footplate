@@ -61,15 +61,17 @@ pub struct Telling {
     pub target: Selected,
 }
 
-/// What arrived since the last notification and is still to be told of.
+/// What arrived since the last notification and is still to be told of,
+/// each with the yard it arrived in: every yard of the settings is
+/// followed, and a burst may be of several.
 #[derive(Debug, Default)]
-pub struct Burst(Vec<News>);
+pub struct Burst(Vec<(String, News)>);
 
 impl Burst {
-    /// Takes `news` in, and says whether it is the first: the window waits
-    /// [`BURST`] from then and tells of all there is.
-    pub fn add(&mut self, news: News) -> bool {
-        self.0.push(news);
+    /// Takes `news` of `yard` in, and says whether it is the first: the
+    /// window waits [`BURST`] from then and tells of all there is.
+    pub fn add(&mut self, yard: &str, news: News) -> bool {
+        self.0.push((yard.to_string(), news));
         self.0.len() == 1
     }
 
@@ -79,71 +81,114 @@ impl Burst {
         self.0.clear();
     }
 
+    /// Drops what waits of `yard`: it is no longer one of the settings',
+    /// and a notification of it would lead nowhere.
+    pub fn forget(&mut self, yard: &str) {
+        self.0.retain(|(of, _)| of != yard);
+    }
+
     /// All there is as one notification, or none when there is nothing. It
-    /// leads to the row of the first, in `yard`: the one all of it arrived
-    /// in.
-    pub fn take(&mut self, yard: &str) -> Option<Telling> {
-        let news = std::mem::take(&mut self.0);
-        let first = news.first()?;
-        let (yard, target) = (yard.to_string(), first.target.clone());
-        if let [one] = news.as_slice() {
-            let title = match one.kind {
-                Kind::Mail => line(&one.from),
-                Kind::Decision if one.from.is_empty() => "a decision waits".to_string(),
-                Kind::Decision => format!("{} asks", line(&one.from)),
-                Kind::Notice => model::YARD.to_string(),
-            };
-            return Some(Telling {
-                title,
-                body: line(&one.text),
-                yard,
-                target,
-            });
-        }
-        let mail_of_one = news
-            .iter()
-            .all(|n| n.kind == Kind::Mail && n.from == first.from);
-        if mail_of_one {
-            // The newest says most of where the sender stands.
-            let last = news.last().unwrap_or(first);
-            return Some(Telling {
-                title: format!("{} from {}", news.len(), line(&first.from)),
-                body: line(&last.text),
-                yard,
-                target,
-            });
-        }
-        // Of several kinds or senders: how many of each, mail by sender in
-        // the order it came.
-        let mut parts: Vec<(String, usize)> = Vec::new();
-        let mut count = |part: String| match parts.iter_mut().find(|(have, _)| *have == part) {
-            Some((_, n)) => *n += 1,
-            None => parts.push((part, 1)),
-        };
-        for n in news.iter().filter(|n| n.kind == Kind::Mail) {
-            count(format!("from {}", line(&n.from)));
-        }
-        let mut body: Vec<String> = parts
-            .into_iter()
-            .map(|(part, n)| format!("{n} {part}"))
-            .collect();
-        for (kind, one, several) in [
-            (Kind::Decision, "decision", "decisions"),
-            (Kind::Notice, "notice", "notices"),
-        ] {
-            match news.iter().filter(|n| n.kind == kind).count() {
-                0 => {}
-                1 => body.push(format!("1 {one}")),
-                n => body.push(format!("{n} {several}")),
+    /// leads to the row of the first, in the yard that arrived in. `named`
+    /// is whether it says which yard: where several are followed, a sender
+    /// alone does not. A burst of several yards always does, each yard's
+    /// part by itself.
+    pub fn take(&mut self, named: bool) -> Option<Telling> {
+        let all = std::mem::take(&mut self.0);
+        let (yard, first) = all.first()?;
+        let (yard, target) = (yard.clone(), first.target.clone());
+        // Each yard's news, the yards in the order they were first heard.
+        let mut yards: Vec<(&str, Vec<&News>)> = Vec::new();
+        for (of, news) in &all {
+            match yards.iter_mut().find(|(have, _)| have == of) {
+                Some((_, its)) => its.push(news),
+                None => yards.push((of, vec![news])),
             }
         }
+        let (title, body) = match yards.as_slice() {
+            [(_, news)] => of_one_yard(news, named.then_some(yard.as_str())),
+            yards => {
+                let parts: Vec<String> = yards
+                    .iter()
+                    .map(|(of, news)| format!("{}: {}", line(of), counted(news)))
+                    .collect();
+                (
+                    format!("{} new in {} yards", all.len(), yards.len()),
+                    parts.join("; "),
+                )
+            }
+        };
         Some(Telling {
-            title: format!("{} new in the yard", news.len()),
-            body: body.join(", "),
+            title,
+            body,
             yard,
             target,
         })
     }
+}
+
+/// The two lines of a notification of one yard's `news`, which is not
+/// empty: led by the yard's name where `yard` gives one.
+fn of_one_yard(news: &[&News], yard: Option<&str>) -> (String, String) {
+    let Some(first) = news.first() else {
+        return Default::default();
+    };
+    let lead = |title: String| match yard {
+        Some(yard) => format!("{} · {title}", line(yard)),
+        None => title,
+    };
+    if let [one] = news {
+        let title = match one.kind {
+            Kind::Mail => line(&one.from),
+            Kind::Decision if one.from.is_empty() => "a decision waits".to_string(),
+            Kind::Decision => format!("{} asks", line(&one.from)),
+            Kind::Notice => model::YARD.to_string(),
+        };
+        return (lead(title), line(&one.text));
+    }
+    let mail_of_one = news
+        .iter()
+        .all(|n| n.kind == Kind::Mail && n.from == first.from);
+    if mail_of_one {
+        // The newest says most of where the sender stands.
+        let last = news.last().unwrap_or(first);
+        return (
+            lead(format!("{} from {}", news.len(), line(&first.from))),
+            line(&last.text),
+        );
+    }
+    let title = match yard {
+        Some(yard) => format!("{} new in {}", news.len(), line(yard)),
+        None => format!("{} new in the yard", news.len()),
+    };
+    (title, counted(news))
+}
+
+/// `news` of several kinds or senders in a line: how many of each, mail
+/// by sender in the order it came.
+fn counted(news: &[&News]) -> String {
+    let mut parts: Vec<(String, usize)> = Vec::new();
+    let mut count = |part: String| match parts.iter_mut().find(|(have, _)| *have == part) {
+        Some((_, n)) => *n += 1,
+        None => parts.push((part, 1)),
+    };
+    for n in news.iter().filter(|n| n.kind == Kind::Mail) {
+        count(format!("from {}", line(&n.from)));
+    }
+    let mut body: Vec<String> = parts
+        .into_iter()
+        .map(|(part, n)| format!("{n} {part}"))
+        .collect();
+    for (kind, one, several) in [
+        (Kind::Decision, "decision", "decisions"),
+        (Kind::Notice, "notice", "notices"),
+    ] {
+        match news.iter().filter(|n| n.kind == kind).count() {
+            0 => {}
+            1 => body.push(format!("1 {one}")),
+            n => body.push(format!("{n} {several}")),
+        }
+    }
+    body.join(", ")
 }
 
 /// The first line of `text` that says something, as a notification has it:
@@ -601,13 +646,13 @@ mod tests {
     #[test]
     fn one_arrival_names_who_it_is_from_and_its_first_line() {
         let mut burst = Burst::default();
-        assert_eq!(burst.take("north"), None);
-        assert!(burst.add(mail(
-            "yardmaster@mac",
-            "\n  Landed on main.\nThe tests held."
-        )));
+        assert_eq!(burst.take(false), None);
+        assert!(burst.add(
+            "north",
+            mail("yardmaster@mac", "\n  Landed on main.\nThe tests held.")
+        ));
         assert_eq!(
-            burst.take("north"),
+            burst.take(false),
             Some(Telling {
                 title: "yardmaster@mac".into(),
                 body: "Landed on main.".into(),
@@ -616,10 +661,10 @@ mod tests {
             })
         );
         // Taken: the next is the first again.
-        assert_eq!(burst.take("north"), None);
-        assert!(burst.add(ask("assembly", "Land it?", "yd-1")));
+        assert_eq!(burst.take(false), None);
+        assert!(burst.add("north", ask("assembly", "Land it?", "yd-1")));
         assert_eq!(
-            burst.take("north"),
+            burst.take(false),
             Some(Telling {
                 title: "assembly asks".into(),
                 body: "Land it?".into(),
@@ -627,11 +672,11 @@ mod tests {
                 target: Selected::Decision("yd-1".into()),
             })
         );
-        burst.add(ask("", "Land it?", "yd-1"));
-        assert_eq!(burst.take("north").unwrap().title, "a decision waits");
-        burst.add(notice("yd-1 closed"));
+        burst.add("north", ask("", "Land it?", "yd-1"));
+        assert_eq!(burst.take(false).unwrap().title, "a decision waits");
+        burst.add("north", notice("yd-1 closed"));
         assert_eq!(
-            burst.take("north"),
+            burst.take(false),
             Some(Telling {
                 title: "yard".into(),
                 body: "yd-1 closed".into(),
@@ -644,11 +689,11 @@ mod tests {
     #[test]
     fn a_burst_is_one_notification() {
         let mut burst = Burst::default();
-        assert!(burst.add(mail("yardmaster@mac", "One.")));
-        assert!(!burst.add(mail("yardmaster@mac", "Two.")));
-        assert!(!burst.add(mail("yardmaster@mac", "Three.")));
+        assert!(burst.add("north", mail("yardmaster@mac", "One.")));
+        assert!(!burst.add("north", mail("yardmaster@mac", "Two.")));
+        assert!(!burst.add("north", mail("yardmaster@mac", "Three.")));
         assert_eq!(
-            burst.take("north"),
+            burst.take(false),
             Some(Telling {
                 title: "3 from yardmaster@mac".into(),
                 body: "Three.".into(),
@@ -656,7 +701,7 @@ mod tests {
                 target: Selected::Conversation("yardmaster@mac".into()),
             })
         );
-        assert_eq!(burst.take("north"), None);
+        assert_eq!(burst.take(false), None);
 
         // Of several senders and kinds: how many of each, and it leads to
         // the first.
@@ -668,10 +713,10 @@ mod tests {
             ask("assembly", "And this?", "yd-2"),
             notice("yd-1 closed"),
         ] {
-            burst.add(news);
+            burst.add("north", news);
         }
         assert_eq!(
-            burst.take("north"),
+            burst.take(false),
             Some(Telling {
                 title: "6 new in the yard".into(),
                 body: "2 from assembly, 1 from yardmaster, 2 decisions, 1 notice".into(),
@@ -679,6 +724,64 @@ mod tests {
                 target: Selected::Decision("yd-1".into()),
             })
         );
+    }
+
+    /// Where several yards are followed a notification says which it is
+    /// of, and a burst of several says each yard's part by itself. It
+    /// leads to the row of the first, in the yard that arrived in.
+    #[test]
+    fn a_notification_names_its_yard_and_a_burst_of_two_yards_says_each_part() {
+        let mut burst = Burst::default();
+        burst.add("plantime", ask("yardmaster", "Land it?", "yd-1"));
+        assert_eq!(
+            burst.take(true),
+            Some(Telling {
+                title: "plantime · yardmaster asks".into(),
+                body: "Land it?".into(),
+                yard: "plantime".into(),
+                target: Selected::Decision("yd-1".into()),
+            })
+        );
+        burst.add("plantime", mail("assembly", "One."));
+        burst.add("plantime", mail("assembly", "Two."));
+        let telling = burst.take(true).unwrap();
+        assert_eq!(telling.title, "plantime · 2 from assembly");
+        assert_eq!(telling.body, "Two.");
+        burst.add("plantime", mail("assembly", "One."));
+        burst.add("plantime", notice("yd-1 closed"));
+        let telling = burst.take(true).unwrap();
+        assert_eq!(telling.title, "2 new in plantime");
+        assert_eq!(telling.body, "1 from assembly, 1 notice");
+
+        // Of two yards: named whatever was asked, since neither is "the"
+        // yard, and a sender of one name in both is counted in each.
+        for (yard, news) in [
+            ("mac", mail("assembly", "Built.")),
+            ("plantime", ask("yardmaster", "Land it?", "yd-1")),
+            ("plantime", mail("assembly", "Tested.")),
+            ("mac", mail("assembly", "Landed.")),
+        ] {
+            burst.add(yard, news);
+        }
+        assert_eq!(
+            burst.take(false),
+            Some(Telling {
+                title: "4 new in 2 yards".into(),
+                body: "mac: 2 from assembly; plantime: 1 from assembly, 1 decision".into(),
+                yard: "mac".into(),
+                target: Selected::Conversation("assembly".into()),
+            })
+        );
+
+        // A yard that is no longer listed is told of no more, and a name a
+        // person gave a yard reaches the system as text.
+        burst.add("mac", mail("assembly", "Built."));
+        burst.add("plan\u{1b}[31mtime", mail("assembly", "Tested."));
+        burst.forget("mac");
+        assert_eq!(burst.take(true).unwrap().title, "plan[31mtime · assembly");
+        burst.add("mac", mail("assembly", "Built."));
+        burst.forget("mac");
+        assert_eq!(burst.take(true), None);
     }
 
     #[test]

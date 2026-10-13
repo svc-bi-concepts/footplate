@@ -219,13 +219,17 @@ own, with a token of its own.
 
 **Switching.** The line under your name in the head is the switcher: a
 click on it, or `cmd+y` (`ctrl+y` on Linux), lists the yards under it, each
-with its kind and its state: `open`, or what it had waiting when the window
-last left it (`2 mail, 1 decision when last opened`), or `not opened yet`.
+with its kind and its state: `open`, what waits in it now (`2 mail, 1
+decision`, or `nothing waiting`), or that it is not reached and why.
 The arrows move, Enter opens, esc leaves, a click on a row opens it, and
-`cmd+1` to `cmd+9` open the yards in the list's order from anywhere. Only
-the open yard is followed: a yard is read when it is opened, the system
-tells of the open one alone, and the counts of the others are as old as
-they say. The yard that was open is the one the next start opens.
+`cmd+1` to `cmd+9` open the yards in the list's order from anywhere. Every
+yard of the list is followed from the start, each by a connection of its
+own: its counts change as its mail, asks and notices arrive, and a switch
+shows it as it stands, with nothing read anew. Nothing of a yard that is
+not open is shown or marked read. One yard that is away, or that no longer
+lets this device in, changes nothing of the others, and one that is away is
+asked again every few seconds by itself. The yard that was open is the one
+the next start opens.
 
 What you wrote and did not send stays with the yard it was written for: the
 line's text, what is attached, and the words typed on a card are kept for
@@ -496,9 +500,14 @@ What you get:
   wrote. Several things that arrive within three seconds are one
   notification ("3 from yardmaster@mac"), so one is up to three seconds
   late.
+- With several yards in the settings it names the yard too, first
+  ("plantime · yardmaster asks"), of the open yard as of any other: what
+  arrives in a yard that is not open is told of by the same kinds. A burst
+  from several yards says each yard's part by itself ("3 new in 2 yards",
+  "mac: 1 from assembly; plantime: 1 from assembly, 1 decision").
 - Nothing while the window is in front and shows the row it belongs to:
-  you read it there. In front on another conversation, behind another
-  window, or with the settings open, you are told.
+  you read it there. In front on another conversation or another yard,
+  behind another window, or with the settings open, you are told.
 - Nothing for what you wrote yourself, and nothing for what was already
   unread or open when the window started. What arrived while the yard was
   away is told of when it is back.
@@ -514,8 +523,9 @@ What the system asks:
   application and not for a bare program, so this needs `Footplate.app`
   ([Building](#building): `scripts/bundle-mac.sh`); from `cargo run` the
   settings say that instead and nothing is shown. Clicking a notification
-  brings the window forward on that conversation, card or the yard row.
-  One of a yard you have switched away from since brings the window
+  brings the window forward on that conversation, card or the yard row,
+  in the yard it told of: where another yard is open, that one is opened.
+  One of a yard that is no longer in the settings brings the window
   forward and opens nothing: the row of that name in the open yard is
   another.
 - **Linux** asks nothing. footplate hands the notification to the
@@ -580,7 +590,7 @@ options have no icon, so the program sees to it when it starts
 |---|---|
 | `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed |
 | `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode |
-| `src/session.rs` | following a yard on a thread: who the window is for, the state it starts from, trying again, or not when the device is not let in |
+| `src/session.rs` | following a yard on a thread, one for each yard of the settings: who the window is for, the state it starts from, trying again, or not when the device is not let in |
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
 | `src/draft.rs` | what is not sent yet, as plain functions: for each yard each conversation's attachments and text, what is refused and why |
 | `src/window.rs` | the window: draws the model and the draft, and makes the calls they ask for |

@@ -19,7 +19,7 @@ use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, DecidedDetail, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow,
-    Effect, Entry, Kind, Model, Row, Selected, Target, Top,
+    Effect, Entry, Kind, Model, News, Row, Selected, Target, Top,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -570,8 +570,8 @@ enum Adding {
     Again(String),
 }
 
-/// What a yard had waiting when the window last left it: the switcher
-/// shows it for a yard that is not open, as of then.
+/// What a yard has waiting: the switcher shows it for a yard that is not
+/// open, as it stands now, since every yard is followed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Counts {
     mail: usize,
@@ -596,7 +596,7 @@ impl Counts {
         }
     }
 
-    /// In words, marked as from when the yard was last open.
+    /// In words.
     fn line(&self) -> String {
         let some = |n: usize, one: &str, more: &str| match n {
             0 => None,
@@ -612,8 +612,43 @@ impl Counts {
         .flatten()
         .collect();
         match parts.is_empty() {
-            true => "nothing waiting when last opened".to_string(),
-            false => format!("{} when last opened", parts.join(", ")),
+            true => "nothing waiting".to_string(),
+            false => parts.join(", "),
+        }
+    }
+}
+
+/// A yard as the window follows it, and all that is of it and not of the
+/// window: the open yard's is in the window's own fields of these names,
+/// and that of each other yard of the settings is held here, going on with
+/// its yard, until the window shows it.
+struct Held {
+    /// Which following this is, counted from the window's start: what the
+    /// follower's words and the answers to its calls are of, wherever the
+    /// yard is by the time they come.
+    session: u64,
+    /// The yard of the settings it was opened as. One listed otherwise by
+    /// now is another yard, and is opened anew.
+    entry: Option<settings::Yard>,
+    client: Option<Client>,
+    following: Option<Task<()>>,
+    following_stop: Option<session::FollowControl>,
+    /// No row of it is open while it is held ([`Model::leave`]).
+    model: Option<Model>,
+    down: Option<String>,
+    away: Away,
+    said: Option<api::Me>,
+    approving: Option<(String, u64)>,
+    approve_elsewhere: HashSet<(String, u64)>,
+    ask_generation: u64,
+    returns_read: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Drop for Held {
+    /// A yard that is held no longer is followed no longer.
+    fn drop(&mut self) {
+        if let Some(stop) = self.following_stop.take() {
+            stop.stop();
         }
     }
 }
@@ -632,14 +667,25 @@ pub struct Footplate {
     yard: String,
     /// Which opening of a yard this is, counted from the window's start.
     /// The answer to a call made in an earlier one is another yard's, or
-    /// this one's before it was left, and changes nothing that is shown.
+    /// this one's before it was left, and changes nothing of what is
+    /// typed or shown beside the model.
     opening: u64,
-    /// Hands on what the follower of the open yard learns. Another yard's
-    /// takes its place, and the follower of the one before ends at its
-    /// next word, which nobody hears: until then it holds its stream.
+    /// Which following the open yard's is, of all the window started
+    /// ([`Held::session`]), and how many it started.
+    session: u64,
+    sessions: u64,
+    /// The yard of the settings the open one was opened as, or none of
+    /// the one yard the environment names.
+    entry: Option<settings::Yard>,
+    /// The other yards of the settings, by name: each followed as the
+    /// open one is, by a client and a follower of its own, so that what
+    /// waits in it is known and told of, and a switch shows it as it
+    /// stands. Nothing of one is shown or sent while it is here.
+    held: HashMap<String, Held>,
+    /// Hands on what the follower of the open yard learns.
     following: Option<Task<()>>,
-    /// Stops that follower when the open yard changes, even while its
-    /// event stream has no new words to deliver.
+    /// Stops that follower when the yard is opened anew or is no longer
+    /// listed, even while its event stream has no new words to deliver.
     following_stop: Option<session::FollowControl>,
     /// What the yard has, once it was read. It is kept while the yard is
     /// away, for the conversation that was open.
@@ -688,11 +734,9 @@ pub struct Footplate {
     /// open yard's again when theirs is opened, and no call of another
     /// yard can name them.
     kept_words: HashMap<String, HashMap<(String, u64), String>>,
-    /// What each yard had waiting when it was last left, by yard.
-    counts: HashMap<String, Counts>,
-    /// Why each yard that was not reached was not, in a word or two, by
+    /// Why each yard that is not reached is not, in a word or two, by
     /// yard: what its row in the switcher says, of the open one and of
-    /// one that was left so. A yard that answers is in it no longer.
+    /// every other. A yard that answers is in it no longer.
     unreached: HashMap<String, &'static str>,
     /// Where each yard stood when it was last left, by yard.
     places: HashMap<String, Place>,
@@ -766,7 +810,8 @@ pub struct Footplate {
     /// Hands on the rows of the notifications a person activates, for as
     /// long as it is held here.
     _heeding: Task<()>,
-    /// What arrived and is told of when the burst it came in is over.
+    /// What arrived, in whichever yard, and is told of when the burst it
+    /// came in is over.
     burst: Burst,
     /// A settings change invalidates timers for any batch already waiting.
     burst_generation: u64,
@@ -881,6 +926,10 @@ impl Footplate {
             env,
             yard: String::new(),
             opening: 0,
+            session: 0,
+            sessions: 0,
+            entry: None,
+            held: HashMap::new(),
             following: None,
             following_stop: None,
             model: None,
@@ -900,7 +949,6 @@ impl Footplate {
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
-            counts: HashMap::new(),
             unreached: HashMap::new(),
             places: HashMap::new(),
             returning: None,
@@ -984,23 +1032,34 @@ impl Footplate {
         .detach();
     }
 
-    /// Takes what arrived from the model, and has the system tell of what
-    /// the settings choose and the window does not show: once the burst it
-    /// came in is over, in one notification.
+    /// Takes what arrived from the open yard's model, and has the system
+    /// tell of what the settings choose and the window does not show.
     fn news(&mut self, cx: &mut Context<Self>) {
         let Some(model) = self.model.as_mut() else {
             return;
         };
+        let news = model.take_news();
         let in_view = self.front && !self.settings_open;
-        for news in model.take_news() {
+        let yard = self.yard.clone();
+        self.tell(&yard, news, in_view, cx);
+    }
+
+    /// Has the system tell of `news` that arrived in `yard`, where the
+    /// settings choose it and the window does not show it: once the burst
+    /// it came in is over, in one notification, which names its yard where
+    /// there are several. `in_view` is whether the window is in front on
+    /// that yard's rows.
+    fn tell(&mut self, yard: &str, news: Vec<News>, in_view: bool, cx: &mut Context<Self>) {
+        for news in news {
             let wanted = notify::wanted(&self.settings.notifications, &news, in_view);
-            if wanted && self.burst.add(news) {
+            if wanted && self.burst.add(yard, news) {
                 let generation = self.burst_generation;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(notify::BURST).await;
                     this.update(cx, |this, _| {
+                        let several = this.env.yard.is_none() && this.settings.yards.len() > 1;
                         if this.burst_generation == generation
-                            && let Some(telling) = this.burst.take(&this.yard)
+                            && let Some(telling) = this.burst.take(several)
                         {
                             this.system.show(&telling);
                         }
@@ -1012,11 +1071,12 @@ impl Footplate {
         }
     }
 
-    /// A notification was activated: the window comes forward on its row.
-    /// A row that is gone since leaves open what was, and so does one of
-    /// `yard` when another is open by now: the system still shows what it
-    /// told of a yard that was left, and the row of that name here is
-    /// another, where what is typed would reach this yard.
+    /// A notification was activated: the window comes forward on its row,
+    /// in the yard it told of, which is opened where another is open. A
+    /// row that is gone since leaves open what the yard has open, and a
+    /// yard that is no longer listed leaves the window as it is: a row of
+    /// that name in the open yard is another, where what is typed would
+    /// reach this one.
     fn come_forward(&mut self, yard: String, row: Selected, cx: &mut Context<Self>) {
         cx.activate(true);
         let (this, handle) = (cx.weak_entity(), self.handle);
@@ -1026,6 +1086,9 @@ impl Footplate {
             let _ = handle.update(cx, |_, window, cx| {
                 window.activate_window();
                 this.update(cx, |this, cx| {
+                    if this.yard != yard {
+                        this.switch_to(&yard, window, cx);
+                    }
                     if this.yard == yard {
                         this.select(row, window, cx);
                     }
@@ -1034,83 +1097,120 @@ impl Footplate {
         });
     }
 
-    /// Opens the yard the environment names, else the one the settings
-    /// open, in place of the one that was open.
+    /// Follows every yard of the settings, and shows the one they open:
+    /// each that is not followed yet is from here on, one that is listed
+    /// no longer or otherwise is followed no longer, and the rest go on as
+    /// they are. The yard to show is opened anew where it could not be
+    /// opened before. With a yard named by the environment there is that
+    /// one alone, opened anew.
     fn reopen(&mut self, cx: &mut Context<Self>) {
-        let opening = self.env.open(&self.settings, self.kept.as_deref());
-        let named = self.env.yard.clone();
-        let yard = named.unwrap_or_else(|| self.settings.opened().name.clone());
-        self.follow(yard, opening, cx);
+        self.reopen_anew(None, cx);
     }
 
-    /// Follows `yard` behind the client from here on, and no longer the
-    /// one before it. Nothing of that one is shown, since a name there is
-    /// not the same one here; what was written in it and not sent is kept
-    /// aside for it, with what it had waiting and where it stood, and what
-    /// was written for this one before is its again. Nothing typed of a secret is kept for
-    /// either. Without a client the window says why there is none, and
-    /// waits for another yard to be chosen.
-    fn follow(&mut self, yard: String, opening: Result<Client, String>, cx: &mut Context<Self>) {
-        // The line's text is the open row's of the yard that is left: it
-        // stays with that, and is in the line again when the row is open.
-        if let Some(model) = self.model.as_ref() {
-            self.counts.insert(self.yard.clone(), Counts::of(model));
-            if let Some(from) = model.selected().cloned() {
-                // A yard left before it was put back where it stood has
-                // nothing newer to say of that: its place stays the kept
-                // one.
-                if self.returning.is_none() {
-                    let place = self.place(from.clone());
-                    self.places.insert(self.yard.clone(), place);
-                }
-                self.keep_typed(&from, cx);
+    /// As [`Footplate::reopen`], with the yard called `anew` opened anew
+    /// whatever is followed of it: its device was paired again, and the
+    /// token it was opened with is not the yard's any more.
+    fn reopen_anew(&mut self, anew: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(named) = self.env.yard.clone() {
+            let opening = self.env.open(&self.settings, self.kept.as_deref());
+            return self.follow(named, opening, cx);
+        }
+        let listed = self.settings.yards.clone();
+        let show = self.settings.opened().name.clone();
+        // Whether what is followed of a yard is followed further: it is
+        // listed as it was opened, it is not to be opened anew, and it is
+        // not the yard to show without a client to show it by.
+        let goes_on = |name: &str, entry: &Option<settings::Yard>, client: &Option<Client>| {
+            listed
+                .iter()
+                .any(|yard| yard.name == name && Some(yard) == entry.as_ref())
+                && anew != Some(name)
+                && !(name == show && client.is_none())
+        };
+        self.held
+            .retain(|name, held| goes_on(name, &held.entry, &held.client));
+        let open_goes_on = goes_on(&self.yard, &self.entry, &self.client);
+        for yard in &listed {
+            let followed =
+                (open_goes_on && yard.name == self.yard) || self.held.contains_key(&yard.name);
+            if !followed {
+                let chosen = self.settings.clone().opening(&yard.name);
+                let opening = self.env.open(&chosen, self.kept.as_deref());
+                let held = self.begin(&yard.name, Some(yard.clone()), opening, cx);
+                self.held.insert(yard.name.clone(), held);
             }
         }
-        self.returning = None;
-        let words = std::mem::take(&mut self.ask_words);
-        if !words.is_empty() {
-            self.kept_words.insert(self.yard.clone(), words);
+        if !(open_goes_on && self.yard == show) {
+            self.show(&show, open_goes_on, cx);
         }
-        self.ask_words = self.kept_words.remove(&yard).unwrap_or_default();
-        self.drafts.turn_to(&yard);
-        self.yard = yard;
-        self.opening += 1;
-        self.switching = None;
-        if let Some(stop) = self.following_stop.take() {
-            stop.stop();
-        }
-        self.following = None;
-        self.model = None;
-        self.said = None;
-        self.images.clear();
-        self.declining = None;
-        self.back_position = None;
-        // A paging request and its scroll position belonged to the yard
-        // just left; a returning yard may need to ask for the same page.
-        self.older_at = None;
-        // What arrived in the yard before is not told of as this one's.
-        self.burst = Burst::default();
-        self.line.update(cx, |line, cx| line.set_text("", cx));
-        self.forget_secret(cx);
-        // What another yard did not serve says nothing of this one.
-        self.approving = None;
-        self.approve_elsewhere.clear();
-        cx.notify();
+    }
+
+    /// Follows `yard` behind the client from here on, as the open one, in
+    /// place of what was followed under that name. The yard that was open
+    /// is held aside, and goes on. Without a client the window says why
+    /// there is none, and waits for another yard to be chosen.
+    fn follow(&mut self, yard: String, opening: Result<Client, String>, cx: &mut Context<Self>) {
+        self.held.remove(&yard);
+        let keep = self.yard != yard;
+        self.leave_yard(&yard, keep, cx);
+        let held = self.begin(&yard, None, opening, cx);
+        self.put(held);
+    }
+
+    /// Shows the yard called `yard`, which is held, as it stands: on the
+    /// row it was left on, with what was typed there. The yard that was
+    /// open is held aside in its turn where `keep` says so, and is
+    /// followed no longer where not.
+    fn show(&mut self, yard: &str, keep: bool, cx: &mut Context<Self>) {
+        let Some(held) = self.held.remove(yard) else {
+            return;
+        };
+        self.leave_yard(yard, keep, cx);
+        self.put(held);
+        self.arrive(cx);
+    }
+
+    /// Starts following a yard behind the client, by a follower of its
+    /// own, and gives what is held of it from here on: `yard` is its name,
+    /// and `entry` the yard of the settings it is. Without a client it
+    /// says why there is none, and nothing is asked.
+    fn begin(
+        &mut self,
+        yard: &str,
+        entry: Option<settings::Yard>,
+        opening: Result<Client, String>,
+        cx: &mut Context<Self>,
+    ) -> Held {
+        self.sessions += 1;
+        let session = self.sessions;
+        let mut held = Held {
+            session,
+            entry,
+            client: None,
+            following: None,
+            following_stop: None,
+            model: None,
+            down: None,
+            away: Away::Stopped,
+            said: None,
+            approving: None,
+            approve_elsewhere: HashSet::new(),
+            ask_generation: 0,
+            returns_read: None,
+        };
         let client = match opening {
             Ok(client) => client,
             Err(why) => {
-                self.client = None;
-                self.down = Some(why);
-                self.away = Away::Stopped;
-                self.unreached.insert(self.yard.clone(), NOT_OPENED);
-                return;
+                held.down = Some(why);
+                self.unreached.insert(yard.to_string(), NOT_OPENED);
+                return held;
             }
         };
         // The yard is followed on a thread of its own, which blocks on the
-        // socket; what it learns comes here.
+        // socket; what it learns comes here, as this following's.
         let (tell, told) = async_channel::unbounded::<Update>();
         let stop = session::FollowControl::default();
-        self.following_stop = Some(stop.clone());
+        held.following_stop = Some(stop.clone());
         let follower = thread::Builder::new().name("yard".into()).spawn({
             let (client, name) = (client.clone(), self.name.clone());
             move || {
@@ -1119,19 +1219,143 @@ impl Footplate {
                 })
             }
         });
-        self.following = Some(cx.spawn(async move |this, cx| {
+        held.following = Some(cx.spawn(async move |this, cx| {
             while let Ok(update) = told.recv().await {
-                if this.update(cx, |this, cx| this.told(update, cx)).is_err() {
+                let heard = this.update(cx, |this, cx| this.told_of(session, update, cx));
+                if heard.is_err() {
                     break;
                 }
             }
         }));
-        self.client = Some(client);
-        self.away = Away::Trying;
-        self.down = Some(match follower {
+        held.client = Some(client);
+        held.away = Away::Trying;
+        held.down = Some(match follower {
             Ok(_) => "Looking for the yard.".to_string(),
             Err(err) => format!("footplate could not start following the yard: {err}"),
         });
+        held
+    }
+
+    /// Leaves the open yard for the one called `to`. Nothing of it is
+    /// shown from here on, since a name there is not the same one here;
+    /// what was written in it and not sent is kept aside for it, with
+    /// where it stood, and what was written for `to` before is its again.
+    /// Nothing typed of a secret is kept for either. The yard itself is
+    /// held aside, with no row open, and goes on being followed; where
+    /// `keep` says not, it is followed no longer.
+    fn leave_yard(&mut self, to: &str, keep: bool, cx: &mut Context<Self>) {
+        // The line's text is the open row's of the yard that is left: it
+        // stays with that, and is in the line again when the row is open.
+        if let Some(from) = self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            // A yard left before it was put back where it stood has
+            // nothing newer to say of that: its place stays the kept
+            // one.
+            if self.returning.is_none() {
+                let place = self.place(from.clone());
+                self.places.insert(self.yard.clone(), place);
+            }
+            self.keep_typed(&from, cx);
+        }
+        self.returning = None;
+        let words = std::mem::take(&mut self.ask_words);
+        if !words.is_empty() {
+            self.kept_words.insert(self.yard.clone(), words);
+        }
+        self.ask_words = self.kept_words.remove(to).unwrap_or_default();
+        self.drafts.turn_to(to);
+        let mut was = Held {
+            session: self.session,
+            entry: self.entry.take(),
+            client: self.client.take(),
+            following: self.following.take(),
+            following_stop: self.following_stop.take(),
+            model: self.model.take(),
+            down: self.down.take(),
+            away: std::mem::replace(&mut self.away, Away::Stopped),
+            said: self.said.take(),
+            approving: self.approving.take(),
+            approve_elsewhere: std::mem::take(&mut self.approve_elsewhere),
+            ask_generation: self.ask_generation,
+            returns_read: self.returns_read.take(),
+        };
+        let from = std::mem::replace(&mut self.yard, to.to_string());
+        // The window before it had a yard has none to hold.
+        if keep && !from.is_empty() {
+            if let Some(model) = was.model.as_mut() {
+                model.leave();
+            }
+            self.held.insert(from, was);
+        }
+        self.opening += 1;
+        self.switching = None;
+        self.images.clear();
+        self.declining = None;
+        self.back_position = None;
+        // A paging request and its scroll position belonged to the yard
+        // just left; a returning yard may need to ask for the same page.
+        self.older_at = None;
+        self.line.update(cx, |line, cx| line.set_text("", cx));
+        self.forget_secret(cx);
+        cx.notify();
+    }
+
+    /// What was held of a yard is the open yard's from here on.
+    fn put(&mut self, mut held: Held) {
+        self.session = held.session;
+        self.entry = held.entry.take();
+        self.client = held.client.take();
+        self.following = held.following.take();
+        self.following_stop = held.following_stop.take();
+        self.model = held.model.take();
+        self.down = held.down.take();
+        self.away = held.away;
+        self.said = held.said.take();
+        self.approving = held.approving.take();
+        self.approve_elsewhere = std::mem::take(&mut held.approve_elsewhere);
+        self.ask_generation = held.ask_generation;
+        self.returns_read = held.returns_read.take();
+    }
+
+    /// The yard that was held is shown: the model it had all along opens
+    /// the row the yard was left on, where that is still there, and the
+    /// line has what was typed in it. A yard that has not answered yet has
+    /// none, and is shown when it does ([`Footplate::told`]).
+    fn arrive(&mut self, cx: &mut Context<Self>) {
+        let kept = self.places.get(&self.yard).cloned();
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let effects = model.back_to(
+            kept.as_ref().map(|place| place.row.clone()),
+            kept.as_ref().is_some_and(|place| place.decided_expanded),
+        );
+        if let Some(place) = &kept {
+            model.expand(&place.expanded);
+        }
+        if let Some(late) = self.late.take() {
+            model.notice = late;
+        }
+        let to = model.selected().cloned();
+        self.returning = kept
+            .filter(|place| to.as_ref() == Some(&place.row))
+            .map(|place| (place, false));
+        let typed = self.typed_for(to.as_ref());
+        self.line.update(cx, |line, cx| line.set_text(&typed, cx));
+        self.new_below = 0;
+        self.scroll_to_newest();
+        // A card that is to be put back where it stood is not told to its
+        // top after that.
+        if self.returning.is_none() {
+            self.decision.scroll_to_item(0);
+        }
+        self.shown(cx);
+        // A yard that is away is asked for nothing: what the row wants is
+        // asked for when the yard is read again.
+        if self.down.is_none() {
+            self.pictures(cx);
+            self.run(effects, cx);
+        }
+        cx.notify();
     }
 
     /// Does `f` in this window for the action `A`, wherever the focus is.
@@ -1221,7 +1445,52 @@ impl Footplate {
         &self.line
     }
 
-    /// What the thread that follows the yard learned.
+    /// What the follower of the following `session` learned: of the open
+    /// yard, or of one that is held, which has it without showing it. Its
+    /// mail, its asks and its notices are told of as the open yard's are,
+    /// and nothing of it is seen. One that is followed no longer says
+    /// nothing.
+    fn told_of(&mut self, session: u64, update: Update, cx: &mut Context<Self>) {
+        if session == self.session {
+            return self.told(update, cx);
+        }
+        let Some((yard, held)) = self.held.iter_mut().find(|(_, h)| h.session == session) else {
+            return;
+        };
+        let yard = yard.clone();
+        match update {
+            Update::Up(state) => {
+                let mut state = *state;
+                held.said = state.yard.take();
+                let (mut model, effects) = match held.model.as_ref() {
+                    Some(before) => before.resumed(state),
+                    None => (Model::new_aside(state), Vec::new()),
+                };
+                let news = model.take_news();
+                held.model = Some(model);
+                held.down = None;
+                self.unreached.remove(&yard);
+                self.run_in(session, effects, cx);
+                self.schedule_return_in(session, cx);
+                // What arrived while the yard was away.
+                self.tell(&yard, news, false, cx);
+            }
+            Update::Event(event) => self.change_in(session, cx, |m| m.event(&event)),
+            Update::Down(why, short) => {
+                held.down = Some(why);
+                held.away = Away::Trying;
+                self.unreached.insert(yard, short);
+            }
+            Update::Out(why) => {
+                held.down = Some(why);
+                held.away = Away::Out;
+                self.unreached.insert(yard, session::PAIR_AGAIN);
+            }
+        }
+        cx.notify();
+    }
+
+    /// What the thread that follows the open yard learned.
     fn told(&mut self, update: Update, cx: &mut Context<Self>) {
         match update {
             Update::Up(state) => {
@@ -1301,9 +1570,46 @@ impl Footplate {
         cx.notify();
     }
 
-    /// Changes the model and does what the change asks for. A conversation
-    /// shows its newest, and the yard its notices; the open card never moves
-    /// for mail or notices arriving.
+    /// Changes the model of the following `session`, wherever its yard is
+    /// by now: the open yard's as [`Footplate::change`] does, and that of
+    /// a yard that is held with nothing shown, its calls made by its own
+    /// client and what arrived in it told of as its. A yard followed no
+    /// longer has none to change.
+    fn change_in(
+        &mut self,
+        session: u64,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Model) -> Vec<Effect>,
+    ) {
+        if session == self.session {
+            return self.change(cx, f);
+        }
+        let Some((yard, held)) = self.held.iter_mut().find(|(_, h)| h.session == session) else {
+            return;
+        };
+        let Some(model) = held.model.as_mut() else {
+            return;
+        };
+        let effects = f(model);
+        let (yard, news) = (yard.clone(), model.take_news());
+        self.run_in(session, effects, cx);
+        self.tell(&yard, news, false, cx);
+        cx.notify();
+    }
+
+    /// The model of the following `session`, of the open yard or of one
+    /// that is held.
+    fn model_in(&mut self, session: u64) -> Option<&mut Model> {
+        if session == self.session {
+            return self.model.as_mut();
+        }
+        let held = self.held.values_mut().find(|h| h.session == session)?;
+        held.model.as_mut()
+    }
+
+    /// Changes the open yard's model and does what the change asks for. A
+    /// conversation shows its newest, and the yard its notices; the open
+    /// card never moves for mail or notices arriving.
     fn change(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Model) -> Vec<Effect>) {
         let Some(model) = self.model.as_mut() else {
             return;
@@ -1942,36 +2248,60 @@ impl Footplate {
         }
     }
 
-    /// Reads the queue again when the next put-aside ask comes back, which
-    /// arrives with no event. One timer waits at a time; a queue read
+    /// Reads the open yard's queue again when its next put-aside ask comes
+    /// back ([`Footplate::schedule_return_in`]).
+    fn schedule_return(&mut self, cx: &mut Context<Self>) {
+        self.schedule_return_in(self.session, cx);
+    }
+
+    /// Reads the queue of the following `session` again when the next
+    /// put-aside ask comes back, which arrives with no event: of a yard
+    /// that is held as of the open one, since what waits in it is told of
+    /// and counted. One timer waits at a time for a yard; a queue read
     /// since replaces it. The queue is read once for a return: a yard that
     /// still lists the ask as put aside after its time is not asked again
     /// for it, and what the stream brings says when it is back.
-    fn schedule_return(&mut self, cx: &mut Context<Self>) {
-        self.ask_generation += 1;
-        let generation = self.ask_generation;
-        let Some(at) = self
-            .model
-            .as_ref()
-            .and_then(|m| m.next_return(self.returns_read))
-        else {
+    fn schedule_return_in(&mut self, session: u64, cx: &mut Context<Self>) {
+        let held = self.held.values_mut().find(|h| h.session == session);
+        let (model, asked, read) = match held {
+            _ if session == self.session => (
+                self.model.as_ref(),
+                &mut self.ask_generation,
+                &mut self.returns_read,
+            ),
+            Some(held) => (
+                held.model.as_ref(),
+                &mut held.ask_generation,
+                &mut held.returns_read,
+            ),
+            None => return,
+        };
+        *asked += 1;
+        let generation = *asked;
+        let Some(at) = model.and_then(|m| m.next_return(*read)) else {
             return;
         };
         let now = chrono::Utc::now();
         let wait = at.timestamp() - now.timestamp();
         if wait <= 0 {
             // Every return up to now is read by this one read.
-            self.returns_read = Some(at.max(now));
-            self.change(cx, |_| vec![Effect::Asks]);
+            *read = Some(at.max(now));
+            self.change_in(session, cx, |_| vec![Effect::Asks]);
             return;
         }
         let wait = std::time::Duration::from_secs(wait as u64);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
-                if this.ask_generation == generation {
-                    this.returns_read = Some(at);
-                    this.change(cx, |_| vec![Effect::Asks]);
+                let held = this.held.values_mut().find(|h| h.session == session);
+                let (asked, read) = match held {
+                    _ if session == this.session => (this.ask_generation, &mut this.returns_read),
+                    Some(held) => (held.ask_generation, &mut held.returns_read),
+                    None => return,
+                };
+                if asked == generation {
+                    *read = Some(at);
+                    this.change_in(session, cx, |_| vec![Effect::Asks]);
                 }
             })
             .ok();
@@ -1999,22 +2329,39 @@ impl Footplate {
 
     /// As [`Footplate::ask`], with the answer handed back whichever yard is
     /// open by then: for a call that carries what a person wrote, which is
-    /// put back where it was written when it did not go. The call is the
-    /// yard's it was made in, since its client is taken here.
+    /// put back where it was written when it did not go, and for one whose
+    /// answer changes the yard's model, which is held when another is
+    /// shown. The call is the yard's it was made in, since its client is
+    /// taken here.
     fn ask_through<R: Send + 'static>(
         &self,
         cx: &mut Context<Self>,
         call: impl FnOnce(&Client, &str) -> R + Send + 'static,
         then: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
     ) {
-        let Some(client) = self.client.clone() else {
+        self.ask_in(self.session, cx, call, then);
+    }
+
+    /// Makes a call of the following `session` off the window's thread, by
+    /// that yard's client and as the user the yard has the window for, and
+    /// hands its answer back to the window, whichever yard is open by
+    /// then. A yard followed no longer is not asked.
+    fn ask_in<R: Send + 'static>(
+        &self,
+        session: u64,
+        cx: &mut Context<Self>,
+        call: impl FnOnce(&Client, &str) -> R + Send + 'static,
+        then: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
+    ) {
+        let (client, model) = match self.held.values().find(|h| h.session == session) {
+            _ if session == self.session => (self.client.as_ref(), self.model.as_ref()),
+            Some(held) => (held.client.as_ref(), held.model.as_ref()),
+            None => return,
+        };
+        let Some(client) = client.cloned() else {
             return;
         };
-        let me = self
-            .model
-            .as_ref()
-            .map(|m| m.me().to_string())
-            .unwrap_or_default();
+        let me = model.map(|m| m.me().to_string()).unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let answer = cx
                 .background_executor()
@@ -2023,6 +2370,17 @@ impl Footplate {
             this.update(cx, |this, cx| then(this, answer, cx)).ok();
         })
         .detach();
+    }
+
+    /// Says `notice` in the yard of the following `session`: at once in
+    /// the open one, and in one that is held when the window shows it.
+    fn notice_in(&mut self, session: u64, notice: String, cx: &mut Context<Self>) {
+        if session == self.session {
+            return self.notice(notice, cx);
+        }
+        if let Some(model) = self.model_in(session) {
+            model.notice = notice;
+        }
     }
 
     fn notice(&mut self, notice: String, cx: &mut Context<Self>) {
@@ -2036,46 +2394,60 @@ impl Footplate {
         cx.notify();
     }
 
+    /// Does what a change of the open yard's model asks for.
     fn run(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
+        self.run_in(self.session, effects, cx);
+    }
+
+    /// Does what a change of the model of the following `session` asks
+    /// for: each call by that yard's client, and its answer to that yard's
+    /// model, wherever the yard is by then.
+    fn run_in(&mut self, session: u64, effects: Vec<Effect>, cx: &mut Context<Self>) {
         for effect in effects {
             match effect {
-                Effect::Read { name, after } => self.ask(
+                Effect::Read { name, after } => self.ask_in(
+                    session,
                     cx,
                     {
                         let name = name.clone();
                         move |client, me| client.conversation(me, &name, after)
                     },
                     move |this, letters, cx| match letters {
-                        Ok(letters) => this.change(cx, |m| m.conversation(&name, letters)),
-                        Err(err) => this.notice(
+                        Ok(letters) => {
+                            this.change_in(session, cx, |m| m.conversation(&name, letters))
+                        }
+                        Err(err) => this.notice_in(
+                            session,
                             format!("the conversation with {name} could not be read: {err}"),
                             cx,
                         ),
                     },
                 ),
-                Effect::Page { name, before } => self.ask(
+                Effect::Page { name, before } => self.ask_in(
+                    session,
                     cx,
                     {
                         let name = name.clone();
                         move |client, me| client.conversation_page(me, &name, model::PAGE, before)
                     },
                     move |this, page, cx| match page {
-                        Ok(page) => {
-                            this.change(cx, |m| m.page(&name, before, page.letters, page.more))
-                        }
+                        Ok(page) => this.change_in(session, cx, |m| {
+                            m.page(&name, before, page.letters, page.more)
+                        }),
                         Err(err) => {
-                            if let Some(model) = this.model.as_mut() {
+                            if let Some(model) = this.model_in(session) {
                                 model.page_failed(&name, &err.to_string());
                             }
                             cx.notify();
                         }
                     },
                 ),
-                Effect::Ack { through } => self.ask(
+                Effect::Ack { through } => self.ask_in(
+                    session,
                     cx,
                     move |client, me| client.ack_user_inbox(me, through),
                     move |this, acked, cx| {
-                        this.change(cx, |m| {
+                        this.change_in(session, cx, |m| {
                             match acked {
                                 Ok(()) => m.acked(through),
                                 Err(err) => m.ack_failed(&err.to_string()),
@@ -2084,50 +2456,67 @@ impl Footplate {
                         })
                     },
                 ),
-                Effect::Crew => self.ask(
+                Effect::Crew => self.ask_in(
+                    session,
                     cx,
                     |client, _| Ok::<_, api::Error>((client.head()?, client.crew()?)),
-                    |this, crew, cx| match crew {
-                        Ok((head, crew)) => this.change(cx, |m| m.listed(head, crew)),
-                        Err(err) => this.notice(format!("the crew could not be read: {err}"), cx),
+                    move |this, crew, cx| match crew {
+                        Ok((head, crew)) => this.change_in(session, cx, |m| m.listed(head, crew)),
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the crew could not be read: {err}"),
+                            cx,
+                        ),
                     },
                 ),
-                Effect::Peers => self.ask(
+                Effect::Peers => self.ask_in(
+                    session,
                     cx,
                     |client, _| client.peers(),
-                    |this, peers, cx| match peers {
-                        Ok(peers) => this.change(cx, |m| m.linked(&peers)),
-                        Err(err) => {
-                            this.notice(format!("the linked yards could not be read: {err}"), cx)
-                        }
+                    move |this, peers, cx| match peers {
+                        Ok(peers) => this.change_in(session, cx, |m| m.linked(&peers)),
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the linked yards could not be read: {err}"),
+                            cx,
+                        ),
                     },
                 ),
-                Effect::Users => self.ask(
+                Effect::Users => self.ask_in(
+                    session,
                     cx,
                     |client, _| client.users(),
-                    |this, users, cx| match users {
-                        Ok(users) => this.change(cx, |m| m.users(users)),
-                        Err(err) => this.notice(format!("the users could not be read: {err}"), cx),
+                    move |this, users, cx| match users {
+                        Ok(users) => this.change_in(session, cx, |m| m.users(users)),
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the users could not be read: {err}"),
+                            cx,
+                        ),
                     },
                 ),
-                Effect::Notifications => self.ask(
+                Effect::Notifications => self.ask_in(
+                    session,
                     cx,
                     |client, me| client.user_notifications(me, 0),
-                    |this, notifications, cx| match notifications {
-                        Ok(notifications) => this.change(cx, |m| {
+                    move |this, notifications, cx| match notifications {
+                        Ok(notifications) => this.change_in(session, cx, |m| {
                             m.notifications(notifications.notifications);
                             Vec::new()
                         }),
-                        Err(err) => {
-                            this.notice(format!("the notices could not be read: {err}"), cx)
-                        }
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the notices could not be read: {err}"),
+                            cx,
+                        ),
                     },
                 ),
-                Effect::AckNotifications { through } => self.ask(
+                Effect::AckNotifications { through } => self.ask_in(
+                    session,
                     cx,
                     move |client, me| client.ack_user_notifications(me, through),
                     move |this, acked, cx| {
-                        this.change(cx, |m| {
+                        this.change_in(session, cx, |m| {
                             match acked {
                                 Ok(()) => m.notifications_acked(through),
                                 Err(err) => m.notifications_ack_failed(&err.to_string()),
@@ -2136,31 +2525,35 @@ impl Footplate {
                         })
                     },
                 ),
-                Effect::Asks => self.ask(
+                Effect::Asks => self.ask_in(
+                    session,
                     cx,
                     |client, me| client.user_asks(me),
-                    |this, asks, cx| match asks {
+                    move |this, asks, cx| match asks {
                         Ok(asks) => {
-                            this.change(cx, |m| m.asks(asks));
-                            this.schedule_return(cx);
+                            this.change_in(session, cx, |m| m.asks(asks));
+                            this.schedule_return_in(session, cx);
                         }
-                        Err(err) => {
-                            this.notice(format!("the decisions could not be read: {err}"), cx)
-                        }
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the decisions could not be read: {err}"),
+                            cx,
+                        ),
                     },
                 ),
-                Effect::Bead { bead } => self.ask(
+                Effect::Bead { bead } => self.ask_in(
+                    session,
                     cx,
                     {
                         let bead = bead.clone();
                         move |client, _| client.bead(&bead)
                     },
                     move |this, answered, cx| match answered {
-                        Ok(bead) => this.change(cx, |m| {
+                        Ok(bead) => this.change_in(session, cx, |m| {
                             m.bead_loaded(bead);
                             Vec::new()
                         }),
-                        Err(err) => this.change(cx, |m| {
+                        Err(err) => this.change_in(session, cx, |m| {
                             m.bead_failed(&bead, &err.to_string());
                             Vec::new()
                         }),
@@ -2224,7 +2617,7 @@ impl Footplate {
             Target::Crew(name) => name.clone(),
             Target::Peer { name, peer } => format!("{name}@{peer}"),
         };
-        let (yard, opening) = (self.yard.clone(), self.opening);
+        let (yard, opening, session) = (self.yard.clone(), self.opening, self.session);
         let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
@@ -2238,17 +2631,20 @@ impl Footplate {
                 }),
             },
             move |this, sent, cx| match sent {
-                // It went, in the yard it was written in, and another is
-                // open since: nothing of this one's shows it.
-                Ok(_) if this.opening != opening => {}
                 Ok(sent) => {
                     // The bytes are here already: the yard is not asked.
+                    // Where another yard was opened since, nothing of
+                    // this one's shows them.
                     for (id, blob) in sent {
-                        if let Some(image) = this.thumbs.remove(&id) {
+                        if let Some(image) = this.thumbs.remove(&id)
+                            && this.opening == opening
+                        {
                             this.images.insert(blob.hash, Picture::Here(image));
                         }
                     }
-                    this.change(cx, |m| m.sent(&to))
+                    // It went in the yard it was written in, whose model
+                    // has it wherever the window is by now.
+                    this.change_in(session, cx, |m| m.sent(&to))
                 }
                 Err(_) if this.yard_identity(&yard) != identity => this.notice(
                     format!(
@@ -2378,7 +2774,10 @@ impl Footplate {
             .collect();
         self.shown(cx);
         let call_bead = bead.clone();
-        self.ask(
+        // What the yard answers is of the yard it was given in, and is
+        // said there, wherever the window is by then.
+        let session = self.session;
+        self.ask_through(
             cx,
             move |client, me| {
                 client
@@ -2396,11 +2795,11 @@ impl Footplate {
             },
             move |this, given, cx| match given {
                 Ok(given) => {
-                    this.change(cx, |m| m.gave(&bead, ask, &given.given));
-                    this.schedule_return(cx);
-                    this.notice(model::given_line(&given), cx);
+                    this.change_in(session, cx, |m| m.gave(&bead, ask, &given.given));
+                    this.schedule_return_in(session, cx);
+                    this.notice_in(session, model::given_line(&given), cx);
                 }
-                Err(why) => this.notice(why, cx),
+                Err(why) => this.notice_in(session, why, cx),
             },
         );
     }
@@ -2428,24 +2827,35 @@ impl Footplate {
         self.approving = Some(at.clone());
         self.shown(cx);
         self.notice(String::new(), cx);
-        self.ask(
+        // The approval is the yard's it was pressed in: what came of it is
+        // that yard's, and is said there, wherever the window is by then.
+        let session = self.session;
+        self.ask_through(
             cx,
             move |client, me| client.approve_ask(&bead, ask, me),
             move |this, approved, cx| {
-                this.approving = None;
+                let held = this.held.values_mut().find(|h| h.session == session);
+                let (approving, elsewhere) = match held {
+                    _ if session == this.session => {
+                        (&mut this.approving, &mut this.approve_elsewhere)
+                    }
+                    Some(held) => (&mut held.approving, &mut held.approve_elsewhere),
+                    None => return,
+                };
+                *approving = None;
                 let (bead, ask) = at.clone();
                 match approved {
                     Ok(approved) => {
                         let line = model::approved_line(&approved);
-                        this.change(cx, |m| m.approved(&bead, ask, &approved));
-                        this.schedule_return(cx);
-                        this.notice(line, cx);
+                        this.change_in(session, cx, |m| m.approved(&bead, ask, &approved));
+                        this.schedule_return_in(session, cx);
+                        this.notice_in(session, line, cx);
                     }
                     Err(err) if model::approves_elsewhere(&err) => {
-                        this.approve_elsewhere.insert(at);
-                        this.notice(String::new(), cx);
+                        elsewhere.insert(at);
+                        this.notice_in(session, String::new(), cx);
                     }
-                    Err(err) => this.notice(model::not_approved(&err), cx),
+                    Err(err) => this.notice_in(session, model::not_approved(&err), cx),
                 }
             },
         );
@@ -2499,16 +2909,17 @@ impl Footplate {
         self.ask_words.remove(&(bead.clone(), ask));
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
-        let (yard, opening) = (self.yard.clone(), self.opening);
+        let (yard, opening, session) = (self.yard.clone(), self.opening, self.session);
         let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
             move |client, me| client.answer_ask(&call_bead, ask, option, &call_words, me),
             move |this, answered, cx| match answered {
-                Ok(()) if this.opening != opening => {}
+                // The yard it was answered in has it, wherever the window
+                // is by now.
                 Ok(()) => {
-                    this.change(cx, |m| m.picked(&bead, ask, option, &words));
-                    this.schedule_return(cx);
+                    this.change_in(session, cx, |m| m.picked(&bead, ask, option, &words));
+                    this.schedule_return_in(session, cx);
                 }
                 Err(err) => {
                     let said = ("not answered", err.to_string());
@@ -2566,15 +2977,16 @@ impl Footplate {
         self.declining = None;
         self.notice(String::new(), cx);
         let call_bead = bead.clone();
-        self.ask(
+        let session = self.session;
+        self.ask_through(
             cx,
             move |client, me| client.defer_ask(&call_bead, ask, me),
             move |this, deferred, cx| match deferred {
                 Ok(()) => {
-                    this.change(cx, |m| m.deferred(&bead, ask));
-                    this.schedule_return(cx);
+                    this.change_in(session, cx, |m| m.deferred(&bead, ask));
+                    this.schedule_return_in(session, cx);
                 }
-                Err(err) => this.notice(format!("not put aside: {err}"), cx),
+                Err(err) => this.notice_in(session, format!("not put aside: {err}"), cx),
             },
         );
     }
@@ -2586,16 +2998,15 @@ impl Footplate {
         self.declining = None;
         self.notice(String::new(), cx);
         let (call_bead, call_words) = (bead.clone(), words.clone());
-        let (yard, opening) = (self.yard.clone(), self.opening);
+        let (yard, opening, session) = (self.yard.clone(), self.opening, self.session);
         let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
             move |client, me| client.decline_ask(&call_bead, ask, &call_words, me),
             move |this, declined, cx| match declined {
-                Ok(()) if this.opening != opening => {}
                 Ok(()) => {
-                    this.change(cx, |m| m.declined(&bead, ask, &words));
-                    this.schedule_return(cx);
+                    this.change_in(session, cx, |m| m.declined(&bead, ask, &words));
+                    this.schedule_return_in(session, cx);
                 }
                 Err(err) => {
                     let said = ("not declined", err.to_string());
@@ -3118,10 +3529,11 @@ impl Footplate {
         }
     }
 
-    /// Opens the yard called `name` in place of the open one, and keeps
-    /// that it is the one to open at the next start. The line has the
-    /// focus, as when the window starts. The yard that is open already
-    /// stays as it is, unless it could not be opened: that is tried again.
+    /// Shows the yard called `name` in place of the open one, as it stands:
+    /// it was followed all along. It is the one to open at the next start.
+    /// The line has the focus, as when the window starts. The yard that is
+    /// open already stays as it is, unless it could not be opened: that is
+    /// tried again.
     fn switch_to(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.switching = None;
         cx.notify();
@@ -3337,7 +3749,13 @@ impl Footplate {
                         };
                         if let Some(settings) = next {
                             this.set(settings, cx);
-                            this.reopen(cx);
+                            // The token before it is not the yard's any
+                            // more: the yard is opened with the new one.
+                            let again = match &adding {
+                                Adding::Again(name) => Some(name.as_str()),
+                                _ => None,
+                            };
+                            this.reopen_anew(again, cx);
                         } else {
                             this.yard_said = Some(
                                 "The yard paired this device, but its settings entry is no longer there. Add it again or remove the device at the yard: yardr user device rm <user> <device>".to_string(),
@@ -3368,17 +3786,20 @@ impl Footplate {
     /// Takes the yard called `name` off the list, with what the window
     /// kept for it, and says what became of its token's file and how the
     /// device is removed at the yard: taking it off here does not. Where
-    /// it was the open one, the first of the list is opened.
+    /// it was the open one, the first of the list is shown.
     fn remove_yard(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.pairing || self.env.yard.is_some() {
             return;
         }
-        // Who the device is there is known of the open yard alone.
-        let me = self.model.as_ref().map(|m| m.me().to_string());
-        let device = (name == self.yard)
-            .then(|| Some((me?, self.said.as_ref()?.said_by.clone())))
-            .flatten();
-        let was_open = self.settings.opened().name == name;
+        // Who the device is there is what the yard said when it was read.
+        let (model, said) = match self.held.get(name) {
+            _ if name == self.yard => (self.model.as_ref(), self.said.as_ref()),
+            Some(held) => (held.model.as_ref(), held.said.as_ref()),
+            None => (None, None),
+        };
+        let device = model
+            .zip(said)
+            .map(|(model, said)| (model.me().to_string(), said.said_by.clone()));
         let (settings, left) = self.settings.clone().without(name, self.kept.as_deref());
         let device = device
             .as_ref()
@@ -3388,9 +3809,9 @@ impl Footplate {
             self.shut_adding(cx);
         }
         self.set(settings, cx);
-        if was_open {
-            self.reopen(cx);
-        }
+        // It is followed no longer, and where it was the open one another
+        // is shown.
+        self.reopen(cx);
         // The last yard removed leaves this machine's, which may be the
         // one that was to go: then it is still there, with what is its.
         if self.settings.yard(name).is_none() {
@@ -3398,7 +3819,7 @@ impl Footplate {
                 self.thumbs.remove(&id);
             }
             self.kept_words.remove(name);
-            self.counts.remove(name);
+            self.burst.forget(name);
             self.unreached.remove(name);
             self.places.remove(name);
         }
@@ -3635,15 +4056,16 @@ impl Footplate {
 
     /// What the switcher and the settings say of a yard of the list after
     /// its name and its kind: that it is not reached, with the short why,
-    /// that it is the open one, or what it had waiting when it was last
-    /// left. One that was left not reached is said so until it is opened
-    /// and answers: nothing asks it meanwhile.
+    /// that it is the open one, or what waits in it now. Every yard is
+    /// followed, so one that is not reached is asked again by itself, and
+    /// says so until it answers.
     fn yard_state(&self, yard: &settings::Yard) -> String {
-        match (self.unreached.get(&yard.name), self.counts.get(&yard.name)) {
+        let model = self.held.get(&yard.name).and_then(|h| h.model.as_ref());
+        match (self.unreached.get(&yard.name), model) {
             (Some(why), _) => format!("not reached: {why}"),
             _ if yard.name == self.yard => "open".to_string(),
-            (None, Some(counts)) => counts.line(),
-            (None, None) => "not opened yet".to_string(),
+            (None, Some(model)) => Counts::of(model).line(),
+            (None, None) => "looking for the yard".to_string(),
         }
     }
 
@@ -3874,8 +4296,8 @@ impl Footplate {
     }
 
     /// The switcher's list, under the head of the left column: a row for
-    /// each yard of the settings, with its kind and its state, the open
-    /// one marked. A click opens a yard, as Enter does on the row the
+    /// each yard of the settings, with its kind and its state, which of
+    /// one that is not open is what waits in it now, the open one marked. A click opens a yard, as Enter does on the row the
     /// arrows are on.
     fn switcher(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div()
@@ -3904,9 +4326,11 @@ impl Footplate {
                     .cursor_pointer()
                     .text_sm()
                     .when(place == at, |el| el.bg(palette.open))
-                    // What a yard that is not open had is as of when it
-                    // was left, and is drawn so.
-                    .when(!open, |el| el.text_color(palette.faint))
+                    // A yard that is not reached has nothing to open
+                    // it for, and is drawn so.
+                    .when(self.unreached.contains_key(&yard.name), |el| {
+                        el.text_color(palette.faint)
+                    })
                     .hover(|style| style.bg(palette.hover))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.switch_to(&name, window, cx)),
@@ -9650,20 +10074,17 @@ mod tests {
         );
     }
 
-    /// A notification carries the yard it tells of, and the system shows it
-    /// after that yard was left. Activated then, it opens no row of the
-    /// yard that is open: a row of its name there is another conversation,
-    /// and what is typed in it would be sent to the wrong yard.
-    #[gpui::test]
-    fn a_notification_of_a_yard_that_was_left_opens_no_row_of_the_open_one(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let near = Yard::start();
-        a_yard_of_jo(&near);
-        let second = Yard::start();
-        a_second_yard_of_jo(&second);
-        let file = dir.path().join("footplate/settings.json");
+    /// A window on this machine's yard and a second home's, both followed,
+    /// with `told` for its notifications, which are on: the mail and the
+    /// decisions tell, and the notices where `notices` says so.
+    fn opened_on_two_yards<'a>(
+        dir: &std::path::Path,
+        (near, second): (&Yard, &Yard),
+        told: &Told,
+        notices: bool,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        let file = dir.join("footplate/settings.json");
         let mut set = Settings::default()
             .with_yard(
                 None,
@@ -9672,6 +10093,7 @@ mod tests {
             )
             .unwrap();
         set.notifications.on = true;
+        set.notifications.notices = notices;
         set.write(&file).unwrap();
         cx.update(|cx| {
             input::bind_keys(cx);
@@ -9681,61 +10103,278 @@ mod tests {
             socket: near.socket().to_path_buf(),
             ..Env::default()
         };
-        let told = Told::new();
+        let told = told.clone();
         let (view, cx) = cx.add_window_view(|window, cx| {
             let view = Footplate::opened(env, "jo".into(), Some(file.clone()), window, cx)
-                .notified_by(Box::new(told.clone()), cx);
+                .notified_by(Box::new(told), cx);
             window.focus(&view.line.focus_handle(cx));
             view
         });
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
+        wait(cx, "what waits in the second home's yard", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        (view, cx)
+    }
+
+    /// Every yard of the settings is followed at once. What arrives in one
+    /// that is not open is counted in the switcher as it arrives, with no
+    /// switch, and nothing of it is marked read. The system tells of it by
+    /// the settings' kinds, in a notification that names its yard, and a
+    /// burst of two yards says each yard's part. Activated, a notification
+    /// opens its yard on its row, as the yard stands: it is not read from
+    /// nothing.
+    #[gpui::test]
+    fn a_yard_that_is_not_open_counts_what_arrives_and_its_notification_opens_it(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let told = Told::new();
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &told, true, cx);
         let open_row = |cx: &mut VisualTestContext| {
             view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned())
         };
+        let tellings = |cx: &mut VisualTestContext| -> Vec<(String, String, String, Selected)> {
+            told.tellings(cx)
+                .into_iter()
+                .map(|t| (t.title, t.body, t.yard, t.target))
+                .collect()
+        };
+        let telling = |title: &str, body: &str, yard: &str, target: Selected| {
+            (
+                title.to_string(),
+                body.to_string(),
+                yard.to_string(),
+                target,
+            )
+        };
+        // What was unread when the window started tells of nothing.
+        assert_eq!(tellings(cx), []);
+        let (loads, streams) = (second.asked("Head").len(), second.streams_asked().len());
+        assert_eq!(streams, 1);
 
-        // Mail arrives behind another window: the system tells of it, as
-        // this yard's.
-        cx.deactivate_window();
-        near.emit(&mail_event(21, "assembly", "Built."));
-        wait(cx, "the unread mail", |cx| {
+        // Mail arrives in the yard that is not open, with the window in
+        // front on the other: it is counted where the switcher says what
+        // waits there, and told of as that yard's. Nothing of it is shown,
+        // so the yard is not told it was read.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.front));
+        second.emit(&mail_event(21, "assembly", "Built."));
+        wait(cx, "the mail in the second home's yard", |cx| {
+            state_of(&view, cx, "second home") == "3 mail"
+        });
+        assert_eq!(open_yard(&view, cx), "this machine");
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+        assert_eq!(
+            tellings(cx),
+            [telling(
+                "second home · assembly",
+                "Built.",
+                "second home",
+                Selected::Conversation("assembly".into())
+            )]
+        );
+        assert_eq!(second.asked("AckUserInbox").len(), 0);
+
+        // A card: one notification, naming the yard it waits in.
+        second.answer("UserAsks", &asks_one());
+        second.emit(r#"{"seq": 31, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 3}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "the card in the second home's yard", |cx| {
+            state_of(&view, cx, "second home") == "3 mail, 1 decision"
+        });
+        assert_eq!(
+            tellings(cx),
+            [telling(
+                "second home · yardmaster asks",
+                "Move them now?",
+                "second home",
+                Selected::Decision("bead-a".into())
+            )]
+        );
+
+        // A notice of the yard, which the settings here have tell too.
+        second.answer("UserNotifications", &notices_many(1));
+        second.emit(r#"{"seq": 32, "kind": "created", "actor": "yard", "bead": "yd-shed", "data": {"notified": {"jo": "all"}}, "at": "2026-10-08T09:32:00Z"}"#);
+        wait(cx, "the notice in the second home's yard", |cx| {
+            state_of(&view, cx, "second home") == "3 mail, 1 decision, 1 notice"
+        });
+        assert_eq!(
+            tellings(cx),
+            [telling(
+                "second home · yard",
+                "notice 0 of the evening's work",
+                "second home",
+                Selected::Yard
+            )]
+        );
+
+        // A burst of both yards is one notification, each yard's part by
+        // itself: a sender of one name in both is not one sender. It leads
+        // to the first, in the yard that arrived in.
+        near.emit(&mail_event(21, "assembly", "Built here."));
+        wait(cx, "the mail in this machine's yard", |cx| {
             unread_of(&view, cx, "assembly") == 1
+        });
+        second.emit(&mail_event(33, "assembly", "Tested."));
+        second.emit(&mail_event(34, "yardmaster", "Landed."));
+        wait(cx, "more mail in the second home's yard", |cx| {
+            state_of(&view, cx, "second home") == "5 mail, 1 decision, 1 notice"
+        });
+        assert_eq!(
+            tellings(cx),
+            [telling(
+                "3 new in 2 yards",
+                "this machine: 1 from assembly; second home: 1 from assembly, 1 from yardmaster",
+                "this machine",
+                Selected::Conversation("assembly".into())
+            )]
+        );
+
+        // The card's notification is activated: the window shows the yard
+        // it waits in, on the card's row. The yard is shown as it was
+        // held: it is not read again, and its stream is the one it had.
+        told.activated
+            .0
+            .try_send(("second home".into(), Selected::Decision("bead-a".into())))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.front));
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(open_row(cx), Some(Selected::Decision("bead-a".into())));
+        assert_eq!(state_of(&view, cx, "second home"), "open");
+        assert_eq!(second.asked("Head").len(), loads);
+        assert_eq!(second.streams_asked().len(), streams);
+        // The yard that was left is followed still, and says what waits.
+        assert_eq!(state_of(&view, cx, "this machine"), "1 mail");
+        near.emit(&mail_event(22, "assembly", "And pushed."));
+        wait(cx, "mail in the yard that was left", |cx| {
+            state_of(&view, cx, "this machine") == "2 mail"
+        });
+        assert_eq!(
+            tellings(cx),
+            [telling(
+                "this machine · assembly",
+                "And pushed.",
+                "this machine",
+                Selected::Conversation("assembly".into())
+            )]
+        );
+
+        // A notification of a yard that is listed no longer opens nothing:
+        // a row of its name in the open yard is another conversation, and
+        // what is typed in it would be sent to the wrong yard.
+        let before = open_row(cx);
+        told.activated
+            .0
+            .try_send(("gone".into(), Selected::Conversation("assembly".into())))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(open_row(cx), before);
+        // One of the open yard leads to its row, as before.
+        told.activated
+            .0
+            .try_send((
+                "second home".into(),
+                Selected::Conversation("assembly".into()),
+            ))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(open_yard(&view, cx), "second home");
+        assert_eq!(
+            open_row(cx),
+            Some(Selected::Conversation("assembly".into()))
+        );
+    }
+
+    /// One yard that goes away changes nothing of the others: the stream,
+    /// the counts and the sends of the open yard go on while one that is
+    /// not open is stopped, and that one is asked again by itself until it
+    /// answers. The same the other way: a yard that is not open goes on
+    /// counting while the open one is away.
+    #[gpui::test]
+    fn a_yard_that_goes_away_leaves_the_others_as_they_are_and_is_asked_again(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let told = Told::new();
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &told, false, cx);
+
+        // The yard that is not open stops.
+        let socket = second.socket().to_path_buf();
+        second.stop();
+        wait(cx, "that the second home's yard is not reached", |cx| {
+            state_of(&view, cx, "second home") == "not reached: nothing answers"
+        });
+        // The open yard shows as it did, on the stream it had: what
+        // arrives there arrives, and what is written there is sent.
+        assert_eq!(open_yard(&view, cx), "this machine");
+        assert_eq!(view.read_with(cx, |v, _| v.down.clone()), None);
+        near.emit(&mail_event(21, "yardmaster", "Landed."));
+        wait(cx, "the mail in the open yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?", "Landed."]
+        });
+        near.emit(&mail_event(22, "assembly", "Built."));
+        wait(cx, "the unread mail in the open yard", |cx| {
+            unread_of(&view, cx, "assembly") == 1
+        });
+        cx.simulate_input("Go on.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail to be sent", |_| near.asked("Mail").len() == 1);
+        assert_eq!(notice(&view, cx), "");
+        assert_eq!(near.streams_asked().len(), 1);
+        assert_eq!(
+            state_of(&view, cx, "second home"),
+            "not reached: nothing answers"
+        );
+
+        // It is started again: asked again by itself, it says what waits
+        // in it, with no switch to it.
+        let second = Yard::start_at(&socket);
+        a_second_yard_of_jo(&second);
+        wait(cx, "the second home's yard to answer by itself", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        assert_eq!(open_yard(&view, cx), "this machine");
+        assert_eq!(near.streams_asked().len(), 1);
+
+        // The open yard stops: the one that is not open goes on, counts
+        // what arrives, and has the system tell of it.
+        told.tellings(cx);
+        near.stop();
+        wait(cx, "that the open yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        second.emit(&mail_event(21, "assembly", "Built."));
+        wait(cx, "the mail in the yard that is not open", |cx| {
+            state_of(&view, cx, "second home") == "3 mail"
         });
         let tellings = told.tellings(cx);
         let [telling] = tellings.as_slice() else {
             panic!("{tellings:?}");
         };
-        assert_eq!(telling.yard, "this machine");
-        assert_eq!(telling.target, Selected::Conversation("assembly".into()));
-
-        // The other yard is opened, which has a conversation of that name
-        // too, and then the notification is activated: the window comes
-        // forward, and stays on the row it had.
-        view.update_in(cx, |v, window, cx| v.switch_to("second home", window, cx));
+        assert_eq!(telling.title, "second home · assembly");
+        assert_eq!(telling.yard, "second home");
+        // And it is shown as it stands, from beside the yard that is away.
+        cx.simulate_keystrokes("secondary-2");
         wait(cx, "the second home's yard", |cx| {
             texts(&view, cx) == ["From the second home."]
         });
-        assert_eq!(unread_of(&view, cx, "assembly"), 1);
-        let before = open_row(cx);
-        assert_eq!(before, Some(Selected::Conversation("yardmaster".into())));
-        told.activated
-            .0
-            .try_send((telling.yard.clone(), telling.target.clone()))
-            .unwrap();
-        cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.front));
-        assert_eq!(open_yard(&view, cx), "second home");
-        assert_eq!(open_row(cx), before);
-        assert_eq!(texts(&view, cx), ["From the second home."]);
-
-        // One of the open yard leads to its row, as before.
-        told.activated
-            .0
-            .try_send(("second home".into(), telling.target.clone()))
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(open_row(cx), Some(telling.target.clone()));
+        assert_eq!(
+            state_of(&view, cx, "this machine"),
+            "not reached: nothing answers"
+        );
     }
 
     fn a_far_yard_of_jo(yard: &Yard) {
@@ -9847,22 +10486,16 @@ mod tests {
     }
 
     #[test]
-    fn what_a_yard_had_waiting_is_said_as_of_when_it_was_last_open() {
+    fn what_a_yard_has_waiting_is_said_in_words() {
         let counts = |mail, decisions, notices| Counts {
             mail,
             decisions,
             notices,
         };
-        assert_eq!(counts(0, 0, 0).line(), "nothing waiting when last opened");
-        assert_eq!(
-            counts(2, 1, 0).line(),
-            "2 mail, 1 decision when last opened"
-        );
-        assert_eq!(counts(1, 0, 1).line(), "1 mail, 1 notice when last opened");
-        assert_eq!(
-            counts(0, 3, 12).line(),
-            "3 decisions, 12 notices when last opened"
-        );
+        assert_eq!(counts(0, 0, 0).line(), "nothing waiting");
+        assert_eq!(counts(2, 1, 0).line(), "2 mail, 1 decision");
+        assert_eq!(counts(1, 0, 1).line(), "1 mail, 1 notice");
+        assert_eq!(counts(0, 3, 12).line(), "3 decisions, 12 notices");
     }
 
     /// The yards in the settings: this machine's, as before, and one at an
@@ -10144,9 +10777,9 @@ mod tests {
 
     /// The head of the left column names the open yard and switches: a
     /// click or its key opens the list of the yards, each with its kind
-    /// and what it had when it was last open; a click on a row, Enter on
-    /// the row the arrows are on, or a yard's own key from anywhere opens
-    /// it, loaded then.
+    /// and what waits in it now; a click on a row, Enter on the row the
+    /// arrows are on, or a yard's own key from anywhere opens it, as it
+    /// stands: every yard is followed from the start.
     #[gpui::test]
     fn the_head_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -10162,13 +10795,15 @@ mod tests {
             ..Env::default()
         };
         let (view, cx) = opened_at(env, &file, cx);
-        // The first of the list, where none was open before, and no other
-        // is asked anything until it is opened.
+        // The first of the list, where none was open before. The others
+        // are read too, and say what waits in them.
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
         assert_eq!(open_yard(&view, cx), "this machine");
-        assert_eq!((second.requests(), far.requests()), (0, 0));
+        wait(cx, "what waits in the other yards", |cx| {
+            state_of(&view, cx, "second home") == "2 mail" && state_of(&view, cx, "far") == "1 mail"
+        });
         assert!(!drawn(cx, "switcher"));
 
         // A click on the head opens the list: each yard, its kind, and
@@ -10178,7 +10813,6 @@ mod tests {
         assert!(drawn(cx, "switcher"));
         assert!(drawn(cx, "switch this machine") && drawn(cx, "switch far"));
         assert_eq!(state_of(&view, cx, "this machine"), "open");
-        assert_eq!(state_of(&view, cx, "second home"), "not opened yet");
         let kinds: Vec<&str> = view.read_with(cx, |v, _| {
             v.settings.yards.iter().map(|y| y.kind()).collect()
         });
@@ -10192,13 +10826,9 @@ mod tests {
         assert_eq!(open_yard(&view, cx), "second home");
         assert_eq!(switching(&view, cx), None);
         assert_eq!(Settings::read(&file).open, "second home");
-        assert_eq!(far.requests(), 0);
-        // What the one that was left had is said as of then: its mail was
-        // read in the open conversation.
-        assert_eq!(
-            state_of(&view, cx, "this machine"),
-            "nothing waiting when last opened"
-        );
+        // What the one that was left has: its mail was read in the open
+        // conversation.
+        assert_eq!(state_of(&view, cx, "this machine"), "nothing waiting");
         let had = view.read_with(cx, |v, _| Counts::of(v.model.as_ref().unwrap()));
         assert_eq!((had.mail, had.decisions), (1, 0), "{had:?}");
 
@@ -10222,10 +10852,7 @@ mod tests {
         });
         assert_eq!(open_yard(&view, cx), "far");
         assert_eq!(switching(&view, cx), None);
-        assert_eq!(
-            state_of(&view, cx, "second home"),
-            "1 mail when last opened"
-        );
+        assert_eq!(state_of(&view, cx, "second home"), "1 mail");
         // Every call there is the device's, with the token of that yard.
         assert!(
             far.last_request()
@@ -10239,10 +10866,7 @@ mod tests {
         wait(cx, "this machine's yard by its key", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
-        assert_eq!(
-            state_of(&view, cx, "far"),
-            "nothing waiting when last opened"
-        );
+        assert_eq!(state_of(&view, cx, "far"), "nothing waiting");
         cx.simulate_keystrokes("secondary-9");
         cx.run_until_parked();
         assert_eq!(open_yard(&view, cx), "this machine");
@@ -10668,12 +11292,14 @@ mod tests {
             yard_said(&view, cx),
             "second home is removed from the list. Its yard is as it was."
         );
+        // Who the device is at a yard that is not open is known too: it
+        // is followed, and said so when it was read.
+        wait(cx, "the paired yard to be read", |cx| {
+            state_of(&view, cx, "far") == "1 mail"
+        });
         click_on(cx, "yard remove far");
         let said = yard_said(&view, cx);
-        assert!(
-            said.ends_with("yardr user device rm <user> <device>"),
-            "{said}"
-        );
+        assert!(said.ends_with("yardr user device rm jo laptop"), "{said}");
         assert!(!beside("yard-far.token").exists());
         assert_eq!(
             Settings::read(&file).yards,
@@ -11055,6 +11681,10 @@ mod tests {
         });
         assert_eq!(head_line(&view, cx), "jo · this machine ▾");
         cx.simulate_input("kept");
+        // The others are followed too, and the two that answer were read.
+        wait(cx, "what waits in the yards that answer", |cx| {
+            state_of(&view, cx, "second home") == "2 mail" && state_of(&view, cx, "far") == "1 mail"
+        });
 
         // The second home's yard is stopped, the shop is away from the
         // network, and the far yard's operator removed this device, one of
@@ -11077,18 +11707,16 @@ mod tests {
         wait(cx, "that the second home's yard is stopped", |cx| {
             down(&view, cx, "No yard: nothing answers at the yard's socket")
         });
-        assert_eq!(head_line(&view, cx), "second home · nothing answers ▾");
+        // Who the window is for there is known of a yard that was read.
+        assert_eq!(head_line(&view, cx), "jo · second home · nothing answers ▾");
         assert_eq!(
             state_of(&view, cx, "second home"),
             "not reached: nothing answers"
         );
         assert!(drawn(cx, "which yard") && drawn(cx, "away why"));
         assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
-        // What the yard that answers had is as it was left.
-        assert_eq!(
-            state_of(&view, cx, "this machine"),
-            "nothing waiting when last opened"
-        );
+        // What the yard that answers has is as it was left.
+        assert_eq!(state_of(&view, cx, "this machine"), "nothing waiting");
 
         // The head is the switcher there too: a click lists the yards, the
         // arrows move, and Enter opens the one away from the network.
@@ -11115,7 +11743,7 @@ mod tests {
         wait(cx, "that the device is not let in", |cx| {
             view.read_with(cx, |v, _| v.away == Away::Out)
         });
-        assert_eq!(head_line(&view, cx), "far · pair again ▾");
+        assert_eq!(head_line(&view, cx), "jo · far · pair again ▾");
         assert_eq!(state_of(&view, cx, "far"), "not reached: pair again");
         assert!(drawn(cx, "away why") && drawn(cx, "pair again"));
         // Esc leaves the list, and the yard stays as it is.
@@ -11147,10 +11775,15 @@ mod tests {
         // an earlier frame drew.)
         assert_eq!(view.read_with(cx, |v, _| v.down.clone()), None);
 
-        // The stopped yard is started: opened, it answers, and is said
-        // not reached no longer, there or when it is left.
+        // The stopped yard is started: it is asked again by itself, with
+        // no switch to it, and is said not reached no longer, there or
+        // when it is opened and left.
         let second = Yard::start_at(&socket);
         a_second_yard_of_jo(&second);
+        wait(cx, "the second home's yard to answer by itself", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        assert_eq!(open_yard(&view, cx), "this machine");
         cx.simulate_keystrokes("secondary-2");
         wait(cx, "the second home's yard", |cx| {
             texts(&view, cx) == ["From the second home."]
@@ -11161,10 +11794,7 @@ mod tests {
         wait(cx, "this machine's yard once more", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
-        assert_eq!(
-            state_of(&view, cx, "second home"),
-            "1 mail when last opened"
-        );
+        assert_eq!(state_of(&view, cx, "second home"), "1 mail");
     }
 
     /// The one yard the environment names has no other to go to: away, it
@@ -13494,6 +14124,11 @@ mod tests {
             texts(&view, cx) == ["From the second home."]
         });
         near.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        near.emit(r#"{"seq": 31, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 4}, "at": "2026-10-10T10:31:00Z"}"#);
+        assert_eq!(state_of(&view, cx, "this machine"), "1 mail, 1 decision");
+        wait(cx, "the yard that is not open to lose its card", |cx| {
+            state_of(&view, cx, "this machine") == "1 mail"
+        });
         cx.simulate_keystrokes("secondary-1");
         wait(cx, "this machine's yard without the card", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
