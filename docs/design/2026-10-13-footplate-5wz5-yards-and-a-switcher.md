@@ -45,9 +45,11 @@ exactly one yard.
 is kept in `yard.token` beside the settings file (`TOKEN_FILE` in
 src/yard.rs), or in `FOOTPLATE_TOKEN_FILE`, which wins. `read_token`
 refuses a file others can read and one that holds no token;
-`keep_token` writes a pairing's token for its user alone. The address
-and code as typed, including a QR string of the form `<address>#<code>`,
-are split by `yard::typed`.
+`keep_token` writes a pairing's token for its user alone. A token file
+alone, without an address, names no yard: `Env::open` with no address
+returns the socket client (src/yard.rs:58-61, proved in test at
+src/yard.rs:221-225). The address and code as typed, including a QR
+string of the form `<address>#<code>`, are split by `yard::typed`.
 
 **One chosen address in the settings.** src/settings.rs keeps `remote`
 and `address`: whether the window shows a yard at an address, and the
@@ -167,10 +169,27 @@ entry has a name to show, unique in the list, and one of two reaches:
   (`api::socket_path`, so `YARDR_HOME` still moves it); a path names
   another home's yard on this machine. No token, no pairing: the
   socket's trust is as today.
-- far: `address` and `token_file`. The token's file is a name beside the
-  settings by default, `yard-<slug>.token` from the entry's name, or an
-  absolute path where the person names one. The token is never in the
-  settings, as today.
+- far: `address` and `token_file`. The token's file is kept as a bare
+  file name, resolved beside the settings file, or as an absolute path
+  where the person names one; anything else is refused with its reason
+  where it is typed. The default for a new entry is `yard-<slug>.token`
+  from the entry's name (lowercased, runs of other characters to one
+  `-`, `yard` where nothing is left), with `-2`, `-3` and so on while
+  the name is taken. The token is never in the settings, as today.
+
+No two far entries may resolve to the same token file, and no renaming
+or edit may make them: the settings refuse a second entry, name or path
+that would collide, where it is typed, before anything is paired or
+written. Renaming an entry never renames its token file, so a rename
+cannot collide with another entry's. Generation skips both names
+another entry already resolves to and names a file on disk already
+holds, so two entries never share a generated `yard-<slug>.token`.
+Where a hand-edited file still holds two entries on one file, the
+settings view refuses to pair or open either colliding entry, naming
+the shared file, until they differ. Today's single-token resolution
+(`Env::token_file` in src/yard.rs:47-52) has no per-entry identity;
+each entry carries its own resolved file instead, and `Env` opens per
+entry.
 
 An existing settings file with one yard becomes one entry, on read,
 once: `remote` with an `address` becomes a far entry named for the
@@ -247,9 +266,12 @@ address (`api::pair`) and keeps the token in that entry's file
 (`yard::keep_token`). Each yard pairs on its own; a code is for one
 yard and is used up there.
 
-Removing an entry deletes its token's file where the file is beside the
-settings (the default and any name there); a token file named by an
-absolute path elsewhere is left alone, and the settings say so. Either
+Pairing writes only to the entry's own resolved file, never to another
+entry's. Removing an entry deletes its token's file only where the file
+is a bare name beside the settings (the default and any name there) and
+no other entry resolves to the same file; a token file named by an
+absolute path elsewhere is always left alone, and a file still named by
+another entry is left and the settings say which entry keeps it. Either
 way the device itself stays at the yard until its operator removes it
 (`yardr user device rm <user> <device>`), and the settings say that in
 one line. Above the list, one sentence says what a pairing gives over a
@@ -381,14 +403,25 @@ would become.
    with several fake yards. I would take A: the window shows one yard,
    the first bead is the valuable one, and staleness is marked; B
    returns as its own bead if living with A misses live counts.
-2. **Whether `FOOTPLATE_YARD` stays or goes.** Option A, it stays: with
-   the variable set the window is of the one yard it names, with no
-   switcher, exactly as today — the trial's window, the debugging
-   window, design yardr-xpf8's first step. It costs the one branch that
-   exists (`Env::address`, `Env::token_file`). Option B, it goes: every
-   yard lives in the settings, and a trial edits them. It costs every
-   use that names a yard for one run, and the tests that open a yard by
-   environment. I would take A.
+2. **Whether `FOOTPLATE_YARD` stays or goes, with `FOOTPLATE_TOKEN_FILE`
+   beside it.** Option A, they stay: with `FOOTPLATE_YARD` set the
+   window is of the one yard it names, with no switcher, exactly as
+   today — the trial's window, the debugging window, design
+   yardr-xpf8's first step; the token is read from
+   `FOOTPLATE_TOKEN_FILE` where it is set, else `yard.token` beside the
+   settings, and a pairing in that window writes to the same file.
+   `FOOTPLATE_TOKEN_FILE` without `FOOTPLATE_YARD` names no yard and is
+   ignored, as today; pairing in the switcher writes each entry's own
+   resolved file and never the environment's. It costs the branches
+   that exist (`Env::address`, per-entry `token_file` with the
+   single-yard fallback). Option B, they go: every yard lives in the
+   settings, both variables are ignored, and a trial edits them; the
+   window with no home loses the fallback the no-home error names today
+   (`Env::open` in src/yard.rs:58-67). It costs every use that names a
+   yard for one run, and the tests that open a yard by environment. I
+   would take A: one run's window stays one run's, and the override
+   cannot silently lend one yard's token to another because it only
+   ever applies to the single yard it names.
 3. **The order of the yards and which one opens at start.** Option A, the
    settings' order, opening the last-open yard (`open` in the settings),
    else the first entry, as proposed: the list is the person's order,
@@ -419,9 +452,11 @@ src/fake.rs for the tests. Done when: two yards (this machine's by its
 socket and one paired, plus a second home's socket in tests) switch from
 the head; a draft, its attachments and ask words typed for one are
 untouched by the other and send only there; the switcher shows kind and
-last-known counts; removing deletes a managed token file and says the
-yard-side command; mckean's old settings file opens as one entry; and
-`.yardr/test` passes.
+last-known counts; no two far entries can resolve to one token file, a
+rename never collides, generated names skip taken ones, and removing
+deletes a managed token file only where no other entry names it and
+says the yard-side command; mckean's old settings file opens as one
+entry; and `.yardr/test` passes.
 
 **Footplate 2. The open row and the scroll are kept per yard.** Goal: a
 switch comes back to the open row and scroll of each yard, not to the
