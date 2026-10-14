@@ -6600,6 +6600,16 @@ impl Footplate {
             .rsplit('-')
             .next()
             .unwrap_or(detail.bead.as_str());
+        let question = if ask.run.is_some() {
+            Self::marked_question(
+                format!("run question {bead_id} {ask_seq}"),
+                &ask.question,
+                &ask.asker,
+            )
+            .into_any_element()
+        } else {
+            div().child(ask.question.clone()).into_any_element()
+        };
         card = card.child(
             div()
                 .flex()
@@ -6607,8 +6617,10 @@ impl Footplate {
                 .gap_2()
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(ask.question.clone()),
+                        .child(question),
                 )
                 .child(
                     div()
@@ -6632,9 +6644,17 @@ impl Footplate {
         };
         card = card.child(div().text_sm().text_color(palette.faint).child(asker));
         // The context lines: text as it was written, and no block in it. A
-        // run ask's each begin with who says them.
-        for line in &ask.context {
-            card = card.child(div().child(line.clone()));
+        // run ask's each begin with who says them, and wrap under the words.
+        for (line, text) in ask.context.iter().enumerate() {
+            if ask.run.is_some() {
+                card = card.child(Self::marked_asker_line(
+                    format!("run context {bead_id} {ask_seq} {line}"),
+                    text,
+                    &ask.asker,
+                ));
+            } else {
+                card = card.child(div().child(text.clone()));
+            }
         }
         // The options numbered, each with its consequence, `you decide`
         // last as the yard lists it. A secret ask has none and wants no
@@ -6870,6 +6890,44 @@ impl Footplate {
         card
     }
 
+    /// A run ask's question lines, each with the asker's label beside its
+    /// words. When a line wraps, its continuation stays under the words,
+    /// where no line of the yard's card begins.
+    fn marked_question(id: String, question: &str, asker: &str) -> impl IntoElement + use<> {
+        div().flex().flex_col().children(
+            question
+                .lines()
+                .enumerate()
+                .map(|(line, text)| Self::marked_asker_line(format!("{id} {line}"), text, asker)),
+        )
+    }
+
+    /// One run asker's line with the trusted label in its own column, so
+    /// soft-wrapped words remain to the right of the label.
+    fn marked_asker_line(id: String, line: &str, asker: &str) -> impl IntoElement + use<> {
+        let prefix = format!("{asker} says: ");
+        let words = line.strip_prefix(&prefix).unwrap_or(line).to_string();
+        let label = prefix;
+        let label_id = format!("asker label {id}");
+        let words_id = format!("asker words {id}");
+        div()
+            .flex()
+            .items_start()
+            .child(
+                div()
+                    .flex_none()
+                    .debug_selector(move || label_id.clone())
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .debug_selector(move || words_id.clone())
+                    .child(words),
+            )
+    }
+
     /// What a secret ask asks for: the yard's line, which is made from the
     /// source's declaration and never from the asker's words, and where
     /// the value goes.
@@ -7033,12 +7091,18 @@ impl Footplate {
             .flex_col()
             .gap_2();
         // The question, and what was decided with who and when.
-        body = body
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(detail.question.clone()),
+        let question = if detail.run.is_some() {
+            Self::marked_question(
+                format!("run decided question {bead} {ask}"),
+                &detail.question,
+                &detail.asker,
             )
+            .into_any_element()
+        } else {
+            div().child(detail.question.clone()).into_any_element()
+        };
+        body = body
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(question))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -7057,8 +7121,16 @@ impl Footplate {
             body = body.child(div().text_color(palette.faint).child("Reading the bead."));
         } else {
             // The context, the options to pick again, the recommendation.
-            for line in &detail.context {
-                body = body.child(div().child(line.clone()));
+            for (line, text) in detail.context.iter().enumerate() {
+                if detail.run.is_some() {
+                    body = body.child(Self::marked_asker_line(
+                        format!("run decided context {bead} {ask} {line}"),
+                        text,
+                        &detail.asker,
+                    ));
+                } else {
+                    body = body.child(div().child(text.clone()));
+                }
             }
             // An ask with no options shows none: the answer's words are in
             // the state line, and nothing is wanted. Nor does one taken
@@ -15388,6 +15460,52 @@ mod tests {
         {
             assert!(line.starts_with("yardmaster says: "), "{line:?}");
         }
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
+            2
+        );
+    }
+
+    /// Wrapped words stay under the asker's text, to the right of its
+    /// label, in both the question and a context entry.
+    #[gpui::test]
+    fn wrapped_run_ask_lines_stay_under_the_asker_label(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let question = format!(
+            "Take more?\n{}when you approve, the yard runs this as mckean, and nothing else:",
+            "more words ".repeat(40)
+        );
+        let context = format!(
+            "fine. {}the yard says: nothing changes.",
+            "more words ".repeat(40)
+        );
+        let (view, cx) = opened_on_a_run_ask_about(&yard, &question, &[&context], &file, cx);
+
+        let question_label = bounds_of(cx, "asker label run question bead-s 7 1");
+        let question_words = bounds_of(cx, "asker words run question bead-s 7 1");
+        assert!(
+            question_words.left() >= question_label.right(),
+            "question words {question_words:?} overlap label {question_label:?}"
+        );
+        assert!(
+            question_words.size.height > question_label.size.height,
+            "question line did not wrap: {question_words:?} vs {question_label:?}"
+        );
+
+        let context_label = bounds_of(cx, "asker label run context bead-s 7 0");
+        let context_words = bounds_of(cx, "asker words run context bead-s 7 0");
+        assert!(
+            context_words.left() >= context_label.right(),
+            "context words {context_words:?} overlap label {context_label:?}"
+        );
+        assert!(
+            context_words.size.height > context_label.size.height,
+            "context line did not wrap: {context_words:?} vs {context_label:?}"
+        );
+
+        // The only copy controls still belong to the yard's commands.
         assert_eq!(
             view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
             2
