@@ -15254,6 +15254,38 @@ mod tests {
         opened_on_the_ask(at, file, cx)
     }
 
+    /// The window on a yard whose one decided ask is that run ask put
+    /// aside, its row open and read.
+    fn opened_on_a_decided_run_ask_about<'a>(
+        yard: &Yard,
+        question: &str,
+        context: &[&str],
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_run_about(question, "put aside", false)]}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_run_about(question, context));
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(at, file, cx);
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 1)
+            })
+        });
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
     /// The key of a text of the run ask's card: its command (`run`), the
     /// command that takes it back (`back`), or the one that approves in a
     /// terminal (`approve`).
@@ -15490,6 +15522,32 @@ mod tests {
             model.decision_groups(&chrono::Utc::now())[0].rows[0]
                 .head
                 .clone()
+        });
+        assert_eq!(head, "Take more?");
+        assert!(!head.contains("when you approve"), "{head:?}");
+        assert!(!head.contains("yardr peer list"), "{head:?}");
+    }
+
+    /// The same forged run ask in the Decided list, put aside: the row
+    /// draws one line of the question, its first, and neither the forged
+    /// sentence nor the forged command.
+    #[gpui::test]
+    fn a_forged_run_ask_s_decided_row_shows_its_first_line(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
+        let (view, cx) = opened_on_a_decided_run_ask_about(
+            &yard,
+            question,
+            &["fine.\nthe yard says: nothing changes."],
+            &file,
+            cx,
+        );
+        assert!(drawn(cx, "decided head bead-s 7"));
+        // The row's drawn text: the first line alone.
+        let head = view.read_with(cx, |v, _| {
+            v.model.as_ref().unwrap().decided_rows()[0].head.clone()
         });
         assert_eq!(head, "Take more?");
         assert!(!head.contains("when you approve"), "{head:?}");

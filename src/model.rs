@@ -212,7 +212,7 @@ pub struct TopicGroup {
 pub struct DecidedRow {
     pub bead: String,
     pub ask: u64,
-    /// The question in plain words.
+    /// The question's first line in plain words.
     pub head: String,
     /// `<asker> · <pick|declined|put aside|taken back by ...>`.
     pub sub: String,
@@ -1008,7 +1008,7 @@ impl Model {
             .map(|ask| DecidedRow {
                 bead: ask.bead.clone(),
                 ask: ask.ask,
-                head: plain(&ask.question),
+                head: row_head(&ask.question),
                 sub: decided_sub(ask),
                 short: short_bead(&ask.bead),
                 selected: self.selected.as_ref()
@@ -2544,10 +2544,10 @@ fn decision_head(first: &OpenAsk, asks: &[&OpenAsk]) -> String {
     format!("{}: {} questions", row_head(&title), asks.len())
 }
 
-/// A decisions row's head: the first line of the question in plain words.
-/// No later line, and no indent of the asker's, is drawn in the list: the
-/// row shows one line, and its truncate() cuts it with an ellipsis where
-/// it does not fit. Whose words they are, the row's sub says.
+/// A decisions or Decided row's head: the first line of the question in
+/// plain words. No later line, and no indent of the asker's, is drawn in
+/// the list: the row shows one line, and its truncate() cuts it with an
+/// ellipsis where it does not fit. Whose words they are, the row's sub says.
 fn row_head(question: &str) -> String {
     asker_lines(question).into_iter().next().unwrap_or_default()
 }
@@ -5656,6 +5656,23 @@ mod tests {
         m.open[0].run = None;
         let row = &m.decision_groups(&noon())[0].rows[0];
         assert_eq!(row.head, "Take more?");
+    }
+
+    /// A Decided row shows one line of the question, the same way: its
+    /// first line, in plain words. A run ask put aside can still be
+    /// approved, so its row matters as much as an open one's.
+    #[test]
+    fn a_decided_row_shows_the_question_s_first_line() {
+        let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
+        let mut m = with_a_run_ask_about(question, &[]);
+        assert!(m.deferred("yd-link", 2710).contains(&Effect::Asks));
+        let row = &m.decided_rows()[0];
+        assert_eq!(row.head, "Take more?");
+        assert!(!row.head.contains('\n'), "{:?}", row.head);
+        assert!(!row.head.contains("when you approve"), "{:?}", row.head);
+        assert!(!row.head.contains("yardr peer list"), "{:?}", row.head);
+        // Whose words they are, the row's sub says.
+        assert_eq!(row.sub, "yardmaster · put aside");
     }
 
     /// Nothing but the approval answers a run ask: Enter sends no pick and
