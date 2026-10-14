@@ -2637,10 +2637,10 @@ impl Footplate {
             ViewUp::Asked(asked) | ViewUp::Answered(asked, _) if asked == &base => return,
             _ => {}
         }
-        // The page shot shows the row with Open: the view is taken as
-        // answering at its address, so the shot is the row and not the
-        // probe. A debug build's alone; where the address reads as none,
-        // the probe below says so.
+        // The page shot shows the row with Open and run: the view is
+        // taken as answering at its address, so the shot is the row and
+        // not the probe. A debug build's alone; where the address reads
+        // as none, the probe below says so.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("page")
             && api::Address::parse_view(&base).is_ok()

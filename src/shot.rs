@@ -22,7 +22,7 @@ use crate::yard::Env;
 /// The stopped yard answers nothing; the yard at an address is opened
 /// from the settings the shot script writes; the settings open over a
 /// running yard; the page's card stands expanded at its end, with the
-/// web view taken as answering, so the row carries Open. The script answers the switch's
+/// web view taken as answering, so the row carries Open and run. The script answers the switch's
 /// yardr for every state, so the head draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
@@ -284,8 +284,8 @@ fn populate(yard: &Yard, state: &str) {
         "page" => {
             // The plain ask above, whose note carries a page and an image:
             // the yard holds the image, and the page is never asked for,
-            // since Open takes it to the browser. The mail carries a page
-            // too, which opens from no mail.
+            // since Open and run take it to the browser. The mail carries
+            // a page too, which opens from no mail.
             yard.blob(IMAGE_HASH, IMAGE);
             yard.answer(
                 "UserInbox",
