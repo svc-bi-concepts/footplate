@@ -65,6 +65,9 @@ case "$command" in
         ;;
     cp)
         destination=$2
+        if [ "${MOCK_FAIL_CP:-0}" = 1 ]; then
+            exit 1
+        fi
         printf 'mock screenshot\n' > "$destination"
         ;;
     *)
@@ -118,6 +121,16 @@ first=$(run_shot "$tmp/log-first")
 second=$(run_shot "$tmp/log-second")
 expect_run "the first shot" "$tmp/log-first" 2
 expect_run "the second shot" "$tmp/log-second" 2
+
+# A failure after the container has started still removes it.
+if MOCK_FAIL_CP=1 MOCK_LOG=$tmp/log-failure PATH="$tmp/bin:$PATH" \
+        "$script" "$tmp/shot-failure.png" >"$tmp/failure.out" 2>&1; then
+    fail "a failed screenshot unexpectedly succeeded"
+fi
+grep -F -q -- "run -d --name $name " "$tmp/log-failure" \
+    || fail "the failing shot started no container"
+[ "$(tail -n 1 "$tmp/log-failure")" = "rm -f $name" ] \
+    || fail "the failing shot left its container behind"
 
 # A container of the name left by a killed run is removed before a new one
 # starts.
