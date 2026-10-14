@@ -16,17 +16,26 @@ use crate::yard::Env;
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
 /// the conversation with the yardmaster, an open decision card of a plain
 /// ask, an open card of a run ask, a yard that is stopped, a yard at an
-/// address, and the settings with the start-at-login switch. The stopped
-/// yard answers nothing; the yard at an address is opened from the
-/// settings the shot script writes; the settings open over a running
-/// yard. The script answers the switch's yardr for every state, so the
-/// head draws the same on every shot.
-pub const STATES: &[&str] = &["yardmaster", "plain", "run", "stopped", "far", "settings"];
+/// address, the settings with the start-at-login switch, and a running
+/// yard whose server is then stopped, shot reconnecting with a draft in
+/// the composer. The stopped yard answers nothing; the yard at an address
+/// is opened from the settings the shot script writes; the settings open
+/// over a running yard. The script answers the switch's yardr for every
+/// state, so the head draws the same on every shot.
+pub const STATES: &[&str] = &[
+    "yardmaster",
+    "plain",
+    "run",
+    "stopped",
+    "far",
+    "settings",
+    "reconnecting",
+];
 
 /// The fake yard and its private socket directory, which go away with the
 /// screenshot run.
 pub(super) struct ShotYard {
-    yard: Yard,
+    yard: std::sync::Arc<Yard>,
     directory: PathBuf,
 }
 
@@ -51,7 +60,13 @@ impl ShotYard {
         let socket = directory.join("yard.sock");
         let yard = Yard::start_at(&socket);
         populate(&yard, state);
-        Ok((socket, ShotYard { yard, directory }))
+        Ok((
+            socket,
+            ShotYard {
+                yard: std::sync::Arc::new(yard),
+                directory,
+            },
+        ))
     }
 }
 
@@ -102,6 +117,22 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
             std::process::exit(1);
         }
     };
+    if state == "reconnecting" {
+        // The yard answers, the window reads it, and then its server is
+        // stopped: the shot is the reconnecting state. The stop waits for
+        // the window's stream, so the yard is read first; past half a
+        // minute it stops anyway, and the shot is whatever that is.
+        let yard = shot.yard.clone();
+        std::thread::spawn(move || {
+            for _ in 0..600 {
+                if !yard.streams_asked().is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            yard.stop();
+        });
+    }
     let mut env = env;
     env.socket = socket;
     (env, Some(shot))
@@ -157,8 +188,9 @@ fn populate(yard: &Yard, state: &str) {
     match state {
         // The yard at an address is opened from the settings, not from
         // this yard, and the settings open over a running one: both
-        // serve the yardmaster's conversation.
-        "yardmaster" | "far" | "settings" => {
+        // serve the yardmaster's conversation, as does the yard that is
+        // stopped once it is read.
+        "yardmaster" | "far" | "settings" | "reconnecting" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -316,7 +348,7 @@ mod tests {
             assert_eq!(loaded.me, "jo", "{state}");
             assert_eq!(loaded.asks.decided.len(), 0, "{state}");
             match *state {
-                "yardmaster" | "far" | "settings" => {
+                "yardmaster" | "far" | "settings" | "reconnecting" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");

@@ -93,10 +93,12 @@ The states are `yardmaster` (the conversation with the yardmaster, with a
 few mails), `plain` (an open decision card of a plain ask), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `stopped` (the head with a stopped
-yard), `far` (a yard at an address, away) and `settings` (the settings
-with the start-at-login switch). With no state the first screen is
-shot, as above. A state is a debug build's alone: the binary reads it
-from `FOOTPLATE_SHOT`, and a release build does not read that variable.
+yard), `far` (a yard at an address, away), `settings` (the settings
+with the start-at-login switch) and `reconnecting` (a running yard whose
+server is then stopped, with a draft in the composer). With no state the
+first screen is shot, as above. A state is a debug build's alone: the
+binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
+that variable.
 
 To add one, serve it in `src/shot.rs` (`STATES` and `populate`), cover it
 in that file's test, add its name to the script's list beside this one,

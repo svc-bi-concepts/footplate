@@ -499,6 +499,17 @@ fn quiet_button(text: String, palette: Palette) -> Div {
         .child(text)
 }
 
+/// Why Send does nothing while the yard is reconnecting, beside the
+/// control that sends: the draft stays as typed, and goes on Enter once
+/// the yard answers.
+fn send_held(palette: Palette) -> impl IntoElement {
+    div()
+        .debug_selector(|| "send held".to_string())
+        .text_sm()
+        .text_color(palette.faint)
+        .child("sends when the yard answers")
+}
+
 /// A small button beside the send button, without what it does: Later and
 /// Decline, with their keys.
 fn small_button(text: String, palette: Palette) -> Div {
@@ -1056,6 +1067,16 @@ impl Footplate {
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings") {
             this.settings_open = true;
+        }
+        // The reconnecting shot has a draft in the composer: the
+        // yardmaster's conversation's, which opens first, in the line
+        // once the yard is read.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reconnecting") {
+            this.drafts.put_text(
+                "yardmaster",
+                "Land it once the last bead is green.".to_string(),
+            );
         }
         this
     }
@@ -2985,6 +3006,14 @@ impl Footplate {
     /// On a card Enter sends the pick with the line's words, or the words
     /// alone.
     fn send(&mut self, cx: &mut Context<Self>) {
+        // While the yard is reconnecting Send is held: the draft stays
+        // as typed, with the reason beside the line, and goes on Enter
+        // once the yard answers. Nothing is queued: a mail sent as the
+        // connection broke cannot be told apart from one that never
+        // arrived, so a queue could send twice.
+        if self.reconnecting() {
+            return;
+        }
         if self.open().is_none() {
             return self.decide(cx);
         }
@@ -3144,6 +3173,11 @@ impl Footplate {
     /// ask of several names takes them one after the other and sends them
     /// together.
     fn give(&mut self, cx: &mut Context<Self>) {
+        // Held as a conversation's sends are: the value stays in the
+        // field, with the reason beside Give.
+        if self.reconnecting() {
+            return;
+        }
         let Some((bead, ask)) = self.card() else {
             return;
         };
@@ -3221,6 +3255,7 @@ impl Footplate {
             || self.approve_elsewhere.contains(&at)
             || self.approving.is_some()
             || self.client.is_none()
+            || self.reconnecting()
         {
             return;
         }
@@ -3266,6 +3301,10 @@ impl Footplate {
     /// or the words alone. Enter with nothing chosen and a recommendation
     /// picks the recommended option.
     fn decide(&mut self, cx: &mut Context<Self>) {
+        // Answers on a card are held as a conversation's sends are.
+        if self.reconnecting() {
+            return;
+        }
         let Some((bead, ask)) = self.card() else {
             return;
         };
@@ -3373,6 +3412,10 @@ impl Footplate {
     /// Puts the ask aside with `x`: it leaves the list and returns as the
     /// yard says.
     fn send_later(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        // Held with the card's answers: the words stay where they are.
+        if self.reconnecting() {
+            return;
+        }
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.ask_words.remove(&(bead.clone(), ask));
         self.declining = None;
@@ -3394,6 +3437,10 @@ impl Footplate {
 
     /// Declines the ask with words: not a pick and not "you decide".
     fn send_decline(&mut self, bead: String, ask: u64, words: String, cx: &mut Context<Self>) {
+        // Held with the card's answers.
+        if self.reconnecting() {
+            return;
+        }
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.ask_words.remove(&(bead.clone(), ask));
         self.declining = None;
@@ -3612,6 +3659,11 @@ impl Footplate {
         // A secret ask is declined with no words: the yard takes none on
         // it, since words there could be the value.
         if self.giving().is_some() {
+            // Held with the card's answers: the value stays in the
+            // field.
+            if self.reconnecting() {
+                return;
+            }
             self.forget_secret(cx);
             return self.send_decline(bead, ask, String::new(), cx);
         }
@@ -3946,8 +3998,11 @@ impl Footplate {
         if self.switching.take().is_some() {
             let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
             let focus = match conversation {
-                // A yard that is away draws no line to type in.
-                Some(_) if !self.settings_open && self.down.is_none() => self.line.focus_handle(cx),
+                // A yard that is away draws no line to type in, but one
+                // that is reconnecting keeps its own.
+                Some(_) if !self.settings_open && (self.down.is_none() || self.reconnecting()) => {
+                    self.line.focus_handle(cx)
+                }
                 _ => self.focus.clone(),
             };
             return window.focus(&focus);
@@ -4226,6 +4281,35 @@ impl Footplate {
     /// holds a yard, and nothing answers there.
     fn yard_is_stopped(&self) -> bool {
         self.down.is_some() && self.switch_status.is_some()
+    }
+
+    /// Whether the open yard answered in this run and is away now, asked
+    /// again every few seconds: its rows and its open row stay on screen
+    /// as last seen, marked stale by the one quiet line, and its sends
+    /// are held until it answers. A yard never reached, one that no
+    /// longer lets this device in, and one that could not be opened keep
+    /// the away screen, which says what to do.
+    fn reconnecting(&self) -> bool {
+        self.down.is_some() && self.model.is_some() && self.away == Away::Trying
+    }
+
+    /// The quiet line where the head has no status row for it: a yard at
+    /// an address, while it is reconnecting. A yard of this machine says
+    /// it in the status row instead. A small strip at the top of the
+    /// conversation; after the reconnect it goes away with the state.
+    fn reconnect_strip(&self, palette: Palette) -> Option<impl IntoElement> {
+        (self.reconnecting() && matches!(self.switch_for(), SwitchFor::Far)).then(|| {
+            div()
+                .debug_selector(|| "reconnecting".to_string())
+                .flex_none()
+                .px_3()
+                .py_1()
+                .text_sm()
+                .text_color(palette.faint)
+                .border_b_1()
+                .border_color(palette.line)
+                .child("Reconnecting…")
+        })
     }
 
     /// Start in the head: `yardr up`. Safe to repeat, so starting a yard
@@ -5376,26 +5460,26 @@ impl Footplate {
     /// Start/Stop as a quiet text button at the right end. Running where
     /// it answers, Starting and Stopping while it is started or stopped,
     /// Stopped where nothing runs, or what the last start could not
-    /// start, in yardr's words.
+    /// start, in yardr's words. Where the yard answered in this run and
+    /// is away now, the row is the one quiet line that says so,
+    /// Reconnecting with a grey dot, and Start stands where a reading
+    /// knows what to start.
     fn switch_state(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let running = self.down.is_none() && self.model.is_some();
         let (state, dot, button): (String, Rgba, Option<(&str, &str)>) = match self.switch_busy {
             Some(SwitchBusy::Starting) => ("Starting…".to_string(), palette.accent, None),
             Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), palette.accent, None),
-            _ if self.switch_program.is_none() => match self.switch_note.is_some() {
-                false => ("…".to_string(), palette.faint, None),
-                true => match running {
-                    true => (
-                        "Running · yardr is not fetched".to_string(),
-                        palette.warn,
-                        Some(("switch try again", "try again")),
-                    ),
-                    false => (
-                        "yardr is not fetched".to_string(),
-                        palette.warn,
-                        Some(("switch try again", "try again")),
-                    ),
-                },
+            _ if self.switch_program.is_none() && self.switch_note.is_some() => match running {
+                true => (
+                    "Running · yardr is not fetched".to_string(),
+                    palette.warn,
+                    Some(("switch try again", "try again")),
+                ),
+                false => (
+                    "yardr is not fetched".to_string(),
+                    palette.warn,
+                    Some(("switch try again", "try again")),
+                ),
             },
             _ if running => (
                 "Running".to_string(),
@@ -5407,6 +5491,14 @@ impl Footplate {
                 palette.warn,
                 Some(("switch start", "Start")),
             ),
+            _ if self.reconnecting() => (
+                "Reconnecting…".to_string(),
+                palette.faint,
+                self.switch_status
+                    .as_ref()
+                    .map(|_| ("switch start", "Start")),
+            ),
+            _ if self.switch_program.is_none() => ("…".to_string(), palette.faint, None),
             _ if self.switch_noyard => ("No yard".to_string(), palette.faint, None),
             _ => match self.switch_status.as_ref() {
                 None => ("…".to_string(), palette.faint, None),
@@ -5443,6 +5535,9 @@ impl Footplate {
                     .min_w_0()
                     .text_size(rems(0.8))
                     .truncate()
+                    .when(self.reconnecting(), |el| {
+                        el.debug_selector(|| "reconnecting".to_string())
+                    })
                     .child(state),
             );
         if let Some((id, text)) = button {
@@ -6486,7 +6581,8 @@ impl Footplate {
                 .children(attached.iter().map(|a| self.attachment(a, palette, cx)))
         });
         let reasons = self.drafts.reasons(with);
-        pane.child(head)
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
             .child(mail)
             .when(!model.notice.is_empty(), |el| {
                 el.child(
@@ -6526,7 +6622,10 @@ impl Footplate {
                             .text_color(palette.warn)
                             .child(format!("! {why}"))
                     }))
-                    .child(self.line.clone()),
+                    .child(self.line.clone())
+                    // The draft stays as typed while the yard is
+                    // reconnecting, with the reason beside the line.
+                    .when(self.reconnecting(), |el| el.child(send_held(palette))),
             )
     }
 
@@ -6635,7 +6734,8 @@ impl Footplate {
                     .into_any_element()
             }))
         };
-        pane.child(head)
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
             .child(list)
             .when(!model.notice.is_empty(), |el| {
                 el.child(
@@ -6716,7 +6816,8 @@ impl Footplate {
                     .map(|ask| self.decision_card(&detail, ask, palette, cx)),
             )
         };
-        pane.child(head)
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
             .child(list)
             .when(!model.notice.is_empty(), |el| {
                 el.child(
@@ -6960,23 +7061,29 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child(why.clone()),
             };
+            // While the yard is reconnecting the card's answers are held
+            // as the conversation's sends are: the buttons stand
+            // disabled, with the reason beside them, and the keys hold
+            // the words where they are.
+            let held = self.reconnecting();
             card = card.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .when_some(send, |el, (id, text, enabled)| {
-                        el.child(send_button(id, text, enabled, palette, cx))
+                        el.child(send_button(id, text, enabled && !held, palette, cx))
                     })
                     .when(ask.run.is_some() && !elsewhere, |el| {
                         el.child(approve_button(
                             format!("approve {bead_id} {ask_seq}"),
                             &self.yard,
-                            self.approving.is_none(),
+                            self.approving.is_none() && !held,
                             palette,
                             cx,
                         ))
                     })
+                    .when(held, |el| el.child(send_held(palette)))
                     .child(
                         small_button("Later (x)".to_string(), palette)
                             .id(SharedString::from(format!("later {bead_id} {ask_seq}")))
@@ -7347,7 +7454,7 @@ impl Footplate {
                     body = body.child(div().flex().child(approve_button(
                         format!("approve {bead} {ask}"),
                         &self.yard,
-                        self.approving.is_none(),
+                        self.approving.is_none() && !self.reconnecting(),
                         palette,
                         cx,
                     )));
@@ -7420,9 +7527,14 @@ impl Footplate {
                         })
                     }),
             };
+            // As an open card's: held while the yard is reconnecting,
+            // with the reason beside the button that would send.
+            let held = self.reconnecting();
+            let sendable = send.is_some() || (detail.run.is_some() && approving && !elsewhere);
             body = body.when_some(send, |body, (id, text, enabled)| {
-                body.child(send_button(id, text, enabled, palette, cx))
+                body.child(send_button(id, text, enabled && !held, palette, cx))
             });
+            body = body.when(held && sendable, |body| body.child(send_held(palette)));
             body = body.child(div().text_sm().text_color(palette.faint).child(
                 match detail.secret {
                     Some(_) if giving.is_some() => secret_keys(bead, ask, false),
@@ -7455,7 +7567,8 @@ impl Footplate {
                 ));
             }
         }
-        pane.child(head)
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
             .child(body)
             .when(!model.notice.is_empty(), |el| {
                 el.child(
@@ -7591,8 +7704,9 @@ impl Render for Footplate {
             _ if self.switch_question.is_some() => CONTEXT,
             // A yard that is away has no card in view either, and what is
             // typed there is a yard's name or a code: `e` and `d` are
-            // letters of it, and Enter is the field's.
-            _ if self.down.is_some() => CONTEXT,
+            // letters of it, and Enter is the field's. One that is
+            // reconnecting keeps its card, and its keys.
+            _ if self.down.is_some() && !self.reconnecting() => CONTEXT,
             Some(Selected::Conversation(_)) => CONTEXT,
             Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
                 if self.line.focus_handle(cx).is_focused(window)
@@ -7649,8 +7763,10 @@ impl Render for Footplate {
             .text_size(rems(0.875));
         // A yard that is away keeps the column with its head, and none of
         // its rows: what they open is not there. The one yard the
-        // environment names has no other to go to, and no column.
+        // environment names has no other to go to, and no column. One
+        // that is reconnecting keeps its rows with it, below.
         let beside = match (&self.down, &self.model) {
+            (Some(_), _) if self.reconnecting() => None,
             (Some(_), model) if self.env.yard.is_none() => {
                 let me = model.as_ref().map(Model::me);
                 Some(self.column(me, div().flex_1(), palette, cx))
@@ -7659,7 +7775,20 @@ impl Render for Footplate {
         };
         let root = root.children(beside);
         match (&self.down, &self.model) {
-            (Some(_), _) if self.settings_open => root.child(self.talk_settings(palette, cx)),
+            (Some(_), _) if self.settings_open && !self.reconnecting() => {
+                root.child(self.talk_settings(palette, cx))
+            }
+            // A yard that answered in this run and is away now stays as
+            // last seen: its rows, and its open row with its sends held.
+            (Some(_), Some(model)) if self.reconnecting() && self.settings_open => root
+                .child(self.list(model, palette, cx))
+                .child(self.talk_settings(palette, cx)),
+            (Some(_), Some(model)) if self.reconnecting() && self.first_run.is_some() => root
+                .child(self.list(model, palette, cx))
+                .children(self.first_run.clone()),
+            (Some(_), Some(model)) if self.reconnecting() => root
+                .child(self.list(model, palette, cx))
+                .child(self.talk(model, palette, cx)),
             (Some(why), _) => match &self.first_run {
                 Some(first_run) => root.child(first_run.clone()),
                 None => root.child(self.away(why, palette, cx)),
@@ -13538,9 +13667,12 @@ mod tests {
     /// A yard that is not reached says so with its short why, in the
     /// switcher's row and where it is open: one that is stopped and one
     /// away from the network, "nothing answers"; one that no longer lets
-    /// the device in, "pair again". The head stays with the switcher, so
-    /// another yard is opened from there and never through the settings,
-    /// and the yard that answers has all that was its.
+    /// the device in, "pair again". One that was read before it went away
+    /// stays as last seen, with the quiet line in the head's status row;
+    /// the away screen is for yards never reached. The head stays with
+    /// the switcher, so another yard is opened from there and never
+    /// through the settings, and the yard that answers has all that was
+    /// its.
     #[gpui::test]
     fn a_yard_that_is_not_reached_says_why_and_the_switcher_leaves_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -13595,9 +13727,10 @@ mod tests {
             })
         };
 
-        // The stopped yard: its why in a word or two, in the head, in the
-        // away view and in its row, with the telling under it. The column
-        // has its head and none of a yard's rows.
+        // The stopped yard was read before it stopped, so it stays as
+        // last seen: its rows, its short why in the head and its row,
+        // and the quiet line in the head's status row. No away screen:
+        // that is for a yard never reached.
         cx.simulate_keystrokes("secondary-2");
         wait(cx, "that the second home's yard is stopped", |cx| {
             down(&view, cx, "No yard: nothing answers at the yard's socket")
@@ -13608,7 +13741,9 @@ mod tests {
             state_of(&view, cx, "second home"),
             "not reached: nothing answers"
         );
-        assert!(drawn(cx, "which yard") && drawn(cx, "away why"));
+        assert!(view.read_with(cx, |v, _| v.reconnecting()));
+        assert!(drawn(cx, "which yard") && drawn(cx, "rows"));
+        assert!(drawn(cx, "reconnecting"));
         assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
         // What the yard that answers has is as it was left.
         assert_eq!(state_of(&view, cx, "this machine"), "nothing waiting");
@@ -13690,6 +13825,163 @@ mod tests {
             texts(&view, cx) == ["Shall I land it?"]
         });
         assert_eq!(state_of(&view, cx, "second home"), "1 mail");
+    }
+
+    /// A yard that answered and goes away keeps its view: the sidebar,
+    /// the decisions and the open conversation stay as last seen, the
+    /// head's status row is the one quiet line, and Send is held with
+    /// the reason beside the line: the draft stays as typed, and goes
+    /// on Enter once the yard answers. Nothing is queued meanwhile.
+    #[gpui::test]
+    fn a_yard_that_answered_and_goes_away_keeps_its_view_and_holds_send(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let socket = yard.socket().to_path_buf();
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        cx.simulate_input("Land it when green.");
+        yard.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        // As last seen: the rows, the conversation, and the quiet line.
+        // (The away screen painted before the first answer, so its
+        // absence is the state, not the selectors.)
+        assert!(view.read_with(cx, |v, _| v.reconnecting()));
+        assert_eq!(head_line(&view, cx), "jo · this machine · nothing answers");
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+        assert!(drawn(cx, "rows") && drawn(cx, "conversation top"));
+        assert!(drawn(cx, "reconnecting") && drawn(cx, "send held"));
+        // Send is held: the draft stays, and nothing goes.
+        assert_eq!(typed(&view, cx), "Land it when green.");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "Land it when green.");
+        assert_eq!(yard.asked("Mail"), Vec::<Value>::new());
+        // It is back: the hold is gone with the state, everything is
+        // read again, and the draft goes on Enter.
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        wait(cx, "the yard again", |cx| {
+            view.read_with(cx, |v, _| v.down.is_none())
+        });
+        assert!(view.read_with(cx, |v, _| !v.reconnecting()));
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+        assert_eq!(typed(&view, cx), "Land it when green.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the draft to be sent", |_| {
+            yard.asked("Mail")
+                == [json!({"to": "yardmaster", "text": "Land it when green.", "actor": "jo"})]
+        });
+        assert_eq!(typed(&view, cx), "");
+    }
+
+    /// Answers on a decision card are held as a conversation's sends are:
+    /// the words stay where they are typed, the Send button stands
+    /// disabled with the reason beside it, and Enter holds them too.
+    #[gpui::test]
+    fn answers_on_a_decision_card_are_held_while_the_yard_is_away(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_words_only());
+        yard.answer("Bead", &bead_words_only());
+        yard.answer("AnswerAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-w".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-w"));
+        let socket = yard.socket().to_path_buf();
+        yard.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        assert!(view.read_with(cx, |v, _| v.reconnecting()));
+        assert!(drawn(cx, "send bead-w 9") && drawn(cx, "send held"));
+        // The words are typed while the yard is away, and held: from
+        // Enter as from the button, nothing goes.
+        cx.simulate_input("warmly");
+        assert_eq!(typed(&view, cx), "warmly");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "warmly");
+        click_on(cx, "send bead-w 9");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "warmly");
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        // It is back: the words go on Enter.
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_words_only());
+        yard.answer("Bead", &bead_words_only());
+        yard.answer("AnswerAsk", "{}");
+        wait(cx, "the yard again", |cx| {
+            view.read_with(cx, |v, _| v.down.is_none())
+        });
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the answer", |_| {
+            yard.asked("AnswerAsk")
+                == [
+                    json!({"bead": "bead-w", "ask": 9, "option": 0, "words": "warmly", "actor": "jo"}),
+                ]
+        });
+        assert_eq!(typed(&view, cx), "");
+    }
+
+    /// A yard at an address has no status row: while it is reconnecting
+    /// the quiet line is the strip at the top of the conversation, and
+    /// Send is held as on a yard of this machine.
+    #[gpui::test]
+    fn a_far_yard_that_goes_away_says_so_in_a_strip_and_holds_send(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            yards: vec![settings::Yard::far("far", far.address(), "yard-far.token")],
+            open: "far".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-far.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yard's conversation", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        cx.simulate_input("Noted.");
+        far.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        assert!(view.read_with(cx, |v, _| v.reconnecting()));
+        assert_eq!(head_line(&view, cx), "jo · far · nothing answers");
+        assert_eq!(texts(&view, cx), ["From afar."]);
+        assert!(drawn(cx, "reconnecting") && drawn(cx, "send held"));
+        assert!(!drawn(cx, "away why") && !drawn(cx, "switch state"));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(typed(&view, cx), "Noted.");
+        assert_eq!(far.asked("Mail"), Vec::<Value>::new());
     }
 
     /// The one yard the environment names has no other to go to: away, it

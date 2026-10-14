@@ -9,8 +9,10 @@
 # in the debug build alone: `yardmaster` (the conversation with the
 # yardmaster), `plain` (an open decision card of a plain ask), `run` (an
 # open card of a run ask), `stopped` (the head with a stopped yard), `far`
-# (a yard at an address, away) and `settings` (the settings with the
-# start-at-login switch). With no state the first screen is shot, as ever.
+# (a yard at an address, away), `settings` (the settings with the
+# start-at-login switch) and `reconnecting` (a running yard whose server
+# is then stopped, with a draft in the composer). With no state the first
+# screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the head draws the same on
 # every shot.
 # The picture goes to the file named, else to footplate-shot.png under a
@@ -24,7 +26,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run stopped far settings"
+states="yardmaster plain run stopped far settings reconnecting"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
