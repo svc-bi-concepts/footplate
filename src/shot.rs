@@ -21,8 +21,8 @@ use crate::yard::Env;
 /// the composer, and an open card whose note carries a page and an image.
 /// The stopped yard answers nothing; the yard at an address is opened
 /// from the settings the shot script writes; the settings open over a
-/// running yard; the page's card stands expanded, with the web view taken
-/// as answering, so the row carries Open. The script answers the switch's
+/// running yard; the page's card stands expanded at its end, with the
+/// web view taken as answering, so the row carries Open. The script answers the switch's
 /// yardr for every state, so the head draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
@@ -319,7 +319,7 @@ fn populate(yard: &Yard, state: &str) {
                 "Bead",
                 &json!({"result": {
                     "id": "bead-a", "title": "Move the links",
-                    "body": "The body of bead-a.",
+                    "body": "",
                     "stage": "new", "labels": ["topic:linear-out"],
                     "notes": [{"seq": 2, "kind": "note", "author": "yardmaster",
                                "text": "the mockup, like this:", "at": "2026-10-10T09:30:00Z",
@@ -333,17 +333,14 @@ fn populate(yard: &Yard, state: &str) {
                         "ask": 3, "to": "jo", "asker": "yardmaster",
                         "since": "2026-10-10T10:00:00Z",
                         "question": "Move them now?",
-                        "context": ["The links file declares the new source.",
-                                    "The move was tested."],
+                        "context": ["The links file declares the new source."],
                         "options": [
                             {"label": "Move them now",
                              "consequence": "all 64 links point tonight"},
-                            {"label": "After Friday",
-                             "consequence": "keep the old source"},
                             {"label": "You decide",
                              "consequence": "leave it to yardmaster"}
                         ],
-                        "recommend": 1, "why": "the test passed",
+                        "recommend": 0, "why": "",
                         "state": "open"
                     }]
                 }})

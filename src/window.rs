@@ -1960,6 +1960,24 @@ impl Footplate {
                     self.returning = kept
                         .filter(|place| model.selected() == Some(&place.row))
                         .map(|place| (place, false));
+                    // The page shot stands at the card's end, so the note's
+                    // page row and image show: past its end, where the
+                    // layout stops, as with a yard returned to. A debug
+                    // build's alone.
+                    #[cfg(debug_assertions)]
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("page")
+                        && let Some(Selected::Decision(bead)) = model.selected()
+                    {
+                        self.returning = Some((
+                            Place {
+                                row: Selected::Decision(bead.clone()),
+                                off: px(1_000_000.),
+                                expanded: model.expanded().clone(),
+                                decided_expanded: model.decided_expanded(),
+                            },
+                            false,
+                        ));
+                    }
                 }
                 self.model = Some(model);
                 // The yard answers: the away screen's details are shut,
