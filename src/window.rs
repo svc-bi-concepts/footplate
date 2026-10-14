@@ -6691,11 +6691,13 @@ impl Footplate {
             .border_color(palette.line)
             .child(self.settings_control("settings".to_string(), palette, cx));
         div()
-            // 260 pixels at the usual text size. Its rows are cut to it, so
-            // it grows with the text, but never over the conversation: the
-            // smallest window still has the larger part for that.
-            .w(rems(16.25))
-            .max_w(relative(0.45))
+            // 270 pixels at the usual text size, so the head's line holds a
+            // name of up to eight letters beside this machine's. Its rows
+            // are cut to it, so it grows with the text, but never over the
+            // conversation: the smallest window still has the larger part
+            // for that.
+            .w(rems(16.875))
+            .max_w(relative(0.48))
             .flex_none()
             .h_full()
             .flex()
@@ -13302,9 +13304,9 @@ mod tests {
     }
 
     /// The head keeps its line and the button has the foot of the list: at
-    /// the narrowest window the name and this machine's are whole, the line
-    /// ends at the column's edge, and the button is under the rows and opens
-    /// the settings by a click and by its key.
+    /// the narrowest window and a wide one the name and this machine's are
+    /// whole, the line ends at the column's edge, and the button is under
+    /// the rows and opens the settings by a click and by its key.
     #[gpui::test]
     fn the_button_has_the_foot_and_the_head_its_line(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13346,26 +13348,43 @@ mod tests {
         // Whole: the line as shaped fits where it is drawn. Shaped as the
         // window shapes it (place()).
         // The fixture's short login would not catch the real operator name
-        // that exposed this line's last-glyph truncation.
-        let line = view.read_with(cx, |v, _| format!("mckean · {}", v.which_yard_short()));
-        let width = cx.update(|window, _| {
-            let run = gpui::TextRun {
-                len: line.len(),
-                font: window.text_style().font(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            window
-                .text_system()
-                .shape_line(line.clone().into(), rem * 0.8, &[run], None)
-                .width
-        });
-        assert!(
-            width <= head.size.width,
-            "at the narrowest window the head's line is cut: {line:?} is {width:?} in {head:?}"
-        );
+        // that exposed this line's last-glyph truncation. Both the head's
+        // own words and the longer telling they stand for are whole: the
+        // short form is what the window shows, the long one what an
+        // eight-letter name reaches with it.
+        let short = view.read_with(cx, |v, _| v.which_yard_short());
+        let lines = [
+            format!("mckean · {short}"),
+            "mckean · this machine's".to_string(),
+            format!("jo · {short}"),
+            "jo · this machine's".to_string(),
+            format!("abcdefgh · {short}"),
+            "abcdefgh · this machine's".to_string(),
+        ];
+        for width_px in [560., 960.] {
+            cx.simulate_resize(gpui::size(px(width_px), px(640.)));
+            let head = bounds_of(cx, "which yard");
+            for line in &lines {
+                let shaped = cx.update(|window, _| {
+                    let run = gpui::TextRun {
+                        len: line.len(),
+                        font: window.text_style().font(),
+                        color: gpui::black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    window
+                        .text_system()
+                        .shape_line(line.clone().into(), rem * 0.8, &[run], None)
+                        .width
+                });
+                assert!(
+                    shaped <= head.size.width,
+                    "at a {width_px}px window the head's line is cut: {line:?} is {shaped:?} in {head:?}"
+                );
+            }
+        }
         // The button opens the settings, and its key shuts them again.
         click_on(cx, "settings");
         assert!(settings_open(&view, cx));
