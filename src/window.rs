@@ -160,6 +160,15 @@ struct Unsent {
     why: String,
 }
 
+/// A note that did not go: the words and the pages, to be put back, with
+/// the page that kept it, if it was one, and why.
+struct UnsentNote {
+    words: String,
+    pages: Vec<Attachment>,
+    at: Option<u64>,
+    why: String,
+}
+
 /// Sends a draft as one mail from `me`: `PutBlob` for each image in the
 /// order attached, then `Mail` with the text and the hashes they answered,
 /// `MailPeer` to one of a linked yard. The cap is asked for first, so that
@@ -201,6 +210,50 @@ fn post(
         }
     }
     Ok(blobs)
+}
+
+/// Sends the words as one note on `bead` from `me`: `PutBlob` for each
+/// page in the order attached, then `AddNote` with the text and the hashes
+/// they answered. The cap is asked for first, so that a page over it is
+/// refused in footplate's words and none travels. A yard from before notes
+/// carried files takes the blobs and refuses the note: that is said as
+/// what it is. Answers the attachment that kept the note, if it was one,
+/// and why.
+fn post_note(
+    client: &Client,
+    me: &str,
+    bead: &str,
+    words: &str,
+    pages: &[Attachment],
+) -> Result<(), (Option<u64>, String)> {
+    let said = |err: api::Error| (None, err.to_string());
+    let mut hashes = Vec::with_capacity(pages.len());
+    if !pages.is_empty() {
+        let cap = client.settings().map_err(said)?.blob_cap();
+        if let Some((page, why)) = pages
+            .iter()
+            .find_map(|a| Some((a, model::page_over_cap(a.bytes.len(), cap)?)))
+        {
+            return Err((Some(page.id), why));
+        }
+        for page in pages {
+            let blob = client
+                .put_blob(&page.bytes)
+                .map_err(|err| (Some(page.id), err.to_string()))?;
+            hashes.push(blob.hash);
+        }
+    }
+    client.add_note(bead, words, me, &hashes).map_err(|err| {
+        if model::note_files_too_old(&err) {
+            (
+                None,
+                "this yard's yardr is too old for a note with a page".to_string(),
+            )
+        } else {
+            said(err)
+        }
+    })?;
+    Ok(())
 }
 
 /// A line between the sections of the left list.
@@ -928,6 +981,12 @@ pub struct Footplate {
     /// open yard's again when theirs is opened, and no call of another
     /// yard can name them.
     kept_words: HashMap<String, HashMap<(String, u64), String>>,
+    /// The pages attached to each ask's note of the open yard, by bead
+    /// and ask, in the order they came: what a drop on the open card
+    /// leaves for Enter to send with the words.
+    note_pages: HashMap<(String, u64), Vec<Attachment>>,
+    /// The same of the yards that are not open, by yard.
+    kept_note_pages: HashMap<String, HashMap<(String, u64), Vec<Attachment>>>,
     /// Why each yard that is not reached is not, in a word or two, by
     /// yard: what its row in the switcher says, of the open one and of
     /// every other. A yard that answers is in it no longer.
@@ -1263,6 +1322,8 @@ impl Footplate {
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
+            note_pages: HashMap::new(),
+            kept_note_pages: HashMap::new(),
             unreached: HashMap::new(),
             places: HashMap::new(),
             returning: None,
@@ -1689,6 +1750,11 @@ impl Footplate {
             self.kept_words.insert(self.yard.clone(), words);
         }
         self.ask_words = self.kept_words.remove(to).unwrap_or_default();
+        let pages = std::mem::take(&mut self.note_pages);
+        if !pages.is_empty() {
+            self.kept_note_pages.insert(self.yard.clone(), pages);
+        }
+        self.note_pages = self.kept_note_pages.remove(to).unwrap_or_default();
         self.drafts.turn_to(to);
         let mut was = Held {
             session: self.session,
@@ -3429,6 +3495,9 @@ impl Footplate {
             if words.is_empty() {
                 return self.notice("decline needs words: why you will not decide it".into(), cx);
             }
+            if !self.card_pages(&bead, ask).is_empty() {
+                return self.notice("a decline carries no page: remove it, then send".into(), cx);
+            }
             return self.send_decline(bead, ask, words, cx);
         }
         let words = self.line.read(cx).text().to_string();
@@ -3436,6 +3505,29 @@ impl Footplate {
             .model
             .as_ref()
             .and_then(|m| m.answer_action(&bead, ask, &words));
+        // A page attached to the card's note goes with words alone: an
+        // answer carries none, and where the words go nowhere as a note,
+        // the page stays until it is removed.
+        if !self.card_pages(&bead, ask).is_empty() {
+            return match action {
+                Some(AnswerAction::Note { words }) => {
+                    match draft::note_unsendable(&words, self.card_pages(&bead, ask)) {
+                        Some(why) => self.notice(why, cx),
+                        None => self.send_note(bead, ask, words, cx),
+                    }
+                }
+                Some(AnswerAction::Answer { .. }) => {
+                    self.notice("an answer carries no page: remove it, then send".into(), cx)
+                }
+                None => match draft::note_unsendable(&words, self.card_pages(&bead, ask)) {
+                    Some(why) => self.notice(why, cx),
+                    None => self.notice(
+                        "words alone go nowhere on this ask: remove the page, then send".into(),
+                        cx,
+                    ),
+                },
+            };
+        }
         match action {
             Some(AnswerAction::Answer { option, words }) => {
                 self.send_answer(bead, ask, option, words, cx);
@@ -3488,8 +3580,14 @@ impl Footplate {
         );
     }
 
-    /// Words with no option chosen go as a plain note; the ask stays open.
+    /// Words with no option chosen go as a plain note, with the card's
+    /// pages; the ask stays open. What the yard refuses is back in the
+    /// line with its pages, and the page that kept it is marked.
     fn send_note(&mut self, bead: String, ask: u64, words: String, cx: &mut Context<Self>) {
+        let pages = self
+            .note_pages
+            .remove(&(bead.clone(), ask))
+            .unwrap_or_default();
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.ask_words.remove(&(bead.clone(), ask));
         self.notice(String::new(), cx);
@@ -3498,25 +3596,70 @@ impl Footplate {
         let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
-            move |client, me| client.add_note(&call_bead, &call_words, me),
+            move |client, me| match post_note(client, me, &call_bead, &call_words, &pages) {
+                Ok(()) => Ok(()),
+                Err((at, why)) => Err(UnsentNote {
+                    words: call_words,
+                    pages,
+                    at,
+                    why,
+                }),
+            },
             move |this, noted, cx| match noted {
                 Ok(()) => {
                     // The note arrives as a `noted` event, which reads the
                     // queue and the bead again.
                 }
-                Err(err) => {
-                    let said = ("not noted", err.to_string());
-                    if this.yard_identity(&yard) != identity {
-                        return this.notice(
-                            format!(
-                                "not noted in {yard}: that yard entry was removed or changed, so its words were not restored"
-                            ),
-                            cx,
-                        );
-                    }
-                    this.words_back((&yard, opening), (bead, ask), words, said, cx);
-                }
+                Err(_) if this.yard_identity(&yard) != identity => this.notice(
+                    format!(
+                        "not noted in {yard}: that yard entry was removed or changed, so its words were not restored"
+                    ),
+                    cx,
+                ),
+                Err(unsent) => this.note_back(&yard, opening, (bead, ask), unsent, cx),
             },
+        );
+    }
+
+    /// The pages attached to the ask's note, in the order they came.
+    fn card_pages(&self, bead: &str, ask: u64) -> &[Attachment] {
+        self.note_pages
+            .get(&(bead.to_string(), ask))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Words for the ask `at` of `yard` that the yard did not take are
+    /// back with what was typed since, and their pages before what was
+    /// attached since, the page that kept them marked: in the line while
+    /// that yard is still the open one, as it was opened then, and else
+    /// with the ask they were written for, in its own yard.
+    fn note_back(
+        &mut self,
+        yard: &str,
+        opening: u64,
+        at: (String, u64),
+        unsent: UnsentNote,
+        cx: &mut Context<Self>,
+    ) {
+        let kept = match yard == self.yard {
+            true => &mut self.note_pages,
+            false => self.kept_note_pages.entry(yard.to_string()).or_default(),
+        };
+        let pages = kept.entry(at.clone()).or_default();
+        let mut back = unsent.pages;
+        back.append(pages);
+        *pages = back;
+        if let Some(id) = unsent.at {
+            for page in pages.iter_mut().filter(|a| a.id == id) {
+                page.refused = Some(unsent.why.clone());
+            }
+        }
+        self.words_back(
+            (yard, opening),
+            at,
+            unsent.words,
+            ("not noted", unsent.why),
+            cx,
         );
     }
 
@@ -3625,11 +3768,13 @@ impl Footplate {
         );
     }
 
-    /// Attaches the files that were dropped on the window to the draft of
-    /// the conversation that was open then. They are read off the window's
-    /// thread, and one that is no image the yard takes only as far as it
-    /// takes to say so.
+    /// Attaches the files that were dropped on the window: to the note
+    /// of the open card, where one is, else to the draft of the open
+    /// conversation.
     fn dropped(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if self.card().is_some() {
+            return self.dropped_on_card(paths, cx);
+        }
         let Some((with, _)) = self.open() else {
             return;
         };
@@ -3649,15 +3794,91 @@ impl Footplate {
         );
     }
 
-    /// Takes an attachment off its draft.
+    /// Attaches the files that were dropped on the open card to its note,
+    /// in the order they came: pages, HTML files. A secret, a run, or a
+    /// taken-back ask takes no note, so a drop on its card attaches
+    /// nothing, and says so. They are read off the window's thread, and
+    /// one that is no page the yard takes only as far as it takes to say
+    /// so.
+    fn dropped_on_card(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let Some((bead, ask)) = self.card() else {
+            return;
+        };
+        let model = self.model.as_ref();
+        if model.is_some_and(|m| m.secret(&bead, ask).is_some()) {
+            return self.notice(
+                "a secret ask takes no note: the file was not attached".into(),
+                cx,
+            );
+        }
+        if model.is_some_and(|m| m.run(&bead, ask).is_some()) {
+            return self.notice(
+                "a run ask takes no note: the file was not attached".into(),
+                cx,
+            );
+        }
+        if model.is_some_and(|m| m.taken_back(&bead, ask)) {
+            return self.notice(
+                "an ask taken back takes no note: the file was not attached".into(),
+                cx,
+            );
+        }
+        let paths = paths.to_vec();
+        self.ask(
+            cx,
+            move |client, _| {
+                let cap = client.settings().ok().map(|settings| settings.blob_cap());
+                let found = paths.iter().map(|path| draft::dropped_page(path, cap));
+                found.collect::<Vec<Found>>()
+            },
+            move |this, found, cx| {
+                for found in found {
+                    this.attach_page(&bead, ask, found, cx);
+                }
+            },
+        );
+    }
+
+    /// Attaches what was dropped on the open card to its note, after what
+    /// is there. A page is drawn by its name: footplate shows no preview
+    /// of one.
+    fn attach_page(&mut self, bead: &str, ask: u64, found: Found, cx: &mut Context<Self>) -> u64 {
+        let id = self.drafts.next_id();
+        self.note_pages
+            .entry((bead.to_string(), ask))
+            .or_default()
+            .push(Attachment {
+                id,
+                name: found.name,
+                bytes: found.bytes,
+                size: found.size,
+                refused: found.refused,
+            });
+        cx.notify();
+        id
+    }
+
+    /// Takes an attachment off its draft or its card's note.
     fn remove(&mut self, id: u64, cx: &mut Context<Self>) {
         self.drafts.remove(id);
+        for pages in self.note_pages.values_mut() {
+            pages.retain(|a| a.id != id);
+        }
         self.thumbs.remove(&id);
         cx.notify();
     }
 
-    /// Backspace in the empty line takes the last attachment off the draft.
+    /// Backspace in the empty line takes the last attachment off the
+    /// draft, or off the open card's note.
     fn remove_last(&mut self, cx: &mut Context<Self>) {
+        if let Some((bead, ask)) = self.card()
+            && let Some(pages) = self.note_pages.get_mut(&(bead, ask))
+            && let Some(page) = pages.pop()
+        {
+            self.thumbs.remove(&page.id);
+            cx.notify();
+            return;
+        }
         let Some((with, _)) = self.open() else {
             return;
         };
@@ -4955,6 +5176,7 @@ impl Footplate {
                 self.thumbs.remove(&id);
             }
             self.kept_words.remove(name);
+            self.kept_note_pages.remove(name);
             self.burst.forget(name);
             self.unreached.remove(name);
             self.places.remove(name);
@@ -7313,6 +7535,27 @@ impl Footplate {
                         .child(field),
                 )
             });
+            // Under the line the pages attached to the ask's note, with
+            // why a marked one cannot go: what Enter sends with the
+            // words. A page is drawn by its name: footplate shows no
+            // preview of one.
+            let pages = self.card_pages(&bead_id, ask_seq);
+            if !pages.is_empty() {
+                card = card
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_3()
+                            .children(pages.iter().map(|a| self.attachment(a, palette, cx))),
+                    )
+                    .children(draft::reasons(pages).into_iter().map(|why| {
+                        div()
+                            .text_sm()
+                            .text_color(palette.warn)
+                            .child(format!("! {why}"))
+                    }));
+            }
             // Under it the button that sends the field, exactly as Enter
             // does, with Later, Decline and ask-about-this beside it. An
             // asker with no conversation has the reason in place of that
@@ -8053,8 +8296,9 @@ impl Render for Footplate {
             .on_action(cx.listener(Self::jump_oldest))
             .on_action(cx.listener(|this, _: &PageUp, window, cx| this.page(false, window, cx)))
             .on_action(cx.listener(|this, _: &PageDown, window, cx| this.page(true, window, cx)))
-            // Files dropped anywhere on the window are for the draft of the
-            // open conversation.
+            // Files dropped anywhere on the window are for the note of
+            // the open card, where one is, else for the draft of the open
+            // conversation.
             .on_drop(
                 cx.listener(|this, files: &ExternalPaths, _, cx| this.dropped(files.paths(), cx)),
             )
@@ -8455,6 +8699,25 @@ mod tests {
                 .collect()
         })
     }
+
+    /// What is attached to the ask's note on the open card: for each its
+    /// id, its name and why it is marked.
+    fn card_attached(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        bead: &str,
+        ask: u64,
+    ) -> Vec<(u64, String, Option<String>)> {
+        view.read_with(cx, |v, _| {
+            v.card_pages(bead, ask)
+                .iter()
+                .map(|a| (a.id, a.name.clone(), a.refused.clone()))
+                .collect()
+        })
+    }
+
+    /// An HTML page, 51 bytes, as a dropped file.
+    const PAGE: &[u8] = b"<!DOCTYPE html><html><body>the mockup</body></html>";
 
     fn typed(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, cx| v.line.read(cx).text().to_string())
@@ -10283,6 +10546,460 @@ mod tests {
         assert!(!drawn(cx, &format!("page open {page}")));
         assert_eq!(yard.blobs_asked(), Vec::<String>::new());
         assert_eq!(picture(&view, cx, &page), "");
+    }
+
+    /// A page dropped on a card goes with its note: one that is no page
+    /// is marked and holds the note, a page wants words, and Enter sends
+    /// one note with the words and every page, in the order they came.
+    #[gpui::test]
+    fn a_page_dropped_on_a_card_goes_with_the_note(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AddNote", "{}");
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "text/html; charset=utf-8", "bytes": 51}})
+                .to_string(),
+        );
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // Words alone on ask 5 go as a plain note: no pick, none
+        // recommended.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 5, cx));
+        assert_eq!(current_ask_of(&view, cx), 5);
+        cx.run_until_parked();
+
+        // A page and a PNG dropped on the card: the page attaches, the
+        // PNG is marked, and nothing went to the yard.
+        let dir = tempfile::tempdir().unwrap();
+        let (mockup, fence) = (dir.path().join("mockup.html"), dir.path().join("fence.png"));
+        std::fs::write(&mockup, PAGE).unwrap();
+        std::fs::write(&fence, png()).unwrap();
+        view.update(cx, |v, cx| v.dropped(&[mockup, fence], cx));
+        wait(cx, "the dropped files", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 2
+        });
+        let neither = "a note carries an HTML file, and fence.png is not one";
+        assert_eq!(
+            card_attached(&view, cx, "bead-a", 5),
+            [
+                (1, "mockup.html".to_string(), None),
+                (2, "fence.png".to_string(), Some(neither.to_string())),
+            ]
+        );
+        assert_eq!(yard.asked("PutBlob").len(), 0);
+
+        // While one is marked Enter sends nothing and says so.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the note was not sent", |cx| {
+            notice(&view, cx) == "fence.png is marked and cannot go: remove it, then send"
+        });
+        assert_eq!(yard.asked("AddNote").len(), 0);
+
+        // The marked one removed at its mark, a page without words wants
+        // them, and sends nothing.
+        click_remove(cx, 2);
+        wait(cx, "one page", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 1
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the page wants words", |cx| {
+            notice(&view, cx) == "a note with a page needs words: say what the page shows"
+        });
+        assert_eq!(yard.asked("AddNote").len(), 0);
+
+        // With words Enter sends one note with the page: first the blob,
+        // then the note with its hash. The ask stays open.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("the mockup, third pass");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the note with the page", |_| {
+            yard.asked("AddNote")
+                == [json!({"bead": "bead-a", "text": "the mockup, third pass",
+                           "actor": "jo", "files": [HASH]})]
+        });
+        assert_eq!(yard.asked("PutBlob").len(), 1);
+        assert_eq!(current_ask_of(&view, cx), 5);
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(card_attached(&view, cx, "bead-a", 5), []);
+
+        // Backspace in the empty line takes the last attachment off the
+        // card's note, as off a draft.
+        view.update(cx, |v, cx| v.dropped(&[dir.path().join("mockup.html")], cx));
+        wait(cx, "the page again", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 1
+        });
+        cx.simulate_keystrokes("backspace");
+        wait(cx, "no pages", |cx| {
+            card_attached(&view, cx, "bead-a", 5).is_empty()
+        });
+    }
+
+    /// An answer carries no page: with a recommendation or a pick Enter
+    /// says so and sends nothing, and a decline says so too. The page
+    /// removed, the answer and the decline go.
+    #[gpui::test]
+    fn a_card_s_answer_and_decline_carry_no_page(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        assert_eq!(current_ask_of(&view, cx), 3);
+        cx.run_until_parked();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mockup = dir.path().join("mockup.html");
+        std::fs::write(&mockup, PAGE).unwrap();
+        // Ask 3 recommends: with a page attached Enter sends no pick.
+        view.update(cx, |v, cx| v.dropped(std::slice::from_ref(&mockup), cx));
+        wait(cx, "the page", |cx| {
+            card_attached(&view, cx, "bead-a", 3).len() == 1
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why no pick went", |cx| {
+            notice(&view, cx) == "an answer carries no page: remove it, then send"
+        });
+        assert_eq!(yard.asked("AnswerAsk").len(), 0);
+        assert_eq!(yard.asked("AddNote").len(), 0);
+        // A pick of its own is no different.
+        cx.simulate_keystrokes("2");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the pick went nowhere", |cx| {
+            notice(&view, cx) == "an answer carries no page: remove it, then send"
+        });
+        assert_eq!(yard.asked("AnswerAsk").len(), 0);
+        // The page removed, the pick goes: escape left it as well, so
+        // it is picked again.
+        click_remove(cx, 1);
+        wait(cx, "no pages", |cx| {
+            card_attached(&view, cx, "bead-a", 3).is_empty()
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("2");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pick", |_| {
+            yard.asked("AnswerAsk")
+                == [json!({"bead": "bead-a", "ask": 3, "option": 2, "actor": "jo"})]
+        });
+
+        // A decline with words asked for: with a page attached it says so
+        // and declines nothing.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 5, cx));
+        assert_eq!(current_ask_of(&view, cx), 5);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("d");
+        view.update(cx, |v, cx| v.dropped(&[mockup], cx));
+        wait(cx, "the page on the decline", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 1
+        });
+        cx.simulate_input("not mine to take");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why nothing was declined", |cx| {
+            notice(&view, cx) == "a decline carries no page: remove it, then send"
+        });
+        assert_eq!(yard.asked("DeclineAsk").len(), 0);
+        // The page removed, the decline goes with the words.
+        click_remove(cx, 2);
+        wait(cx, "no pages on the decline", |cx| {
+            card_attached(&view, cx, "bead-a", 5).is_empty()
+        });
+        cx.simulate_keystrokes("enter");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk")
+                == [
+                    json!({"bead": "bead-a", "ask": 5, "words": "not mine to take",
+                           "actor": "jo"}),
+                ]
+        });
+    }
+
+    /// A note the yard refused is back with its pages: the words in the
+    /// line, the pages with the ask, the page that kept it marked with the
+    /// yard's words. A yard too old for files says so as what it is.
+    #[gpui::test]
+    fn a_note_the_yard_refused_is_back_with_its_pages(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AddNote", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 5, cx));
+        assert_eq!(current_ask_of(&view, cx), 5);
+        cx.run_until_parked();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mockup = dir.path().join("mockup.html");
+        std::fs::write(&mockup, PAGE).unwrap();
+        view.update(cx, |v, cx| v.dropped(std::slice::from_ref(&mockup), cx));
+        wait(cx, "the page", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 1
+        });
+
+        // The yard refuses the blob: the words are back in the line and
+        // the page with the ask, marked with the yard's words, and no
+        // note went.
+        let kept = "the file is application/octet-stream: the yard keeps only image/png and image/jpeg and text/html; charset=utf-8";
+        yard.answer(
+            "PutBlob",
+            &json!({"error": {"code": "error", "message": kept}}).to_string(),
+        );
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("the mockup, third pass");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the page was not sent", |cx| {
+            notice(&view, cx) == format!("not noted: {kept}")
+        });
+        assert_eq!(typed(&view, cx), "the mockup, third pass");
+        assert_eq!(
+            card_attached(&view, cx, "bead-a", 5),
+            [(1, "mockup.html".to_string(), Some(kept.to_string()))]
+        );
+        assert_eq!(yard.asked("AddNote").len(), 0);
+
+        // The marked one removed and the yard taking blobs, the note is
+        // refused for its files instead: a yardr from before notes
+        // carried any. That is said as what it is, and the words and the
+        // page are back, the page unmarked.
+        click_remove(cx, 1);
+        view.update(cx, |v, cx| v.dropped(&[mockup], cx));
+        wait(cx, "the page again", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 1
+        });
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "text/html; charset=utf-8", "bytes": 51}})
+                .to_string(),
+        );
+        yard.answer(
+            "AddNote",
+            r#"{"error": {"code": "error", "message": "argument \"files\": AddNote has none of that name (it takes bead, text, actor)"}}"#,
+        );
+        // The words never left the line: Enter sends them with the page.
+        // No escape first: it would leave the words behind.
+        assert_eq!(typed(&view, cx), "the mockup, third pass");
+        cx.simulate_keystrokes("i");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the old yard took no note", |cx| {
+            notice(&view, cx) == "not noted: this yard's yardr is too old for a note with a page"
+        });
+        assert_eq!(typed(&view, cx), "the mockup, third pass");
+        assert_eq!(
+            card_attached(&view, cx, "bead-a", 5),
+            [(2, "mockup.html".to_string(), None)]
+        );
+        // The blobs went first: the old yard took them and refused the
+        // note.
+        assert_eq!(yard.asked("PutBlob").len(), 2);
+        assert_eq!(yard.asked("AddNote").len(), 1);
+    }
+
+    /// A drop on a secret ask attaches nothing: it takes no note, and the
+    /// yard is not even asked its cap.
+    #[gpui::test]
+    fn a_drop_on_a_secret_ask_attaches_nothing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_secret(&["BOOKS_TOKEN"], 7, "", &[])],
+                                "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_secret(&["BOOKS_TOKEN"], &[7]));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-s".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        cx.run_until_parked();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mockup = dir.path().join("mockup.html");
+        std::fs::write(&mockup, PAGE).unwrap();
+        let asked = yard.asked("Settings").len();
+        view.update(cx, |v, cx| v.dropped(&[mockup], cx));
+        cx.run_until_parked();
+        assert_eq!(
+            notice(&view, cx),
+            "a secret ask takes no note: the file was not attached"
+        );
+        assert_eq!(card_attached(&view, cx, "bead-s", 7), []);
+        assert_eq!(yard.asked("Settings").len(), asked);
+    }
+
+    /// A drop on a run ask attaches nothing: it takes no note either.
+    #[gpui::test]
+    fn a_drop_on_a_run_ask_attaches_nothing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+        );
+        yard.answer("Bead", &bead_run());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-s".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        cx.run_until_parked();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mockup = dir.path().join("mockup.html");
+        std::fs::write(&mockup, PAGE).unwrap();
+        view.update(cx, |v, cx| v.dropped(&[mockup], cx));
+        cx.run_until_parked();
+        assert_eq!(
+            notice(&view, cx),
+            "a run ask takes no note: the file was not attached"
+        );
+        assert_eq!(card_attached(&view, cx, "bead-s", 7), []);
+    }
+
+    /// A drop on an ask taken back attaches nothing: its card takes no
+    /// note. Words with a page on a decided ask go nowhere: the ask takes
+    /// no note either, and the page stays until it is removed.
+    #[gpui::test]
+    fn a_drop_on_a_taken_back_ask_attaches_nothing_and_a_decided_one_takes_no_note(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let mut asks: Value =
+            serde_json::from_str(&asks_decided(1, "Switch to attention")).unwrap();
+        asks["result"]["decided"][0]["state"] = json!("taken back");
+        yard.answer("UserAsks", &asks.to_string());
+        yard.answer("Bead", &bead_decided());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
+            })
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mockup = dir.path().join("mockup.html");
+        std::fs::write(&mockup, PAGE).unwrap();
+        open_decided(&view, cx, "bead-d", 11);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-d"));
+        view.update(cx, |v, cx| v.dropped(std::slice::from_ref(&mockup), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            notice(&view, cx),
+            "an ask taken back takes no note: the file was not attached"
+        );
+        assert_eq!(card_attached(&view, cx, "bead-d", 11), []);
+
+        // Ask 12 was answered and keeps its line: a page attaches, but
+        // with words Enter sends neither note nor answer.
+        open_decided(&view, cx, "bead-d", 12);
+        view.update(cx, |v, cx| v.dropped(&[mockup], cx));
+        wait(cx, "the page", |cx| {
+            card_attached(&view, cx, "bead-d", 12).len() == 1
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("still true?");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the words went nowhere", |cx| {
+            notice(&view, cx) == "words alone go nowhere on this ask: remove the page, then send"
+        });
+        assert_eq!(yard.asked("AddNote").len(), 0);
+        assert_eq!(yard.asked("AnswerAsk").len(), 0);
+        assert_eq!(typed(&view, cx), "still true?");
+        assert_eq!(card_attached(&view, cx, "bead-d", 12).len(), 1);
     }
 
     /// The words of a card are typed in the same line as a mail: shift

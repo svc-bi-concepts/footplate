@@ -2712,6 +2712,14 @@ pub fn approves_elsewhere(err: &api::Error) -> bool {
     matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
 }
 
+/// Whether the yard refused the files of a note because its `AddNote`
+/// takes none: a yardr from before notes carried files. Its words are
+/// read here, as above, and when they change this is shown as any
+/// refusal.
+pub fn note_files_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("argument \"files\""))
+}
+
 /// Why a run ask was not approved, for the card. A call that ended without
 /// an answer may have run the command all the same, so it is never said to
 /// be approved or not: the card, read again, says which. A refusal is the
@@ -2864,12 +2872,66 @@ pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// The tags `http.DetectContentType` answers `text/html` for, in upper
+/// case: what the yard takes a page by.
+const PAGE_TAGS: &[&[u8]] = &[
+    b"<!DOCTYPE HTML",
+    b"<HTML",
+    b"<HEAD",
+    b"<SCRIPT",
+    b"<IFRAME",
+    b"<H1",
+    b"<DIV",
+    b"<FONT",
+    b"<TABLE",
+    b"<A",
+    b"<STYLE",
+    b"<TITLE",
+    b"<B",
+    b"<BODY",
+    b"<BR",
+    b"<P",
+    b"<!--",
+];
+
+/// The type of a page the yard takes, read from its bytes as the yard
+/// reads it: `text/html; charset=utf-8`, and nothing for anything else.
+/// Past the leading whitespace, one of the tags above, the case aside,
+/// ended by a space or `>`: what `http.DetectContentType` answers.
+pub fn page_type(bytes: &[u8]) -> Option<&'static str> {
+    let start = bytes
+        .iter()
+        .position(|b| !matches!(b, b'\t' | b'\n' | b'\x0c' | b'\r' | b' '))
+        .unwrap_or(bytes.len());
+    let head = &bytes[start..];
+    PAGE_TAGS
+        .iter()
+        .any(|tag| {
+            head.len() > tag.len()
+                && head[..tag.len()].eq_ignore_ascii_case(tag)
+                && matches!(head[tag.len()], b' ' | b'>')
+        })
+        .then_some("text/html; charset=utf-8")
+}
+
 /// Why an image of `bytes` bytes is not sent in a yard whose cap on one is
 /// `cap`, if it is not.
 pub fn over_cap(bytes: usize, cap: u64) -> Option<String> {
+    over_cap_as("image", bytes, cap)
+}
+
+/// Why a page of `bytes` bytes is not sent in a yard whose cap on one is
+/// `cap`, if it is not: the cap is the yard's, whatever the file.
+pub fn page_over_cap(bytes: usize, cap: u64) -> Option<String> {
+    over_cap_as("page", bytes, cap)
+}
+
+/// Why a file of `bytes` bytes, an image or a page, is not sent in a yard
+/// whose cap on one is `cap`, if it is not.
+fn over_cap_as(what: &str, bytes: usize, cap: u64) -> Option<String> {
     (bytes as u64 > cap).then(|| {
         format!(
-            "the image is {}, and this yard takes one of {} at most (yardr settings: blob_max_bytes)",
+            "the {what} is {}, and this yard takes one of {} at most (yardr settings: blob_max_bytes)",
             size(bytes as u64),
             size(cap)
         )
@@ -4630,6 +4692,71 @@ mod tests {
         assert_eq!(image_type(b"GIF89a"), None);
         assert_eq!(image_type(b"II*\0"), None);
         assert_eq!(image_type(b""), None);
+    }
+
+    const PAGE: &str = "text/html; charset=utf-8";
+
+    #[test]
+    fn a_page_is_html_by_its_bytes_as_the_yard_reads_it() {
+        // What http.DetectContentType answers: the tags, the case aside,
+        // past the leading whitespace, ended by a space or `>`.
+        for head in [
+            "<!DOCTYPE HTML>",
+            "<!doctype html>",
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\">",
+            "<html>",
+            "<HTML LANG=\"en\">",
+            "<head>",
+            "<Script>",
+            "<!-- a note -->",
+            "  \r\n<html>",
+        ] {
+            assert_eq!(page_type(head.as_bytes()), Some(PAGE), "{head}");
+        }
+        // Anything else is no page: images, text, SVG (which the yard
+        // reads as text), a tag cut short or unterminated, and nothing.
+        for head in [
+            b"\x89PNG\r\n\x1a\nthe rest".as_slice(),
+            b"GIF89a".as_slice(),
+            b"just words".as_slice(),
+            b"<svg width=\"8\">".as_slice(),
+            b"<blink>".as_slice(),
+            b"<htm".as_slice(),
+            b"<html".as_slice(),
+            b"".as_slice(),
+            b"   \t\r\n".as_slice(),
+        ] {
+            assert_eq!(page_type(head), None, "{head:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_over_the_yard_s_cap_is_refused_with_both_sizes() {
+        assert_eq!(page_over_cap(70, 8388608), None);
+        assert_eq!(
+            page_over_cap(9 * 1024 * 1024, 8388608).as_deref(),
+            Some(
+                "the page is 9.0 MiB, and this yard takes one of 8.0 MiB at most (yardr settings: blob_max_bytes)"
+            )
+        );
+    }
+
+    #[test]
+    fn an_old_yard_s_add_note_has_no_files() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        assert!(note_files_too_old(&refused(
+            "argument \"files\": AddNote has none of that name (it takes bead, text, actor)"
+        )));
+        assert!(!note_files_too_old(&refused("no such method AddNote")));
+        assert!(!note_files_too_old(&refused(
+            "a note with images needs words: say what the picture shows"
+        )));
+        assert!(!note_files_too_old(&api::Error::Protocol(
+            "AddNote: status 200, and no JSON object".into()
+        )));
     }
 
     #[test]

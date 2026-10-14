@@ -134,7 +134,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
 | `Crew`, `Peers`, `Users` | whom there is to talk with: the crew, `<name>@<peer>` for each one a linked yard exposes, and the users of this yard, yourself among them. A peer's `trust` says which of its names are a user of this yard speaking |
-| `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on an image, before one is sent |
+| `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on an image or a page, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
 | `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
@@ -149,6 +149,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each image, with their hashes |
 | `AnswerAsk` | Enter, on a card: the option chosen, with the line's words in the one answer; an ask with no options is answered with words |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
+| `PutBlob` for each page, then `AddNote` with their hashes | Enter, on a card whose note has pages attached |
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
 | `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide"; a secret ask with none |
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
@@ -190,7 +191,9 @@ removes an image no mail names) is a line that says so.
 
 **Sending images.** Paste an image (`cmd+v`, `ctrl+v` on Linux) or drop
 image files on the window, anywhere: each is attached to the draft of the
-open conversation and shown small above the line. Nothing is sent yet. Write
+open conversation and shown small above the line. Where a card is open
+instead, a dropped file is for its note: an HTML file attaches as a page,
+anything else is refused in words. Nothing is sent yet. Write
 something or not, and Enter sends one mail with the text and every image
 attached, in the order they came; an image alone is a mail. A draft belongs
 to its conversation: open another, and the text and the images wait where
@@ -222,6 +225,38 @@ that goes is the draft as it stands, never the draft less an image. Remove
 the marked one and Enter sends the rest. A send that fails puts the text and
 the images back in the draft. An image the yard took before the send failed
 stays in its store, named by no mail, until `yardr store prune`.
+
+**Sending pages.** Drop an HTML file on an open card: it is attached to
+the ask's note as a page and shown small under the line. Nothing is sent
+yet. Write what the page shows, and Enter sends one note with the words
+and every page attached, in the order they came; the ask stays open. The
+note is then like an agent's: its page opens in the browser from the note,
+and stands on the bead's board in the web view. A page belongs to its ask:
+open another card, and the words and the pages wait where they were. The
+`×` on an attachment removes it, and so does `backspace` in an empty line,
+the last one first.
+
+An attachment that cannot go is marked, pale in a frame of the warning
+colour, with the reason under the line:
+
+- one that is no HTML file, which is what a note carries. It is told by
+  its first bytes, not by its name, and a dropped file that is none is not
+  read further;
+- one over the yard's cap (`blob_max_bytes` of `yardr settings`, 8 MiB when
+  unset);
+- one the yard refused when it was sent, with the yard's words.
+
+While an attachment is marked, Enter sends nothing and says so: the note
+that goes is the draft as it stands, never the draft less a page. Remove
+the marked one and Enter sends the rest. A note with a page needs words:
+without them Enter says so and sends nothing. An answer carries no page:
+with a pick or a recommendation Enter says so and sends nothing — remove
+the page, pick, and send the answer. A decline carries no page either, and
+a secret, a run, or a taken-back ask takes no note, so a file dropped on
+its card is not attached. A send that fails puts the words and the pages
+back with the ask. A page the yard took before the send failed stays in
+its store, named by no note, until `yardr store prune`. A yard whose yardr
+is too old for a note with a page says so, and the note waits where it was.
 
 **No yard.** Where no yard was ever made at this run's place, the window
 says so in plain words — "No yard has been made here yet — set one up."
@@ -697,10 +732,12 @@ last; the recommended one with its why; a line for words; the keys. A number
 key or the arrows choose an option; Enter sends the pick with the line's
 words in the one answer, or the recommended option when none is chosen, as
 the keys say. Words with no option chosen and none recommended go as a plain
-note, and the ask stays open; an ask with no options says "words wanted",
-and Enter sends the words as the answer. `x` puts the ask aside, to come
-back as the yard says. `d` declines it with words, which is not a pick and
-not "you decide". `e` expands the card in place to the bead's body, notes
+note, and the ask stays open; an HTML file dropped on the card is attached
+to the note as a page, and goes with the words. An ask with no options
+says "words wanted", and Enter sends the words as the answer. `x` puts the
+ask aside, to come back as the yard says. `d` declines it with words,
+which is not a pick and not "you decide". `e` expands the card in place to
+the bead's body, notes
 and about-beads; a design bead's document is named by path and branch, not
 fetched. After a pick the ask moves to "Decided" at once, and a later pick
 on it from there replaces the earlier one. The window holds the card's keys,

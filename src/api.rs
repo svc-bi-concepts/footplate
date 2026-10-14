@@ -1522,14 +1522,17 @@ impl Client {
         .map(drop)
     }
 
-    /// Puts a plain note on the bead. Words about a question with no
-    /// option chosen go here, and leave the ask open.
-    pub fn add_note(&self, bead: &str, text: &str, actor: &str) -> Result<()> {
-        self.call(
-            "AddNote",
-            json!({ "bead": bead, "text": text, "actor": actor }),
-        )
-        .map(drop)
+    /// Puts a plain note on the bead, with the pages `files` names by the
+    /// hash `PutBlob` answered. Words about a question with no option
+    /// chosen go here, and leave the ask open; a note with a page needs
+    /// its words. A yard from before notes carried files refuses the
+    /// argument, in its words.
+    pub fn add_note(&self, bead: &str, text: &str, actor: &str, files: &[String]) -> Result<()> {
+        let mut args = json!({ "bead": bead, "text": text, "actor": actor });
+        if !files.is_empty() {
+            args["files"] = json!(files);
+        }
+        self.call("AddNote", args).map(drop)
     }
 
     /// Sends mail to a crew member or a user of this yard, with the images
@@ -1543,7 +1546,9 @@ impl Client {
         self.call("Mail", args).map(drop)
     }
 
-    /// Gives the yard an image, a PNG or a JPEG, for mail to carry.
+    /// Gives the yard a file: an image, a PNG or a JPEG, for mail to
+    /// carry, or a page, an HTML file, for a note. What it is the yard
+    /// reads from the bytes, and refuses what it takes none of.
     pub fn put_blob(&self, bytes: &[u8]) -> Result<BlobRef> {
         self.answer("PutBlob", json!({ "data": BASE64.encode(bytes) }))
     }
@@ -3042,11 +3047,27 @@ mod tests {
             ]
         );
         client
-            .add_note("yd-greet", "the newcomer arrives Monday", "jo")
+            .add_note("yd-greet", "the newcomer arrives Monday", "jo", &[])
             .unwrap();
         assert_eq!(
             yard.asked("AddNote"),
             vec![json!({"bead": "yd-greet", "text": "the newcomer arrives Monday", "actor": "jo"})]
+        );
+        // A note with pages names their hashes; without, no argument goes,
+        // and a yard from before takes the call as it always did.
+        client
+            .add_note(
+                "yd-greet",
+                "the mockup, third pass",
+                "jo",
+                &["aa".into(), "bb".into()],
+            )
+            .unwrap();
+        assert_eq!(
+            yard.asked("AddNote").last(),
+            Some(
+                &json!({"bead": "yd-greet", "text": "the mockup, third pass", "actor": "jo", "files": ["aa", "bb"]})
+            )
         );
     }
 

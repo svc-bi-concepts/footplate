@@ -52,6 +52,18 @@ pub fn unattachable(name: &str, head: &[u8], size: u64, cap: Option<u64>) -> Opt
     cap.and_then(|cap| model::over_cap(size as usize, cap))
 }
 
+/// Why `name` is not attached as a page, if it is not: by its first bytes
+/// `head`, and by its size when the yard's cap is known. A note carries a
+/// page, an HTML file, and nothing else.
+pub fn unattachable_page(name: &str, head: &[u8], size: u64, cap: Option<u64>) -> Option<String> {
+    if model::page_type(head).is_none() {
+        return Some(format!(
+            "a note carries an HTML file, and {name} is not one"
+        ));
+    }
+    cap.and_then(|cap| model::page_over_cap(size as usize, cap))
+}
+
 /// An image from the clipboard. The yard's cap is not known here: the
 /// window asks for it and marks the attachment then.
 pub fn pasted(bytes: Vec<u8>) -> Found {
@@ -68,6 +80,30 @@ pub fn pasted(bytes: Vec<u8>) -> Found {
 /// bytes and its size: the rest of it is not read, and nothing of it leaves
 /// the window.
 pub fn dropped(path: &Path, cap: Option<u64>) -> Found {
+    dropped_as(path, cap, 8, unattachable)
+}
+
+/// How much of a dropped file a page is told by: the yard reads the type
+/// by its first 512 bytes, so a file refused here for its type is one the
+/// yard would refuse.
+const PAGE_HEAD: usize = 512;
+
+/// A file dropped on an open card, for its note. One that is no page, or
+/// none the yard takes, is refused by its first bytes and its size: the
+/// rest of it is not read, and nothing of it leaves the window.
+pub fn dropped_page(path: &Path, cap: Option<u64>) -> Found {
+    dropped_as(path, cap, PAGE_HEAD, unattachable_page)
+}
+
+/// A file dropped on the window, told by `refuse` over its first `head`
+/// bytes and its size: the rest of a refused file is not read, and nothing
+/// of it leaves the window.
+fn dropped_as(
+    path: &Path,
+    cap: Option<u64>,
+    head: usize,
+    refuse: fn(&str, &[u8], u64, Option<u64>) -> Option<String>,
+) -> Found {
     let name = match path.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),
         None => path.display().to_string(),
@@ -76,8 +112,8 @@ pub fn dropped(path: &Path, cap: Option<u64>) -> Found {
         let mut file = File::open(path)?;
         let size = file.metadata()?.len();
         let mut bytes = Vec::new();
-        file.by_ref().take(8).read_to_end(&mut bytes)?;
-        let refused = unattachable(&name, &bytes, size, cap);
+        file.by_ref().take(head as u64).read_to_end(&mut bytes)?;
+        let refused = refuse(&name, &bytes, size, cap);
         match refused {
             Some(_) => bytes.clear(),
             None => {
@@ -98,24 +134,56 @@ pub fn dropped(path: &Path, cap: Option<u64>) -> Found {
     }
 }
 
+/// Why a marked attachment holds its send back, if one does: a mail or
+/// a note goes as its draft stands, never less one.
+fn marked(attachments: &[Attachment]) -> Option<String> {
+    let marked = attachments.iter().find(|a| a.refused.is_some())?;
+    let n = attachments.iter().filter(|a| a.refused.is_some()).count();
+    Some(match n {
+        1 => format!(
+            "{} is marked and cannot go: remove it, then send",
+            marked.name
+        ),
+        n => format!("{n} attachments are marked and cannot go: remove them, then send"),
+    })
+}
+
 /// Why Enter sends nothing of a draft, if it does not: empty when there is
 /// nothing to send. An image is a mail without text; a marked attachment
 /// holds the whole draft back, so that what goes is what the draft shows.
 pub fn unsendable(text: &str, attachments: &[Attachment]) -> Option<String> {
-    if let Some(marked) = attachments.iter().find(|a| a.refused.is_some()) {
-        let n = attachments.iter().filter(|a| a.refused.is_some()).count();
-        return Some(match n {
-            1 => format!(
-                "{} is marked and cannot go: remove it, then send",
-                marked.name
-            ),
-            n => format!("{n} attachments are marked and cannot go: remove them, then send"),
-        });
+    if let Some(why) = marked(attachments) {
+        return Some(why);
     }
     match model::unsendable(text) {
         Some(why) if why.is_empty() && !attachments.is_empty() => None,
         other => other,
     }
+}
+
+/// Why attachments cannot go, each reason once: for the line their send
+/// is typed in.
+pub fn reasons(attachments: &[Attachment]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for why in attachments.iter().filter_map(|a| a.refused.as_ref()) {
+        if !out.contains(why) {
+            out.push(why.clone());
+        }
+    }
+    out
+}
+
+/// Why Enter sends no note of the words with the card's pages, if it does
+/// not: a marked page holds the note back, and a page without words goes
+/// nowhere, since the yard wants to know what it shows.
+pub fn note_unsendable(words: &str, attachments: &[Attachment]) -> Option<String> {
+    if let Some(why) = marked(attachments) {
+        return Some(why);
+    }
+    if !attachments.is_empty() && words.trim().is_empty() {
+        return Some("a note with a page needs words: say what the page shows".to_string());
+    }
+    None
 }
 
 /// How long the question in a card's reference may be, before it is cut
@@ -223,23 +291,20 @@ impl Drafts {
 
     /// Why attachments of the draft for `with` are marked, each reason once.
     pub fn reasons(&self, with: &str) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for why in self
-            .attachments(with)
-            .iter()
-            .filter_map(|a| a.refused.as_ref())
-        {
-            if !out.contains(why) {
-                out.push(why.clone());
-            }
-        }
-        out
+        reasons(self.attachments(with))
+    }
+
+    /// The id of the next attachment, of a draft or of a card's note: an
+    /// id is its attachment's alone, in whichever yard, so one counter
+    /// serves both.
+    pub fn next_id(&mut self) -> u64 {
+        self.last += 1;
+        self.last
     }
 
     /// Attaches what was found to the draft for `with`, after what is there.
     pub fn attach(&mut self, with: &str, found: Found) -> u64 {
-        self.last += 1;
-        let id = self.last;
+        let id = self.next_id();
         let draft = self.entry(with);
         draft.attachments.push(Attachment {
             id,
@@ -591,5 +656,104 @@ mod tests {
         assert!(why.starts_with("gone.png could not be read: "), "{why}");
         // A folder is no image either.
         assert!(dropped(dir.path(), None).refused.is_some());
+    }
+
+    const HTML: &[u8] = b"<!DOCTYPE html><html><body>the mockup</body></html>";
+
+    #[test]
+    fn a_page_is_an_html_file_and_under_the_cap() {
+        assert_eq!(unattachable_page("mockup.html", HTML, 51, None), None);
+        assert_eq!(
+            unattachable_page("fence.png", PNG, 16, Some(1024)).as_deref(),
+            Some("a note carries an HTML file, and fence.png is not one")
+        );
+        // By its bytes, whatever its name.
+        assert_eq!(
+            unattachable_page("mockup.html", b"%PDF-1.7", 900, Some(1024)).as_deref(),
+            Some("a note carries an HTML file, and mockup.html is not one")
+        );
+        assert_eq!(
+            unattachable_page("mockup.html", HTML, 2048, Some(1024)).as_deref(),
+            Some(
+                "the page is 2 KiB, and this yard takes one of 1 KiB at most (yardr settings: blob_max_bytes)"
+            )
+        );
+    }
+
+    #[test]
+    fn a_dropped_page_is_read_whole_and_a_refused_one_only_as_far_as_it_takes() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+
+        let found = dropped_page(&at("mockup.html", HTML), Some(1024));
+        assert_eq!(
+            found,
+            Found {
+                name: "mockup.html".into(),
+                bytes: HTML.to_vec(),
+                size: 51,
+                refused: None
+            }
+        );
+        // A doctype past the eighth byte is still a page: the head is the
+        // yard's 512.
+        let late = [b"\n\n\n\n\n\n\n\n\n\n".as_slice(), HTML].concat();
+        assert_eq!(dropped_page(&at("late.html", &late), None).refused, None);
+
+        // No page by its bytes, whatever its name: refused, and not read.
+        let found = dropped_page(&at("notes.html", b"%PDF-1.7 and more"), Some(1024));
+        assert_eq!(
+            found.refused.as_deref(),
+            Some("a note carries an HTML file, and notes.html is not one")
+        );
+        assert_eq!((found.bytes.len(), found.size), (0, 17));
+
+        let found = dropped_page(&at("big.html", HTML), Some(15));
+        assert!(
+            found
+                .refused
+                .as_deref()
+                .unwrap()
+                .starts_with("the page is 51 bytes"),
+            "{found:?}"
+        );
+        assert!(found.bytes.is_empty());
+
+        let found = dropped_page(&dir.path().join("gone.html"), None);
+        let why = found.refused.unwrap();
+        assert!(why.starts_with("gone.html could not be read: "), "{why}");
+    }
+
+    #[test]
+    fn a_note_with_a_page_needs_words_and_no_marked_page() {
+        let page = |refused: Option<&str>| Attachment {
+            id: 1,
+            name: "mockup.html".into(),
+            bytes: HTML.to_vec(),
+            size: 51,
+            refused: refused.map(str::to_string),
+        };
+        let pages = [page(None)];
+        assert_eq!(note_unsendable("the mockup, third pass", &pages), None);
+        assert_eq!(
+            note_unsendable("  \n ", &pages).as_deref(),
+            Some("a note with a page needs words: say what the page shows")
+        );
+        assert_eq!(
+            note_unsendable("the mockup", &[page(Some("too large")), page(None)]).as_deref(),
+            Some("mockup.html is marked and cannot go: remove it, then send")
+        );
+        assert_eq!(
+            note_unsendable(
+                "the mockup",
+                &[page(Some("too large")), page(Some("too large"))]
+            )
+            .as_deref(),
+            Some("2 attachments are marked and cannot go: remove them, then send")
+        );
     }
 }
