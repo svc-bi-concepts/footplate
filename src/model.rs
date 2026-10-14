@@ -954,7 +954,7 @@ impl Model {
             .collect()
     }
 
-    /// How many beads have open asks: the `decisions (n)`.
+    /// How many beads have open asks: the Decisions head's count.
     pub fn decisions_count(&self) -> usize {
         self.decision_beads().len()
     }

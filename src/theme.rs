@@ -67,6 +67,8 @@ pub struct Palette {
     pub accent: Rgba,
     pub on_accent: Rgba,
     pub warn: Rgba,
+    /// The head's dot where the yard runs.
+    pub ok: Rgba,
     pub selection: Rgba,
     /// The ground under code, over whatever the text stands on.
     pub code: Rgba,
@@ -95,6 +97,7 @@ impl Palette {
                 accent: rgb(0xe8a33d),
                 on_accent: rgb(0x1e2024),
                 warn: rgb(0xf0764f),
+                ok: rgb(0x7fb069),
                 selection: rgba(0xe8a33d55),
                 code: rgba(0xffffff14),
             }
@@ -110,6 +113,7 @@ impl Palette {
                 accent: rgb(0xa8600a),
                 on_accent: rgb(0xffffff),
                 warn: rgb(0xb3401c),
+                ok: rgb(0x3d8b4f),
                 selection: rgba(0xa8600a40),
                 code: rgba(0x0000000f),
             }

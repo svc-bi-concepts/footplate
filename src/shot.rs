@@ -15,8 +15,20 @@ use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
 /// the conversation with the yardmaster, an open decision card of a plain
-/// ask, and an open card of a run ask.
-pub const STATES: &[&str] = &["yardmaster", "plain", "run"];
+/// ask, an open card of a run ask, a yard that is stopped, a yard at an
+/// address, and the settings with the start-at-login switch. The stopped
+/// yard answers nothing; the yard at an address is opened from the
+/// settings the shot script writes; the settings open over a running
+/// yard. The script answers the switch's yardr for every state, so the
+/// head draws the same on every shot.
+pub const STATES: &[&str] = &[
+    "yardmaster",
+    "plain",
+    "run",
+    "stopped",
+    "far",
+    "settings",
+];
 
 /// The fake yard and its private socket directory, which go away with the
 /// screenshot run.
@@ -74,7 +86,23 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
         );
         std::process::exit(2);
     }
-    let (socket, shot) = match ShotYard::start(&std::env::temp_dir(), &state) {
+    start_for_state(env, &state)
+}
+
+/// The run for `state`: the fake yard serves it, and the run's socket
+/// points there. For `stopped` no yard listens: the socket names a
+/// directory that holds none, so the window opens on a yard that is
+/// down, and the switch says it is stopped.
+fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
+    if state == "stopped" {
+        let mut env = env;
+        env.socket = std::env::temp_dir().join(format!(
+            "footplate-shot-{}-stopped/yard.sock",
+            std::process::id()
+        ));
+        return (env, None);
+    }
+    let (socket, shot) = match ShotYard::start(&std::env::temp_dir(), state) {
         Ok(shot) => shot,
         Err(error) => {
             eprintln!("footplate: the screenshot yard has nowhere to listen: {error}");
@@ -134,7 +162,10 @@ fn populate(yard: &Yard, state: &str) {
     yard.answer("DeferAsk", "{}");
     yard.answer("DeclineAsk", "{}");
     match state {
-        "yardmaster" => {
+        // The yard at an address is opened from the settings, not from
+        // this yard, and the settings open over a running one: both
+        // serve the yardmaster's conversation.
+        "yardmaster" | "far" | "settings" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -271,17 +302,28 @@ mod tests {
     /// Every state reads as the window reads it: the login name is no user
     /// of the yard, so the window is for its operator, jo, and the state
     /// opens where the shot says. A state added to [`STATES`] lands in the
-    /// unreachable arm until it is covered here.
+    /// unreachable arm until it is covered here. `stopped` listens
+    /// nowhere: its run's socket names a yard that is down.
     #[test]
     fn every_state_loads_as_the_window_reads_it() {
         for state in STATES {
+            if *state == "stopped" {
+                let env = Env {
+                    socket: PathBuf::from("/none"),
+                    ..Env::default()
+                };
+                let (env, shot) = start_for_state(env, state);
+                assert!(shot.is_none(), "{state}");
+                assert!(!env.socket.exists(), "{state}");
+                continue;
+            }
             let yard = Yard::start();
             populate(&yard, state);
             let loaded = session::load(&yard.client(), "shot").unwrap();
             assert_eq!(loaded.me, "jo", "{state}");
             assert_eq!(loaded.asks.decided.len(), 0, "{state}");
             match *state {
-                "yardmaster" => {
+                "yardmaster" | "far" | "settings" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");

@@ -10,8 +10,8 @@ use std::thread;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton,
-    ObjectFit, Pixels, ScrollHandle, SharedString, Task, Window, actions, div, img, prelude::*, px,
-    relative, rems,
+    ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Task, Window, actions, div, img,
+    prelude::*, px, relative, rems,
 };
 
 use crate::api::{self, Address, BlobRef, Client};
@@ -193,6 +193,44 @@ fn post(
 /// A line between the sections of the left list.
 fn divider(palette: Palette) -> impl IntoElement {
     div().mx_3().my_1().h(px(1.)).bg(palette.line)
+}
+
+/// What a section's head says waits in it: the number, or that none
+/// does.
+fn waiting_words(waiting: usize) -> String {
+    match waiting {
+        0 => "none waiting".to_string(),
+        waiting => waiting.to_string(),
+    }
+}
+
+/// A section's head in the left list: its title on the left, what waits
+/// in it on the right, quiet. "Decisions" counts the open ones, "Crew"
+/// the mail that is not read.
+fn section_head(title: &'static str, waiting: usize, palette: Palette) -> impl IntoElement {
+    div()
+        .px_3()
+        .pt_2()
+        .pb_1()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .debug_selector(move || format!("section {title}"))
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(
+            div()
+                .debug_selector(move || format!("section {title} count"))
+                .text_sm()
+                .text_color(palette.faint)
+                .flex_none()
+                .child(waiting_words(waiting)),
+        )
 }
 
 /// The keys of an open card. Enter with nothing chosen and a recommendation
@@ -410,6 +448,45 @@ fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
         return true;
     }
     ask.recommend == 0 && !foreign
+}
+
+/// The switcher's mark beside the yard's line: a chevron drawn with two
+/// strokes, in the line's own colour. A character would draw on one
+/// desktop and stand in for a missing glyph on the next.
+fn chevron(color: Rgba) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let top = bounds.origin.y + bounds.size.height * 0.3;
+            let bottom = bounds.origin.y + bounds.size.height * 0.7;
+            let left = bounds.origin.x + bounds.size.width * 0.15;
+            let middle = bounds.origin.x + bounds.size.width * 0.5;
+            let right = bounds.origin.x + bounds.size.width * 0.85;
+            let mut path = gpui::PathBuilder::stroke(bounds.size.height * 0.18);
+            path.move_to(gpui::point(left, top));
+            path.line_to(gpui::point(middle, bottom));
+            path.line_to(gpui::point(right, top));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .w(rems(0.625))
+    .h(rems(0.5))
+    .flex_none()
+}
+
+/// Words that take a click, without the border: the head's status row
+/// ends in one. The hover's ground is what says so.
+fn quiet_button(text: String, palette: Palette) -> Div {
+    div()
+        .px_1()
+        .rounded_md()
+        .text_size(rems(0.8))
+        .text_color(palette.faint)
+        .cursor_pointer()
+        .hover(|style| style.bg(palette.hover))
+        .child(text)
 }
 
 /// A small button beside the send button, without what it does: Later and
@@ -964,6 +1041,12 @@ impl Footplate {
     ) -> Self {
         let mut this = Self::bare(env, name, window, cx).kept_in(file, cx);
         this.reopen(cx);
+        // A screenshot state that opens the settings (shot.rs): a debug
+        // build's alone.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings") {
+            this.settings_open = true;
+        }
         this
     }
 
@@ -1696,8 +1779,9 @@ impl Footplate {
     }
 
     /// The head's line: who the window is for, where the yard said, the
-    /// open yard, and why it is not reached while it is not. It ends in
-    /// the mark of the switcher where there are yards to switch between.
+    /// open yard, and why it is not reached while it is not. The
+    /// switcher's chevron stands beside it where there are yards to
+    /// switch between.
     fn head_line(&self, me: Option<&str>) -> String {
         let yard = self.which_yard_short();
         // Where no yard was ever made the line names the yard alone: the
@@ -1707,15 +1791,11 @@ impl Footplate {
             true => None,
             false => self.unreached.get(&self.yard).copied(),
         };
-        let mut line = [me, Some(yard.as_str()), why]
+        [me, Some(yard.as_str()), why]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
-            .join(" · ");
-        if self.env.yard.is_none() {
-            line.push_str(" ▾");
-        }
-        line
+            .join(" · ")
     }
 
     /// Which yard the head's line names, short: the open one by the name
@@ -4275,22 +4355,26 @@ impl Footplate {
         cx.notify();
     }
 
-    /// "Start at login", on or off. On is `up --login`: the login
+    /// "Start at login", switched `on`. On is `up --login`: the login
     /// services are installed, and a yard that is stopped is started.
     /// Off removes the daemon's service; the daemon the service ran is
     /// stopped with it, and started again where the yard runs. What went
-    /// is the checkbox's from here on; what could not be is said.
-    fn toggle_login(&mut self, cx: &mut Context<Self>) {
+    /// is the switch's from here on; what could not be is said. A click
+    /// on what it already is does nothing.
+    fn set_login(&mut self, on: bool, cx: &mut Context<Self>) {
         let Some(yardr) = self.switch_yardr() else {
             return;
         };
         if self.switch_busy.is_some() {
             return;
         }
-        let on = self
+        let is = self
             .switch_status
             .as_ref()
             .is_some_and(|status| status.starts_at_login());
+        if is == on {
+            return;
+        }
         self.switch_busy = Some(SwitchBusy::Login);
         self.switch_note = None;
         cx.notify();
@@ -4300,8 +4384,8 @@ impl Footplate {
                 .background_executor()
                 .spawn(async move {
                     match on {
-                        false => LoginDid::Checked(yardr.up_login()),
-                        true => LoginDid::Unchecked(yardr.daemon_uninstall()),
+                        true => LoginDid::Checked(yardr.up_login()),
+                        false => LoginDid::Unchecked(yardr.daemon_uninstall()),
                     }
                 })
                 .await;
@@ -4696,7 +4780,7 @@ impl Footplate {
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
             );
         // What a setting is called, over its buttons and the keys for it.
-        let setting = |name: &'static str, keys: String| {
+        let setting = |name: String, keys: String| {
             div()
                 .flex()
                 .flex_col()
@@ -4706,7 +4790,7 @@ impl Footplate {
         };
         let text = self.settings.text;
         let size = setting(
-            "text size",
+            "text size".to_string(),
             format!("{SECONDARY}+= larger · {SECONDARY}+- smaller · {SECONDARY}+0 the usual size"),
         )
         .child(
@@ -4746,7 +4830,7 @@ impl Footplate {
         );
         let chosen = self.settings.look;
         let look = setting(
-            "light or dark",
+            "light or dark".to_string(),
             format!("{SECONDARY}+shift+l the next of auto, light, dark · auto is the desktop's"),
         )
         .child(div().flex().flex_wrap().items_center().gap_2().children(
@@ -4770,11 +4854,12 @@ impl Footplate {
             })
         };
         let yard = self.talk_yards(setting, palette, cx);
+        let login = self.login_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
         let notify = self.settings.notifications;
         let mut notifications = setting(
-            "notifications",
+            "notifications".to_string(),
             "the system tells of what arrives while the window is behind another or shows another row"
                 .to_string(),
         )
@@ -4833,7 +4918,7 @@ impl Footplate {
         // Closing hides on a Mac alone: elsewhere it quits either way.
         let menu_bar = {
             setting(
-                "menu bar or tray item",
+                "menu bar or tray item".to_string(),
                 match cfg!(target_os = "macos") {
                     true => format!(
                         "while it is on, closing the window hides footplate, which goes on following its yards: its item in the menu bar says what waits and shows it again, as a click on its icon in the dock does, {SECONDARY}+q quits · off, there is no item and closing quits"
@@ -4872,6 +4957,7 @@ impl Footplate {
                     .child(size)
                     .child(look)
                     .child(yard)
+                    .child(login)
                     .child(notifications)
                     .child(menu_bar),
             )
@@ -4929,13 +5015,13 @@ impl Footplate {
     /// that one alone, to pair again.
     fn talk_yards(
         &self,
-        setting: impl Fn(&'static str, String) -> Div,
+        setting: impl Fn(String, String) -> Div,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
         let faint = |text: String| div().text_sm().text_color(palette.faint).child(text);
         let mut yard = setting(
-            "yards",
+            "yards".to_string(),
             format!(
                 "the window shows {} · {SECONDARY}+y lists them · {SECONDARY}+1 to 9 opens one",
                 self.which_yard()
@@ -5047,6 +5133,96 @@ impl Footplate {
             }
         }
         yard.children(self.yard_asked(palette, cx))
+    }
+
+    /// "Start at login" for the open yard, which the setting names: the
+    /// yard's daemon starts at login, and herdr's server with it, by the
+    /// one service every yard on this machine shares. On is the yard
+    /// starting at login, both halves. A yard at an address starts
+    /// nothing on this machine, and says so instead of the switch; so
+    /// does an entry that names no yard home, and a system whose
+    /// services yardr does not write to. Beside the switch, one faint
+    /// line for what came of a switch.
+    fn login_setting(
+        &self,
+        setting: impl Fn(String, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let title = format!("start {} at login", self.yard);
+        let mut section = match self.switch_for() {
+            SwitchFor::Far => setting(
+                title,
+                "a yard at an address starts nothing on this machine: its processes are elsewhere"
+                    .to_string(),
+            ),
+            SwitchFor::NoHome => setting(
+                title,
+                "this entry names no yard home: nothing is started at login".to_string(),
+            ),
+            SwitchFor::Near(_) => match self.switch_status.as_ref() {
+                Some(status) if status.daemon_service().supported => {
+                    let on = status.starts_at_login();
+                    setting(title, self.login_help(status)).child(
+                        div().flex().flex_wrap().items_center().gap_2().children(
+                            [("off", false), ("on", true)].map(|(name, want)| {
+                                small_button(name.to_string(), palette)
+                                    .id(SharedString::from(format!("login {name}")))
+                                    .debug_selector(move || format!("login {name}"))
+                                    .when(want == on, |el| {
+                                        el.bg(palette.open)
+                                            .text_color(palette.text)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                    })
+                                    .when(self.switch_busy.is_some(), |el| el.opacity(0.5))
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.set_login(want, cx)),
+                                    )
+                            }),
+                        ),
+                    )
+                }
+                Some(_) => setting(
+                    title,
+                    "this system has no service manager yardr writes to: nothing starts at login"
+                        .to_string(),
+                ),
+                None => setting(
+                    title,
+                    match (&self.switch_note, self.switch_reading) {
+                        (Some(_), false) => "yardr could not be read.".to_string(),
+                        _ => "asking yardr what starts at login…".to_string(),
+                    },
+                ),
+            },
+        };
+        if !matches!(self.switch_for(), SwitchFor::Far | SwitchFor::NoHome)
+            && let Some(note) = self.switch_note.as_ref()
+        {
+            section = section.child(
+                div()
+                    .debug_selector(|| "switch note".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .truncate()
+                    .child(note.clone()),
+            );
+        }
+        section
+    }
+
+    /// The one line of help under "start at login". Where the yard is
+    /// stopped and the switch is off, switching on starts the yard now
+    /// as well as at every login (`up --login` starts a stopped yard),
+    /// so it says so before the click.
+    fn login_help(&self, status: &setup::Status) -> String {
+        let help = "the yard's daemon and herdr's shared server start at login";
+        // While the switch is busy a click starts nothing, so the help
+        // names only login then.
+        match !status.starts_at_login() && self.yard_is_stopped() && self.switch_busy.is_none() {
+            true => format!("{help}; switching on starts the yard now as well"),
+            false => help.to_string(),
+        }
     }
 
     /// The fields of the yard that is being added, or of the code for one
@@ -5163,9 +5339,10 @@ impl Footplate {
         asked
     }
 
-    /// The switch in the head, under the yard's line: its state with
-    /// Start/Stop, "start at login", and one faint line for what came of
-    /// it. A yard at an address has none: its processes are elsewhere.
+    /// The switch in the head, under the yard's line: the one status
+    /// row. A yard at an address has none: its processes are elsewhere.
+    /// "Start at login" is a switch of the settings, with the faint line
+    /// for what came of a switch beside it there.
     fn switch_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if self.first_run.is_some() {
             return Vec::new();
@@ -5180,65 +5357,60 @@ impl Footplate {
                     .child("the entry names no yard home")
                     .into_any_element(),
             ],
-            SwitchFor::Near(_) => {
-                let mut rows = vec![self.switch_state(palette, cx)];
-                if let Some(status) = self.switch_status.as_ref()
-                    && status.daemon_service().supported
-                {
-                    rows.push(self.switch_login(status, palette, cx));
-                }
-                if let Some(note) = self.switch_note.as_ref() {
-                    rows.push(
-                        div()
-                            .debug_selector(|| "switch note".to_string())
-                            .text_size(rems(0.8))
-                            .text_color(palette.faint)
-                            .truncate()
-                            .child(note.clone())
-                            .into_any_element(),
-                    );
-                }
-                rows
-            }
+            SwitchFor::Near(_) => vec![self.switch_state(palette, cx)],
         }
     }
 
-    /// The yard's state with Start/Stop: Running where it answers,
-    /// Starting and Stopping while it is started or stopped, Stopped
-    /// where nothing runs, or what the last start could not start, in
-    /// yardr's words.
+    /// The one status row: a coloured dot, the yard's state, and
+    /// Start/Stop as a quiet text button at the right end. Running where
+    /// it answers, Starting and Stopping while it is started or stopped,
+    /// Stopped where nothing runs, or what the last start could not
+    /// start, in yardr's words.
     fn switch_state(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let running = self.down.is_none() && self.model.is_some();
-        let (state, button): (String, Option<(&str, &str)>) = match self.switch_busy {
-            Some(SwitchBusy::Starting) => ("Starting…".to_string(), None),
-            Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), None),
+        let (state, dot, button): (String, Rgba, Option<(&str, &str)>) = match self.switch_busy {
+            Some(SwitchBusy::Starting) => ("Starting…".to_string(), palette.accent, None),
+            Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), palette.accent, None),
             _ if self.switch_program.is_none() => match self.switch_note.is_some() {
-                false => ("…".to_string(), None),
+                false => ("…".to_string(), palette.faint, None),
                 true => match running {
                     true => (
                         "Running · yardr is not fetched".to_string(),
+                        palette.warn,
                         Some(("switch try again", "try again")),
                     ),
                     false => (
                         "yardr is not fetched".to_string(),
+                        palette.warn,
                         Some(("switch try again", "try again")),
                     ),
                 },
             },
-            _ if running => ("Running".to_string(), Some(("switch stop", "Stop"))),
+            _ if running => (
+                "Running".to_string(),
+                palette.ok,
+                Some(("switch stop", "Stop")),
+            ),
             _ if !self.switch_troubles.is_empty() => (
                 self.switch_troubles.join("; "),
+                palette.warn,
                 Some(("switch start", "Start")),
             ),
-            _ if self.switch_noyard => ("No yard".to_string(), None),
+            _ if self.switch_noyard => ("No yard".to_string(), palette.faint, None),
             _ => match self.switch_status.as_ref() {
-                None => ("…".to_string(), None),
+                None => ("…".to_string(), palette.faint, None),
                 // Processes without a socket: half started, or half
                 // stopped. Start repairs it, and is safe to repeat.
-                Some(status) if status.server_running() || status.daemon_running() => {
-                    ("Starting…".to_string(), Some(("switch start", "Start")))
-                }
-                Some(_) => ("Stopped".to_string(), Some(("switch start", "Start"))),
+                Some(status) if status.server_running() || status.daemon_running() => (
+                    "Starting…".to_string(),
+                    palette.accent,
+                    Some(("switch start", "Start")),
+                ),
+                Some(_) => (
+                    "Stopped".to_string(),
+                    palette.faint,
+                    Some(("switch start", "Start")),
+                ),
             },
         };
         let mut row = div()
@@ -5248,6 +5420,14 @@ impl Footplate {
             .gap_2()
             .child(
                 div()
+                    .debug_selector(|| "switch dot".to_string())
+                    .size(rems(0.5))
+                    .rounded_full()
+                    .bg(dot)
+                    .flex_none(),
+            )
+            .child(
+                div()
                     .flex_1()
                     .min_w_0()
                     .text_size(rems(0.8))
@@ -5255,7 +5435,7 @@ impl Footplate {
                     .child(state),
             );
         if let Some((id, text)) = button {
-            let button = small_button(text.to_string(), palette)
+            let button = quiet_button(text.to_string(), palette)
                 .id(id)
                 .debug_selector(move || id.to_string())
                 .flex_none();
@@ -5268,50 +5448,6 @@ impl Footplate {
             });
         }
         row.into_any_element()
-    }
-
-    /// "Start at login": the yard's daemon starts at login, and herdr's
-    /// server with it, by the one service every yard on this machine
-    /// shares. Checked is the yard starting at login, both halves.
-    fn switch_login(
-        &self,
-        status: &setup::Status,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let checked = status.starts_at_login();
-        small_button(self.login_words(status), palette)
-            .id("switch login")
-            .debug_selector(|| "switch login".to_string())
-            .text_size(rems(0.8))
-            .when(checked, |el| {
-                el.bg(palette.open)
-                    .text_color(palette.text)
-                    .font_weight(FontWeight::SEMIBOLD)
-            })
-            .when(self.switch_busy.is_some(), |el| el.opacity(0.5))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_login(cx)))
-            .into_any_element()
-    }
-
-    /// The words beside "start at login". Where the yard is stopped
-    /// and the box is off, checking starts the yard now as well as at
-    /// every login (`up --login` starts a stopped yard), so it says so
-    /// before the click.
-    fn login_words(&self, status: &setup::Status) -> String {
-        let checked = status.starts_at_login();
-        let mark = match checked {
-            true => "☑",
-            false => "☐",
-        };
-        // While the switch is busy a click starts nothing, so the box
-        // names only login then.
-        match !checked && self.yard_is_stopped() && self.switch_busy.is_none() {
-            true => format!(
-                "{mark} start at login (starts the yard now and at every login; herdr's server shared)"
-            ),
-            false => format!("{mark} start at login (and herdr's server, shared)"),
-        }
     }
 
     /// The question before stopping: the agents in the middle of
@@ -5726,18 +5862,29 @@ impl Footplate {
                             // local yard name at the narrowest window.
                             .text_size(rems(0.8))
                             .text_color(palette.accent)
-                            .truncate()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_md()
                             .debug_selector(|| "which yard".to_string())
                             // The line is the switcher: it names the open
                             // yard and opens the list of them. The one
                             // yard the environment names has none.
                             .when(self.env.yard.is_none(), |el| {
                                 el.cursor_pointer()
+                                    .hover(|style| style.bg(palette.hover))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_switcher(window, cx)
                                     }))
                             })
-                            .child(self.head_line(me)),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(self.head_line(me)),
+                            )
+                            .children(self.env.yard.is_none().then(|| chevron(palette.accent))),
                     )
                     .children(self.switch_rows(palette, cx)),
             );
@@ -5786,15 +5933,7 @@ impl Footplate {
         let decisions = model.decisions_count();
         let decided = model.decided_count();
         if decisions > 0 || decided > 0 {
-            body = body.child(
-                div()
-                    .px_3()
-                    .pt_2()
-                    .pb_1()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("decisions ({decisions})")),
-            );
+            body = body.child(section_head("Decisions", decisions, palette));
             for group in model.decision_groups(&now) {
                 body = body.child(
                     div()
@@ -5834,6 +5973,8 @@ impl Footplate {
             }
             body = body.child(divider(palette));
         }
+        let waiting: usize = rows.iter().map(|row| row.unread).sum();
+        body = body.child(section_head("Crew", waiting, palette));
         if rows.is_empty() {
             body =
                 body.child(
@@ -11201,6 +11342,88 @@ mod tests {
         assert!(logo.size.width > px(40.));
     }
 
+    /// A section's head says what waits in it: the number, or that none
+    /// does.
+    #[test]
+    fn a_section_s_head_counts_what_waits_in_it() {
+        assert_eq!(waiting_words(0), "none waiting");
+        assert_eq!(waiting_words(1), "1");
+        assert_eq!(waiting_words(12), "12");
+    }
+
+    /// The left list's sections stand under their titles, each with its
+    /// count at the right: "Decisions" over the open questions, "Crew"
+    /// over the conversations. With nothing to decide the Decisions head
+    /// is gone; the Crew head stands whatever the yard holds.
+    #[gpui::test]
+    fn the_sections_stand_under_their_titles_with_their_counts(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"},
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decisions_count() == 1)
+            })
+        });
+        assert!(drawn(cx, "section Decisions"));
+        assert!(drawn(cx, "section Decisions count"));
+        assert!(drawn(cx, "section Crew"));
+        assert!(drawn(cx, "section Crew count"));
+        let decisions = bounds_of(cx, "section Decisions");
+        let decision_count = bounds_of(cx, "section Decisions count");
+        let crew = bounds_of(cx, "section Crew");
+        let crew_count = bounds_of(cx, "section Crew count");
+        let rows = bounds_of(cx, "rows");
+        assert!(
+            decisions.bottom() <= crew.top(),
+            "the Crew head stands above the Decisions head: {crew:?} {decisions:?}"
+        );
+        for (head, count) in [(&decisions, &decision_count), (&crew, &crew_count)] {
+            assert!(
+                head.right() <= count.left() && count.right() <= rows.right() + px(1.),
+                "the count is not at its head's right end: {head:?} {count:?} {rows:?}"
+            );
+            assert!(
+                head.top() <= count.bottom() && count.top() <= head.bottom(),
+                "the count stands off its head's row: {head:?} {count:?}"
+            );
+        }
+    }
+
+    /// With nothing to decide there is no Decisions head; the Crew head
+    /// stands alone over the conversations.
+    #[gpui::test]
+    fn without_decisions_the_crew_head_stands_alone(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        wait(cx, "the yard", |cx| {
+            view.read_with(cx, |v, _| v.model.is_some())
+        });
+        assert!(!drawn(cx, "section Decisions"));
+        assert!(!drawn(cx, "section Decisions count"));
+        assert!(drawn(cx, "section Crew"));
+        assert!(drawn(cx, "section Crew count"));
+    }
+
     /// The head keeps its line and the button has the foot of the list: at
     /// the narrowest window the name and this machine's are whole, the line
     /// ends at the column's edge, and the button is under the rows and opens
@@ -13337,7 +13560,7 @@ mod tests {
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
-        assert_eq!(head_line(&view, cx), "jo · this machine ▾");
+        assert_eq!(head_line(&view, cx), "jo · this machine");
         cx.simulate_input("kept");
         // The others are followed too, and the two that answer were read.
         wait(cx, "what waits in the yards that answer", |cx| {
@@ -13366,7 +13589,7 @@ mod tests {
             down(&view, cx, "No yard: nothing answers at the yard's socket")
         });
         // Who the window is for there is known of a yard that was read.
-        assert_eq!(head_line(&view, cx), "jo · second home · nothing answers ▾");
+        assert_eq!(head_line(&view, cx), "jo · second home · nothing answers");
         assert_eq!(
             state_of(&view, cx, "second home"),
             "not reached: nothing answers"
@@ -13385,7 +13608,7 @@ mod tests {
         wait(cx, "that nothing answers at the shop", |cx| {
             down(&view, cx, "No yard: nothing answers at the yard's address")
         });
-        assert_eq!(head_line(&view, cx), "shop · nothing answers ▾");
+        assert_eq!(head_line(&view, cx), "shop · nothing answers");
         assert_eq!(state_of(&view, cx, "shop"), "not reached: nothing answers");
         // The one that was left is said as it was left.
         assert_eq!(
@@ -13401,7 +13624,7 @@ mod tests {
         wait(cx, "that the device is not let in", |cx| {
             view.read_with(cx, |v, _| v.away == Away::Out)
         });
-        assert_eq!(head_line(&view, cx), "jo · far · pair again ▾");
+        assert_eq!(head_line(&view, cx), "jo · far · pair again");
         assert_eq!(state_of(&view, cx, "far"), "not reached: pair again");
         assert!(drawn(cx, "away why") && drawn(cx, "pair again"));
         // Esc leaves the list, and the yard stays as it is.
@@ -13421,7 +13644,7 @@ mod tests {
         });
         assert!(!settings_open(&view, cx));
         assert_eq!(typed(&view, cx), "kept");
-        assert_eq!(head_line(&view, cx), "jo · this machine ▾");
+        assert_eq!(head_line(&view, cx), "jo · this machine");
         assert_eq!(state_of(&view, cx, "this machine"), "open");
         assert_eq!(
             state_of(&view, cx, "second home"),
@@ -13446,7 +13669,7 @@ mod tests {
         wait(cx, "the second home's yard", |cx| {
             texts(&view, cx) == ["From the second home."]
         });
-        assert_eq!(head_line(&view, cx), "jo · second home ▾");
+        assert_eq!(head_line(&view, cx), "jo · second home");
         assert_eq!(state_of(&view, cx, "second home"), "open");
         cx.simulate_keystrokes("secondary-1");
         wait(cx, "this machine's yard once more", |cx| {
@@ -14009,8 +14232,12 @@ mod tests {
         });
         assert!(drawn(cx, "switch start"));
         assert!(!drawn(cx, "switch stop"));
-        assert!(drawn(cx, "switch login"));
         assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
+        // "Start at login" is a switch of the settings, off here.
+        click_on(cx, "settings");
+        assert!(drawn(cx, "login off"));
+        assert!(drawn(cx, "login on"));
+        click_on(cx, "settings");
 
         click_on(cx, "switch start");
         wait(cx, "up run", |cx| {
@@ -14045,6 +14272,43 @@ mod tests {
             settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_none() && v.model.is_some())
         });
         assert!(drawn(cx, "switch stop"));
+    }
+
+    /// The status row holds at the narrowest window: with a failure
+    /// longer than the column, the words end in an ellipsis, and Start
+    /// stands on the row's end, inside the column.
+    #[gpui::test]
+    fn the_status_row_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        wait(cx, "the switch read", |cx| settled(&view, cx));
+        view.update(cx, |v, _| {
+            v.switch_program = Some(dir.path().join("yardr"));
+            v.switch_note = None;
+            v.switch_troubles = vec![
+                "the daemon would not start: launchd refused the plist, and herdr's server answered nothing on its socket".to_string(),
+            ];
+        });
+        // The narrowest window the application opens (main.rs).
+        cx.simulate_resize(gpui::size(px(560.), px(360.)));
+        let state = bounds_of(cx, "switch state");
+        let button = bounds_of(cx, "switch start");
+        let yard = bounds_of(cx, "which yard");
+        // The yard's line ends at the column's edge, short of the head's
+        // own padding only: Start past that runs past the column.
+        let edge = yard.right() + settings_of(&view, cx).rem() * 0.75 + px(1.);
+        assert!(
+            button.top() >= state.top() - px(1.) && button.bottom() <= state.bottom() + px(1.),
+            "Start stands off the status row: {state:?} {button:?}"
+        );
+        assert!(
+            button.right() <= edge,
+            "Start runs past the column: {button:?} past {yard:?}"
+        );
+        assert!(
+            state.size.height <= yard.size.height + px(2.),
+            "the status row wraps: {state:?} against the yard's line {yard:?}"
+        );
     }
 
     /// The head shows a running yard with Stop, which first asks what
@@ -14141,8 +14405,8 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
     }
 
-    /// A yard at an address has no switch: its processes are elsewhere,
-    /// and nothing of yardr's runs for it.
+    /// A yard at an address has no switch, in the head or the settings:
+    /// its processes are elsewhere, and nothing of yardr's runs for it.
     #[gpui::test]
     fn a_yard_at_an_address_has_no_switch(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -14172,9 +14436,11 @@ mod tests {
             settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_some())
         });
         assert!(!drawn(cx, "switch state"));
-        assert!(!drawn(cx, "switch login"));
         assert!(!drawn(cx, "switch start"));
         assert!(!drawn(cx, "switch no home"));
+        click_on(cx, "settings");
+        assert!(!drawn(cx, "login on"));
+        assert!(!drawn(cx, "login off"));
         assert!(standin::calls(&program).is_empty());
     }
 
@@ -14206,7 +14472,9 @@ mod tests {
         assert!(drawn(cx, "switch no home"), "{socket}");
         assert!(!drawn(cx, "switch start"), "{socket}");
         assert!(!drawn(cx, "switch stop"), "{socket}");
-        assert!(!drawn(cx, "switch login"), "{socket}");
+        click_on(cx, "settings");
+        assert!(!drawn(cx, "login on"), "{socket}");
+        assert!(!drawn(cx, "login off"), "{socket}");
         assert!(standin::calls(&program).is_empty());
     }
 
@@ -14289,13 +14557,15 @@ mod tests {
         wait(cx, "the login read off", |cx| {
             settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
         });
-        assert!(drawn(cx, "switch login"));
+        click_on(cx, "settings");
+        assert!(drawn(cx, "login off"));
+        assert!(drawn(cx, "login on"));
         assert!(view.read_with(cx, |v, _| {
             !v.switch_status.as_ref().unwrap().starts_at_login()
         }));
 
-        // Checking installs both halves.
-        click_on(cx, "switch login");
+        // Switching on installs both halves.
+        click_on(cx, "login on");
         wait(cx, "up with login", |cx| {
             settled(&view, cx)
                 && standin::calls(&program)
@@ -14318,9 +14588,9 @@ mod tests {
                 })
         });
 
-        // Unchecking removes the daemon's, and says herdr's shared
+        // Switching off removes the daemon's, and says herdr's shared
         // service is left. Nothing runs to start again here.
-        click_on(cx, "switch login");
+        click_on(cx, "login off");
         wait(cx, "the daemon's service removed", |cx| {
             settled(&view, cx)
                 && standin::calls(&program)
@@ -14353,9 +14623,9 @@ mod tests {
                 })
         });
 
-        // Checking where installing fails says what could not be done,
-        // and the box stays off.
-        click_on(cx, "switch login");
+        // Switching on where installing fails says what could not be done,
+        // and the switch stays off.
+        click_on(cx, "login on");
         wait(cx, "the failed install said", |cx| {
             settled(&view, cx)
                 && view.read_with(cx, |v, _| {
@@ -14383,9 +14653,9 @@ mod tests {
         );
     }
 
-    /// Where the yard is stopped, "start at login" says checking starts
-    /// the yard now and at every login; where it runs, or the box is
-    /// checked, it names only login.
+    /// Where the yard is stopped, "start at login"'s help says switching
+    /// on starts the yard now as well; where it runs, or the switch is
+    /// on, it names only login.
     #[gpui::test]
     fn start_at_login_says_it_starts_a_stopped_yard_now(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -14402,25 +14672,22 @@ mod tests {
         });
         assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
         view.read_with(cx, |v, _| {
-            let words = v.login_words(v.switch_status.as_ref().unwrap());
-            assert!(
-                words.contains("starts the yard now and at every login"),
-                "{words}"
-            );
+            let words = v.login_help(v.switch_status.as_ref().unwrap());
+            assert!(words.contains("starts the yard now as well"), "{words}");
         });
 
-        // The yard answers: Running, and the box names only login.
+        // The yard answers: Running, and the help names only login.
         let yard = Yard::start_at(&dir.path().join("yard.sock"));
         a_yard_of_jo(&yard);
         wait(cx, "the yard running", |cx| {
             settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_none() && v.model.is_some())
         });
         view.read_with(cx, |v, _| {
-            let words = v.login_words(v.switch_status.as_ref().unwrap());
+            let words = v.login_help(v.switch_status.as_ref().unwrap());
             assert!(!words.contains("starts the yard now"), "{words}");
         });
 
-        // Checked on a stopped yard: unchecking starts nothing, so it
+        // On, on a stopped yard: switching off starts nothing, so it
         // names only login too.
         standin::answers(&program, "status", 0, &standin::status(false, true));
         yard.stop();
@@ -14437,7 +14704,7 @@ mod tests {
             settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_some())
         });
         view.read_with(cx, |v, _| {
-            let words = v.login_words(v.switch_status.as_ref().unwrap());
+            let words = v.login_help(v.switch_status.as_ref().unwrap());
             assert!(!words.contains("starts the yard now"), "{words}");
         });
     }
@@ -14522,7 +14789,7 @@ mod tests {
         );
         // The sidebar names the yard alone: the short why would run past
         // the pane's edge.
-        assert_eq!(head_line(&view, cx), "this machine ▾");
+        assert_eq!(head_line(&view, cx), "this machine");
         // A click opens the details: the error and the socket, as they
         // stood on the screen before.
         click_on(cx, "away details");
@@ -14664,8 +14931,8 @@ mod tests {
         assert!(drawn(cx, "switch start"));
     }
 
-    /// Unchecking "start at login" where the yard runs starts the daemon
-    /// again, which removing its service stopped: the yard runs on.
+    /// Switching "start at login" off where the yard runs starts the
+    /// daemon again, which removing its service stopped: the yard runs on.
     #[gpui::test]
     fn unchecking_start_at_login_starts_the_daemon_again_where_the_yard_runs(
         cx: &mut TestAppContext,
@@ -14695,7 +14962,8 @@ mod tests {
                     v.switch_status.as_ref().unwrap().starts_at_login()
                 })
         });
-        click_on(cx, "switch login");
+        click_on(cx, "settings");
+        click_on(cx, "login off");
         wait(cx, "the daemon started again", |cx| {
             settled(&view, cx)
                 && standin::calls(&program)

@@ -8,7 +8,11 @@
 # A state opens the window against a fake yard serving it (src/shot.rs),
 # in the debug build alone: `yardmaster` (the conversation with the
 # yardmaster), `plain` (an open decision card of a plain ask), `run` (an
-# open card of a run ask). With no state the first screen is shot, as ever.
+# open card of a run ask), `stopped` (the head with a stopped yard), `far`
+# (a yard at an address, away) and `settings` (the settings with the
+# start-at-login switch). With no state the first screen is shot, as ever.
+# The switch's yardr answers canned JSON, so the head draws the same on
+# every shot.
 # The picture goes to the file named, else to footplate-shot.png under a
 # fresh directory of its own; its path is printed at the end either way.
 # The first run provisions the container and builds footplate, which takes
@@ -20,7 +24,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run"
+states="yardmaster plain run stopped far settings"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -164,6 +168,23 @@ docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY
     mkdir -p "$scratch/home" "$scratch/config" "$scratch/data"
     chown -R shot:shot "$scratch"
     echo "$scratch" > /tmp/shots/last-scratch
+    # The yardr of the shot, kept beside the settings: doctor and
+    # status answer canned JSON, so the head draws the same on every
+    # shot. Kept as version 99, the fetch keeps it: the site is asked for
+    # the number of the latest alone, and where even that fails the kept
+    # one is still the answer. Stopped says nothing runs; every other
+    # state says the yard runs, and none starts at login.
+    bin="$scratch/config/footplate/bin"
+    mkdir -p "$bin"
+    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor and status answer canned JSON." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
+    chmod +x "$bin/yardr"
+    printf "%s\n" "v99.0.0" > "$bin/yardr.version"
+    printf "%s\n" "{\"yard\": false, \"machine\": []}" > "$bin/doctor.json"
+    case "'"$state"'" in stopped) up=false ;; *) up=true ;; esac
+    printf "%s\n" "{\"home\": \"/tmp/shot-yard\", \"name\": \"shot\", \"operator\": \"Jo\", \"server\": {\"running\": $up, \"cli_build\": \"shot\"}, \"daemon\": {\"running\": $up, \"pid\": 0, \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot\", \"file\": \"/tmp/shot.service\", \"installed\": false, \"loaded\": false}}, \"herdr_login_service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.herdr.shot\", \"file\": \"/tmp/shot-herdr.service\", \"installed\": false, \"loaded\": false}, \"web\": {\"views\": [], \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot-web\", \"file\": \"/tmp/shot-web.service\", \"installed\": false, \"loaded\": false}}}" > "$bin/status.json"
+    # A yard at an address opens from the settings: one far yard, open.
+    if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"}" > "$scratch/config/footplate/settings.json"; fi
+    chown -R shot:shot "$scratch"
     su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json FOOTPLATE_SHOT='"$state"' dbus-run-session -- /target/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 
 # The window is waited for, not slept for: sway's tree names it by app_id.

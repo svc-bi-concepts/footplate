@@ -87,9 +87,11 @@ first screen:
     scripts/shot-linux.sh <state> "$shot"
 
 The states are `yardmaster` (the conversation with the yardmaster, with a
-few mails), `plain` (an open decision card of a plain ask) and `run` (an
+few mails), `plain` (an open decision card of a plain ask), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
-question forges the yard's lines). With no state the first screen is
+question forges the yard's lines), `stopped` (the head with a stopped
+yard), `far` (a yard at an address, away) and `settings` (the settings
+with the start-at-login switch). With no state the first screen is
 shot, as above. A state is a debug build's alone: the binary reads it
 from `FOOTPLATE_SHOT`, and a release build does not read that variable.
 
@@ -606,14 +608,15 @@ rm -rf "$scratch"
 
 ## Starting and stopping the yard
 
-Under the yard's line in the head, the switch: the yard's state, read from
-`yardr status --json`, with Start and Stop, which run `yardr up` and
-`yardr down`. The yard answers: Running. Nothing runs: Stopped. Between
-them, Starting while it is started, Stopping while it is stopped. Where a
-start could not start something, the head says that in yardr's words, with
-Start to try again. Start and Stop are safe to repeat, as `up` and `down`
-are. Where the home holds no yard, the head says No yard, and the first
-screen offers setting one up. Reading the switch starts nothing.
+Under the yard's line in the head, one status row: a coloured dot, the
+yard's state, read from `yardr status --json`, and Start or Stop at its
+right end, which run `yardr up` and `yardr down`. The yard answers:
+Running. Nothing runs: Stopped. Between them, Starting while it is
+started, Stopping while it is stopped. Where a start could not start
+something, the head says that in yardr's words, with Start to try again.
+Start and Stop are safe to repeat, as `up` and `down` are. Where the home
+holds no yard, the head says No yard, and the first screen offers setting
+one up. Reading the switch starts nothing.
 
 Stop first asks `down` without its yes-flag, which stops nothing on a yard
 with agents and answers what it would stop. The window asks then: the
@@ -623,16 +626,16 @@ they are in is lost. "Stop them" runs `down` again with the flag; "Leave
 running", or Esc, stops nothing. With no agent, Stop stops at once and asks
 nothing.
 
-Beside the switch, "start at login (and herdr's server, shared)": checked,
-the yard starts at login. Checking installs the login services with
-`up --login`: the daemon's and herdr's server's. Where the yard is stopped,
-checking starts it now as well as at every login, so the box says that
-before the click. herdr's is one service for
-every yard on the machine, the user's and not the yard's. Unchecking
+In the settings, "start at login" for the open yard, which the setting
+names: on, the yard starts at login. Switching on installs the login
+services with `up --login`: the daemon's and herdr's server's. Where the
+yard is stopped, switching on starts it now as well as at every login, so
+the help says that before the click. herdr's is one service for
+every yard on the machine, the user's and not the yard's. Switching off
 removes the daemon's service; herdr's shared service is left, and its
 server still starts at login. Where removing the daemon's service stops the
 daemon it ran, the switch starts it again while the yard runs, so the yard
-runs on.
+runs on. A yard at an address has no switch: its processes are elsewhere.
 
 Every one of the switch's calls names the open yard's home: its socket
 minus `yard.sock` as `--home`. This run's yard, whose socket is empty,
