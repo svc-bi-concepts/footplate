@@ -883,9 +883,9 @@ impl Address {
     }
 
     /// The browser's URL for the page `hash` at this base address: the
-    /// view's `/blobs/` route under it. The hash is what a note said, and
-    /// goes into the URL's path: one that is no hex names no page, and
-    /// opens nothing.
+    /// `/blobs/` route under it, on the view for Open and on the run base
+    /// for run. The hash is what a note said, and goes into the URL's
+    /// path: one that is no hex names no page, and opens nothing.
     pub fn page_url(&self, hash: &str) -> Option<String> {
         if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
@@ -909,17 +909,6 @@ impl Address {
             port: RUN_PORT,
             path: String::new(),
         }
-    }
-
-    /// The browser's URL for running the page `hash` at this run base
-    /// address: the sandbox origin's `/run/` route under it. The hash is
-    /// what a note said, as for [`Address::page_url`]: one that is no
-    /// hex names no page, and runs nothing.
-    pub fn run_url(&self, hash: &str) -> Option<String> {
-        if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return None;
-        }
-        Some(format!("{}{}/run/{hash}", self.origin(), self.path))
     }
 
     fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
@@ -2164,6 +2153,14 @@ mod tests {
             address.page_url("cd").as_deref(),
             Some("https://mac.example.net/yard/blobs/cd")
         );
+        // And under the run base, which run hands to the browser.
+        let address = Address::parse_view("http://127.0.0.1:8791/")
+            .unwrap()
+            .run_base();
+        assert_eq!(
+            address.page_url(&"ab".repeat(32)),
+            Some(format!("http://127.0.0.1:8789/blobs/{}", "ab".repeat(32)))
+        );
     }
 
     #[test]
@@ -2232,43 +2229,6 @@ mod tests {
             .unwrap()
             .run_base();
         assert_eq!(run.to_string(), "http://[::1]:8789");
-    }
-
-    #[test]
-    fn a_page_s_run_url_is_the_run_route_under_its_base() {
-        let address = Address::parse_view("http://127.0.0.1:8791/")
-            .unwrap()
-            .run_base();
-        assert_eq!(
-            address.run_url(&"ab".repeat(32)),
-            Some(format!("http://127.0.0.1:8789/run/{}", "ab".repeat(32)))
-        );
-        // Under a set run base with a path, alike.
-        let address = Address::parse_view("https://pages.example.net/yard/").unwrap();
-        assert_eq!(
-            address.run_url("cd").as_deref(),
-            Some("https://pages.example.net/yard/run/cd")
-        );
-    }
-
-    #[test]
-    fn a_page_whose_hash_is_no_hex_has_no_run_url() {
-        // The hash is a yard's text: it chooses no other route of the
-        // origin, no query and no other host.
-        let address = Address::parse_view("http://127.0.0.1:8791/")
-            .unwrap()
-            .run_base();
-        for hash in [
-            "",
-            "../api/x",
-            "ab?x=1",
-            "ab#x",
-            "ab/../cd",
-            "@evil.example",
-            "ab cd",
-        ] {
-            assert_eq!(address.run_url(hash), None, "{hash:?}");
-        }
     }
 
     #[test]

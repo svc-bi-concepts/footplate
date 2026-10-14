@@ -7026,7 +7026,7 @@ impl Footplate {
                 // while it is asked the row is Open alone.
                 match (self.run_address(), self.run_up_now()) {
                     (Some(base), Some(true)) => {
-                        let Some(url) = base.run_url(&file.hash) else {
+                        let Some(url) = base.page_url(&file.hash) else {
                             return row.into_any_element();
                         };
                         let run = self.means.open.clone();
@@ -11320,11 +11320,11 @@ mod tests {
         assert!(drawn(cx, &format!("page run {page}")));
         assert_eq!(yard.blobs_asked(), Vec::<String>::new());
         assert_eq!(picture(&view, cx, &page), "");
-        // Run hands the sandbox origin's run route to the browser.
+        // Run hands the sandbox origin's page to the browser.
         let opened = opened_pages(&view, cx);
         click_on(cx, &format!("page run {page}"));
         cx.run_until_parked();
-        assert_eq!(opened.borrow().as_slice(), [format!("{run}/run/{page}")]);
+        assert_eq!(opened.borrow().as_slice(), [format!("{run}/blobs/{page}")]);
     }
 
     #[gpui::test]
