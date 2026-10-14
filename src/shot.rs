@@ -18,14 +18,17 @@ use crate::yard::Env;
 /// ask, an open card of a run ask, a yard that is stopped, a yard at an
 /// address, the settings with the start-at-login switch, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
-/// the composer, an open card whose note carries a page and an image, and
-/// the first screen's way to a yard at an address, with a pairing's http
-/// address refused under its fields.
+/// the composer, an open card whose note carries a page and an image, the
+/// first screen's way to a yard at an address, with a pairing's http
+/// address refused under its fields, and the conversation with one of a
+/// linked yard whose mail was refused over the hour.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down. The yard at an address is opened
 /// from the settings the shot script writes; the settings open over a
 /// running yard; the page's card stands expanded at its end, with the
-/// web view taken as answering, so the row carries Open and run. The script answers the switch's
+/// web view taken as answering, so the row carries Open and run. The undelivered
+/// conversation opens on the row the shot names, with the hour's line under
+/// the mail. The script answers the switch's
 /// yardr for every state, so the head draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
@@ -37,6 +40,7 @@ pub const STATES: &[&str] = &[
     "reconnecting",
     "page",
     "refusal",
+    "undelivered",
 ];
 
 /// The note's image in the `page` state, and its hash: the yard serves
@@ -352,6 +356,34 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
+        "undelivered" => {
+            // The conversation with one of a linked yard whose mail the
+            // yard gave up over the hour: its line says what the link
+            // takes and when the hour ends, from the mail the yard wrote
+            // of it. The failed message and the telling cross as the
+            // stream tells of them, past the head the window reads from.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.converse(
+                "clerk@north",
+                vec![
+                    json!({"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "clerk@north",
+                           "to": "jo", "text": "The ledger closes at noon.", "read": true}),
+                    json!({"seq": 13, "at": "2026-10-13T09:32:00Z", "from": "jo",
+                           "to": "clerk@north", "text": "Is the ledger closed?",
+                           "read": false, "delivery": "failed"}),
+                ],
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 11, "at": "2026-10-13T09:29:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            yard.emit(r#"{"seq": 21, "kind": "peer_message_failed", "actor": "yard", "data": {"peer": "north", "kind": "mail", "id": "m1", "attempts": 1, "reason": "peer north: refused by the peer: it takes 30 mails an hour from this yard; send again after 21:00"}}"#);
+            yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "yard", "at": "2026-10-13T20:31:00Z", "data": {"to": "jo", "to_user": true, "undelivered": "m1", "limit": 30, "until": "2026-10-13T21:00:00Z", "text": "your mail to clerk@north of 10-13 20:31 was not delivered: refused by the peer: it takes 30 mails an hour from this yard; send again after 21:00"}}"#);
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -477,6 +509,22 @@ mod tests {
                     assert_eq!(letters.len(), 1, "{state}");
                     assert_eq!(letters[0].files.len(), 1, "{state}");
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
+                }
+                "undelivered" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    let letters = yard.client().conversation("jo", "clerk@north", 0).unwrap();
+                    assert_eq!(letters.len(), 2, "{state}");
+                    assert_eq!(letters[1].delivery, "failed", "{state}");
+                    // The failed message and the telling of it cross past
+                    // the head, as the stream tells of them.
+                    let mut events = yard.client().events(20).unwrap();
+                    let failed = events.next().unwrap().unwrap();
+                    assert_eq!(failed.text("peer"), "north", "{state}");
+                    assert_eq!(failed.text("id"), "m1", "{state}");
+                    let telling = events.next().unwrap().unwrap();
+                    assert_eq!(telling.text("undelivered"), "m1", "{state}");
+                    assert_eq!(telling.number("limit"), 30, "{state}");
+                    assert!(!telling.text("until").is_empty(), "{state}");
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }

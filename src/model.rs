@@ -414,6 +414,25 @@ struct Waiting {
     seen: bool,
 }
 
+/// The hour a linked yard refused mail over: what its link takes in an
+/// hour and when the hour ends.
+#[derive(Debug, Clone, PartialEq)]
+struct Hour {
+    limit: u64,
+    until: String,
+}
+
+impl Hour {
+    /// When the hour ends as `HH:MM`, in the zone of the person reading.
+    /// Empty for a time that cannot be read.
+    fn end(&self) -> String {
+        match DateTime::parse_from_rfc3339(&self.until) {
+            Ok(t) => t.with_timezone(&chrono::Local).format("%H:%M").to_string(),
+            Err(_) => String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Model {
     me: String,
@@ -437,6 +456,16 @@ pub struct Model {
     /// answered.
     older: HashSet<String>,
     paging: HashSet<String>,
+    /// The hour a linked yard refused mail over, by peer, from the mail
+    /// the yard wrote that one of this yard's was not delivered: `limit`
+    /// and `until` of an undelivered event. Said under failed mail to the
+    /// peer instead of the inbox's why; a refusal the yard tells without
+    /// them clears the peer's.
+    hours: HashMap<String, Hour>,
+    /// The peer of a message the yard gave up, by its outbox id, from the
+    /// failed event the yard logs before the mail that tells of it: that
+    /// mail names the message alone.
+    failed_ids: HashMap<String, String>,
     /// The user's unread mail by seq. `cursor` is how far the yard has it
     /// acknowledged, `asked` how far the window has asked for.
     unread: BTreeMap<u64, Waiting>,
@@ -1801,7 +1830,7 @@ impl Model {
         if let Some((_, peer)) = l.to.split_once('@') {
             return match l.delivery.as_str() {
                 "queued" => format!("queued for {peer}: the daemon delivers it"),
-                "failed" => "not delivered: yardr inbox says why".to_string(),
+                "failed" => self.not_delivered(peer),
                 _ => format!("delivered to {peer}, which does not say when it is read"),
             };
         }
@@ -1817,6 +1846,22 @@ impl Model {
             Some("failed to start") => format!("{name} failed to start: yardr crew show {name}"),
             _ => "sent".to_string(),
         }
+    }
+
+    /// Why mail to the peer was not delivered: what the peer takes in an
+    /// hour and when the hour ends, where the yard refused one of this
+    /// yard's over the hour, else that the inbox says why.
+    fn not_delivered(&self, peer: &str) -> String {
+        if let Some(hour) = self.hours.get(peer) {
+            let end = hour.end();
+            if !end.is_empty() {
+                return format!(
+                    "not delivered: {peer} takes {} mails an hour from this yard; send again after {end}",
+                    hour.limit
+                );
+            }
+        }
+        "not delivered: yardr inbox says why".to_string()
     }
 
     /// Where what is typed goes, when a conversation is open. In the row
@@ -2199,6 +2244,7 @@ impl Model {
     /// queued as the event tells of it; mail from there has that address as
     /// its sender already.
     fn mail(&mut self, e: &Event) -> Vec<Effect> {
+        self.undelivered(e);
         let to = e.text("to");
         let mut l = Letter {
             seq: e.seq,
@@ -2254,6 +2300,32 @@ impl Model {
         effects
     }
 
+    /// A mail the yard wrote that one of this yard's was not delivered:
+    /// the hour the peer refused over, where it did. The mail names the
+    /// outbox message alone; the failed event before it named its peer.
+    /// One the yard tells without the hour clears the peer's.
+    fn undelivered(&mut self, e: &Event) {
+        let gone = e.text("undelivered");
+        if e.actor != YARD || gone.is_empty() {
+            return;
+        }
+        let Some(peer) = self.failed_ids.remove(gone) else {
+            return;
+        };
+        let (limit, until) = (e.number("limit"), e.text("until"));
+        if limit > 0 && !until.is_empty() {
+            self.hours.insert(
+                peer,
+                Hour {
+                    limit,
+                    until: until.to_string(),
+                },
+            );
+        } else {
+            self.hours.remove(&peer);
+        }
+    }
+
     /// An event of a link. The roster a peer says changes without an event
     /// of its own, so every one is the occasion to read the linked yards
     /// again, and one that tells how a message to a peer ended to read the
@@ -2262,6 +2334,15 @@ impl Model {
     fn link(&mut self, e: &Event) -> Vec<Effect> {
         let mut effects = vec![Effect::Peers];
         let peer = e.text("peer");
+        if e.kind.as_str() == "peer_message_failed"
+            && e.text("kind") == PEER_MAIL
+            && !peer.is_empty()
+        {
+            let id = e.text("id");
+            if !id.is_empty() {
+                self.failed_ids.insert(id.to_string(), peer.to_string());
+            }
+        }
         if matches!(e.kind.as_str(), "peer_message_sent" | "peer_message_failed")
             && !peer.is_empty()
         {
@@ -3962,6 +4043,108 @@ mod tests {
         );
         assert_eq!(
             m.entries()[1].standing.as_deref(),
+            Some("not delivered: yardr inbox says why")
+        );
+    }
+
+    #[test]
+    fn mail_refused_over_the_hour_says_so_under_it() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        assert_eq!(
+            m.select(Selected::Conversation("clerk@north".into())),
+            [page("clerk@north", 0)]
+        );
+        m.conversation(
+            "clerk@north",
+            vec![Letter {
+                delivery: "failed".into(),
+                ..letter(24, "jo", "clerk@north", "Is the ledger closed?")
+            }],
+        );
+        // Without the yard's word of the hour, the inbox says why.
+        assert_eq!(
+            m.entries()[0].standing.as_deref(),
+            Some("not delivered: yardr inbox says why")
+        );
+        // Another peer's hour is none of this mail's.
+        m.event(&event(
+            25,
+            "peer_message_failed",
+            "yard",
+            json!({"peer": "south", "kind": "mail", "id": "s1"}),
+        ));
+        m.event(&event(
+            26,
+            "mail",
+            "yard",
+            json!({"to": "jo", "to_user": true, "undelivered": "s1", "limit": 300,
+                   "until": "2026-10-12T21:00:00Z", "text": "mail of south's hour"}),
+        ));
+        assert_eq!(
+            m.entries()[0].standing.as_deref(),
+            Some("not delivered: yardr inbox says why")
+        );
+        // The yard gave the message up, then told of it with the hour:
+        // the mail names the message alone, the failed event before it
+        // names its peer.
+        m.event(&event(
+            27,
+            "peer_message_failed",
+            "yard",
+            json!({"peer": "north", "kind": "mail", "id": "m1"}),
+        ));
+        m.event(&event(
+            28,
+            "mail",
+            "yard",
+            json!({"to": "jo", "to_user": true, "undelivered": "m1", "limit": 30,
+                   "until": "2026-10-12T21:00:00Z",
+                   "text": "your mail to clerk@north of 10-12 20:31 was not delivered"}),
+        ));
+        let end = DateTime::parse_from_rfc3339("2026-10-12T21:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        assert_eq!(
+            m.entries()[0].standing.as_deref(),
+            Some(
+                format!(
+                    "not delivered: north takes 30 mails an hour from this yard; send again after {end}"
+                )
+                .as_str()
+            )
+        );
+        // A refusal the yard tells without the hour clears the peer's:
+        // the inbox says why again.
+        m.event(&event(
+            29,
+            "peer_message_failed",
+            "yard",
+            json!({"peer": "north", "kind": "mail", "id": "m2"}),
+        ));
+        m.event(&event(
+            30,
+            "mail",
+            "yard",
+            json!({"to": "jo", "to_user": true, "undelivered": "m2",
+                   "text": "your mail to clerk@north of 10-12 20:33 was not delivered"}),
+        ));
+        assert_eq!(
+            m.entries()[0].standing.as_deref(),
+            Some("not delivered: yardr inbox says why")
+        );
+        // A telling of a message the yard never said it gave up names no
+        // peer, so it says nothing under the mail.
+        m.event(&event(
+            31,
+            "mail",
+            "yard",
+            json!({"to": "jo", "to_user": true, "undelivered": "m9", "limit": 30,
+                   "until": "2026-10-12T21:00:00Z", "text": "mail of no failure"}),
+        ));
+        assert_eq!(
+            m.entries()[0].standing.as_deref(),
             Some("not delivered: yardr inbox says why")
         );
     }

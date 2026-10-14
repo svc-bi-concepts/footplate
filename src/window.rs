@@ -1133,6 +1133,17 @@ pub struct Footplate {
     _tray_heeding: Task<()>,
 }
 
+/// The row a screenshot state opens on instead of the yard's own: the
+/// refused mail's conversation for the undelivered shot, else none. A
+/// debug build's alone.
+fn shot_selected() -> Option<Selected> {
+    #[cfg(debug_assertions)]
+    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("undelivered") {
+        return Some(Selected::Conversation("clerk@north".into()));
+    }
+    None
+}
+
 impl Footplate {
     /// The window on the yard behind `client`, for the user the yard knows
     /// `name` as. It follows the yard from here on.
@@ -2050,7 +2061,9 @@ impl Footplate {
                     Some(before) => before.resumed(state),
                     None => Model::new_returning(
                         state,
-                        kept.as_ref().map(|place| place.row.clone()),
+                        kept.as_ref()
+                            .map(|place| place.row.clone())
+                            .or_else(shot_selected),
                         kept.as_ref().is_some_and(|place| place.decided_expanded),
                     ),
                 };
