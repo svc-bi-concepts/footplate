@@ -4474,6 +4474,7 @@ impl Footplate {
     /// The run base is the view's host on the sandbox port again.
     fn usual_run(&mut self, cx: &mut Context<Self>) {
         self.run_said = None;
+        self.run.update(cx, |line, cx| line.set_text("", cx));
         self.set(
             Settings {
                 run_base: String::new(),
@@ -4481,6 +4482,7 @@ impl Footplate {
             },
             cx,
         );
+        cx.notify();
     }
 
     /// The switcher's list under the head, or no longer: the yards the
@@ -13012,6 +13014,18 @@ mod tests {
         click_on(cx, "run save");
         assert_eq!(settings_of(&view, cx).run_base, "");
         assert!(drawn(cx, "run said"));
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.run.read(cx).text().to_string()),
+            "plantime"
+        );
+        // The usual base clears an invalid unsaved value and its error
+        // even though the kept setting was already empty.
+        click_on(cx, "run usual");
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.run.read(cx).text().to_string()),
+            ""
+        );
+        assert_eq!(view.read_with(cx, |v, _| v.run_said.clone()), None);
         // Kept, it is the setting's, and the file has it.
         let base = view_up();
         view.update(cx, |v, cx| {
