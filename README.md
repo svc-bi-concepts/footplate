@@ -1,17 +1,20 @@
 # footplate
 
-A native chat window onto a yardr yard, for macOS and Linux: the deck where
-the crew stand. It is an interface over yardr's socket API; the yard runs as
-it does (`yardr status`). The yard is this machine's, or one at an address,
-which the window is paired with by a code. Where this machine has no yard,
-the window sets one up: it fetches yardr and runs its commands, with no
+footplate is the yard's desktop app, for macOS and Linux. It sets a yard up
+on a machine with no terminal, starts and stops it, puts the yard's
+decisions in front of you to answer, and lets you talk with the crew of
+this yard and of the yards it is linked with, on this machine or paired
+with one elsewhere by a code.
+
+It is an interface over yardr's socket API; the yard runs as it does
+(`yardr status`). The yard is this machine's, or one at an address, which
+the window is paired with by a code. Where this machine has no yard, the
+window sets one up: it fetches yardr and runs its commands, with no
 terminal ([Setting up a yard here](#setting-up-a-yard-here)). Its head
 starts and stops the open yard the same way
 ([Starting and stopping the yard](#starting-and-stopping-the-yard)).
-Beside those two it starts nothing of yardr's.
-The first slice is the
-conversations a person has with this yard's crew and with the crew a linked
-yard exposes, as `yardr chat` shows them in a terminal.
+Beside those two it starts nothing of yardr's. The conversations are as
+`yardr chat` shows them in a terminal.
 
 Rust, drawn with [gpui](https://gpui.rs/), the UI framework Zed is built on.
 Tracked in Linear as YRD-22. Developed in a yardr yard; `.yardr/` holds its
