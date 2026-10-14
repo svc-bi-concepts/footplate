@@ -123,7 +123,9 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         // the window's read of the open conversation, and a breath after
         // it for the reply to land, so the shot is the conversation as
         // last seen; past half a minute it stops anyway, and the shot is
-        // whatever that is.
+        // whatever that is. The event before the stop only marks the
+        // stream as heard, so the window notices the stop at once: mail
+        // read elsewhere, by nobody shown, changes nothing.
         let yard = shot.yard.clone();
         std::thread::spawn(move || {
             for _ in 0..600 {
@@ -133,6 +135,10 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
+            yard.emit(
+                r#"{"seq": 99, "kind": "mail_read", "data": {"reader": "nobody", "through": 0}}"#,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(300));
             yard.stop();
         });
     }
