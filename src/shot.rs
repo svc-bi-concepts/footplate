@@ -3,6 +3,11 @@
 //! the README names the states. This module is a debug build's alone: a
 //! release build neither compiles it nor reads the variable.
 
+use std::fs;
+use std::io;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
+
 use serde_json::json;
 
 use crate::fake::Yard;
@@ -13,12 +18,51 @@ use crate::yard::Env;
 /// ask, and an open card of a run ask.
 pub const STATES: &[&str] = &["yardmaster", "plain", "run"];
 
+/// The fake yard and its private socket directory, which go away with the
+/// screenshot run.
+pub(super) struct ShotYard {
+    yard: Yard,
+    directory: PathBuf,
+}
+
+impl ShotYard {
+    fn start(root: &Path, state: &str) -> io::Result<(PathBuf, ShotYard)> {
+        let directory = (0..1000)
+            .find_map(|suffix| {
+                let directory =
+                    root.join(format!("footplate-shot-{}-{suffix}", std::process::id()));
+                match fs::DirBuilder::new().mode(0o700).create(&directory) {
+                    Ok(()) => Some(Ok(directory)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .unwrap_or_else(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "too many screenshot yard directories",
+                ))
+            })?;
+        let socket = directory.join("yard.sock");
+        let yard = Yard::start_at(&socket);
+        populate(&yard, state);
+        Ok((socket, ShotYard { yard, directory }))
+    }
+}
+
+impl Drop for ShotYard {
+    fn drop(&mut self) {
+        self.yard.stop();
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
 /// The run against a fake yard serving `FOOTPLATE_SHOT`'s state, when the
 /// variable names one, else the run as ever. The fake yard listens at a
 /// socket of its own, and the run's socket points there, so nothing is
 /// asked of the real yard. A name it does not know is refused, before any
 /// window opens.
-pub fn start_if_asked(env: Env) -> (Env, Option<Yard>) {
+pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
     let state = std::env::var("FOOTPLATE_SHOT").unwrap_or_default();
     if state.is_empty() {
         return (env, None);
@@ -30,20 +74,16 @@ pub fn start_if_asked(env: Env) -> (Env, Option<Yard>) {
         );
         std::process::exit(2);
     }
-    let socket = std::env::temp_dir()
-        .join(format!("footplate-shot-{}", std::process::id()))
-        .join("yard.sock");
-    if let Some(dir) = socket.parent()
-        && std::fs::create_dir_all(dir).is_err()
-    {
-        eprintln!("footplate: the screenshot yard has nowhere to listen");
-        std::process::exit(1);
-    }
-    let yard = Yard::start_at(&socket);
-    populate(&yard, &state);
+    let (socket, shot) = match ShotYard::start(&std::env::temp_dir(), &state) {
+        Ok(shot) => shot,
+        Err(error) => {
+            eprintln!("footplate: the screenshot yard has nowhere to listen: {error}");
+            std::process::exit(1);
+        }
+    };
     let mut env = env;
     env.socket = socket;
-    (env, Some(yard))
+    (env, Some(shot))
 }
 
 /// Serves `state` from `yard`: the yard of the window's tests, with the
@@ -226,6 +266,7 @@ fn bead_run(question: &str, context: &[&str]) -> String {
 mod tests {
     use super::*;
     use crate::session;
+    use std::os::unix::fs::PermissionsExt;
 
     /// Every state reads as the window reads it: the login name is no user
     /// of the yard, so the window is for its operator, jo, and the state
@@ -264,5 +305,37 @@ mod tests {
                 _ => unreachable!("a state with no coverage: {state}"),
             }
         }
+    }
+
+    #[test]
+    fn screenshot_yards_use_private_directories_and_remove_them_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let (first_socket, first) = ShotYard::start(root.path(), "plain").unwrap();
+        let (second_socket, second) = ShotYard::start(root.path(), "run").unwrap();
+        let first_directory = first_socket.parent().unwrap().to_path_buf();
+        let second_directory = second_socket.parent().unwrap().to_path_buf();
+
+        assert_ne!(first_directory, second_directory);
+        assert_eq!(
+            fs::metadata(&first_directory).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert_eq!(
+            fs::metadata(&second_directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        assert!(first_socket.exists());
+        assert!(second_socket.exists());
+
+        drop(first);
+        assert!(!first_directory.exists());
+        assert!(second_socket.exists());
+
+        drop(second);
+        assert!(!second_directory.exists());
     }
 }
