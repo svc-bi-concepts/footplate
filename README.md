@@ -205,9 +205,9 @@ says so in plain words — "No yard has been made here yet — set one up."
 yard here" is the first of the ways below, and the marked one. Where the
 home holds a yard that is only stopped, it says that instead, and Start
 in the head starts it. Anywhere else it says what is wrong and names
-where it looked. Everywhere the window tries again every 3 seconds:
-trying again starts nothing, and what the head reads starts nothing
-either: `status` starts no server. When the server comes back, the
+where it looked. While it is trying, the window tries again every 3
+seconds: trying again starts nothing, and what the head reads starts
+nothing either: `status` starts no server. When the server comes back, the
 conversation that was open is open again.
 
 Under those words the window offers the ways to a yard from there, and

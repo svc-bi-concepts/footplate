@@ -14500,6 +14500,8 @@ mod tests {
             lead,
             "This yard is stopped. Start it with the switch in the head."
         );
+        assert!(!drawn(cx, "away details"));
+        assert!(!drawn(cx, "way here"));
         assert!(drawn(cx, "switch start"));
     }
 
