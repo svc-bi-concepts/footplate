@@ -90,7 +90,8 @@ first screen:
     scripts/shot-linux.sh <state> "$shot"
 
 The states are `yardmaster` (the conversation with the yardmaster, with a
-few mails), `plain` (an open decision card of a plain ask), `run` (an
+few mails), `plain` (an open decision card of a plain ask), `page` (an
+open card whose note carries a page and an image), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings

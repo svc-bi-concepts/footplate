@@ -1948,6 +1948,15 @@ impl Footplate {
                     if let Some(place) = &kept {
                         model.expand(&place.expanded);
                     }
+                    // The page shot opens the card, so the note's page row
+                    // and image show: a debug build's alone, as the settings
+                    // and the draft of Footplate::opened.
+                    #[cfg(debug_assertions)]
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("page")
+                        && let Some((bead, ask)) = model.current_ask()
+                    {
+                        model.toggle_expand(&bead, ask);
+                    }
                     self.returning = kept
                         .filter(|place| model.selected() == Some(&place.row))
                         .map(|place| (place, false));
@@ -2514,6 +2523,17 @@ impl Footplate {
         match &self.view_up {
             ViewUp::Asked(asked) | ViewUp::Answered(asked, _) if asked == &base => return,
             _ => {}
+        }
+        // The page shot shows the row with Open: the view is taken as
+        // answering at its address, so the shot is the row and not the
+        // probe. A debug build's alone; where the address reads as none,
+        // the probe below says so.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("page")
+            && api::Address::parse_view(&base).is_ok()
+        {
+            self.view_up = ViewUp::Answered(base, true);
+            return;
         }
         self.view_up = ViewUp::Asked(base.clone());
         cx.spawn(async move |this, cx| {

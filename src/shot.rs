@@ -16,12 +16,14 @@ use crate::yard::Env;
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
 /// the conversation with the yardmaster, an open decision card of a plain
 /// ask, an open card of a run ask, a yard that is stopped, a yard at an
-/// address, the settings with the start-at-login switch, and a running
+/// address, the settings with the start-at-login switch, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
-/// the composer. The stopped yard answers nothing; the yard at an address
-/// is opened from the settings the shot script writes; the settings open
-/// over a running yard. The script answers the switch's yardr for every
-/// state, so the head draws the same on every shot.
+/// the composer, and an open card whose note carries a page and an image.
+/// The stopped yard answers nothing; the yard at an address is opened
+/// from the settings the shot script writes; the settings open over a
+/// running yard; the page's card stands expanded, with the web view taken
+/// as answering, so the row carries Open. The script answers the switch's
+/// yardr for every state, so the head draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
     "plain",
@@ -30,7 +32,19 @@ pub const STATES: &[&str] = &[
     "far",
     "settings",
     "reconnecting",
+    "page",
 ];
+
+/// The note's image in the `page` state, and its hash: the yard serves
+/// the bytes, and the note names them.
+const IMAGE: &[u8] = include_bytes!("fixtures/shot-page.png");
+const IMAGE_HASH: &str = "ca2421063b23c6ff5739c2000b22125bea109764fff6e643eccea0c00f6fe6c3";
+
+/// The pages in the `page` state: the note's, which Open takes to the
+/// browser, and a mail's, which opens from no mail. Named, never served:
+/// the yard is asked for neither.
+const PAGE_HASH: &str = "abababababababababababababababababababababababababababababababab";
+const MAIL_PAGE_HASH: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
 /// The fake yard and its private socket directory, which go away with the
 /// screenshot run.
@@ -267,6 +281,75 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
+        "page" => {
+            // The plain ask above, whose note carries a page and an image:
+            // the yard holds the image, and the page is never asked for,
+            // since Open takes it to the browser. The mail carries a page
+            // too, which opens from no mail.
+            yard.blob(IMAGE_HASH, IMAGE);
+            yard.answer(
+                "UserInbox",
+                &json!({"result": {"mail": [
+                    {"seq": 12, "from": "yardmaster", "to": "jo",
+                     "text": "The mockup is on the bead.", "read": false},
+                ], "unread": 1, "last": 12, "from": ["yardmaster"]}})
+                .to_string(),
+            );
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "The mockup is on the bead.",
+                     "files": [{"hash": MAIL_PAGE_HASH, "type": "text/html; charset=utf-8",
+                                "bytes": 18000}],
+                     "read": false},
+                ]})
+                .to_string(),
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [
+                    {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                     "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                     "since": "2026-10-10T10:00:00Z"},
+                ], "decided": []}})
+                .to_string(),
+            );
+            yard.answer(
+                "Bead",
+                &json!({"result": {
+                    "id": "bead-a", "title": "Move the links",
+                    "body": "The body of bead-a.",
+                    "stage": "new", "labels": ["topic:linear-out"],
+                    "notes": [{"seq": 2, "kind": "note", "author": "yardmaster",
+                               "text": "the mockup, like this:", "at": "2026-10-10T09:30:00Z",
+                               "files": [
+                                   {"hash": PAGE_HASH, "type": "text/html; charset=utf-8",
+                                    "bytes": 42000},
+                                   {"hash": IMAGE_HASH, "type": "image/png",
+                                    "bytes": IMAGE.len()},
+                               ]}],
+                    "asks": [{
+                        "ask": 3, "to": "jo", "asker": "yardmaster",
+                        "since": "2026-10-10T10:00:00Z",
+                        "question": "Move them now?",
+                        "context": ["The links file declares the new source.",
+                                    "The move was tested."],
+                        "options": [
+                            {"label": "Move them now",
+                             "consequence": "all 64 links point tonight"},
+                            {"label": "After Friday",
+                             "consequence": "keep the old source"},
+                            {"label": "You decide",
+                             "consequence": "leave it to yardmaster"}
+                        ],
+                        "recommend": 1, "why": "the test passed",
+                        "state": "open"
+                    }]
+                }})
+                .to_string(),
+            );
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -377,6 +460,21 @@ mod tests {
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].question.lines().count(), 3, "{state}");
                     assert!(bead.asks[0].run.is_some(), "{state}");
+                }
+                "page" => {
+                    assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    let bead = yard.client().bead("bead-a").unwrap();
+                    assert_eq!(bead.notes.len(), 1, "{state}");
+                    assert_eq!(bead.notes[0].files.len(), 2, "{state}");
+                    assert!(crate::model::is_page(&bead.notes[0].files[0]), "{state}");
+                    assert!(!crate::model::is_page(&bead.notes[0].files[1]), "{state}");
+                    // The yard holds the image; the pages are named only.
+                    let image = yard.client().blob(IMAGE_HASH).unwrap().unwrap();
+                    assert_eq!(image.len(), IMAGE.len(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 1, "{state}");
+                    assert_eq!(letters[0].files.len(), 1, "{state}");
+                    assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }

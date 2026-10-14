@@ -7,7 +7,8 @@
 # Run it on the Mac, from anywhere: `scripts/shot-linux.sh [<state>] [output.png]`.
 # A state opens the window against a fake yard serving it (src/shot.rs),
 # in the debug build alone: `yardmaster` (the conversation with the
-# yardmaster), `plain` (an open decision card of a plain ask), `run` (an
+# yardmaster), `plain` (an open decision card of a plain ask), `page` (an
+# open card whose note carries a page and an image), `run` (an
 # open card of a run ask), `stopped` (the head with a stopped yard), `far`
 # (a yard at an address, away), `settings` (the settings with the
 # start-at-login switch) and `reconnecting` (a running yard whose server
@@ -26,7 +27,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run stopped far settings reconnecting"
+states="yardmaster plain run stopped far settings reconnecting page"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
