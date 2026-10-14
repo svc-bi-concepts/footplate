@@ -198,13 +198,17 @@ the marked one and Enter sends the rest. A send that fails puts the text and
 the images back in the draft. An image the yard took before the send failed
 stays in its store, named by no mail, until `yardr store prune`.
 
-**No yard** (the socket is missing, or nothing answers): the window says so,
-names the socket, and tries again every 3 seconds. Where the home holds a
-yard that is only stopped, it says that instead, and Start in the head
-starts it. Trying again starts nothing, and what the head reads starts
-nothing either: `status` starts no server. The first of the ways below
-starts the yard. When the server comes back, the conversation that was
-open is open again.
+**No yard.** Where no yard was ever made at this run's place, the window
+says so in plain words — "No yard has been made here yet — set one up."
+— and the socket, the error and the hint at `yardr status` hide under a
+"details" line, shut at first, which a click or Enter opens. "Set up a
+yard here" is the first of the ways below, and the marked one. Where the
+home holds a yard that is only stopped, it says that instead, and Start
+in the head starts it. Anywhere else it says what is wrong and names
+where it looked. Everywhere the window tries again every 3 seconds:
+trying again starts nothing, and what the head reads starts nothing
+either: `status` starts no server. When the server comes back, the
+conversation that was open is open again.
 
 Under those words the window offers the ways to a yard from there, and
 goes on trying the one that is away meanwhile:
@@ -212,8 +216,9 @@ goes on trying the one that is away meanwhile:
 - **set up a yard here** makes the yard that is not there and starts it:
   [Setting up a yard here](#setting-up-a-yard-here). It stands under this
   run's own yard alone, while nothing answers at its socket and no yard is
-  there yet: another home's yard and one at an address are not footplate's
-  to make, and one that is only stopped is started from the head instead.
+  there yet, first of the ways and marked as the one to take: another
+  home's yard and one at an address are not footplate's to make, and one
+  that is only stopped is started from the head instead.
 - **open a yard on this machine** asks for a name and a socket path. This
   run's socket is filled in; leave it to try this machine's yard, or change
   it to another home's yard socket (`<its home>/.yardr/yard.sock`). There

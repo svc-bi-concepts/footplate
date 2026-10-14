@@ -79,7 +79,8 @@ actions!(
         JumpNewest,
         JumpOldest,
         PageUp,
-        PageDown
+        PageDown,
+        AwayDetails
     ]
 );
 
@@ -355,8 +356,9 @@ fn approve_button(
     card_button(id, approve_label(yard), palette, click)
 }
 
-/// A card's one filled button, with what a click on it does. Without that
-/// it is drawn faint, and takes no click.
+/// One filled button, standing as the one to take, with what a click on
+/// it does: a card's that sends, or the away screen's that sets a yard up.
+/// Without that it is drawn faint, and takes no click.
 fn card_button(
     id: String,
     text: String,
@@ -488,6 +490,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Decide, Some(SWITCH_CONTEXT)),
         KeyBinding::new("escape", Leave, Some(SWITCH_CONTEXT)),
     ]);
+    // The away screen's details open on Enter from anywhere, as on a
+    // click. The binding has no context, as the switcher's keys do, so it
+    // answers while the yard is away and the line is not drawn. It answers
+    // everywhere else too, before the fields and the line take Enter for
+    // themselves; the handler takes it only where no yard was made and no
+    // way's fields are open, and never stops it.
+    cx.bind_keys([KeyBinding::new("enter", AwayDetails, None)]);
     // The switcher and a yard by its place in the list, from anywhere:
     // with the modifier, since a plain digit is a card's pick.
     cx.bind_keys([
@@ -761,6 +770,9 @@ pub struct Footplate {
     /// Why the yard is not there, while it is not.
     down: Option<String>,
     away: Away,
+    /// The away screen's details are open: the socket, the error and the
+    /// hint at yardr status, where no yard was ever made. Closed at first.
+    away_details: bool,
     /// Of a yard at an address: who it says this device is.
     said: Option<api::Me>,
     line: Entity<Line>,
@@ -1011,6 +1023,22 @@ impl Footplate {
         // So are the switcher's: another yard is opened from wherever the
         // focus is, and from a yard that is away.
         Self::on_app_action::<SwitchYards>(window, cx, Self::toggle_switcher);
+        // Enter for the away screen's details likewise answers from
+        // wherever the focus is, but unlike those it never stops the key:
+        // the fields and the line take Enter beside it, after it.
+        {
+            let (this, handle) = (cx.weak_entity(), window.window_handle());
+            let app: &mut App = cx;
+            app.on_action(move |_: &AwayDetails, cx| {
+                cx.propagate();
+                let this = this.clone();
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, _, cx| {
+                        this.update(cx, |this, cx| this.away_details_key(cx))
+                    });
+                });
+            });
+        }
         Self::on_app_action::<Yard1>(window, cx, |this, w, cx| this.switch_nth(0, w, cx));
         Self::on_app_action::<Yard2>(window, cx, |this, w, cx| this.switch_nth(1, w, cx));
         Self::on_app_action::<Yard3>(window, cx, |this, w, cx| this.switch_nth(2, w, cx));
@@ -1076,6 +1104,7 @@ impl Footplate {
             model: None,
             down: None,
             away: Away::Stopped,
+            away_details: false,
             said: None,
             line,
             conversation: ScrollHandle::new(),
@@ -1540,6 +1569,7 @@ impl Footplate {
         }
         self.opening += 1;
         self.switching = None;
+        self.away_details = false;
         self.images.clear();
         self.declining = None;
         self.back_position = None;
@@ -1670,7 +1700,13 @@ impl Footplate {
     /// the mark of the switcher where there are yards to switch between.
     fn head_line(&self, me: Option<&str>) -> String {
         let yard = self.which_yard_short();
-        let why = self.unreached.get(&self.yard).copied();
+        // Where no yard was ever made the line names the yard alone: the
+        // telling is the screen's, and the short why would run past the
+        // pane's edge.
+        let why = match self.sets_up_here() {
+            true => None,
+            false => self.unreached.get(&self.yard).copied(),
+        };
         let mut line = [me, Some(yard.as_str()), why]
             .into_iter()
             .flatten()
@@ -1771,6 +1807,9 @@ impl Footplate {
                         .map(|place| (place, false));
                 }
                 self.model = Some(model);
+                // The yard answers: the away screen's details are shut,
+                // for the next time it is away.
+                self.away_details = false;
                 // The fields of a way to a yard stood where this yard is
                 // drawn now: they are asked for no longer, and the line
                 // has the keys, not a field that is not in view.
@@ -5421,20 +5460,101 @@ impl Footplate {
         });
     }
 
+    /// The away screen's first words: a yard that is only stopped says
+    /// that, with where to start it; where no yard was ever made, one
+    /// plain sentence says so and what to do, with no socket, no error
+    /// and no yardr command in it; anywhere else the telling stands.
+    fn away_lead(&self, why: &str) -> String {
+        if self.yard_is_stopped() {
+            return "This yard is stopped. Start it with the switch in the head.".to_string();
+        }
+        if self.sets_up_here() {
+            return "No yard has been made here yet — set one up.".to_string();
+        }
+        why.to_string()
+    }
+
+    /// Opens the away screen's details, or shuts them again.
+    fn toggle_away_details(&mut self, cx: &mut Context<Self>) {
+        self.away_details = !self.away_details;
+        cx.notify();
+    }
+
+    /// Enter for the away screen's details: where no yard was made and no
+    /// way's fields are open, they open, or shut again. Anywhere else the
+    /// key is a field's, the line's or the switcher's, and this takes
+    /// nothing: it answers beside those, and never stops the key.
+    fn away_details_key(&mut self, cx: &mut Context<Self>) {
+        if self.down.is_none()
+            || self.adding.is_some()
+            || self.settings_open
+            || self.first_run.is_some()
+            || self.switching.is_some()
+            || !self.sets_up_here()
+        {
+            return;
+        }
+        self.toggle_away_details(cx);
+    }
+
+    /// The away screen's details line, where no yard was ever made: shut
+    /// at first, it opens on a click or Enter.
+    fn away_details_line(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.away_details;
+        div()
+            .id("away details")
+            .debug_selector(|| "away details".to_string())
+            .text_sm()
+            .text_color(palette.faint)
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.hover))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_away_details(cx)))
+            .child(format!("{} details", if open { "▾" } else { "▸" }))
+    }
+
+    /// What the open details hold: the error and where it was looked for,
+    /// as they stood on the screen before.
+    fn away_details_body(
+        &self,
+        why: &str,
+        place: Option<String>,
+        palette: Palette,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .debug_selector(|| "away details why".to_string())
+                    .child(why.to_string()),
+            )
+            .children(place.map(|place| {
+                div()
+                    .debug_selector(|| "away details place".to_string())
+                    .text_color(palette.faint)
+                    .child(place)
+            }))
+    }
+
     /// No yard: which, and why in a word or two, then why in words, where
-    /// it was looked for, and whether it is tried again. A yard that no
-    /// longer lets this device in is not: the device is paired again from
-    /// here. A yard that is only stopped says that, and points at the
-    /// switch in the head. It stands beside the head of the left column,
-    /// which opens another yard; the one yard the environment names has
-    /// no other, and its settings are reached from under the words. Under
-    /// the words are the ways to a yard from here, which are the
-    /// settings' own: each asks for what the settings ask for a yard that
-    /// is added, in the same fields, and opens the yard it adds.
+    /// it was looked for, and whether it is tried again. Where no yard
+    /// was ever made the words are one plain sentence, and the socket,
+    /// the error and the hint at yardr status hide under details, shut at
+    /// first; "set up a yard here" is the first way, and the marked one.
+    /// A yard that no longer lets this device in is not: the device is
+    /// paired again from here. A yard that is only stopped says that, and
+    /// points at the switch in the head. It stands beside the head of the
+    /// left column, which opens another yard; the one yard the environment
+    /// names has no other, and its settings are reached from under the
+    /// words. Under the words are the ways to a yard from here, which are
+    /// the settings' own: each asks for what the settings ask for a yard
+    /// that is added, in the same fields, and opens the yard it adds.
     fn away(&self, why: &str, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let place = self.client.as_ref().map(Client::place);
         let alone = self.env.yard.is_some();
         let short = self.unreached.get(&self.yard).copied();
+        let setup_here = self.sets_up_here();
         let again = match self.away {
             Away::Trying => format!(
                 "footplate tries again every {} seconds.",
@@ -5476,13 +5596,24 @@ impl Footplate {
                             .child(format!("{} · {short}", self.which_yard_short()))
                     }))
                     .child(
-                        div().child(match self.yard_is_stopped() {
-                            true => "This yard is stopped. Start it with the switch in the head."
-                                .to_string(),
-                            false => why.to_string(),
-                        }),
+                        div()
+                            .debug_selector(|| "away lead".to_string())
+                            .child(self.away_lead(why)),
                     )
-                    .children(place.map(|place| div().text_color(palette.faint).child(place)))
+                    // Where no yard was ever made the socket, the error and
+                    // the hint at yardr status hide under details, shut at
+                    // first; anywhere else they stand as they did.
+                    .children(setup_here.then(|| self.away_details_line(palette, cx)))
+                    .children(
+                        (setup_here && self.away_details)
+                            .then(|| self.away_details_body(why, place.clone(), palette)),
+                    )
+                    .children(
+                        (!setup_here)
+                            .then(|| place.clone())
+                            .flatten()
+                            .map(|place| div().text_color(palette.faint).child(place)),
+                    )
                     .child(div().text_color(palette.faint).child(again)),
             )
             // The ways to a yard: one entry each, and a further way is one
@@ -5507,14 +5638,17 @@ impl Footplate {
                                 .items_center()
                                 .gap_2()
                                 // The first way makes the yard that is
-                                // not there: this run's, and no other.
-                                .children(self.sets_up_here().then(|| {
-                                    small_button("set up a yard here".to_string(), palette)
-                                        .id("way here")
-                                        .debug_selector(|| "way here".to_string())
-                                        .on_click(cx.listener(|this, _, window, cx| {
+                                // not there: this run's, and no other. It
+                                // stands filled, as the one to take.
+                                .children(setup_here.then(|| {
+                                    card_button(
+                                        "way here".to_string(),
+                                        "set up a yard here".to_string(),
+                                        palette,
+                                        Some(cx.listener(|this, _, window, cx| {
                                             this.set_up_here(window, cx)
-                                        }))
+                                        })),
+                                    )
                                 }))
                                 .children(ways.map(|(id, text, adding)| {
                                     let far = adding == Adding::Far;
@@ -14277,6 +14411,96 @@ mod tests {
                 v.down
             );
         });
+    }
+
+    /// Where no yard was ever made, the screen says so in one plain
+    /// sentence, with no socket, no error and no yardr command in it; the
+    /// socket, the error and the hint hide under details, shut at first.
+    /// "Set up a yard here" is the first way, and the sidebar names the
+    /// yard alone, whole in its pane.
+    #[gpui::test]
+    fn no_yard_made_here_says_so_plainly_with_its_details_shut(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        assert!(view.read_with(cx, |v, _| v.sets_up_here()));
+        let lead = view.read_with(cx, |v, _| v.away_lead(v.down.as_ref().unwrap()));
+        assert_eq!(lead, "No yard has been made here yet — set one up.");
+        assert!(
+            !lead.contains("yard.sock") && !lead.contains("os error") && !lead.contains("yardr"),
+            "{lead}"
+        );
+        assert!(drawn(cx, "away lead") && drawn(cx, "away why"));
+        // Shut at first: the line, but neither the error nor the socket.
+        assert!(drawn(cx, "away details"));
+        assert!(!drawn(cx, "away details why"));
+        assert!(!drawn(cx, "away details place"));
+        // The three ways, setting one up first.
+        assert!(drawn(cx, "way here") && drawn(cx, "way near") && drawn(cx, "way far"));
+        let (here, near, far) = (
+            bounds_of(cx, "way here"),
+            bounds_of(cx, "way near"),
+            bounds_of(cx, "way far"),
+        );
+        assert!(
+            here.top() <= near.top() + px(2.)
+                && here.top() <= far.top() + px(2.)
+                && here.left() <= near.left(),
+            "{here:?} {near:?} {far:?}"
+        );
+        // The sidebar names the yard alone: the short why would run past
+        // the pane's edge.
+        assert_eq!(head_line(&view, cx), "this machine ▾");
+        // A click opens the details: the error and the socket, as they
+        // stood on the screen before.
+        click_on(cx, "away details");
+        assert!(drawn(cx, "away details why") && drawn(cx, "away details place"));
+        view.read_with(cx, |v, _| {
+            let why = v.down.as_ref().unwrap();
+            assert!(why.contains("os error 2"), "{why}");
+            assert!(why.contains("yardr status"), "{why}");
+            let place = v.client.as_ref().unwrap().place();
+            assert!(place.contains("yard.sock"), "{place}");
+        });
+    }
+
+    /// Enter opens the details where no yard was made, and shuts them
+    /// again: the line it is typed in is not drawn to take it.
+    #[gpui::test]
+    fn enter_opens_the_details_where_no_yard_was_made(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        assert!(!view.read_with(cx, |v, _| v.away_details));
+        cx.simulate_keystrokes("enter");
+        assert!(view.read_with(cx, |v, _| v.away_details));
+        assert!(drawn(cx, "away details why"));
+        cx.simulate_keystrokes("enter");
+        assert!(!view.read_with(cx, |v, _| v.away_details));
+    }
+
+    /// A yard that is only stopped keeps its words, and offers neither a
+    /// setup nor details: the switch in the head starts it.
+    #[gpui::test]
+    fn a_stopped_yard_keeps_its_words_with_no_setup_and_no_details(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(false, false));
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the stopped yard read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+        assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
+        assert!(!view.read_with(cx, |v, _| v.sets_up_here()));
+        let lead = view.read_with(cx, |v, _| v.away_lead(v.down.as_ref().unwrap()));
+        assert_eq!(
+            lead,
+            "This yard is stopped. Start it with the switch in the head."
+        );
+        assert!(drawn(cx, "switch start"));
     }
 
     /// What a start could not start is the head's, in yardr's words, with
