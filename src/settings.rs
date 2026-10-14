@@ -138,6 +138,13 @@ pub struct Settings {
     /// pages once this names the address that yard's view is reached by.
     #[serde(skip_serializing_if = "is_usual_view")]
     pub web_view: String,
+    /// The sandbox origin's base address, through which a note's pages
+    /// run in the browser. Empty until one is set, and left out of the
+    /// file while it is: then the view's host on the sandbox port is
+    /// the run base. A yard on a custom pages port, or one behind a
+    /// proxy with a second name, is set here whole.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub run_base: String,
 }
 
 fn is_on(on: &bool) -> bool {
@@ -166,6 +173,7 @@ struct Kept {
     notifications: Notify,
     menu_bar: bool,
     web_view: String,
+    run_base: String,
 }
 
 impl Default for Kept {
@@ -180,6 +188,7 @@ impl Default for Kept {
             notifications: Notify::default(),
             menu_bar: true,
             web_view: String::new(),
+            run_base: String::new(),
         }
     }
 }
@@ -223,6 +232,7 @@ impl From<Kept> for Settings {
                 "" => WEB_VIEW.to_string(),
                 _ => kept.web_view,
             },
+            run_base: kept.run_base.trim().to_string(),
         }
     }
 }
@@ -317,6 +327,7 @@ impl Default for Settings {
             notifications: Notify::default(),
             menu_bar: true,
             web_view: WEB_VIEW.to_string(),
+            run_base: String::new(),
         }
     }
 }
@@ -469,6 +480,21 @@ impl Settings {
         }
         Address::parse_view(address)?;
         self.web_view = address.to_string();
+        Ok(self)
+    }
+
+    /// With the sandbox origin's base address `address`: what runs a
+    /// note's pages in the browser. What is no address is refused with
+    /// why, and nothing changed; empty is the view's host on the
+    /// sandbox port again.
+    pub fn with_run_base(mut self, address: &str) -> Result<Settings, String> {
+        let address = address.trim();
+        if address.is_empty() {
+            self.run_base = String::new();
+            return Ok(self);
+        }
+        Address::parse_run(address)?;
+        self.run_base = address.to_string();
         Ok(self)
     }
 
@@ -1400,6 +1426,45 @@ mod tests {
         assert!(
             why.starts_with(
                 "http://plantime:8791 is refused: plain http is for the web view on this machine alone"
+            ),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn the_run_base_is_empty_until_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Nobody chose: empty, and left out of the file; then the
+        // view's host on the sandbox port is the run base.
+        let usual = Settings::default();
+        assert_eq!(usual.run_base, "");
+        fs::write(&file, "{\"text\": 15}").unwrap();
+        assert_eq!(Settings::read(&file).run_base, "");
+        usual.write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("run_base"));
+        // Set, it is kept and read back; empty is empty again.
+        let set = usual.with_run_base("https://pages.example.net/").unwrap();
+        set.write(&file).unwrap();
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"run_base\": \"https://pages.example.net/\"")
+        );
+        assert_eq!(Settings::read(&file), set);
+        assert_eq!(set.with_run_base("").unwrap().run_base, "");
+        // What is no address is refused with why, in the run base's words.
+        let why = Settings::default().with_run_base("plantime").unwrap_err();
+        assert_eq!(
+            why,
+            "\"plantime\" is no address of the run base: one starts with https://, or with http:// for the run base on this machine"
+        );
+        let why = Settings::default()
+            .with_run_base("http://plantime:8789")
+            .unwrap_err();
+        assert!(
+            why.starts_with(
+                "http://plantime:8789 is refused: plain http is for the run base on this machine alone"
             ),
             "{why}"
         );

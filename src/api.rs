@@ -36,6 +36,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a yard's address may take to be connected to.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The sandbox origin's port: a note's pages run there, on the web
+/// view's host, unless the run base says otherwise.
+const RUN_PORT: u16 = 8789;
+
 /// A stream over the network is silent while nothing happens, and a link
 /// that went away says nothing either: the system asks the other end after
 /// this long a silence, so that a dead stream ends and is opened again.
@@ -710,20 +714,23 @@ pub struct Address {
     path: String,
 }
 
-/// What an address is read as: a yard's, or the web view's. The rules
-/// are the same; only the refusals say which.
+/// What an address is read as: a yard's, the web view's, or the run
+/// base's. The rules are the same; only the refusals say which.
 #[derive(Clone, Copy)]
 enum AddressOf {
     Yard,
     View,
+    Run,
 }
 
 impl AddressOf {
-    /// What the refusals call one: `a yard`, `the web view`.
+    /// What the refusals call one: `a yard`, `the web view`, `the run
+    /// base`.
     fn noun(self) -> &'static str {
         match self {
             AddressOf::Yard => "a yard",
             AddressOf::View => "the web view",
+            AddressOf::Run => "the run base",
         }
     }
 
@@ -732,6 +739,7 @@ impl AddressOf {
         match self {
             AddressOf::Yard => "the yard's listener",
             AddressOf::View => "the view",
+            AddressOf::Run => "the sandbox origin",
         }
     }
 
@@ -740,7 +748,7 @@ impl AddressOf {
     fn secret(self) -> &'static str {
         match self {
             AddressOf::Yard => " The token would cross the network for anyone to read.",
-            AddressOf::View => "",
+            AddressOf::View | AddressOf::Run => "",
         }
     }
 }
@@ -758,6 +766,13 @@ impl Address {
     /// to keep. Plain HTTP off this machine is refused with them.
     pub fn parse_view(text: &str) -> std::result::Result<Address, String> {
         Address::parse_as(text, AddressOf::View)
+    }
+
+    /// Reads the sandbox origin's base address, set as the run base: by
+    /// the same rules as the view's, since a run page is the yard's to
+    /// keep. Plain HTTP off this machine is refused with them.
+    pub fn parse_run(text: &str) -> std::result::Result<Address, String> {
+        Address::parse_as(text, AddressOf::Run)
     }
 
     fn parse_as(text: &str, of: AddressOf) -> std::result::Result<Address, String> {
@@ -876,6 +891,35 @@ impl Address {
             return None;
         }
         Some(format!("{}{}/blobs/{hash}", self.origin(), self.path))
+    }
+
+    /// The sandbox origin's base address for the view at this base
+    /// address: the view's host on the sandbox port, with no path. A
+    /// proxied second name is set as the run base instead.
+    pub fn run_base(&self) -> Address {
+        let authority = if self.host.contains(':') {
+            format!("[{}]:{RUN_PORT}", self.host)
+        } else {
+            format!("{}:{RUN_PORT}", self.host)
+        };
+        Address {
+            tls: self.tls,
+            host: self.host.clone(),
+            authority,
+            port: RUN_PORT,
+            path: String::new(),
+        }
+    }
+
+    /// The browser's URL for running the page `hash` at this run base
+    /// address: the sandbox origin's `/run/` route under it. The hash is
+    /// what a note said, as for [`Address::page_url`]: one that is no
+    /// hex names no page, and runs nothing.
+    pub fn run_url(&self, hash: &str) -> Option<String> {
+        if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(format!("{}{}/run/{hash}", self.origin(), self.path))
     }
 
     fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
@@ -2081,6 +2125,28 @@ mod tests {
     }
 
     #[test]
+    fn the_run_base_s_address_reads_as_an_address_in_the_run_base_s_words() {
+        let address = Address::parse_run("https://pages.example.net/").unwrap();
+        assert_eq!(
+            (address.tls, address.host.as_str(), address.port),
+            (true, "pages.example.net", 443)
+        );
+        // What is no address is refused as the run base's, not the view's.
+        let why = Address::parse_run("plantime").unwrap_err();
+        assert_eq!(
+            why,
+            "\"plantime\" is no address of the run base: one starts with https://, or with http:// for the run base on this machine"
+        );
+        let why = Address::parse_run("http://plantime:8789").unwrap_err();
+        assert!(
+            why.starts_with(
+                "http://plantime:8789 is refused: plain http is for the run base on this machine alone"
+            ),
+            "{why}"
+        );
+    }
+
+    #[test]
     fn a_page_s_url_is_the_view_s_blobs_route_under_its_base() {
         let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
         assert_eq!(
@@ -2133,6 +2199,86 @@ mod tests {
                 "status {status}"
             );
         }
+        // A port nothing listens on: one that was bound, and is not now.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(
+            !Address::parse_view(&format!("http://127.0.0.1:{port}"))
+                .unwrap()
+                .answers()
+        );
+    }
+
+    #[test]
+    fn the_run_base_is_the_view_s_host_on_the_sandbox_port() {
+        let run = Address::parse_view("http://127.0.0.1:8791/")
+            .unwrap()
+            .run_base();
+        assert_eq!(run.to_string(), "http://127.0.0.1:8789");
+        // A view on another port, and one under a proxy's path, alike:
+        // the port is the sandbox's, and the path is none.
+        let run = Address::parse_view("http://127.0.0.1:9000/")
+            .unwrap()
+            .run_base();
+        assert_eq!(run.to_string(), "http://127.0.0.1:8789");
+        let run = Address::parse_view("https://mac.example.net/yard/")
+            .unwrap()
+            .run_base();
+        assert_eq!(run.to_string(), "https://mac.example.net:8789");
+        let run = Address::parse_view("http://[::1]:8791/")
+            .unwrap()
+            .run_base();
+        assert_eq!(run.to_string(), "http://[::1]:8789");
+    }
+
+    #[test]
+    fn a_page_s_run_url_is_the_run_route_under_its_base() {
+        let address = Address::parse_view("http://127.0.0.1:8791/")
+            .unwrap()
+            .run_base();
+        assert_eq!(
+            address.run_url(&"ab".repeat(32)),
+            Some(format!("http://127.0.0.1:8789/run/{}", "ab".repeat(32)))
+        );
+        // Under a set run base with a path, alike.
+        let address = Address::parse_view("https://pages.example.net/yard/").unwrap();
+        assert_eq!(
+            address.run_url("cd").as_deref(),
+            Some("https://pages.example.net/yard/run/cd")
+        );
+    }
+
+    #[test]
+    fn a_page_whose_hash_is_no_hex_has_no_run_url() {
+        // The hash is a yard's text: it chooses no other route of the
+        // origin, no query and no other host.
+        let address = Address::parse_view("http://127.0.0.1:8791/")
+            .unwrap()
+            .run_base();
+        for hash in [
+            "",
+            "../api/x",
+            "ab?x=1",
+            "ab#x",
+            "ab/../cd",
+            "@evil.example",
+            "ab cd",
+        ] {
+            assert_eq!(address.run_url(hash), None, "{hash:?}");
+        }
+    }
+
+    #[test]
+    fn the_run_base_answers_where_it_runs_and_nowhere_else() {
+        // Any HTTP answer says it runs, even the origin's 404 for no
+        // route: the probe asks for the front page, which is none.
+        let base = answering(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        assert!(Address::parse_view(&base).unwrap().answers());
         // A port nothing listens on: one that was bound, and is not now.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
