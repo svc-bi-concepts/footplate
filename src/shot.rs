@@ -21,14 +21,7 @@ use crate::yard::Env;
 /// settings the shot script writes; the settings open over a running
 /// yard. The script answers the switch's yardr for every state, so the
 /// head draws the same on every shot.
-pub const STATES: &[&str] = &[
-    "yardmaster",
-    "plain",
-    "run",
-    "stopped",
-    "far",
-    "settings",
-];
+pub const STATES: &[&str] = &["yardmaster", "plain", "run", "stopped", "far", "settings"];
 
 /// The fake yard and its private socket directory, which go away with the
 /// screenshot run.
