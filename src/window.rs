@@ -204,10 +204,20 @@ fn waiting_words(waiting: usize) -> String {
     }
 }
 
-/// A section's head in the left list: its title on the left, what waits
-/// in it on the right, quiet. "Decisions" counts the open ones, "Crew"
-/// the mail that is not read.
-fn section_head(title: &'static str, waiting: usize, palette: Palette) -> impl IntoElement {
+/// What the Crew head says is unread in it: the number with "unread",
+/// or that none is. "Waiting" beside Crew would read as crew that
+/// waits, where it is mail that is not read.
+fn unread_words(unread: usize) -> String {
+    match unread {
+        0 => "none unread".to_string(),
+        unread => format!("{unread} unread"),
+    }
+}
+
+/// A section's head in the left list: its title on the left, its count
+/// on the right, quiet. "Decisions" counts the open ones, "Crew" the
+/// mail that is not read.
+fn section_head(title: &'static str, count: String, palette: Palette) -> impl IntoElement {
     div()
         .px_3()
         .pt_2()
@@ -229,7 +239,7 @@ fn section_head(title: &'static str, waiting: usize, palette: Palette) -> impl I
                 .text_sm()
                 .text_color(palette.faint)
                 .flex_none()
-                .child(waiting_words(waiting)),
+                .child(count),
         )
 }
 
@@ -671,7 +681,7 @@ enum SwitchBusy {
     Login,
 }
 
-/// What the switch in the head is for the open yard.
+/// What the status row in the head is for the open yard.
 enum SwitchFor {
     /// A yard of this machine: its home, or none for this run's, which
     /// takes no `--home` flag.
@@ -965,8 +975,8 @@ pub struct Footplate {
     /// What the first run reaches outside the window with. The switch
     /// reaches out with the same.
     means: Means,
-    /// The switch in the head: the yardr it runs, ensured once, and the
-    /// PATH widened by doctor, once, which only grows.
+    /// The status row in the head: the yardr it runs, ensured once, and
+    /// the PATH widened by doctor, once, which only grows.
     switch_program: Option<PathBuf>,
     switch_path: Option<std::ffi::OsString>,
     /// What `status` last said of the open yard, or that its home holds
@@ -1784,10 +1794,11 @@ impl Footplate {
     /// switch between.
     fn head_line(&self, me: Option<&str>) -> String {
         let yard = self.which_yard_short();
-        // Where no yard was ever made the line names the yard alone: the
-        // telling is the screen's, and the short why would run past the
-        // pane's edge.
-        let why = match self.sets_up_here() {
+        // Where no yard was ever made, and where the yard is only
+        // stopped, the line names the yard alone: the telling is the
+        // screen's and the status row's, and the short why would run
+        // past the pane's edge.
+        let why = match self.sets_up_here() || self.yard_is_stopped() {
             true => None,
             false => self.unreached.get(&self.yard).copied(),
         };
@@ -4043,8 +4054,8 @@ impl Footplate {
         self.change(cx, |m| m.select(row));
     }
 
-    /// What the switch in the head is for the open yard: its state with
-    /// Start/Stop, or none.
+    /// What the status row in the head is for the open yard: its state
+    /// with Start/Stop, or none.
     fn switch_for(&self) -> SwitchFor {
         if self.env.yard.is_some() {
             return SwitchFor::Far;
@@ -5339,10 +5350,10 @@ impl Footplate {
         asked
     }
 
-    /// The switch in the head, under the yard's line: the one status
-    /// row. A yard at an address has none: its processes are elsewhere.
-    /// "Start at login" is a switch of the settings, with the faint line
-    /// for what came of a switch beside it there.
+    /// The status row in the head, under the yard's line. A yard at an
+    /// address has none: its processes are elsewhere. "Start at login" is
+    /// a switch of the settings, with the faint line for what came of a
+    /// switch beside it there.
     fn switch_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if self.first_run.is_some() {
             return Vec::new();
@@ -5602,7 +5613,7 @@ impl Footplate {
     /// and no yardr command in it; anywhere else the telling stands.
     fn away_lead(&self, why: &str) -> String {
         if self.yard_is_stopped() {
-            return "This yard is stopped. Start it with the switch in the head.".to_string();
+            return "This yard is stopped. Start it with Start, in the head.".to_string();
         }
         if self.sets_up_here() {
             return "No yard has been made here yet — set one up.".to_string();
@@ -5680,7 +5691,7 @@ impl Footplate {
     /// first; "set up a yard here" is the first way, and the marked one.
     /// A yard that no longer lets this device in is not: the device is
     /// paired again from here. A yard that is only stopped says that, and
-    /// points at the switch in the head. It stands beside the head of the
+    /// points at Start in the head. It stands beside the head of the
     /// left column, which opens another yard; the one yard the environment
     /// names has no other, and its settings are reached from under the
     /// words. Under the words are the ways to a yard from here, which are
@@ -5933,7 +5944,7 @@ impl Footplate {
         let decisions = model.decisions_count();
         let decided = model.decided_count();
         if decisions > 0 || decided > 0 {
-            body = body.child(section_head("Decisions", decisions, palette));
+            body = body.child(section_head("Decisions", waiting_words(decisions), palette));
             for group in model.decision_groups(&now) {
                 body = body.child(
                     div()
@@ -5973,8 +5984,8 @@ impl Footplate {
             }
             body = body.child(divider(palette));
         }
-        let waiting: usize = rows.iter().map(|row| row.unread).sum();
-        body = body.child(section_head("Crew", waiting, palette));
+        let unread: usize = rows.iter().map(|row| row.unread).sum();
+        body = body.child(section_head("Crew", unread_words(unread), palette));
         if rows.is_empty() {
             body =
                 body.child(
@@ -11343,12 +11354,15 @@ mod tests {
     }
 
     /// A section's head says what waits in it: the number, or that none
-    /// does.
+    /// does. The Crew head says unread instead of waiting.
     #[test]
     fn a_section_s_head_counts_what_waits_in_it() {
         assert_eq!(waiting_words(0), "none waiting");
         assert_eq!(waiting_words(1), "1");
         assert_eq!(waiting_words(12), "12");
+        assert_eq!(unread_words(0), "none unread");
+        assert_eq!(unread_words(1), "1 unread");
+        assert_eq!(unread_words(12), "12 unread");
     }
 
     /// The left list's sections stand under their titles, each with its
@@ -14838,9 +14852,13 @@ mod tests {
         let lead = view.read_with(cx, |v, _| v.away_lead(v.down.as_ref().unwrap()));
         assert_eq!(
             lead,
-            "This yard is stopped. Start it with the switch in the head."
+            "This yard is stopped. Start it with Start, in the head."
         );
         assert!(drawn(cx, "switch start"));
+        // The head names the stopped yard alone: the status row under it
+        // already says Stopped, with Start, and the short why would run
+        // past the pane's edge.
+        assert_eq!(head_line(&view, cx), "this machine");
     }
 
     /// What a start could not start is the head's, in yardr's words, with
