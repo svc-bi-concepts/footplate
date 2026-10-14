@@ -6533,10 +6533,14 @@ impl Footplate {
         match self.view_up_now() {
             Some(true) => {
                 // The probe answered at this address, so it parses: the
-                // same reading, not another.
-                let url = Address::parse_view(&self.settings.web_view)
+                // same reading, not another. A hash that is no hex names
+                // no page, and the row has no Open.
+                let Some(url) = Address::parse_view(&self.settings.web_view)
                     .expect("the web view answered at this address")
-                    .page_url(&file.hash);
+                    .page_url(&file.hash)
+                else {
+                    return row.child(label).into_any_element();
+                };
                 let open = self.means.open.clone();
                 row.child(label)
                     .child(

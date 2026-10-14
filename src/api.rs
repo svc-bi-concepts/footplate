@@ -868,9 +868,14 @@ impl Address {
     }
 
     /// The browser's URL for the page `hash` at this base address: the
-    /// view's `/blobs/` route under it.
-    pub fn page_url(&self, hash: &str) -> String {
-        format!("{}{}/blobs/{hash}", self.origin(), self.path)
+    /// view's `/blobs/` route under it. The hash is what a note said, and
+    /// goes into the URL's path: one that is no hex names no page, and
+    /// opens nothing.
+    pub fn page_url(&self, hash: &str) -> Option<String> {
+        if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(format!("{}{}/blobs/{hash}", self.origin(), self.path))
     }
 
     fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
@@ -2075,16 +2080,37 @@ mod tests {
         let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
         assert_eq!(
             address.page_url(&"ab".repeat(32)),
-            format!("http://127.0.0.1:8791/blobs/{}", "ab".repeat(32))
+            Some(format!("http://127.0.0.1:8791/blobs/{}", "ab".repeat(32)))
         );
         // With no slash, and under a proxy's path, alike.
         let address = Address::parse_view("http://127.0.0.1:8791").unwrap();
-        assert_eq!(address.page_url("cd"), "http://127.0.0.1:8791/blobs/cd");
+        assert_eq!(
+            address.page_url("cd").as_deref(),
+            Some("http://127.0.0.1:8791/blobs/cd")
+        );
         let address = Address::parse_view("https://mac.example.net/yard/").unwrap();
         assert_eq!(
-            address.page_url("cd"),
-            "https://mac.example.net/yard/blobs/cd"
+            address.page_url("cd").as_deref(),
+            Some("https://mac.example.net/yard/blobs/cd")
         );
+    }
+
+    #[test]
+    fn a_page_whose_hash_is_no_hex_has_no_url() {
+        // The hash is a yard's text: it chooses no other path of the view,
+        // no query and no other host.
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        for hash in [
+            "",
+            "../api/x",
+            "ab?x=1",
+            "ab#x",
+            "ab/../cd",
+            "@evil.example",
+            "ab cd",
+        ] {
+            assert_eq!(address.page_url(hash), None, "{hash:?}");
+        }
     }
 
     #[test]
