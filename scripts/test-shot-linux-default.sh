@@ -1,5 +1,7 @@
 #!/bin/sh
-# Two shots without an argument must write to separate files.
+# Two shots without an argument must write to separate files; every shot
+# mounts the two volumes all shots share and removes its container when it
+# ends, and a stale container is removed before a new one starts.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -7,6 +9,7 @@ script=$script_dir/shot-linux.sh
 tmp=$(mktemp -d)
 first_dir=
 second_dir=
+stale_dir=
 # The two directories are named by the script under test, so they are never
 # removed with what they hold: only the shot is, and then the directory if
 # that left it empty. A script that went wrong and wrote into a directory it
@@ -19,15 +22,18 @@ remove_shot_dir() {
 cleanup() {
     remove_shot_dir "$first_dir"
     remove_shot_dir "$second_dir"
+    remove_shot_dir "$stale_dir"
     rm -rf "$tmp"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -p "$tmp/bin"
 
-# The shot script only needs Docker to report a running container and a
-# visible window here. Stub it so this checks the real output-path behavior
-# without provisioning a container or building Footplate.
+# The shot script only needs Docker to answer whether a stale container is
+# left and to report a visible window here. Stub it so this checks the real
+# output-path and cleanup behavior without provisioning a container or
+# building Footplate; the run and rm lines are logged, so this sees what a
+# shot mounts and leaves.
 cat > "$tmp/bin/docker" <<'MOCK_DOCKER'
 #!/bin/sh
 set -eu
@@ -35,15 +41,19 @@ command=$1
 shift
 case "$command" in
     inspect)
-        shift
-        if [ "${1:-}" = --format ] && [ "${2:-}" = '{{.State.Status}}' ]; then
-            echo running
+        # The only inspect asks whether a stale container of the name is
+        # left; MOCK_HAVE_CONTAINER=1 says one is.
+        if [ "${MOCK_HAVE_CONTAINER:-0}" = 1 ]; then
             exit 0
         fi
-        # The first inspect asks whether a checkout-specific container exists.
         exit 1
         ;;
-    run|start)
+    run)
+        printf 'run %s\n' "$*" >> "$MOCK_LOG"
+        exit 0
+        ;;
+    rm)
+        printf 'rm %s\n' "$*" >> "$MOCK_LOG"
         exit 0
         ;;
     exec)
@@ -69,12 +79,55 @@ exit 0
 MOCK_SLEEP
 chmod +x "$tmp/bin/docker" "$tmp/bin/sleep"
 
-run_shot() {
-    PATH="$tmp/bin:$PATH" "$script"
+fail() {
+    echo "test-shot-linux-default.sh: $1" >&2
+    exit 1
 }
 
-first=$(run_shot)
-second=$(run_shot)
+# The container's name, as the script under test derives it from the
+# checkout: one container per checkout.
+root=$(CDPATH= cd "$script_dir/.." && pwd)
+suffix=$(basename "$root")
+suffix=$(printf '%s' "$suffix" | tr -c 'a-zA-Z0-9_.-' '-' | tr 'A-Z' 'a-z')
+name=footplate-shot-$suffix
+
+run_shot() {
+    MOCK_LOG=$1 PATH="$tmp/bin:$PATH" "$script"
+}
+
+# A shot mounts the checkout read-only and the two volumes all shots
+# share, and removes its container when it ends: the log holds a run line
+# and then the rm line, and with a stale container one rm line before that.
+expect_run() {
+    what=$1
+    log=$2
+    lines=$3
+    grep -F -q -- "run -d --name $name " "$log" \
+        || fail "$what started no container of its own"
+    grep -F -q -- ":/src:ro" "$log" \
+        || fail "$what did not mount the checkout read-only"
+    grep -F -q -- "-v footplate-shot-cargo:/cargo -v footplate-shot-target:/target" "$log" \
+        || fail "$what did not mount the shared volumes"
+    [ "$(tail -n 1 "$log")" = "rm -f $name" ] \
+        || fail "$what left its container behind"
+    [ "$(grep -c '' "$log")" = "$lines" ] \
+        || fail "$what ran unexpected docker commands: $(cat "$log")"
+}
+
+first=$(run_shot "$tmp/log-first")
+second=$(run_shot "$tmp/log-second")
+expect_run "the first shot" "$tmp/log-first" 2
+expect_run "the second shot" "$tmp/log-second" 2
+
+# A container of the name left by a killed run is removed before a new one
+# starts.
+export MOCK_HAVE_CONTAINER=1
+stale=$(run_shot "$tmp/log-stale")
+unset MOCK_HAVE_CONTAINER
+stale_dir=$(dirname "$stale")
+[ "$(head -n 1 "$tmp/log-stale")" = "rm -f $name" ] \
+    || fail "a stale container was not removed before the new one started"
+expect_run "the stale shot" "$tmp/log-stale" 3
 if [ "$first" = "$second" ]; then
     echo "test-shot-linux-default.sh: two default shots used the same path: $first" >&2
     exit 1

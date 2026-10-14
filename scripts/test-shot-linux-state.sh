@@ -22,10 +22,11 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -p "$tmp/bin" "$tmp/cwd"
 
-# The shot script only needs Docker to report a running container and a
-# visible window here. Stub it so this checks the real argument behavior
-# without provisioning a container or building Footplate; every exec line
-# is logged, so this sees what footplate would start with.
+# The shot script only needs Docker to answer whether a stale container is
+# left and to report a visible window here. Stub it so this checks the real
+# argument and cleanup behavior without provisioning a container or building
+# Footplate; the run, rm and exec lines are logged, so this sees what a
+# shot mounts and leaves, and what footplate would start with.
 cat > "$tmp/bin/docker" <<'MOCK_DOCKER'
 #!/bin/sh
 set -eu
@@ -33,15 +34,15 @@ command=$1
 shift
 case "$command" in
     inspect)
-        shift
-        if [ "${1:-}" = --format ] && [ "${2:-}" = '{{.State.Status}}' ]; then
-            echo running
-            exit 0
-        fi
-        # The first inspect asks whether a checkout-specific container exists.
+        # The only inspect asks whether a stale container of the name is left.
         exit 1
         ;;
-    run|start)
+    run)
+        printf 'run %s\n' "$*" >> "$MOCK_LOG"
+        exit 0
+        ;;
+    rm)
+        printf 'rm %s\n' "$*" >> "$MOCK_LOG"
         exit 0
         ;;
     exec)
@@ -73,6 +74,13 @@ fail() {
     exit 1
 }
 
+# The container's name, as the script under test derives it from the
+# checkout: one container per checkout.
+root=$(CDPATH= cd "$script_dir/.." && pwd)
+suffix=$(basename "$root")
+suffix=$(printf '%s' "$suffix" | tr -c 'a-zA-Z0-9_.-' '-' | tr 'A-Z' 'a-z')
+name=footplate-shot-$suffix
+
 expect_shot() {
     what=$1
     want=$2
@@ -90,27 +98,44 @@ expect_launch() {
         || fail "$what started footplate without FOOTPLATE_SHOT='$want'"
 }
 
+# A shot mounts the two volumes all shots share and removes its container
+# when it ends: the run line carries them, and the rm line is last.
+expect_cleanup() {
+    what=$1
+    log=$2
+    grep -F -q -- "run -d --name $name " "$log" \
+        || fail "$what started no container of its own"
+    grep -F -q -- "-v footplate-shot-cargo:/cargo -v footplate-shot-target:/target" "$log" \
+        || fail "$what did not mount the shared volumes"
+    [ "$(tail -n 1 "$log")" = "rm -f $name" ] \
+        || fail "$what left its container behind"
+}
+
 export MOCK_LOG=$tmp/log-default
 out=$(PATH="$tmp/bin:$PATH" "$script")
 expect_shot "no arguments" "$out"
 expect_launch "no arguments" "$MOCK_LOG" ""
+expect_cleanup "no arguments" "$MOCK_LOG"
 
 export MOCK_LOG=$tmp/log-run
 out=$(PATH="$tmp/bin:$PATH" "$script" run)
 expect_shot "a state alone" "$out"
 expect_launch "a state alone" "$MOCK_LOG" "run"
+expect_cleanup "a state alone" "$MOCK_LOG"
 
 export MOCK_LOG=$tmp/log-plain
 out=$(PATH="$tmp/bin:$PATH" "$script" plain "$tmp/shot-plain.png")
 [ "$out" = "$tmp/shot-plain.png" ] || fail "a state with a file printed $out"
 expect_shot "a state with a file" "$out"
 expect_launch "a state with a file" "$MOCK_LOG" "plain"
+expect_cleanup "a state with a file" "$MOCK_LOG"
 
 export MOCK_LOG=$tmp/log-file
 out=$(PATH="$tmp/bin:$PATH" "$script" "$tmp/shot-first.png")
 [ "$out" = "$tmp/shot-first.png" ] || fail "a file alone printed $out"
 expect_shot "a file alone" "$out"
 expect_launch "a file alone" "$MOCK_LOG" ""
+expect_cleanup "a file alone" "$MOCK_LOG"
 
 # One argument that is no state is a file, as before the states.
 export MOCK_LOG=$tmp/log-bogus-file
@@ -118,9 +143,10 @@ out=$(cd "$tmp/cwd" && PATH="$tmp/bin:$PATH" MOCK_LOG="$MOCK_LOG" "$script" bogu
 [ "$out" = "$tmp/cwd/bogus" ] || fail "a lone name printed $out"
 [ -f "$tmp/cwd/bogus" ] || fail "a lone name wrote no screenshot"
 expect_launch "a lone name" "$MOCK_LOG" ""
+expect_cleanup "a lone name" "$MOCK_LOG"
 
 # Two arguments name a state first: an unknown one is refused, before
-# anything is written.
+# anything is written or any container is touched.
 export MOCK_LOG=$tmp/log-bogus-state
 if err=$(PATH="$tmp/bin:$PATH" "$script" bogus "$tmp/shot-bogus.png" 2>&1); then
     fail "an unknown state shot anyway: $err"
@@ -130,5 +156,6 @@ case "$err" in
     *) fail "an unknown state said: $err" ;;
 esac
 [ ! -e "$tmp/shot-bogus.png" ] || fail "an unknown state wrote its file"
+[ ! -e "$tmp/log-bogus-state" ] || fail "an unknown state reached docker"
 
 echo "test-shot-linux-state.sh: pass"

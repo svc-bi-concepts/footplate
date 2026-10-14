@@ -18,10 +18,11 @@
 # every shot.
 # The picture goes to the file named, else to footplate-shot.png under a
 # fresh directory of its own; its path is printed at the end either way.
-# The first run provisions the container and builds footplate, which takes
-# minutes; later runs only rebuild what changed and shoot, in seconds. The
-# container stays running afterwards, so the next shot is cheap; remove it
-# and its two volumes when no shot is wanted again (the names are printed).
+# Every run provisions a fresh container and builds footplate in it; the
+# container is removed when the shot ends, so a shot leaves nothing behind
+# but the picture. Cargo's home and the build tree live in two volumes
+# every shot shares, so the first build takes minutes and later ones only
+# rebuild what changed.
 set -e
 
 caller=$PWD
@@ -85,38 +86,38 @@ fi
 
 # One container per checkout, from its directory's name: two builders' shots
 # never share one, and a container always looks at the checkout that made it.
-# SHOT_CONTAINER names another one.
+# SHOT_CONTAINER names another one. The container is removed when the shot
+# ends; cargo's home and the build tree live in two volumes every shot
+# shares instead, so each build warms from the last one. Two shots at once
+# share them safely: cargo locks the target dir.
 suffix=$(basename "$root")
 suffix=$(printf '%s' "$suffix" | tr -c 'a-zA-Z0-9_.-' '-' | tr 'A-Z' 'a-z')
 name=${SHOT_CONTAINER:-footplate-shot-$suffix}
-cargo_vol=$name-cargo
-target_vol=$name-target
+cargo_vol=footplate-shot-cargo
+target_vol=footplate-shot-target
+
+# The shot leaves nothing behind: the container goes when the script ends,
+# however it ends.
+trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+trap 'exit 1' HUP INT TERM
 
 have() {
     docker exec "$name" sh -c "command -v $1" >/dev/null 2>&1
 }
 
-# A container of the name may already run, from an earlier shot in this
-# checkout: keep it, unless it looks at another checkout, and then remake it.
+# A container of the name may be left by a killed run: remove it before a
+# new one starts.
 if docker inspect "$name" >/dev/null 2>&1; then
-    mounted=$(docker inspect "$name" --format '{{range .Mounts}}{{if eq .Destination "/src"}}{{.Source}}{{end}}{{end}}')
-    if [ "$mounted" != "$root" ]; then
-        docker rm -f "$name" >/dev/null
-    fi
+    docker rm -f "$name" >/dev/null
 fi
-if ! docker inspect "$name" >/dev/null 2>&1; then
-    docker run -d --name "$name" --init \
-        -v "$root:/src:ro" \
-        -v "$cargo_vol:/cargo" -v "$target_vol:/target" \
-        -e CARGO_HOME=/cargo -e RUSTUP_HOME=/cargo/rustup \
-        -e CARGO_TARGET_DIR=/target \
-        -e PATH=/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        debian:13 sleep infinity >/dev/null
-    echo "shot-linux.sh: container $name, volumes $cargo_vol $target_vol" >&2
-fi
-if [ "$(docker inspect "$name" --format '{{.State.Status}}')" != running ]; then
-    docker start "$name" >/dev/null
-fi
+docker run -d --name "$name" --init \
+    -v "$root:/src:ro" \
+    -v "$cargo_vol:/cargo" -v "$target_vol:/target" \
+    -e CARGO_HOME=/cargo -e RUSTUP_HOME=/cargo/rustup \
+    -e CARGO_TARGET_DIR=/target \
+    -e PATH=/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    debian:13 sleep infinity >/dev/null
+echo "shot-linux.sh: container $name, volumes $cargo_vol $target_vol" >&2
 
 # The checkout is mounted read-only: cargo reads it and writes the build to
 # the target volume, so a shot never dirties the checkout it shoots.
@@ -144,7 +145,7 @@ fi
 docker exec "$name" sh -c 'cd /src && /cargo/bin/cargo build --locked' >&2
 
 # seatd lends the device-less session its seat; sway will not start without
-# one. Both outlive the shot, so a second run finds them already there.
+# one.
 docker exec "$name" sh -c 'mkdir -p /run/user/1000 /tmp/shots && chown shot:shot /run/user/1000 /tmp/shots && chmod 700 /run/user/1000
     if ! { [ -f /tmp/shots/seatd.pid ] && kill -0 "$(cat /tmp/shots/seatd.pid)" 2>/dev/null; }; then
         seatd -u shot -g shot >/tmp/shots/seatd.log 2>&1 & echo $! > /tmp/shots/seatd.pid
