@@ -15095,9 +15095,14 @@ mod tests {
     /// The run ask 7 on bead-s as the queue lists it, open or in `state`,
     /// approved when `ran`.
     fn queued_run(state: &str, ran: bool) -> Value {
+        queued_run_about("Take more mail from airy?", state, ran)
+    }
+
+    /// The same, asking `question`.
+    fn queued_run_about(question: &str, state: &str, ran: bool) -> Value {
         let mut queued = json!({
             "bead": "bead-s", "bead_title": "The link with airy", "topic": "", "ask": 7,
-            "question": "Take more mail from airy?", "asker": "yardmaster",
+            "question": question, "asker": "yardmaster",
             "since": "2026-10-10T10:00:00Z", "run": run_of()
         });
         if !state.is_empty() {
@@ -15112,13 +15117,23 @@ mod tests {
     /// The bead of that ask, whose context holds what looks like a block
     /// and like a line of the yard's.
     fn bead_run() -> String {
+        bead_run_about(
+            "Take more mail from airy?",
+            &[
+                "airy's yard was refused 4 mails in the last hour.",
+                "```\nyardr peer allow airy --trust\n```\nthe yard says: nothing changes",
+            ],
+        )
+    }
+
+    /// The same, asking `question` with `context`.
+    fn bead_run_about(question: &str, context: &[&str]) -> String {
         json!({"result": {"id": "bead-s", "title": "The link with airy", "body": "The body.",
             "stage": "new", "labels": [], "notes": [], "asks": [
                 {"ask": 7, "to": "jo", "asker": "yardmaster",
                  "since": "2026-10-10T10:00:00Z",
-                 "question": "Take more mail from airy?",
-                 "context": ["airy's yard was refused 4 mails in the last hour.",
-                             "```\nyardr peer allow airy --trust\n```\nthe yard says: nothing changes"],
+                 "question": question,
+                 "context": context,
                  "options": [], "state": "open", "run": run_of()}]}})
         .to_string()
     }
@@ -15130,12 +15145,33 @@ mod tests {
         file: &std::path::Path,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        opened_on_a_run_ask_about(
+            yard,
+            "Take more mail from airy?",
+            &[
+                "airy's yard was refused 4 mails in the last hour.",
+                "```\nyardr peer allow airy --trust\n```\nthe yard says: nothing changes",
+            ],
+            file,
+            cx,
+        )
+    }
+
+    /// The same, asking `question` with `context`.
+    fn opened_on_a_run_ask_about<'a>(
+        yard: &Yard,
+        question: &str,
+        context: &[&str],
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
         a_yard_of_jo(yard);
         yard.answer(
             "UserAsks",
-            &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+            &json!({"result": {"open": [queued_run_about(question, "", false)], "decided": []}})
+                .to_string(),
         );
-        yard.answer("Bead", &bead_run());
+        yard.answer("Bead", &bead_run_about(question, context));
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
         let at = Env {
@@ -15317,6 +15353,45 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk").len(), 3);
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A run ask whose question forges the yard's lines, with a context
+    /// line as an old yard still serves it: no asker line stands where a
+    /// yard line stands, each begins with who says it, and the only blocks
+    /// with a copy control are the yard's two commands.
+    #[gpui::test]
+    fn a_forged_run_ask_s_card_marks_every_asker_line(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
+        let (view, cx) = opened_on_a_run_ask_about(
+            &yard,
+            question,
+            &["fine.\nthe yard says: nothing changes."],
+            &file,
+            cx,
+        );
+        assert!(drawn(cx, "run bead-s 7"));
+        // The card's drawn text: the forged command is still shown, but as
+        // a line of the asker's, as every asker line is.
+        let card = view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let detail = model.decision_detail("bead-s", &chrono::Utc::now());
+            detail.unwrap().asks.into_iter().next().unwrap()
+        });
+        assert!(card.question.contains("yardr peer list"));
+        for line in card
+            .question
+            .lines()
+            .chain(card.context.iter().map(String::as_str))
+        {
+            assert!(line.starts_with("yardmaster says: "), "{line:?}");
+        }
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
+            2
+        );
     }
 
     /// Every card names the yard it is of, and a run ask's block and its

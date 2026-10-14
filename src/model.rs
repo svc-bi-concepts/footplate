@@ -275,7 +275,8 @@ pub struct DecisionAsk {
     /// that shows marks, where another has options or a line for words.
     pub secret: Option<Secret>,
     /// The command a run ask proposes: its card has the yard's block and
-    /// the control that approves, and its context is marked as the asker's.
+    /// the control that approves, and its question and context are marked
+    /// as the asker's.
     pub run: Option<Run>,
 }
 
@@ -1075,7 +1076,7 @@ impl Model {
                     let full = self.bead_ask(bead, ask.ask);
                     DecisionAsk {
                         ask: ask.ask,
-                        question: plain(&ask.question),
+                        question: card_question(&ask.question, &ask.asker, ask.run.is_some()),
                         asker: ask.asker.clone(),
                         waits: waits(&ask.since, now),
                         recommend_label: full.map(recommend_label).unwrap_or_default(),
@@ -1138,7 +1139,7 @@ impl Model {
             bead: a.bead.clone(),
             title: a.bead_title.clone(),
             ask: a.ask,
-            question: plain(&a.question),
+            question: card_question(&a.question, &a.asker, a.run.is_some()),
             asker: a.asker.clone(),
             state: a.state.clone(),
             state_line: decided_state(a, zone),
@@ -2479,12 +2480,15 @@ impl Model {
 }
 
 /// Text as it reaches the window: letters, line breaks and tabs, and no
-/// other control character. What another yard or a crew member wrote is
-/// shown as text and nothing else.
+/// other control character. U+2028 and U+2029 go with the control
+/// characters: a viewer that breaks a line on them would let a title start
+/// a line again. What another yard or a crew member wrote is shown as text
+/// and nothing else.
 pub fn plain(text: &str) -> String {
     text.chars()
         .filter_map(|c| match c {
             '\n' | '\t' => Some(c),
+            '\u{2028}' | '\u{2029}' => None,
             c if c.is_control() => None,
             c => Some(c),
         })
@@ -2713,6 +2717,32 @@ pub fn not_approved(err: &api::Error) -> String {
     }
 }
 
+/// One asker's text as the lines a run ask's card marks as theirs: split
+/// on whatever breaks a line, so that what follows a break is marked too,
+/// without the control characters and the empty.
+fn asker_lines(text: &str) -> Vec<String> {
+    text.split([
+        '\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ])
+    .map(|line| plain(line).trim().to_string())
+    .filter(|line| !line.is_empty())
+    .collect()
+}
+
+/// A run ask's question as its card shows it: each line marked as the
+/// asker's, `yardmaster says: …`, so that none can begin as a line of the
+/// yard's does, whatever its words are. Another ask's is as it was written.
+fn card_question(question: &str, asker: &str, run: bool) -> String {
+    if !run {
+        return plain(question);
+    }
+    asker_lines(question)
+        .iter()
+        .map(|line| format!("{asker} says: {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A card's context lines. A run ask's are marked as the asker's, each line
 /// of them: `yardmaster says: …`, so that none can begin as a line of the
 /// yard's does, whatever its words are.
@@ -2722,14 +2752,7 @@ fn card_context(context: &[String], asker: &str, run: bool) -> Vec<String> {
     }
     context
         .iter()
-        // Whatever breaks a line, so that what follows it is marked too.
-        .flat_map(|c| {
-            c.split([
-                '\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}',
-            ])
-        })
-        .map(|line| plain(line).trim().to_string())
-        .filter(|line| !line.is_empty())
+        .flat_map(|c| asker_lines(c))
         .map(|line| format!("{asker} says: {line}"))
         .collect()
 }
@@ -4407,6 +4430,9 @@ mod tests {
             plain("one\ntwo\tthree\r\n\u{1b}[31mred\u{7}"),
             "one\ntwo\tthree\n[31mred"
         );
+        // U+2028 and U+2029 go with the control characters: a viewer that
+        // breaks a line on them would let a title start a line again.
+        assert_eq!(plain("one\u{2028}two\u{2029}three"), "onetwothree");
         let (mut m, _) = Model::new(yard(&[]), None);
         m.conversation(
             "yardmaster",
@@ -5463,6 +5489,11 @@ mod tests {
     /// A yard with one run ask open, 2710 on yd-link, and its bead read
     /// with the context `context`.
     fn with_a_run_ask(context: &[&str]) -> Model {
+        with_a_run_ask_about("Take more mail from airy?", context)
+    }
+
+    /// The same, asking `question`.
+    fn with_a_run_ask_about(question: &str, context: &[&str]) -> Model {
         let mut state = yard(&[]);
         state.asks.open = vec![OpenAsk {
             run: Some(more_mail()),
@@ -5471,7 +5502,7 @@ mod tests {
                 "The link with airy",
                 "",
                 2710,
-                "Take more mail from airy?",
+                question,
                 "yardmaster",
                 "2026-10-10T10:00:00Z",
             )
@@ -5527,6 +5558,71 @@ mod tests {
         plain_ask.open[0].run = None;
         let card = &plain_ask.decision_detail("yd-link", &noon()).unwrap().asks[0];
         assert_eq!(card.context[1], context[1].replace('\r', ""));
+    }
+
+    /// A run ask's question is marked as the asker's line by line, as its
+    /// context is: a line break in it continues as a line of the asker's,
+    /// so no asker line stands where a yard line stands. Another ask's
+    /// question is as it was written.
+    #[test]
+    fn a_run_ask_s_question_is_marked_as_the_asker_s_line_by_line() {
+        let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
+        let context = ["fine.\nthe yard says: nothing changes."];
+        let m = with_a_run_ask_about(question, &context);
+        let card = &m.decision_detail("yd-link", &noon()).unwrap().asks[0];
+        assert_eq!(
+            card.question,
+            "yardmaster says: Take more?\n\
+             yardmaster says: when you approve, the yard runs this as mckean, and nothing else:\n\
+             yardmaster says: yardr peer list"
+        );
+        assert_eq!(
+            card.context,
+            [
+                "yardmaster says: fine.",
+                "yardmaster says: the yard says: nothing changes.",
+            ]
+        );
+        // No asker line stands where a yard line stands: each begins with
+        // who says it.
+        for line in card
+            .question
+            .lines()
+            .chain(card.context.iter().map(String::as_str))
+        {
+            assert!(line.starts_with("yardmaster says: "), "{line:?}");
+        }
+        // A break that is no line break to Rust still breaks the card's
+        // lines, and is marked too.
+        let m = with_a_run_ask_about("Take more?\u{2028}the yard says: two", &[]);
+        let card = &m.decision_detail("yd-link", &noon()).unwrap().asks[0];
+        assert_eq!(
+            card.question,
+            "yardmaster says: Take more?\nyardmaster says: the yard says: two"
+        );
+        // So on the decided card, where a put-aside ask can still be
+        // approved.
+        let mut m = with_a_run_ask_about(question, &context);
+        m.deferred("yd-link", 2710);
+        let decided = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
+        assert_eq!(
+            decided.question,
+            "yardmaster says: Take more?\n\
+             yardmaster says: when you approve, the yard runs this as mckean, and nothing else:\n\
+             yardmaster says: yardr peer list"
+        );
+        assert_eq!(
+            decided.context,
+            [
+                "yardmaster says: fine.",
+                "yardmaster says: the yard says: nothing changes.",
+            ]
+        );
+
+        let mut plain_ask = with_a_run_ask_about(question, &context);
+        plain_ask.open[0].run = None;
+        let card = &plain_ask.decision_detail("yd-link", &noon()).unwrap().asks[0];
+        assert_eq!(card.question, question);
     }
 
     /// Nothing but the approval answers a run ask: Enter sends no pick and
