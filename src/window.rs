@@ -5038,7 +5038,8 @@ impl Footplate {
                     })),
             )
         };
-        pane.child(head)
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
             .child(
                 div()
                     .id("settings pane")
@@ -5469,6 +5470,15 @@ impl Footplate {
         let (state, dot, button): (String, Rgba, Option<(&str, &str)>) = match self.switch_busy {
             Some(SwitchBusy::Starting) => ("Starting…".to_string(), palette.accent, None),
             Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), palette.accent, None),
+            _ if self.reconnecting() => (
+                "Reconnecting…".to_string(),
+                palette.faint,
+                match (self.switch_yardr().is_some(), self.switch_note.is_some()) {
+                    (true, _) => Some(("switch start", "Start")),
+                    (false, true) => Some(("switch try again", "try again")),
+                    (false, false) => None,
+                },
+            ),
             _ if self.switch_program.is_none() && self.switch_note.is_some() => match running {
                 true => (
                     "Running · yardr is not fetched".to_string(),
@@ -5490,13 +5500,6 @@ impl Footplate {
                 self.switch_troubles.join("; "),
                 palette.warn,
                 Some(("switch start", "Start")),
-            ),
-            _ if self.reconnecting() => (
-                "Reconnecting…".to_string(),
-                palette.faint,
-                self.switch_status
-                    .as_ref()
-                    .map(|_| ("switch start", "Start")),
             ),
             _ if self.switch_program.is_none() => ("…".to_string(), palette.faint, None),
             _ if self.switch_noyard => ("No yard".to_string(), palette.faint, None),
@@ -5535,7 +5538,7 @@ impl Footplate {
                     .min_w_0()
                     .text_size(rems(0.8))
                     .truncate()
-                    .when(self.reconnecting(), |el| {
+                    .when(state == "Reconnecting…", |el| {
                         el.debug_selector(|| "reconnecting".to_string())
                     })
                     .child(state),
@@ -13843,6 +13846,24 @@ mod tests {
         wait(cx, "that the yard is away", |cx| {
             view.read_with(cx, |v, _| v.down.is_some())
         });
+        wait(cx, "the switch read after the yard went away", |cx| {
+            settled(&view, cx)
+        });
+        // A failed switch read must not hide the follower's reconnecting
+        // state in the head.
+        let (program, note) =
+            view.read_with(cx, |v, _| (v.switch_program.clone(), v.switch_note.clone()));
+        view.update(cx, |v, cx| {
+            v.switch_program = None;
+            v.switch_note = Some("yardr could not be fetched".to_string());
+            cx.notify();
+        });
+        assert!(drawn(cx, "reconnecting"));
+        view.update(cx, |v, cx| {
+            v.switch_program = program;
+            v.switch_note = note;
+            cx.notify();
+        });
         // As last seen: the rows, the conversation, and the quiet line.
         // (The away screen painted before the first answer, so its
         // absence is the state, not the selectors.)
@@ -13982,6 +14003,46 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(typed(&view, cx), "Noted.");
         assert_eq!(far.asked("Mail"), Vec::<Value>::new());
+    }
+
+    /// A far yard has no head status row: even with Settings open instead
+    /// of its conversation, its reconnecting strip stays visible.
+    #[gpui::test]
+    fn a_far_yard_reconnecting_in_settings_says_so(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            yards: vec![settings::Yard::far("far", far.address(), "yard-far.token")],
+            open: "far".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-far.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the far yard's conversation", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        click_on(cx, "settings");
+        wait(cx, "settings to open", |cx| {
+            view.read_with(cx, |v, _| v.settings_open)
+        });
+        assert!(!drawn(cx, "reconnecting"));
+        far.stop();
+        wait(cx, "the far yard to reconnect", |cx| {
+            view.read_with(cx, |v, _| v.reconnecting())
+        });
+        assert!(drawn(cx, "reconnecting"));
     }
 
     /// The one yard the environment names has no other to go to: away, it
