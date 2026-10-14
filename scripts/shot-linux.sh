@@ -5,6 +5,8 @@
 # through Vulkan, and the container has no GPU, so footplate is pointed at
 # Mesa's software driver (lavapipe) alone: the picture proves that is enough.
 # Run it on the Mac, from anywhere: `scripts/shot-linux.sh [output.png]`.
+# With no argument the picture goes to footplate-shot.png under a fresh
+# directory of its own, whose path is printed at the end.
 # The first run provisions the container and builds footplate, which takes
 # minutes; later runs only rebuild what changed and shoot, in seconds. The
 # container stays running afterwards, so the next shot is cheap; remove it
@@ -12,7 +14,11 @@
 set -e
 
 caller=$PWD
-out=${1:-/tmp/footplate-shot.png}
+# No argument: a file under a fresh directory of its own. Every builder on
+# this Mac shares /tmp, and under one fixed name there two shots at once
+# would overwrite each other, and a note could carry another bead's picture.
+# The path is printed at the end, as with an argument.
+out=${1:-$(mktemp -d)/footplate-shot.png}
 case "$out" in
     /*) ;;
     *) out=$caller/$out ;;
