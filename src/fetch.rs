@@ -1214,7 +1214,7 @@ mod tests {
         archive_of(&[
             ("yardr", b'0', BINARY),
             ("README.md", b'0', b"# yardr\n"),
-            ("LICENSE", b'0', b"Apache License\n"),
+            ("LICENSE", b'0', b"Functional Source License\n"),
             ("NOTICE", b'0', b"yardr\n"),
         ])
     }

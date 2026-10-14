@@ -1046,8 +1046,11 @@ a home of its own (`a_real_yardr_takes_the_first_run_s_commands` in
 
 ## Licence
 
-Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Source-available under the Functional Source License, FSL-1.1-ALv2
+([LICENSE](LICENSE)): use, change and run it for anything except a competing
+product or service; each release becomes Apache 2.0 two years after it was
+made available.
 
 The licence covers the code. It does not cover the names yardr and footplate
-or the project's marks (Apache 2.0, section 6): a fork takes a name and a
-mark of its own.
+or the project's marks (the FSL's Trademarks clause): a fork takes a name and
+a mark of its own.
