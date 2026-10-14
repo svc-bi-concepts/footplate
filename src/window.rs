@@ -138,6 +138,19 @@ impl Picture {
     }
 }
 
+/// Whether the web view answers at the setting's base address: a note's
+/// page carries Open when it does, and how to start it when it does not.
+/// Asked once per address; the answer stands until the address changes.
+#[derive(Clone, Debug, PartialEq)]
+enum ViewUp {
+    /// No probe has gone for the setting's address.
+    Unknown,
+    /// A probe is underway for the address.
+    Asked(String),
+    /// The address answered, or did not.
+    Answered(String, bool),
+}
+
 /// A draft that did not go: all of it, to be put back, with the attachment
 /// that kept it, if it was one, and why.
 struct Unsent {
@@ -901,6 +914,9 @@ pub struct Footplate {
     /// The images of the conversations and cards that were open, by hash:
     /// an image never changes under its hash, so each is asked for once.
     images: HashMap<String, Picture>,
+    /// Whether the web view answers at the setting's address: what a
+    /// note's page is drawn with.
+    view_up: ViewUp,
     /// What is attached and not sent, for each conversation of each yard,
     /// and the text typed in those that are not open; the open one's is in
     /// the line. They speak of the open yard alone.
@@ -980,6 +996,10 @@ pub struct Footplate {
     adding: Option<Adding>,
     pairing: bool,
     yard_said: Option<String>,
+    /// The web view's base address as it is typed: what opens a note's
+    /// pages in the browser, and what a typed one that is none says.
+    view: Entity<Line>,
+    view_said: Option<String>,
     /// "Set up a yard here", while it is underway: it stands where the
     /// yard that is not there would, and where its conversation will.
     first_run: Option<Entity<FirstRun>>,
@@ -1117,6 +1137,15 @@ impl Footplate {
         let socket = field("/Users/plantime/.yardr/yard.sock", cx);
         let address = field("https://mac.example.net", cx);
         let code = field("K7QM-2XPD", cx);
+        // Enter in the web view's address keeps it: a note's pages open
+        // through it.
+        let view = cx.new(|cx| {
+            let mut field = Line::new(cx);
+            field.set_placeholder(settings::WEB_VIEW, cx);
+            field
+        });
+        cx.subscribe(&view, |this, _, _: &Submitted, cx| this.submit_view(cx))
+            .detach();
         let selection = cx.new(|_| Selection::default());
         cx.observe(&selection, |_, _, cx| cx.notify()).detach();
         // Auto is the desktop's look: when that changes, the window is
@@ -1230,6 +1259,7 @@ impl Footplate {
             decision: ScrollHandle::new(),
             selection,
             images: HashMap::new(),
+            view_up: ViewUp::Unknown,
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
@@ -1261,6 +1291,8 @@ impl Footplate {
             adding: None,
             pairing: false,
             yard_said: None,
+            view,
+            view_said: None,
             first_run: None,
             means: Means::real(),
             switch_program: None,
@@ -1784,6 +1816,8 @@ impl Footplate {
         if let Some(file) = &file {
             self.settings = Settings::read(file);
         }
+        let base = self.settings.web_view.clone();
+        self.view.update(cx, |line, cx| line.set_text(&base, cx));
         cx.set_global(self.settings.look);
         self.kept = file;
         if self.settings.notifications.on {
@@ -2468,6 +2502,45 @@ impl Footplate {
                     cx.notify();
                 },
             );
+        }
+        self.view_probe(cx);
+    }
+
+    /// Asks whether the web view answers at the setting's base address,
+    /// once per address: a note's page carries Open when it does, and how
+    /// to start it when it does not. Off the window's thread, as a call.
+    fn view_probe(&mut self, cx: &mut Context<Self>) {
+        let base = self.settings.web_view.clone();
+        match &self.view_up {
+            ViewUp::Asked(asked) | ViewUp::Answered(asked, _) if asked == &base => return,
+            _ => {}
+        }
+        self.view_up = ViewUp::Asked(base.clone());
+        cx.spawn(async move |this, cx| {
+            let asked = base.clone();
+            let up = cx
+                .background_executor()
+                .spawn(async move {
+                    api::Address::parse_view(&asked).is_ok_and(|address| address.answers())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(&this.view_up, ViewUp::Asked(asked) if asked == &base) {
+                    this.view_up = ViewUp::Answered(base, up);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the web view answers at the setting's address, if that was
+    /// asked: what a note's page is drawn with.
+    fn view_up_now(&self) -> Option<bool> {
+        match &self.view_up {
+            ViewUp::Answered(asked, up) if asked == &self.settings.web_view => Some(*up),
+            _ => None,
         }
     }
 
@@ -3907,6 +3980,7 @@ impl Footplate {
         let switched_on = settings.notifications.on && !self.settings.notifications.on;
         let yards_moved =
             settings.yards != self.settings.yards || settings.open != self.settings.open;
+        let view_moved = settings.web_view != self.settings.web_view;
         self.settings = settings;
         if switched_on {
             self.ask_permission(cx);
@@ -3916,6 +3990,13 @@ impl Footplate {
             // switch said is gone, and read anew.
             self.switch_reset();
             self.refresh_switch(cx);
+        }
+        if view_moved {
+            // The address the field holds is the setting's again, and a
+            // note's pages go by whether the view answers at it.
+            let base = self.settings.web_view.clone();
+            self.view.update(cx, |line, cx| line.set_text(&base, cx));
+            self.view_probe(cx);
         }
         cx.notify();
     }
@@ -3982,6 +4063,33 @@ impl Footplate {
         self.set(
             Settings {
                 look,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
+    /// Keeps the web view's base address that is typed: a note's pages
+    /// open in the browser through it. What is no address is said, and
+    /// nothing changed.
+    fn submit_view(&mut self, cx: &mut Context<Self>) {
+        let address = self.view.read(cx).text().to_string();
+        cx.notify();
+        match self.settings.clone().with_web_view(&address) {
+            Ok(settings) => {
+                self.view_said = None;
+                self.set(settings, cx);
+            }
+            Err(why) => self.view_said = Some(why),
+        }
+    }
+
+    /// The web view's address is its default again.
+    fn usual_view(&mut self, cx: &mut Context<Self>) {
+        self.view_said = None;
+        self.set(
+            Settings {
+                web_view: settings::WEB_VIEW.to_string(),
                 ..self.settings.clone()
             },
             cx,
@@ -4949,6 +5057,7 @@ impl Footplate {
             })
         };
         let yard = self.talk_yards(setting, palette, cx);
+        let view = self.view_setting(setting, palette, cx);
         let login = self.login_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
@@ -5053,6 +5162,7 @@ impl Footplate {
                     .child(size)
                     .child(look)
                     .child(yard)
+                    .child(view)
                     .child(login)
                     .child(notifications)
                     .child(menu_bar),
@@ -5319,6 +5429,79 @@ impl Footplate {
             true => format!("{help}; switching on starts the yard now as well"),
             false => help.to_string(),
         }
+    }
+
+    /// The web view's base address in the settings: the field it is typed
+    /// in, what keeps it, and what a typed one that is none says. A
+    /// note's pages open in the browser through it; a yard reached by
+    /// pairing opens its pages once this names the address that yard's
+    /// view is reached by.
+    fn view_setting(
+        &self,
+        setting: impl Fn(String, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let focus = self.view.focus_handle(cx);
+        let mut section = setting(
+            "web view".to_string(),
+            "a note's pages open in the browser through it".to_string(),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().w(rems(4.)).flex_none().child("address"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(rems(28.))
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(palette.line)
+                        .bg(palette.side)
+                        .debug_selector(|| "view address".to_string())
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            window.focus(&focus);
+                            window.prevent_default();
+                        })
+                        .child(self.view.clone()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    small_button("save (enter)".to_string(), palette)
+                        .id("view save")
+                        .debug_selector(|| "view save".to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_view(cx))),
+                )
+                .child(
+                    small_button("the usual address".to_string(), palette)
+                        .id("view usual")
+                        .debug_selector(|| "view usual".to_string())
+                        .when(self.settings.web_view == settings::WEB_VIEW, |el| {
+                            el.opacity(0.5)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.usual_view(cx))),
+                ),
+        );
+        if let Some(said) = &self.view_said {
+            section = section.child(
+                div()
+                    .debug_selector(|| "view said".to_string())
+                    .child(said.clone()),
+            );
+        }
+        section
     }
 
     /// The fields of the yard that is being added, or of the code for one
@@ -6288,12 +6471,16 @@ impl Footplate {
             )
     }
 
-    /// An image of a mail or of a note, or the line that says why there
-    /// is none.
-    fn picture(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
+    /// A file of a mail or of a note: an image, a page's row, or the
+    /// line that says why there is none. `note` says it is a note's, whose
+    /// page opens in the browser; a mail's page opens from no mail.
+    fn picture(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
         let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
         if !file.not_taken.is_empty() {
             return line(model::not_taken(file)).into_any_element();
+        }
+        if model::is_page(file) {
+            return self.page_row(file, note, palette).into_any_element();
         }
         match self.images.get(&file.hash) {
             Some(Picture::Here(image)) => img(image.clone())
@@ -6308,6 +6495,76 @@ impl Footplate {
             Some(Picture::Asked) | None => div()
                 .h(px(IMAGE_HEIGHT))
                 .child(line(format!("image, {}…", model::size(file.bytes))))
+                .into_any_element(),
+        }
+    }
+
+    /// A page of a mail or of a note: a row with its size, and for a
+    /// note's page Open in the browser, through the web view's base
+    /// address. Where the view does not answer the row says how to start
+    /// it instead of opening nowhere; a mail's page is the row without
+    /// Open, since the view serves no mail's bytes.
+    fn page_row(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
+        let hash = file.hash.clone();
+        let row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .debug_selector({
+                let hash = hash.clone();
+                move || format!("page row {hash}")
+            });
+        let label = div()
+            .text_color(palette.faint)
+            .child(format!("page, {}", model::size(file.bytes)));
+        if !note {
+            return row
+                .child(label)
+                .child(
+                    div()
+                        .text_color(palette.faint)
+                        .debug_selector(move || format!("page mail {hash}"))
+                        .child("pages open from notes"),
+                )
+                .into_any_element();
+        }
+        match self.view_up_now() {
+            Some(true) => {
+                // The probe answered at this address, so it parses: the
+                // same reading, not another.
+                let url = Address::parse_view(&self.settings.web_view)
+                    .expect("the web view answered at this address")
+                    .page_url(&file.hash);
+                let open = self.means.open.clone();
+                row.child(label)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("page open {hash}")))
+                            .debug_selector(move || format!("page open {hash}"))
+                            .text_color(palette.accent)
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| (open)(&url, cx))
+                            .child("Open"),
+                    )
+                    .into_any_element()
+            }
+            Some(false) => row
+                .child(label)
+                .child(
+                    div()
+                        .text_color(palette.faint)
+                        .debug_selector(move || format!("page start {hash}"))
+                        .child("the web view is not reached: start it with yardr web start"),
+                )
+                .into_any_element(),
+            None => row
+                .child(
+                    div()
+                        .text_color(palette.faint)
+                        .child(format!("page, {}…", model::size(file.bytes))),
+                )
                 .into_any_element(),
         }
     }
@@ -6407,12 +6664,12 @@ impl Footplate {
                         .child(select::text(seq, entry.text, &self.selection)),
                 )
             })
-            .children(
-                entry
-                    .files
-                    .iter()
-                    .map(|file| div().pl_4().pt_1().child(self.picture(file, palette))),
-            )
+            .children(entry.files.iter().map(|file| {
+                div()
+                    .pl_4()
+                    .pt_1()
+                    .child(self.picture(file, false, palette))
+            }))
             .when_some(entry.standing, |el, standing| {
                 el.child(
                     div()
@@ -7637,7 +7894,7 @@ impl Footplate {
                         &self.selection,
                     ));
                 for file in &note.files {
-                    block = block.child(self.picture(file, palette));
+                    block = block.child(self.picture(file, true, palette));
                 }
                 out = out.child(block);
             }
@@ -9545,6 +9802,82 @@ mod tests {
         .to_string()
     }
 
+    fn bead_note_page(page: &str) -> String {
+        json!({"result": {
+            "id": "bead-a", "title": "Move the links",
+            "body": "The body of bead-a.",
+            "stage": "new", "labels": ["topic:linear-out"],
+            "notes": [
+                {"seq": 2, "kind": "note", "author": "yardmaster",
+                 "text": "the mockup, like this:", "at": "2026-10-10T09:30:00Z",
+                 "files": [{"hash": page, "type": "text/html; charset=utf-8", "bytes": 42000}]},
+                {"seq": 3, "kind": "note", "author": "yardmaster",
+                 "text": "no pages here", "at": "2026-10-10T09:31:00Z"}
+            ],
+            "asks": [
+                {"ask": 3, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Move them now?",
+                 "context": ["The links file declares the new source."],
+                 "options": [
+                    {"label": "Move them now", "consequence": "all 64 links point tonight"},
+                    {"label": "You decide", "consequence": "leave it to yardmaster"}
+                 ],
+                 "recommend": 1, "why": "the test passed",
+                 "state": "open"}
+            ]
+        }})
+        .to_string()
+    }
+
+    /// A port whose listener answers the web view's front page to every
+    /// connection: the view, up. Its base address.
+    fn view_up() -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut conn in listener.incoming().flatten() {
+                let mut asked = [0u8; 1024];
+                let _ = conn.read(&mut asked);
+                let _ = conn.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        base
+    }
+
+    /// A base address nothing answers at: one that was bound, and is not
+    /// now. The view, down.
+    fn view_down() -> String {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Whether the window has the web view up, down, or not asked yet.
+    fn view_answered(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<bool> {
+        view.read_with(cx, |v, _| v.view_up_now())
+    }
+
+    /// The pages the window opens in the browser from here on: in place
+    /// of the browser.
+    fn opened_pages(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<RefCell<Vec<String>>> {
+        let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+        let pages = opened.clone();
+        view.update(cx, |v, _| {
+            v.means.open = Rc::new(move |url, _| pages.borrow_mut().push(url.to_string()));
+        });
+        opened
+    }
+
     fn chosen_of(
         view: &Entity<Footplate>,
         cx: &mut VisualTestContext,
@@ -9781,6 +10114,133 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         assert_eq!(yard.blobs_asked().len(), 2);
+    }
+
+    #[gpui::test]
+    fn a_note_s_page_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        // The note names a page, which the yard is never asked for.
+        let page = "ab".repeat(32);
+        yard.answer("Bead", &bead_note_page(&page));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // The view answers at its address: the row carries Open.
+        let base = view_up();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        // One key expands the card: the page is a row with Open, and the
+        // yard is asked for none of its bytes.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        assert!(drawn(cx, &format!("page row {page}")));
+        assert!(drawn(cx, &format!("page open {page}")));
+        assert_eq!(yard.blobs_asked(), Vec::<String>::new());
+        assert_eq!(picture(&view, cx, &page), "");
+        // Open hands the view's page to the browser.
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("page open {page}"));
+        cx.run_until_parked();
+        assert_eq!(opened.borrow().as_slice(), [format!("{base}/blobs/{page}")]);
+    }
+
+    #[gpui::test]
+    fn a_note_s_page_says_how_to_start_the_view_where_it_does_not_answer(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        let page = "ab".repeat(32);
+        yard.answer("Bead", &bead_note_page(&page));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // Nothing answers at the view's address: the row says how to
+        // start it, instead of opening nowhere.
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: view_down(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the view not answering", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        assert!(drawn(cx, &format!("page row {page}")));
+        assert!(drawn(cx, &format!("page start {page}")));
+        assert!(!drawn(cx, &format!("page open {page}")));
+    }
+
+    #[gpui::test]
+    fn a_mail_s_page_is_a_row_without_open(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The mail carries a page, which the yard is never asked for.
+        let page = "ab".repeat(32);
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Like this?", "read": false,
+                 "files": [{"hash": page, "type": "text/html; charset=utf-8", "bytes": 42000}]}
+            ]})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Like this?"], cx);
+        // The page is a row without Open: pages open from notes.
+        assert!(drawn(cx, &format!("page row {page}")));
+        assert!(drawn(cx, &format!("page mail {page}")));
+        assert!(!drawn(cx, &format!("page open {page}")));
+        assert_eq!(yard.blobs_asked(), Vec::<String>::new());
+        assert_eq!(picture(&view, cx, &page), "");
     }
 
     /// The words of a card are typed in the same line as a mail: shift
@@ -11346,6 +11806,50 @@ mod tests {
         cx.simulate_keystrokes("secondary-=");
         assert_eq!(settings_of(&view, cx).text, 15);
         assert!(view.read_with(cx, |v, _| v.unkept.is_some()));
+    }
+
+    #[gpui::test]
+    fn the_web_view_s_address_is_kept_from_the_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        // The field holds the view's default, from the file that keeps
+        // nothing of it.
+        assert_eq!(settings_of(&view, cx).web_view, settings::WEB_VIEW);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "view address"));
+        // What is no address is said, and nothing changed.
+        view.update(cx, |v, cx| {
+            v.view.update(cx, |line, cx| line.set_text("plantime", cx))
+        });
+        click_on(cx, "view save");
+        assert_eq!(settings_of(&view, cx).web_view, settings::WEB_VIEW);
+        assert!(drawn(cx, "view said"));
+        // Kept, it is the setting's, and the file has it.
+        let base = view_up();
+        view.update(cx, |v, cx| {
+            v.view.update(cx, |line, cx| line.set_text(&base, cx))
+        });
+        click_on(cx, "view save");
+        assert_eq!(settings_of(&view, cx).web_view, base);
+        assert_eq!(Settings::read(&file).web_view, base);
+        // Said no longer: the test frame's bounds only ever grow, so
+        // what is gone is read, not drawn.
+        assert_eq!(view.read_with(cx, |v, _| v.view_said.clone()), None);
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        // The usual address is the default again.
+        click_on(cx, "view usual");
+        assert_eq!(settings_of(&view, cx).web_view, settings::WEB_VIEW);
+        assert_eq!(Settings::read(&file).web_view, settings::WEB_VIEW);
     }
 
     /// With the yard away the left column has its head and its foot: the

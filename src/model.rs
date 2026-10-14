@@ -243,7 +243,7 @@ pub struct CardOption {
 pub struct CardNote {
     pub author: String,
     pub text: String,
-    /// The images the note carries, drawn below its words.
+    /// The files the note carries, drawn below its words.
     pub files: Vec<BlobRef>,
 }
 
@@ -2876,18 +2876,31 @@ pub fn over_cap(bytes: usize, cap: u64) -> Option<String> {
     })
 }
 
+/// Whether `file` is a page, an HTML blob, and not an image: what its
+/// type says before any `;`.
+pub fn is_page(file: &BlobRef) -> bool {
+    file.kind
+        .split(';')
+        .next()
+        .is_some_and(|kind| kind.trim() == "text/html")
+}
+
 /// The hash of `file` among the images to ask for, once: one this yard
-/// did not take from a linked yard is none it has.
+/// did not take from a linked yard is none it has, and a page is opened
+/// in the browser, not asked for.
 fn push_image<'a>(out: &mut Vec<&'a str>, file: &'a BlobRef) {
-    if file.not_taken.is_empty() && !out.contains(&file.hash.as_str()) {
+    if !is_page(file) && file.not_taken.is_empty() && !out.contains(&file.hash.as_str()) {
         out.push(&file.hash);
     }
 }
 
-/// The line for an image of mail from a linked yard that this yard did not
+/// The line for a file of mail from a linked yard that this yard did not
 /// take, with the yard's reason.
 pub fn not_taken(file: &BlobRef) -> String {
-    format!("image, {}, not taken: {}", size(file.bytes), file.not_taken)
+    match is_page(file) {
+        true => format!("page, {}, not taken: {}", size(file.bytes), file.not_taken),
+        false => format!("image, {}, not taken: {}", size(file.bytes), file.not_taken),
+    }
 }
 
 /// A number of bytes for a person: `70 bytes`, `812 KiB`, `8.5 MiB`.
@@ -4465,6 +4478,10 @@ mod tests {
         json!({"hash": hash, "type": "image/png", "bytes": 70})
     }
 
+    fn html(hash: &str) -> Value {
+        json!({"hash": hash, "type": "text/html; charset=utf-8", "bytes": 42000})
+    }
+
     #[test]
     fn a_mail_s_images_are_shown_with_it_from_the_yard_and_from_the_stream() {
         let (mut m, _) = Model::new(yard(&[]), None);
@@ -4520,6 +4537,43 @@ mod tests {
         // Another conversation has none of them.
         m.select(Selected::Conversation("assembly".into()));
         assert_eq!(m.images(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_page_is_no_image_to_ask_for() {
+        assert!(is_page(&BlobRef {
+            kind: "text/html; charset=utf-8".into(),
+            ..BlobRef::default()
+        }));
+        assert!(is_page(&BlobRef {
+            kind: "text/html".into(),
+            ..BlobRef::default()
+        }));
+        assert!(!is_page(&BlobRef {
+            kind: "image/png".into(),
+            ..BlobRef::default()
+        }));
+        assert!(!is_page(&BlobRef::default()));
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let files: Vec<BlobRef> = serde_json::from_value(json!([html("pp"), png("aa")])).unwrap();
+        m.conversation(
+            "yardmaster",
+            vec![Letter {
+                files: files.clone(),
+                ..letter(12, "yardmaster", "jo", "Like this?")
+            }],
+        );
+        // The mail carries both, and only the image is asked for.
+        assert_eq!(m.entries()[0].files, files);
+        assert_eq!(m.images(), ["aa"]);
+        // One this yard did not take is a page's line, not an image's.
+        let mut refused = html("qq");
+        refused["not_taken"] = json!("the link does not take files");
+        let file: BlobRef = serde_json::from_value(refused).unwrap();
+        assert_eq!(
+            not_taken(&file),
+            "page, 41 KiB, not taken: the link does not take files"
+        );
     }
 
     #[test]

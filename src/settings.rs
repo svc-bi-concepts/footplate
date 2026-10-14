@@ -32,6 +32,10 @@ pub const TEXT_MAX: u8 = 20;
 /// by this run's socket.
 pub const HERE: &str = "this machine";
 
+/// The web view's base address where none is set: its default, as `yardr
+/// web start` prints it. A note's pages open in the browser through it.
+pub const WEB_VIEW: &str = "http://127.0.0.1:8791/";
+
 /// A yard the window can show: its name in the switcher, and how it is
 /// reached. Near, by its socket on this machine, or far, at an address, as
 /// a device of its user with a token in a file of its own. What says
@@ -128,10 +132,20 @@ pub struct Settings {
     /// window does ([`Settings::closing_hides`]).
     #[serde(skip_serializing_if = "is_on")]
     pub menu_bar: bool,
+    /// The web view's base address, through which a note's pages open in
+    /// the browser. The view's default until one is set, and left out of
+    /// the file while it is that. A yard reached by pairing opens its
+    /// pages once this names the address that yard's view is reached by.
+    #[serde(skip_serializing_if = "is_usual_view")]
+    pub web_view: String,
 }
 
 fn is_on(on: &bool) -> bool {
     *on
+}
+
+fn is_usual_view(view: &str) -> bool {
+    view == WEB_VIEW
 }
 
 fn nobody_chose(yards: &[Yard]) -> bool {
@@ -151,6 +165,7 @@ struct Kept {
     address: String,
     notifications: Notify,
     menu_bar: bool,
+    web_view: String,
 }
 
 impl Default for Kept {
@@ -164,6 +179,7 @@ impl Default for Kept {
             address: String::new(),
             notifications: Notify::default(),
             menu_bar: true,
+            web_view: String::new(),
         }
     }
 }
@@ -203,6 +219,10 @@ impl From<Kept> for Settings {
             open,
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
+            web_view: match kept.web_view.trim() {
+                "" => WEB_VIEW.to_string(),
+                _ => kept.web_view,
+            },
         }
     }
 }
@@ -296,6 +316,7 @@ impl Default for Settings {
             open: String::new(),
             notifications: Notify::default(),
             menu_bar: true,
+            web_view: WEB_VIEW.to_string(),
         }
     }
 }
@@ -434,6 +455,20 @@ impl Settings {
             }
             None => self.yards.push(yard),
         }
+        Ok(self)
+    }
+
+    /// With the web view's base address `address`: what opens a note's
+    /// pages in the browser. What is no address is refused with why, and
+    /// nothing changed; empty is the view's default again.
+    pub fn with_web_view(mut self, address: &str) -> Result<Settings, String> {
+        let address = address.trim();
+        if address.is_empty() {
+            self.web_view = WEB_VIEW.to_string();
+            return Ok(self);
+        }
+        Address::parse_view(address)?;
+        self.web_view = address.to_string();
         Ok(self)
     }
 
@@ -1325,6 +1360,49 @@ mod tests {
         assert_eq!(Settings::read(&file), off);
         assert!(!off.closing_hides(true));
         assert!(!off.closing_hides(false));
+    }
+
+    #[test]
+    fn the_web_view_s_address_is_its_default_until_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Nobody chose: the view's default, and a file from before it says
+        // nothing of it, as a file that keeps something else still says
+        // nothing.
+        let usual = Settings::default();
+        assert_eq!(usual.web_view, WEB_VIEW);
+        fs::write(&file, "{\"text\": 15}").unwrap();
+        assert_eq!(Settings::read(&file).web_view, WEB_VIEW);
+        usual.write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("web_view"));
+        // An empty one is the default again.
+        fs::write(&file, "{\"web_view\": \"\"}").unwrap();
+        assert_eq!(Settings::read(&file).web_view, WEB_VIEW);
+        // Set, it is kept and read back.
+        let set = usual
+            .with_web_view("https://plantime.example.net:8443/yard/")
+            .unwrap();
+        set.write(&file).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"web_view\": \"https://plantime.example.net:8443/yard/\"\n}\n"
+        );
+        assert_eq!(Settings::read(&file), set);
+        // What is no address is refused with why, in the view's words.
+        let why = Settings::default().with_web_view("plantime").unwrap_err();
+        assert_eq!(
+            why,
+            "\"plantime\" is no address of the web view: one starts with https://, or with http:// for the web view on this machine"
+        );
+        let why = Settings::default()
+            .with_web_view("http://plantime:8791")
+            .unwrap_err();
+        assert!(
+            why.starts_with(
+                "http://plantime:8791 is refused: plain http is for the web view on this machine alone"
+            ),
+            "{why}"
+        );
     }
 
     #[test]

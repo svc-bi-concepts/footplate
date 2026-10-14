@@ -135,14 +135,14 @@ impl Settings {
     }
 }
 
-/// An image mail carries, or a note of a bead, as a letter or a note
-/// names it.
+/// A file mail carries, or a note of a bead: an image, or a page. As
+/// a letter or a note names it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct BlobRef {
     /// The SHA-256 of its bytes, in hex: `GET /blobs/<hash>` answers them.
     #[serde(default)]
     pub hash: String,
-    /// `image/png` or `image/jpeg`.
+    /// `image/png`, `image/jpeg`, or `text/html; charset=utf-8` for a page.
     #[serde(default, rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -237,7 +237,7 @@ pub struct Letter {
     pub text: String,
     #[serde(default)]
     pub read: bool,
-    /// The images it carries, in the order it was sent with them.
+    /// The files it carries, in the order it was sent with them.
     #[serde(default, deserialize_with = "or_default")]
     pub files: Vec<BlobRef>,
     /// On mail to a linked yard only: `queued`, `sent` or `failed`.
@@ -582,7 +582,7 @@ pub struct BeadNote {
     pub text: String,
     #[serde(default)]
     pub at: String,
-    /// The images it carries, in the order they were attached with.
+    /// The files it carries, in the order they were attached with.
     #[serde(default, deserialize_with = "or_default")]
     pub files: Vec<BlobRef>,
 }
@@ -635,7 +635,7 @@ impl Event {
         self.data.get(field).and_then(Value::as_u64).unwrap_or(0)
     }
 
-    /// The images of a `mail` event, none when it carries none.
+    /// The files of a `mail` event, none when it carries none.
     pub fn files(&self) -> Vec<BlobRef> {
         self.data
             .get("files")
@@ -710,19 +710,66 @@ pub struct Address {
     path: String,
 }
 
+/// What an address is read as: a yard's, or the web view's. The rules
+/// are the same; only the refusals say which.
+#[derive(Clone, Copy)]
+enum AddressOf {
+    Yard,
+    View,
+}
+
+impl AddressOf {
+    /// What the refusals call one: `a yard`, `the web view`.
+    fn noun(self) -> &'static str {
+        match self {
+            AddressOf::Yard => "a yard",
+            AddressOf::View => "the web view",
+        }
+    }
+
+    /// What stands before it, as the plain-HTTP refusal names it.
+    fn front(self) -> &'static str {
+        match self {
+            AddressOf::Yard => "the yard's listener",
+            AddressOf::View => "the view",
+        }
+    }
+
+    /// Why plain HTTP off this machine is refused, past what both share:
+    /// a yard's token would cross the network, and the view has none.
+    fn secret(self) -> &'static str {
+        match self {
+            AddressOf::Yard => " The token would cross the network for anyone to read.",
+            AddressOf::View => "",
+        }
+    }
+}
+
 impl Address {
     /// Reads an address as `yardr user device pair` prints it. Plain HTTP
     /// is refused off this machine: the yard does no TLS and cannot tell
     /// whether anything in front of it does, so the rule is the client's.
     pub fn parse(text: &str) -> std::result::Result<Address, String> {
+        Address::parse_as(text, AddressOf::Yard)
+    }
+
+    /// Reads the web view's base address, as `yardr web start` prints it:
+    /// by the same rules as a yard's, since a page's bytes are the yard's
+    /// to keep. Plain HTTP off this machine is refused with them.
+    pub fn parse_view(text: &str) -> std::result::Result<Address, String> {
+        Address::parse_as(text, AddressOf::View)
+    }
+
+    fn parse_as(text: &str, of: AddressOf) -> std::result::Result<Address, String> {
         let text = text.trim();
+        let noun = of.noun();
         let (tls, rest) = if let Some(rest) = text.strip_prefix("https://") {
             (true, rest)
         } else if let Some(rest) = text.strip_prefix("http://") {
             (false, rest)
         } else {
             return Err(format!(
-                "{text:?} is no address of a yard: one starts with https://, or with http:// for a yard on this machine"
+                "{text:?} is no address of {noun}: one starts with https://, or with http:// for {noun} on this machine"
             ));
         };
         // The address goes into the head of every request as it is.
@@ -731,11 +778,11 @@ impl Address {
             .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '?' | '#' | '@'))
         {
             return Err(format!(
-                "{text:?} is no address of a yard: it has no space, no query, no # and no name before an @"
+                "{text:?} is no address of {noun}: it has no space, no query, no # and no name before an @"
             ));
         }
         let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-        let no_host = || format!("{text:?} is no address of a yard: it names no host");
+        let no_host = || format!("{text:?} is no address of {noun}: it names no host");
         let (host, port) = match authority.strip_prefix('[') {
             // "[::1]:8790"
             Some(v6) => {
@@ -764,7 +811,7 @@ impl Address {
         let port = match port {
             Some(port) => port
                 .parse()
-                .map_err(|_| format!("{text:?} is no address of a yard: {port:?} is no port"))?,
+                .map_err(|_| format!("{text:?} is no address of {noun}: {port:?} is no port"))?,
             None if tls => 443,
             None => 80,
         };
@@ -772,7 +819,9 @@ impl Address {
             || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
         if !tls && !here {
             return Err(format!(
-                "{text} is refused: plain http is for a yard on this machine alone (127.0.0.1, ::1, localhost). The token would cross the network for anyone to read. Give the https:// address of what stands in front of the yard's listener."
+                "{text} is refused: plain http is for {noun} on this machine alone (127.0.0.1, ::1, localhost).{} Give the https:// address of what stands in front of {}.",
+                of.secret(),
+                of.front()
             ));
         }
         Ok(Address {
@@ -792,6 +841,36 @@ impl Address {
             && self.host.eq_ignore_ascii_case(&other.host)
             && self.port == other.port
             && self.path == other.path
+    }
+
+    /// Whether the web view answers at this base address: one GET of its
+    /// front page. Any HTTP answer says it runs, even a refusal, which is
+    /// the browser's to show and not this probe's. The bytes go unread:
+    /// the connection closes with them.
+    pub fn answers(&self) -> bool {
+        let mut conn = match self.connect(Some(CALL_TIMEOUT)) {
+            Ok(conn) => conn,
+            Err(_) => return false,
+        };
+        let asked = conn
+            .write_all(
+                format!(
+                    "GET {}/ HTTP/1.1\r\nHost: {}\r\nUser-Agent: {CLIENT}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+                    self.path, self.authority
+                )
+                .as_bytes(),
+            )
+            .and(conn.flush());
+        if asked.is_err() {
+            return false;
+        }
+        respond(conn).is_ok()
+    }
+
+    /// The browser's URL for the page `hash` at this base address: the
+    /// view's `/blobs/` route under it.
+    pub fn page_url(&self, hash: &str) -> String {
+        format!("{}{}/blobs/{hash}", self.origin(), self.path)
     }
 
     fn connect(&self, timeout: Option<Duration>) -> io::Result<Conn> {
@@ -1967,6 +2046,73 @@ mod tests {
             let why = Address::parse(none).unwrap_err();
             assert!(why.contains("is no address of a yard"), "{none:?}: {why}");
         }
+    }
+
+    #[test]
+    fn the_web_view_s_address_reads_as_an_address_in_the_view_s_words() {
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        assert_eq!(
+            (address.tls, address.host.as_str(), address.port),
+            (false, "127.0.0.1", 8791)
+        );
+        // What is no address is refused as the view's, not a yard's.
+        let why = Address::parse_view("plantime").unwrap_err();
+        assert_eq!(
+            why,
+            "\"plantime\" is no address of the web view: one starts with https://, or with http:// for the web view on this machine"
+        );
+        let why = Address::parse_view("http://plantime:8791").unwrap_err();
+        assert_eq!(
+            why,
+            "http://plantime:8791 is refused: plain http is for the web view on this machine alone (127.0.0.1, ::1, localhost). Give the https:// address of what stands in front of the view."
+        );
+        let why = Address::parse_view("https://mac.example.net:port").unwrap_err();
+        assert!(why.contains("is no address of the web view"), "{why}");
+    }
+
+    #[test]
+    fn a_page_s_url_is_the_view_s_blobs_route_under_its_base() {
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        assert_eq!(
+            address.page_url(&"ab".repeat(32)),
+            format!("http://127.0.0.1:8791/blobs/{}", "ab".repeat(32))
+        );
+        // With no slash, and under a proxy's path, alike.
+        let address = Address::parse_view("http://127.0.0.1:8791").unwrap();
+        assert_eq!(address.page_url("cd"), "http://127.0.0.1:8791/blobs/cd");
+        let address = Address::parse_view("https://mac.example.net/yard/").unwrap();
+        assert_eq!(
+            address.page_url("cd"),
+            "https://mac.example.net/yard/blobs/cd"
+        );
+    }
+
+    #[test]
+    fn the_view_answers_where_it_runs_and_nowhere_else() {
+        // Any HTTP answer says it runs, even a refusal.
+        for status in [200, 404, 421] {
+            let view = answering(
+                format!(
+                    "HTTP/1.1 {status} Reply\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .into_bytes(),
+            );
+            assert!(
+                Address::parse_view(&view).unwrap().answers(),
+                "status {status}"
+            );
+        }
+        // A port nothing listens on: one that was bound, and is not now.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(
+            !Address::parse_view(&format!("http://127.0.0.1:{port}"))
+                .unwrap()
+                .answers()
+        );
     }
 
     /// A secret is given in its own call, by the socket and at an address
