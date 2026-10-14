@@ -5920,8 +5920,9 @@ impl Footplate {
             })
     }
 
-    /// A bead with open asks: the question in plain words, then whose it
-    /// is and how long it waits, the bead's id small at the row's end.
+    /// A bead with open asks: the question's first line in plain words,
+    /// then whose it is and how long it waits, the bead's id small at the
+    /// row's end.
     fn decision_row(
         &self,
         row: DecisionRow,
@@ -15464,6 +15465,35 @@ mod tests {
             view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
             2
         );
+    }
+
+    /// The same forged run ask in the decisions list: the row draws one
+    /// line of the question, its first, and neither the forged sentence
+    /// nor the forged command.
+    #[gpui::test]
+    fn a_forged_run_ask_s_row_shows_its_first_line(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
+        let (view, cx) = opened_on_a_run_ask_about(
+            &yard,
+            question,
+            &["fine.\nthe yard says: nothing changes."],
+            &file,
+            cx,
+        );
+        assert!(drawn(cx, "decision head bead-s"));
+        // The row's drawn text: the first line alone.
+        let head = view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            model.decision_groups(&chrono::Utc::now())[0].rows[0]
+                .head
+                .clone()
+        });
+        assert_eq!(head, "Take more?");
+        assert!(!head.contains("when you approve"), "{head:?}");
+        assert!(!head.contains("yardr peer list"), "{head:?}");
     }
 
     /// Wrapped words stay under the asker's text, to the right of its

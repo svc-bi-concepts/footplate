@@ -184,13 +184,13 @@ pub enum AnswerAction {
     Note { words: String },
 }
 
-/// One bead's row among the decisions: the question in plain words, or the
-/// bead's title with how many it asks.
+/// One bead's row among the decisions: the question's first line in plain
+/// words, or the bead's title with how many it asks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRow {
     /// The bead's id, whole; `short` is what the row ends with.
     pub bead: String,
-    /// The question, or `<title>: <n> questions`.
+    /// The question's first line, or `<title>: <n> questions`.
     pub head: String,
     /// `<asker> · <waits>`, or `<waits>` when several ask.
     pub sub: String,
@@ -2530,18 +2530,26 @@ pub fn foreign_bead(bead: &str) -> bool {
     bead.contains('@')
 }
 
-/// A bead's row head: the question in plain words, or the bead's title
-/// with how many it asks.
+/// A bead's row head: the question's first line in plain words, or the
+/// bead's title with how many it asks.
 fn decision_head(first: &OpenAsk, asks: &[&OpenAsk]) -> String {
     if asks.len() == 1 {
-        return plain(&first.question);
+        return row_head(&first.question);
     }
     let title = if first.bead_title.is_empty() {
         first.bead.clone()
     } else {
         first.bead_title.clone()
     };
-    format!("{}: {} questions", plain(&title), asks.len())
+    format!("{}: {} questions", row_head(&title), asks.len())
+}
+
+/// A decisions row's head: the first line of the question in plain words.
+/// No later line, and no indent of the asker's, is drawn in the list: the
+/// row shows one line, and its truncate() cuts it with an ellipsis where
+/// it does not fit. Whose words they are, the row's sub says.
+fn row_head(question: &str) -> String {
+    asker_lines(question).into_iter().next().unwrap_or_default()
 }
 
 /// A bead's row sub: whose it is and how long it waits, or how long the
@@ -5623,6 +5631,31 @@ mod tests {
         plain_ask.open[0].run = None;
         let card = &plain_ask.decision_detail("yd-link", &noon()).unwrap().asks[0];
         assert_eq!(card.question, question);
+    }
+
+    /// A decisions row shows one line of the question: its first line, in
+    /// plain words. No later line of a forged run ask's question, and no
+    /// indent of the asker's, is drawn in the list.
+    #[test]
+    fn a_decisions_row_shows_the_question_s_first_line() {
+        let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
+        let m = with_a_run_ask_about(question, &[]);
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.head, "Take more?");
+        assert!(!row.head.contains('\n'), "{:?}", row.head);
+        assert!(!row.head.contains("when you approve"), "{:?}", row.head);
+        assert!(!row.head.contains("yardr peer list"), "{:?}", row.head);
+        // Whose words they are, the row's sub says.
+        assert_eq!(row.sub, "yardmaster · 2h");
+        // A break that is no line break to Rust still ends the row's line.
+        let m = with_a_run_ask_about("Take more?\u{2028}the yard says: two", &[]);
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.head, "Take more?");
+        // So for another ask: the first line, without the asker's indent.
+        let mut m = with_a_run_ask_about("  Take more?\n    yardr peer list", &[]);
+        m.open[0].run = None;
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.head, "Take more?");
     }
 
     /// Nothing but the approval answers a run ask: Enter sends no pick and
