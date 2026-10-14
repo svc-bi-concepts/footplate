@@ -7,9 +7,18 @@ script=$script_dir/shot-linux.sh
 tmp=$(mktemp -d)
 first_dir=
 second_dir=
+# The two directories are named by the script under test, so they are never
+# removed with what they hold: only the shot is, and then the directory if
+# that left it empty. A script that went wrong and wrote into a directory it
+# shares (/tmp, the checkout) costs this test nothing but its own files.
+remove_shot_dir() {
+    [ -n "$1" ] || return 0
+    rm -f "$1/footplate-shot.png"
+    rmdir "$1" 2>/dev/null || true
+}
 cleanup() {
-    [ -z "$first_dir" ] || rm -rf "$first_dir"
-    [ -z "$second_dir" ] || rm -rf "$second_dir"
+    remove_shot_dir "$first_dir"
+    remove_shot_dir "$second_dir"
     rm -rf "$tmp"
 }
 trap cleanup EXIT
