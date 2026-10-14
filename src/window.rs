@@ -1173,6 +1173,22 @@ impl Footplate {
                 "Land it once the last bead is green.".to_string(),
             );
         }
+        // The refusal shot pairs with a yard at an http address off this
+        // machine: the way's fields stand open and filled, and pair was
+        // pressed, so the refusal is the line under them. A debug build's
+        // alone, as the settings and the draft above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("refusal") {
+            this.adding = Some(Adding::Far);
+            this.yard_name
+                .update(cx, |line, cx| line.set_text("droplet", cx));
+            this.address.update(cx, |line, cx| {
+                line.set_text("http://droplet-yard.tail5cf2e8.ts.net:8790", cx)
+            });
+            this.code
+                .update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
+            this.pair(cx);
+        }
         this
     }
 
@@ -5970,9 +5986,10 @@ impl Footplate {
     }
 
     /// The fields of the yard that is being added, or of the code for one
-    /// that is paired again, with the button under them and what came of
-    /// the last change to the yards: under the yards in the settings, and
-    /// under the ways to a yard where there is none.
+    /// that is paired again, with the button under them, what came of the
+    /// last change to the yards under that, and the help under it: under
+    /// the yards in the settings, and under the ways to a yard where there
+    /// is none.
     fn yard_asked(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let typed = |name: &'static str, line: &Entity<Line>, cx: &mut Context<Self>| {
             let focus = line.focus_handle(cx);
@@ -6000,7 +6017,13 @@ impl Footplate {
                         .child(line.clone()),
                 )
         };
-        let faint = |text: String| div().text_sm().text_color(palette.faint).child(text);
+        let faint = |text: String| {
+            div()
+                .debug_selector(|| "yard help".to_string())
+                .text_sm()
+                .text_color(palette.faint)
+                .child(text)
+        };
         let mut asked: Vec<AnyElement> = Vec::new();
         let submit = |text: &str, cx: &mut Context<Self>| {
             div().flex().child(
@@ -6016,6 +6039,11 @@ impl Footplate {
             false => "pair (enter)",
         };
         const OPERATOR: &str = "The yard's operator opens a pairing for this device and gives you the address and the code: yardr user device pair <user> <device>. A code is for one yard, and is used up there.";
+        // What came of the last change stands directly under the button,
+        // where a person looks the moment it is pressed: the help stands
+        // under that. Below the help, a refusal falls off a short window
+        // while the button stays in it, and the press looks silent.
+        let mut help: Option<AnyElement> = None;
         match &self.adding {
             None => {}
             Some(Adding::Near) => {
@@ -6023,12 +6051,14 @@ impl Footplate {
                     typed("name", &self.yard_name, cx).into_any_element(),
                     typed("socket", &self.socket, cx).into_any_element(),
                     submit("add (enter)", cx).into_any_element(),
+                ]);
+                help = Some(
                     faint(
                         "A yard of this machine is reached by its socket: no token or pairing. This field starts at this run's socket; change it to another home's yard socket (<its home>/.yardr/yard.sock)."
                             .to_string(),
                     )
                     .into_any_element(),
-                ]);
+                );
             }
             Some(Adding::Far) => {
                 asked.extend([
@@ -6036,11 +6066,13 @@ impl Footplate {
                     typed("address", &self.address, cx).into_any_element(),
                     typed("code", &self.code, cx).into_any_element(),
                     submit(pair, cx).into_any_element(),
+                ]);
+                help = Some(
                     faint(format!(
                         "{OPERATOR} With no name it is called by its address's host. The device's token is kept in a file of this yard's own beside the settings, for you alone, and never with the settings."
                     ))
                     .into_any_element(),
-                ]);
+                );
             }
             Some(Adding::Again(name)) => {
                 let (whose, address) = match &self.env.yard {
@@ -6068,8 +6100,8 @@ impl Footplate {
                         .into_any_element(),
                     typed("code", &self.code, cx).into_any_element(),
                     submit(pair, cx).into_any_element(),
-                    faint(format!("{OPERATOR} {token}")).into_any_element(),
                 ]);
+                help = Some(faint(format!("{OPERATOR} {token}")).into_any_element());
             }
         }
         if let Some(said) = &self.yard_said {
@@ -6080,6 +6112,7 @@ impl Footplate {
                     .into_any_element(),
             );
         }
+        asked.extend(help);
         asked
     }
 
@@ -14279,6 +14312,18 @@ mod tests {
             said.starts_with("http://mac.example.net is refused: plain http"),
             "{said}"
         );
+        // The refusal is the line under the fields, nothing was sent, and
+        // the fields stay filled for the fix.
+        assert!(drawn(cx, "yard said"));
+        assert_eq!(far.requests(), 0);
+        assert!(!file.exists());
+        view.read_with(cx, |v, cx| {
+            assert_eq!(
+                v.address.read(cx).text().to_string(),
+                "http://mac.example.net"
+            );
+            assert_eq!(v.code.read(cx).text().to_string(), "K7QM-2XPD");
+        });
         // No code: one is wanted.
         type_in(&view, cx, "far", far.address(), "");
         click_on(cx, "yard pair");
@@ -15131,6 +15176,12 @@ mod tests {
         });
         unasked(cx);
         assert!(token.is_dir());
+        // The refusal is the line under the fields, and the code stays for
+        // the pairing once the file can be written.
+        assert!(drawn(cx, "yard said"));
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.code.read(cx).text().to_string(), "K7QM-2XPD");
+        });
 
         // A file where its directory would be.
         std::fs::remove_dir_all(&tokens).unwrap();
@@ -17158,6 +17209,77 @@ mod tests {
             "yardr-dev-paired-1"
         );
         assert_eq!(far.devices(), [crate::fake::TOKEN, "yardr-dev-paired-1"]);
+    }
+
+    /// From where there is no yard, a pairing's http address off this
+    /// machine is refused under the fields, in the README's words, the
+    /// moment pair is pressed: the button is never silent, nothing is
+    /// sent, and the fields stay filled for the fix.
+    #[gpui::test]
+    fn no_yard_refuses_a_pairing_s_http_address_off_this_machine(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let (view, cx) = no_yard(dir.path(), cx);
+        click_on(cx, "way far");
+        type_in(
+            &view,
+            cx,
+            "",
+            "http://droplet-yard.tail5cf2e8.ts.net:8790",
+            "K7QM-2XPD",
+        );
+        click_on(cx, "yard pair");
+        let said = yard_said(&view, cx);
+        assert!(
+            said.contains("plain http is for a yard on this machine alone")
+                && said.contains("Give the https:// address"),
+            "{said}"
+        );
+        assert!(drawn(cx, "yard said"));
+        // The line stands directly under the button, above the help: where
+        // a person looks the moment pair is pressed.
+        let pair = bounds_of(cx, "yard pair").origin.y;
+        let said = bounds_of(cx, "yard said").origin.y;
+        let help = bounds_of(cx, "yard help").origin.y;
+        assert!(said > pair && help > said);
+        // Nothing was sent: no pairing is in flight, no yard was kept.
+        view.read_with(cx, |v, _| assert!(!v.pairing));
+        assert!(!file.exists());
+        // The fields stay filled, so the address can be fixed where it is.
+        view.read_with(cx, |v, cx| {
+            assert_eq!(
+                v.address.read(cx).text().to_string(),
+                "http://droplet-yard.tail5cf2e8.ts.net:8790"
+            );
+            assert_eq!(v.code.read(cx).text().to_string(), "K7QM-2XPD");
+        });
+    }
+
+    /// From where there is no yard, a pairing with a yard that answers
+    /// nowhere says the connection's words under the fields: the button is
+    /// never silent after a send either, and the fields stay filled.
+    #[gpui::test]
+    fn no_yard_says_an_unreached_yard_s_words_under_the_pairing_fields(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        // A loopback address nothing answers at: plain http is allowed on
+        // this machine, so the code goes, and the connection says no.
+        let far = Yard::start_tcp();
+        let address = far.address().to_string();
+        far.stop();
+        let (view, cx) = no_yard(dir.path(), cx);
+        click_on(cx, "way far");
+        type_in(&view, cx, "droplet", &address, "K7QM-2XPD");
+        click_on(cx, "yard pair");
+        wait(cx, "that the yard does not answer", |cx| {
+            yard_said(&view, cx).starts_with("the yard does not answer")
+        });
+        assert!(drawn(cx, "yard said"));
+        assert!(!file.exists());
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.address.read(cx).text().to_string(), address);
+            assert_eq!(v.code.read(cx).text().to_string(), "K7QM-2XPD");
+        });
     }
 
     /// The window goes on asking for the yard that is away while a way's

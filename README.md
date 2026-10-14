@@ -97,8 +97,10 @@ open card whose note carries a page and an image), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
-with the start-at-login switch) and `reconnecting` (a running yard whose
-server is then stopped, with a draft in the composer). With no state the
+with the start-at-login switch), `reconnecting` (a running yard whose
+server is then stopped, with a draft in the composer) and `refusal` (the
+first screen's way to a yard at an address, with a pairing's http address
+refused under its fields). With no state the
 first screen is shot, as above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
 that variable.
