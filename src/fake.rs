@@ -1,8 +1,9 @@
-//! A yard for the tests: a unix socket in a temp dir that answers calls
-//! with the JSON a test gives it, as docs/api.md of the yardr repository
-//! shows it, and serves the stream. Or the same yard at its listener, a
-//! TCP port of this machine: the calls under `/user/` for a device's
-//! token, `/user/me`, and a pairing that gives a token for a code.
+//! A yard for the tests, and in a debug build for the screenshots: a unix
+//! socket in a temp dir that answers calls with the JSON a test gives it,
+//! as docs/api.md of the yardr repository shows it, and serves the stream.
+//! Or the same yard at its listener, a TCP port of this machine: the calls
+//! under `/user/` for a device's token, `/user/me`, and a pairing that
+//! gives a token for a code.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -119,6 +120,9 @@ struct Shared {
 
 pub struct Yard {
     /// The socket's directory, when the yard made it: it goes with the yard.
+    /// The screenshots name their socket instead, so they need no temp dir
+    /// of `tempfile`'s, which the built footplate does not have.
+    #[cfg(test)]
     #[allow(dead_code)]
     dir: Option<tempfile::TempDir>,
     socket: PathBuf,
@@ -130,6 +134,7 @@ pub struct Yard {
 
 impl Yard {
     /// A yard at a socket in a temp dir of its own.
+    #[cfg(test)]
     pub fn start() -> Yard {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("yard.sock");
@@ -188,6 +193,7 @@ impl Yard {
             }
         });
         Yard {
+            #[cfg(test)]
             dir: None,
             socket,
             address,

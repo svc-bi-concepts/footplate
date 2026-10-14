@@ -4,9 +4,13 @@
 # runs in it against a throwaway home, and grim writes the PNG. gpui draws
 # through Vulkan, and the container has no GPU, so footplate is pointed at
 # Mesa's software driver (lavapipe) alone: the picture proves that is enough.
-# Run it on the Mac, from anywhere: `scripts/shot-linux.sh [output.png]`.
-# With no argument the picture goes to footplate-shot.png under a fresh
-# directory of its own, whose path is printed at the end.
+# Run it on the Mac, from anywhere: `scripts/shot-linux.sh [<state>] [output.png]`.
+# A state opens the window against a fake yard serving it (src/shot.rs),
+# in the debug build alone: `yardmaster` (the conversation with the
+# yardmaster), `plain` (an open decision card of a plain ask), `run` (an
+# open card of a run ask). With no state the first screen is shot, as ever.
+# The picture goes to the file named, else to footplate-shot.png under a
+# fresh directory of its own; its path is printed at the end either way.
 # The first run provisions the container and builds footplate, which takes
 # minutes; later runs only rebuild what changed and shoot, in seconds. The
 # container stays running afterwards, so the next shot is cheap; remove it
@@ -14,7 +18,29 @@
 set -e
 
 caller=$PWD
-# No argument: a file under a fresh directory of its own. Every builder on
+# The states src/shot.rs serves, kept as that file's own list has them: a
+# state added there is added here, and refused here until it is.
+states="yardmaster plain run"
+is_state() {
+    case " $states " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+state=""
+if [ $# -ge 2 ]; then
+    if is_state "$1"; then
+        state=$1
+        shift
+    else
+        echo "shot-linux.sh: no such state: $1 ($states)" >&2
+        exit 2
+    fi
+elif [ $# -eq 1 ] && is_state "$1"; then
+    state=$1
+    shift
+fi
+# No file: one under a fresh directory of its own. Every builder on
 # this Mac shares /tmp, and under one fixed name there two shots at once
 # would overwrite each other, and a note could carry another bead's picture.
 # The path is printed at the end, as with an argument.
@@ -129,14 +155,16 @@ docker exec "$name" sh /src/scripts/shot-linux-stop.sh /tmp/shots/footplate.pid 
 # The window opens against a throwaway home, as the README's "Trying the
 # setup without touching your yard" has it: nothing of this yard's socket or
 # pairing is in reach. VK_ICD_FILENAMES leaves lavapipe as the only Vulkan
-# driver, so the picture is drawn in software and says so.
+# driver, so the picture is drawn in software and says so. A state opens it
+# against a fake yard serving that state instead, which the debug build
+# alone reads; empty, the first screen is shot.
 docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1
     export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
     scratch=$(mktemp -d /tmp/shots/scratch.XXXXXX)
     mkdir -p "$scratch/home" "$scratch/config" "$scratch/data"
     chown -R shot:shot "$scratch"
     echo "$scratch" > /tmp/shots/last-scratch
-    su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json dbus-run-session -- /target/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
+    su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json FOOTPLATE_SHOT='"$state"' dbus-run-session -- /target/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 
 # The window is waited for, not slept for: sway's tree names it by app_id.
 # Three seconds past that, the first paint has settled and grim shoots.

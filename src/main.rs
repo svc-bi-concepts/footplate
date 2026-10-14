@@ -11,7 +11,8 @@ mod api;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod dock;
 mod draft;
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod fake;
 mod fetch;
 mod input;
@@ -22,6 +23,8 @@ mod select;
 mod session;
 mod settings;
 mod setup;
+#[cfg(debug_assertions)]
+mod shot;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
 mod theme;
@@ -48,6 +51,12 @@ actions!(footplate, [Quit]);
 
 fn main() {
     let env = yard::Env::read();
+    // In a debug build only, a screenshot state starts a fake yard of its
+    // own and points this run's socket at it; held for the run, since
+    // dropping it stops the yard. A release build does not read the
+    // variable at all.
+    #[cfg(debug_assertions)]
+    let (env, _shot) = shot::start_if_asked(env);
     let name = session::login_name();
 
     let application = Application::new();

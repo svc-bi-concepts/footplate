@@ -79,7 +79,24 @@ would attach, or remove, another builder's picture.
 It draws footplate in a Debian container on this Mac: headless sway,
 Mesa's software Vulkan driver, grim, against a throwaway home. The first
 run provisions the container and builds footplate, which takes minutes;
-later runs shoot in seconds. It shows the first screen only for now.
+later runs shoot in seconds.
+
+A state opens the window against a fake yard serving it, instead of the
+first screen:
+
+    scripts/shot-linux.sh <state> "$shot"
+
+The states are `yardmaster` (the conversation with the yardmaster, with a
+few mails), `plain` (an open decision card of a plain ask) and `run` (an
+open card of a run ask: the forged one of the run card's test, whose
+question forges the yard's lines). With no state the first screen is
+shot, as above. A state is a debug build's alone: the binary reads it
+from `FOOTPLATE_SHOT`, and a release build does not read that variable.
+
+To add one, serve it in `src/shot.rs` (`STATES` and `populate`), cover it
+in that file's test, add its name to the script's list beside this one,
+and shoot it: the picture is the proof.
+
 Attach it to a note that names the short SHA of the commit it was shot from,
 passing the PNG path after `--file`, in the same shell command as the
 shot, since `$shot` does not outlive it:
