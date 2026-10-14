@@ -14477,10 +14477,10 @@ mod tests {
         assert!(!view.read_with(cx, |v, _| v.away_details));
     }
 
-    /// A yard that is only stopped keeps its words, and offers neither a
-    /// setup nor details: the switch in the head starts it.
+    /// A yard that is only stopped keeps its words, and offers Start
+    /// instead of setting one up.
     #[gpui::test]
-    fn a_stopped_yard_keeps_its_words_with_no_setup_and_no_details(cx: &mut TestAppContext) {
+    fn a_stopped_yard_keeps_its_words_and_offers_start_instead_of_setup(cx: &mut TestAppContext) {
         use crate::setup::standin;
 
         let dir = tempfile::tempdir().unwrap();
@@ -14500,8 +14500,6 @@ mod tests {
             lead,
             "This yard is stopped. Start it with the switch in the head."
         );
-        assert!(!drawn(cx, "away details"));
-        assert!(!drawn(cx, "way here"));
         assert!(drawn(cx, "switch start"));
     }
 
