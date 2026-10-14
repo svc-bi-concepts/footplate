@@ -120,16 +120,19 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     if state == "reconnecting" {
         // The yard answers, the window reads it, and then its server is
         // stopped: the shot is the reconnecting state. The stop waits for
-        // the window's stream, so the yard is read first; past half a
-        // minute it stops anyway, and the shot is whatever that is.
+        // the window's read of the open conversation, and a breath after
+        // it for the reply to land, so the shot is the conversation as
+        // last seen; past half a minute it stops anyway, and the shot is
+        // whatever that is.
         let yard = shot.yard.clone();
         std::thread::spawn(move || {
             for _ in 0..600 {
-                if !yard.streams_asked().is_empty() {
+                if !yard.asked("Conversation").is_empty() {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
             yard.stop();
         });
     }
