@@ -418,7 +418,10 @@ fn dropped_zip(
     };
     let mut planned: Vec<Entry> = Vec::new();
     for index in 0..zip.len() {
-        let entry = match zip.by_index(index) {
+        // Inspect metadata without constructing a decompressor: an entry
+        // with an unsupported method is one marked row, not a reason to
+        // discard the rest of the archive.
+        let entry = match zip.by_index_data(index) {
             Ok(entry) => entry,
             Err(err) => {
                 return vec![Found {
@@ -1765,6 +1768,46 @@ mod tests {
             Some("inner.zip is a zip in a zip, and the window unpacks one level only")
         );
         assert!(found[0].bytes.is_empty());
+        assert_eq!(found[1].refused, None);
+        assert_eq!(found[1].bytes, PDF);
+    }
+
+    #[test]
+    fn an_unsupported_zip_entry_is_marked_and_the_rest_attaches() {
+        let mut bytes = raw_zip(&[
+            RawEntry {
+                name: "unsupported.pdf",
+                data: PDF,
+                declared: None,
+                attrs: 0o100644 << 16,
+            },
+            RawEntry {
+                name: "supported.pdf",
+                data: PDF,
+                declared: None,
+                attrs: 0o100644 << 16,
+            },
+        ]);
+        // Set the first entry's method to an unsupported method in both
+        // its local and central headers. The archive remains structurally
+        // valid, so only that entry should be refused when read.
+        bytes[8..10].copy_from_slice(&99u16.to_le_bytes());
+        let central = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .unwrap();
+        bytes[central + 10..central + 12].copy_from_slice(&99u16.to_le_bytes());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unsupported.zip");
+        std::fs::write(&path, bytes).unwrap();
+        let found = dropped(&path, Some(1024), 64, 0);
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "unsupported.pdf");
+        assert!(found[0].refused.as_deref().unwrap().contains("99"));
+        assert!(found[0].bytes.is_empty());
+        assert_eq!(found[1].name, "supported.pdf");
         assert_eq!(found[1].refused, None);
         assert_eq!(found[1].bytes, PDF);
     }
