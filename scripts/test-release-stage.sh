@@ -133,9 +133,14 @@ cat >"$bin/fakebuild" <<'EOF'
 } >>"$FAKE_DIR/calls.log"
 number=${1#v}
 printf 'fake footplate darwin arm64 for %s\n' "$1" >"$2/Footplate_${number}_darwin_arm64.zip"
-printf 'fake footplate darwin amd64 for %s\n' "$1" >"$2/Footplate_${number}_darwin_amd64.zip"
+if [ "${FAKE_BUILD_OMIT:-}" != "Footplate_${number}_darwin_amd64.zip" ]; then
+    printf 'fake footplate darwin amd64 for %s\n' "$1" >"$2/Footplate_${number}_darwin_amd64.zip"
+fi
 printf 'fake footplate linux arm64 for %s\n' "$1" >"$2/footplate_${number}_linux_arm64.tar.gz"
 printf 'fake footplate linux amd64 for %s\n' "$1" >"$2/footplate_${number}_linux_amd64.tar.gz"
+if [ "${FAKE_BUILD_EXTRA:-}" = yes ]; then
+    printf 'unexpected release asset\n' >"$2/unexpected.txt"
+fi
 # shellcheck disable=SC2086 # $FAKE_SUM is a list
 (cd "$2" && $FAKE_SUM Footplate_*_darwin_*.zip footplate_*_linux_*.tar.gz >checksums.txt)
 EOF
@@ -254,6 +259,33 @@ lack "fakebuild"
 lack "gh release create"
 ok "build refuses a version that is not Cargo.toml's"
 
+# A partial archive set is refused before the tag or release is created.
+begin missing-archive
+repo
+show "footplate v0.3.0" "notes"
+run build "YARDR_DEPOT_PATH=$checkout" \
+    "FAKE_BUILD_OMIT=Footplate_0.3.0_darwin_amd64.zip"
+want "yardr bead done footplate-rel1 --outcome failed --note -"
+want "the build left no Footplate_0.3.0_darwin_amd64.zip"
+lack "gh release create"
+if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
+    fail "missing-archive: a tag was made for a partial build"
+fi
+ok "build refuses a missing archive"
+
+# An extra file is refused instead of riding along as a release asset.
+begin extra-asset
+repo
+show "footplate v0.3.0" "notes"
+run build "YARDR_DEPOT_PATH=$checkout" "FAKE_BUILD_EXTRA=yes"
+want "yardr bead done footplate-rel1 --outcome failed --note -"
+want "unexpected file unexpected.txt"
+lack "gh release create"
+if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
+    fail "extra-asset: a tag was made for an unexpected asset"
+fi
+ok "build refuses an extra asset"
+
 # A dirty tree is refused.
 begin dirty-tree
 repo
@@ -299,7 +331,8 @@ body='Release "v0.3.0"
 
 - fixes <bugs> & things'
 show "footplate v0.3.0" "$body"
-run build "YARDR_DEPOT_PATH=$checkout"
+mkdir "$tmp/temp dir"
+run build "YARDR_DEPOT_PATH=$checkout" "TMPDIR=$tmp/temp dir"
 at=$(git -C "$checkout" rev-parse refs/tags/v0.3.0)
 [ "$at" = "$(git -C "$checkout" rev-parse refs/heads/main)" ] ||
     fail "releases: tag v0.3.0 is at $at, not at main"

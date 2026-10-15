@@ -218,23 +218,40 @@ build() {
     fail failed "building $v failed" "$(tail -n 30 "$log")"
   fi
   [ -f "$out/checksums.txt" ] || fail failed "the build left no checksums.txt in $out; nothing was tagged"
+  # This depot's release has four fixed archive names. Do not publish a
+  # partial build or let an unexpected file ride along as a release asset.
   files=""
-  n=0
-  for f in "$out"/*; do
-    [ -f "$f" ] || continue
-    case $f in *.minisig) continue ;; esac
+  for f in \
+      "Footplate_${number}_darwin_arm64.zip" \
+      "Footplate_${number}_darwin_amd64.zip" \
+      "footplate_${number}_linux_arm64.tar.gz" \
+      "footplate_${number}_linux_amd64.tar.gz"; do
+    [ -f "$out/$f" ] || fail failed "the build left no $f in $out; nothing was tagged"
     files="$files
 $f"
-    case $f in "$out/checksums.txt") ;; *) n=$((n + 1)) ;; esac
   done
-  [ "$n" -gt 0 ] || fail failed "the build left no archives beside checksums.txt; nothing was tagged"
+  for f in "$out"/*; do
+    [ -f "$f" ] || continue
+    b=${f##*/}
+    case $b in
+    checksums.txt | \
+    "Footplate_${number}_darwin_arm64.zip" | \
+    "Footplate_${number}_darwin_amd64.zip" | \
+    "footplate_${number}_linux_arm64.tar.gz" | \
+    "footplate_${number}_linux_amd64.tar.gz") ;;
+    *) fail failed "the build left unexpected file $b in $out; expected four archives and checksums.txt" ;;
+    esac
+  done
+  n=4
   [ -z "$tagat" ] || echo "== $BEAD: tag $v is already at $at; finishing that run"
   [ -n "$tagat" ] || git -C "$REPO" tag "$v" "$base" || fail failed "tagging $at as $v failed; nothing was pushed"
   git -C "$REPO" push "$REMOTE" "$v" >"$tmp/push.log" 2>&1 ||
     fail failed "tag $v is made but pushing it to $REMOTE failed; push it by hand, then advance the bead back to build" "$(tail -n 10 "$tmp/push.log")"
   printf '%s\n' "$body" >"$tmp/notes.md"
+  # The asset list is the four fixed filenames, so pass it from inside the
+  # output directory; a TMPDIR containing spaces stays one path.
   # shellcheck disable=SC2086 # $files is a newline-separated list
-  if gh release create "$v" $files --repo "$GHREPO" --title "$v" --notes-file "$tmp/notes.md" --verify-tag >"$tmp/create.log" 2>&1; then
+  if (cd "$out" && gh release create "$v" $files checksums.txt --repo "$GHREPO" --title "$v" --notes-file "$tmp/notes.md" --verify-tag >"$tmp/create.log" 2>&1); then
     echo "== $BEAD: released $v"
   else
     fail failed "tag $v is pushed but making the release failed; make it by hand from $out, or delete the tag and the release and advance the bead back to build" "$(cat "$tmp/create.log")"
