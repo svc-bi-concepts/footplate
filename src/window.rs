@@ -771,6 +771,13 @@ enum SwitchBusy {
     Login,
 }
 
+/// What "Agents and you" is doing: nothing else of it starts meanwhile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AgentsBusy {
+    Reading,
+    Saving,
+}
+
 /// What the status row in the head is for the open yard.
 enum SwitchFor {
     /// A yard of this machine: its home, or none for this run's, which
@@ -1113,6 +1120,15 @@ pub struct Footplate {
     /// The question before stopping: what down would stop, which nothing
     /// has agreed to yet. It stands where the conversation is.
     switch_question: Option<setup::Down>,
+    /// "Agents and you" in the settings: the near yard's operator
+    /// settings. The chosen style, the line about the operator as it is
+    /// typed, what of the two is underway, whether the yard's own stand
+    /// in them, and what came of the last read or save.
+    agents_style: usize,
+    agents_about: Entity<Line>,
+    agents_busy: Option<AgentsBusy>,
+    agents_read: bool,
+    agents_said: Option<String>,
     /// The row to open once the yard has it: the yardmaster's, after the
     /// first run, whose yard may not have answered yet.
     wanted_row: Option<Selected>,
@@ -1221,6 +1237,22 @@ impl Footplate {
             this.socket
                 .update(cx, |line, cx| line.set_text(&socket, cx));
         }
+        // The setup shot is step 2 of setting up a yard here, posed: no
+        // yard answers, and the first run stands at the yard's form. A
+        // debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("setup") {
+            let first_run = cx.new(|cx| {
+                FirstRun::shot_step2(
+                    this.means.clone(),
+                    &this.env.socket,
+                    &this.name,
+                    this.handle,
+                    cx,
+                )
+            });
+            this.first_run = Some(first_run);
+        }
         this
     }
 
@@ -1278,6 +1310,17 @@ impl Footplate {
         });
         cx.subscribe(&run, |this, _, _: &Submitted, cx| this.submit_run(cx))
             .detach();
+        // Enter in the line about the operator saves it with the chosen
+        // style: the next session picks both up.
+        let agents_about = cx.new(|cx| {
+            let mut field = Line::new(cx);
+            field.set_placeholder("I teach history and do not read code", cx);
+            field
+        });
+        cx.subscribe(&agents_about, |this, _, _: &Submitted, cx| {
+            this.save_agents(cx)
+        })
+        .detach();
         let selection = cx.new(|_| Selection::default());
         cx.observe(&selection, |_, _, cx| cx.notify()).detach();
         // Auto is the desktop's look: when that changes, the window is
@@ -1443,6 +1486,11 @@ impl Footplate {
             switch_troubles: Vec::new(),
             switch_note: None,
             switch_question: None,
+            agents_style: 0,
+            agents_about,
+            agents_busy: None,
+            agents_read: false,
+            agents_said: None,
             wanted_row: None,
             system,
             permission: None,
@@ -1718,6 +1766,7 @@ impl Footplate {
         let held = self.begin(&yard, None, opening, cx);
         self.put(held);
         self.switch_reset();
+        self.agents_reset(cx);
         self.refresh_switch(cx);
     }
 
@@ -1733,6 +1782,7 @@ impl Footplate {
         self.put(held);
         self.arrive(cx);
         self.switch_reset();
+        self.agents_reset(cx);
         self.refresh_switch(cx);
     }
 
@@ -4395,6 +4445,8 @@ impl Footplate {
         // field: nothing typed of a secret waits there.
         self.forget_secret(cx);
         self.shown(cx);
+        // "Agents and you" reads once the settings show.
+        self.read_agents(cx);
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
             Some(_) if !self.settings_open => self.line.focus_handle(cx),
@@ -4435,6 +4487,7 @@ impl Footplate {
             // The open yard may be another, or another home's: what the
             // switch said is gone, and read anew.
             self.switch_reset();
+            self.agents_reset(cx);
             self.refresh_switch(cx);
         }
         if view_moved {
@@ -4862,6 +4915,11 @@ impl Footplate {
                 }
             }
         }
+        // The settings stand open on the yard this read: its operator
+        // settings are read now that yardr is there to run.
+        if self.settings_open {
+            self.read_agents(cx);
+        }
         cx.notify();
     }
 
@@ -5135,6 +5193,111 @@ impl Footplate {
             .ok();
         })
         .detach();
+    }
+
+    /// Reads "Agents and you" anew: the near yard's operator settings, as
+    /// the setup reads doctor. Off the window's thread; an answer that
+    /// comes when another yard was opened since is dropped. Nothing is
+    /// read while the settings are shut, or for a yard at an address.
+    fn read_agents(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_open || self.agents_busy.is_some() || self.agents_read {
+            return;
+        }
+        if !matches!(self.switch_for(), SwitchFor::Near(_)) {
+            return;
+        }
+        let Some(yardr) = self.switch_yardr() else {
+            return;
+        };
+        self.agents_busy = Some(AgentsBusy::Reading);
+        self.agents_said = None;
+        cx.notify();
+        let opening = self.opening;
+        cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move { yardr.operator() })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.opening != opening {
+                    return;
+                }
+                this.agents_busy = None;
+                match read {
+                    Ok(operator) => {
+                        // Unset, or newer than this footplate: the setup's
+                        // default, the most guidance.
+                        this.agents_style = setup::style_at(&operator.style).unwrap_or(0);
+                        this.agents_about
+                            .update(cx, |line, cx| line.set_text(&operator.note, cx));
+                        this.agents_read = true;
+                    }
+                    Err(why) => this.agents_said = Some(why),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Saves "Agents and you": the chosen style and the line about the
+    /// operator. An emptied line unsets the note. What came of it stands
+    /// under the section: a change reaches the next session.
+    fn save_agents(&mut self, cx: &mut Context<Self>) {
+        if self.agents_busy.is_some() || !self.agents_read {
+            return;
+        }
+        let Some(yardr) = self.switch_yardr() else {
+            return;
+        };
+        let style = setup::STYLES[self.agents_style].0.to_string();
+        let note = self.agents_about.read(cx).text().trim().to_string();
+        self.agents_busy = Some(AgentsBusy::Saving);
+        self.agents_said = None;
+        cx.notify();
+        let opening = self.opening;
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { yardr.set_operator(&style, &note) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.opening != opening {
+                    return;
+                }
+                this.agents_busy = None;
+                this.agents_said = Some(match saved {
+                    Ok(()) => "Saved. The next session picks it up.".to_string(),
+                    Err(why) => why,
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Tries "Agents and you" again, after it could not be read: yardr
+    /// itself first, where it could not be had.
+    fn agents_retry(&mut self, cx: &mut Context<Self>) {
+        if self.switch_program.is_none() {
+            self.switch_retry(cx);
+        }
+        self.agents_said = None;
+        self.read_agents(cx);
+        cx.notify();
+    }
+
+    /// The open yard is another: what "Agents and you" said of the last
+    /// is gone, and the yard's own are read anew once the settings show.
+    fn agents_reset(&mut self, cx: &mut Context<Self>) {
+        self.agents_style = 0;
+        self.agents_about
+            .update(cx, |line, cx| line.set_text("", cx));
+        self.agents_busy = None;
+        self.agents_read = false;
+        self.agents_said = None;
     }
 
     /// A yard is to be added, in the settings or from where there is no
@@ -5565,6 +5728,7 @@ impl Footplate {
         let view = self.view_setting(setting, palette, cx);
         let run = self.run_setting(setting, palette, cx);
         let login = self.login_setting(setting, palette, cx);
+        let agents = self.agents_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
         let notify = self.settings.notifications;
@@ -5671,6 +5835,7 @@ impl Footplate {
                     .child(view)
                     .child(run)
                     .child(login)
+                    .child(agents)
                     .child(notifications)
                     .child(menu_bar),
             )
@@ -5935,6 +6100,154 @@ impl Footplate {
         match !status.starts_at_login() && self.yard_is_stopped() && self.switch_busy.is_none() {
             true => format!("{help}; switching on starts the yard now as well"),
             false => help.to_string(),
+        }
+    }
+
+    /// "Agents and you" in the settings: how the near yard's agents work
+    /// with its operator, and the line they know about them. A yard at
+    /// an address keeps its operator's settings where it runs: they are
+    /// changed on that machine, not from here.
+    fn agents_setting(
+        &self,
+        setting: impl Fn(String, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let focus = self.agents_about.focus_handle(cx);
+        let help = "how this yard's agents work with you, and the line they know about you";
+        match self.switch_for() {
+            SwitchFor::Far => setting("Agents and you".to_string(), help.to_string()).child(
+                div()
+                    .debug_selector(|| "agents far".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("These are the operator's at that machine: they are changed there, not from here."),
+            ),
+            SwitchFor::NoHome => setting(
+                "Agents and you".to_string(),
+                "this entry names no yard home: nothing is read or changed".to_string(),
+            ),
+            SwitchFor::Near(_) if !self.agents_read => {
+                let mut section = setting("Agents and you".to_string(), help.to_string());
+                // What a read came to instead of the yard's own, or why
+                // yardr is not there to run: either is tried again.
+                let said = match (&self.agents_said, &self.switch_note) {
+                    (Some(said), _) => Some(said),
+                    (None, Some(note))
+                        if self.switch_program.is_none() && !self.switch_reading =>
+                    {
+                        Some(note)
+                    }
+                    (None, _) => None,
+                };
+                match said {
+                    Some(said) => {
+                        section = section
+                            .child(
+                                div()
+                                    .debug_selector(|| "agents said".to_string())
+                                    .child(said.clone()),
+                            )
+                            .child(
+                                div().flex().child(
+                                    small_button("try again".to_string(), palette)
+                                        .id("agents again")
+                                        .debug_selector(|| "agents again".to_string())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.agents_retry(cx)
+                                        })),
+                                ),
+                            );
+                    }
+                    None => {
+                        section = section.child(
+                            div()
+                                .text_sm()
+                                .text_color(palette.faint)
+                                .child("asking yardr how agents work with you…"),
+                        );
+                    }
+                }
+                section
+            }
+            SwitchFor::Near(_) => {
+                let chosen = self.agents_style;
+                let busy = self.agents_busy.is_some();
+                let mut section = setting("Agents and you".to_string(), help.to_string())
+                    .child(
+                        div().flex().flex_wrap().gap_2().children(
+                            setup::STYLES.iter().enumerate().map(|(at, (key, _, _))| {
+                                let name = setup::style_name(at);
+                                small_button(name, palette)
+                                    .id(SharedString::from(format!("agents style {key}")))
+                                    .debug_selector(move || format!("agents style {key}"))
+                                    .when(at == chosen, |el| {
+                                        el.bg(palette.open)
+                                            .text_color(palette.text)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                    })
+                                    .when(busy, |el| el.opacity(0.5))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.agents_style = at;
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(setup::STYLES[chosen].2.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(rems(6.)).flex_none().child("about you"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .max_w(rems(28.))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(palette.line)
+                                    .bg(palette.side)
+                                    .debug_selector(|| "agents about".to_string())
+                                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                        window.focus(&focus);
+                                        window.prevent_default();
+                                    })
+                                    .child(self.agents_about.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                small_button("save (enter)".to_string(), palette)
+                                    .id("agents save")
+                                    .debug_selector(|| "agents save".to_string())
+                                    .when(busy, |el| el.opacity(0.5))
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_agents(cx))),
+                            ),
+                    );
+                if let Some(said) = &self.agents_said {
+                    section = section.child(
+                        div()
+                            .debug_selector(|| "agents said".to_string())
+                            .child(said.clone()),
+                    );
+                }
+                section
+            }
         }
     }
 
@@ -12926,6 +13239,16 @@ mod tests {
         view.read_with(cx, |v, _| v.settings.clone())
     }
 
+    /// What "Agents and you" holds of the line about the operator, and
+    /// what came of its last read or save.
+    fn agents_about(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, cx| v.agents_about.read(cx).text().to_string())
+    }
+
+    fn agents_said(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.agents_said.clone().unwrap_or_default())
+    }
+
     fn settings_open(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
         view.read_with(cx, |v, _| v.settings_open)
     }
@@ -13190,6 +13513,136 @@ mod tests {
         click_on(cx, "run usual");
         assert_eq!(settings_of(&view, cx).run_base, "");
         assert_eq!(Settings::read(&file).run_base, "");
+    }
+
+    /// "Agents and you" reads the near yard's operator settings: the style
+    /// the yard has, and the line. Saving sets the chosen style and the
+    /// line about the operator, and says the next session picks it up;
+    /// an emptied line unsets the note.
+    #[gpui::test]
+    fn agents_and_you_reads_and_saves_the_operator_s_settings(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let (means, program, _) = stand_in_means(dir.path(), false);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(true, false));
+        standin::answers(
+            &program,
+            "settings-get",
+            0,
+            &json!([
+                {"key": "operator_style", "value": "work", "from": "set"},
+                {"key": "operator_note", "value": "I read code", "from": "set"},
+            ]),
+        );
+        standin::answers(&program, "settings-set", 0, &json!({}));
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the switch read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+
+        // Opening the settings reads the pair: the style chosen, and the
+        // line in the field.
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        wait(cx, "the operator's settings read", |cx| {
+            view.read_with(cx, |v, _| v.agents_read)
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.agents_style), 2);
+        assert_eq!(agents_about(&view, cx), "I read code");
+        for key in ["guide", "show", "work", "report"] {
+            assert!(drawn(cx, &format!("agents style {key}")), "{key}");
+        }
+        assert!(drawn(cx, "agents about") && drawn(cx, "agents save"));
+
+        // Another style and another line are the two commands, and the
+        // next session picks them up.
+        click_on(cx, "agents style report");
+        view.update(cx, |v, cx| {
+            v.agents_about.update(cx, |line, cx| {
+                line.set_text("I review every merge myself", cx)
+            })
+        });
+        let calls = standin::calls(&program).len();
+        click_on(cx, "agents save");
+        wait(cx, "the save", |cx| {
+            agents_said(&view, cx) == "Saved. The next session picks it up."
+        });
+        assert_eq!(
+            standin::calls(&program)[calls..],
+            [
+                "[settings] [set] [--json] [--] [operator_style] [report]".to_string(),
+                "[settings] [set] [--json] [--] [operator_note] [I review every merge myself]"
+                    .to_string(),
+            ]
+        );
+
+        // An emptied line unsets the note; the style is set as chosen.
+        view.update(cx, |v, cx| {
+            v.agents_about.update(cx, |line, cx| line.set_text("", cx))
+        });
+        let calls = standin::calls(&program).len();
+        click_on(cx, "agents save");
+        wait(cx, "the unset", |_| {
+            standin::calls(&program).len() == calls + 2
+        });
+        assert_eq!(
+            standin::calls(&program)[calls..],
+            [
+                "[settings] [set] [--json] [--] [operator_style] [report]".to_string(),
+                "[settings] [set] [--json] [--] [operator_note] []".to_string(),
+            ]
+        );
+    }
+
+    /// "Agents and you" at an address is read-only: the section says the
+    /// settings are the operator's at that machine, and nothing of yardr's
+    /// runs for it.
+    #[gpui::test]
+    fn agents_and_you_at_an_address_is_read_only(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            yards: vec![settings::Yard::far(
+                "remote",
+                "https://yard.example.net",
+                "remote.token",
+            )],
+            open: "remote".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the yard away", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_some())
+        });
+        click_on(cx, "settings");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "agents far"));
+        assert!(!drawn(cx, "agents save") && !drawn(cx, "agents about"));
+        assert!(!drawn(cx, "agents style guide"));
+        assert!(!view.read_with(cx, |v, _| v.agents_read));
+        assert!(standin::calls(&program).is_empty());
     }
 
     /// With the yard away the left column has its head and its foot: the
@@ -16295,6 +16748,15 @@ mod tests {
         assert_eq!(setup_typed(&view, cx, "your name"), "jo");
         assert!(drawn(cx, "setup harness claude") && drawn(cx, "setup harness codex"));
         assert!(drawn(cx, "setup style guide") && drawn(cx, "setup style report"));
+        // The row is the scale it is: the question, the four numbered in
+        // order, and the line that they change later.
+        assert!(drawn(cx, "setup savvy") && drawn(cx, "setup change later"));
+        let left = |key: &str| bounds_of(cx, &format!("setup style {key}")).origin.x;
+        let places: Vec<_> = ["guide", "show", "work", "report"]
+            .into_iter()
+            .map(left)
+            .collect();
+        assert!(places.windows(2).all(|pair| pair[0] < pair[1]));
         // The name is typed where the focus is: every letter of it.
         cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("Jo Deed");

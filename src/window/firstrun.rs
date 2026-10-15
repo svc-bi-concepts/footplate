@@ -198,6 +198,50 @@ impl FirstRun {
         handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::build(means, socket, name, handle, cx);
+        this.fetch(cx);
+        this
+    }
+
+    /// Step 2 posed for a screenshot: the yard's form with a harness
+    /// chosen and the scale to pick from. A debug build's alone: nothing
+    /// is fetched, and no command runs.
+    #[cfg(debug_assertions)]
+    pub fn shot_step2(
+        means: Means,
+        socket: &Path,
+        name: &str,
+        handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::build(means, socket, name, handle, cx);
+        this.step = Step::Yard;
+        this.doctor = serde_json::from_value(serde_json::json!({
+            "yard": false,
+            "machine": [
+                {"program": "herdr", "for": "it starts every agent in a pane of its own",
+                 "found": true, "server": {"state": "not_running"}},
+                {"program": "git", "for": "a depot is a git repository", "found": true},
+                {"program": "claude", "for": "a harness a yard can be created on",
+                 "found": true, "harness": "claude", "harness_login": true},
+                {"program": "codex", "for": "a harness a yard can be created on",
+                 "found": true, "harness": "codex"},
+            ],
+        }))
+        .ok();
+        this.harness = Some("claude".to_string());
+        this
+    }
+
+    /// The first run before it starts: its fields, with the login name
+    /// standing in the operator's.
+    fn build(
+        means: Means,
+        socket: &Path,
+        name: &str,
+        handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let field = |hint: &'static str, text: &str, cx: &mut Context<Self>| {
             let field = cx.new(|cx| {
                 let mut field = Line::new(cx);
@@ -213,7 +257,7 @@ impl FirstRun {
         let code = cx.new(Line::masked);
         cx.subscribe(&code, |this, _, _: &Submitted, cx| this.give_code(cx))
             .detach();
-        let mut this = FirstRun {
+        FirstRun {
             means,
             home: socket.parent().map(Path::to_path_buf).unwrap_or_default(),
             step: Step::Yardr,
@@ -247,9 +291,7 @@ impl FirstRun {
             tell: true,
             focus: cx.focus_handle(),
             handle,
-        };
-        this.fetch(cx);
-        this
+        }
     }
 
     /// Does `work` away from the window and hands what it came to to
@@ -992,20 +1034,23 @@ impl FirstRun {
                 );
                 body.push(self.typed("yardmaster", &self.yardmaster, palette, cx));
                 body.push(self.typed("model", &self.model, palette, cx));
-                body.push(plain("How should agents work with you?"));
-                let styles = setup::STYLES
-                    .iter()
-                    .enumerate()
-                    .map(|(at, (key, name, _))| {
-                        self.button(format!("setup style {key}"), name, palette)
-                            .when(at == self.style, |el| {
-                                el.bg(palette.open).text_color(palette.text)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.style = at;
-                                cx.notify();
-                            }))
-                    });
+                body.push(
+                    div()
+                        .debug_selector(|| "setup savvy".to_string())
+                        .child("How savvy are you with code and a terminal?")
+                        .into_any_element(),
+                );
+                let styles = setup::STYLES.iter().enumerate().map(|(at, (key, _, _))| {
+                    let name = setup::style_name(at);
+                    self.button(format!("setup style {key}"), &name, palette)
+                        .when(at == self.style, |el| {
+                            el.bg(palette.open).text_color(palette.text)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.style = at;
+                            cx.notify();
+                        }))
+                });
                 body.push(
                     div()
                         .flex()
@@ -1016,6 +1061,14 @@ impl FirstRun {
                 );
                 body.push(faint(setup::STYLES[self.style].2));
                 body.push(self.typed("about you", &self.about, palette, cx));
+                body.push(
+                    div()
+                        .debug_selector(|| "setup change later".to_string())
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child("You can change this and the line about you later, in the settings.")
+                        .into_any_element(),
+                );
                 body.push(faint(
                     "The yardmaster is the agent you talk with: it keeps the work moving and comes to you with decisions. The model and the line about you may stay empty.",
                 ));

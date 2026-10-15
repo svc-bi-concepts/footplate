@@ -15,9 +15,10 @@
 # is then stopped, with a draft in the composer), `refusal` (the
 # first screen's way to a yard at an address, with a pairing's http
 # address refused under its fields), `undelivered` (the conversation
-# with one of a linked yard whose mail was refused over the hour) and
+# with one of a linked yard whose mail was refused over the hour),
 # `answered` (the first screen with a way's fields open after the yard
-# answered, with the line that esc opens it).
+# answered, with the line that esc opens it) and `setup` (step 2 of
+# setting up a yard here, posed: the working styles as a numbered scale).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the head draws the same on
@@ -36,7 +37,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run stopped far settings reconnecting page refusal undelivered answered"
+states="yardmaster plain run stopped far settings reconnecting page refusal undelivered answered setup"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -178,11 +179,12 @@ docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY
     # state says the yard runs, and none starts at login.
     bin="$scratch/config/footplate/bin"
     mkdir -p "$bin"
-    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor and status answer canned JSON." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
+    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor, status and the operator's settings answer canned JSON." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "settings) case \"\$2\" in get) cat \"\$D/settings-get.json\" ;; set) echo '{}' ;; *) echo \"{\\\"error\\\":\\\"a shot takes no settings \$2\\\"}\"; exit 1 ;; esac ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
     chmod +x "$bin/yardr"
     printf "%s\n" "v99.0.0" > "$bin/yardr.version"
     printf "%s\n" "{\"yard\": false, \"machine\": []}" > "$bin/doctor.json"
-    case "'"$state"'" in stopped) up=false ;; *) up=true ;; esac
+    printf "%s\n" "[{\"key\": \"operator_style\", \"value\": \"show\", \"from\": \"set\"}, {\"key\": \"operator_note\", \"value\": \"I review every merge myself\", \"from\": \"set\"}]" > "$bin/settings-get.json"
+    case "'"$state"'" in stopped|setup) up=false ;; *) up=true ;; esac
     printf "%s\n" "{\"home\": \"/tmp/shot-yard\", \"name\": \"shot\", \"operator\": \"Jo\", \"server\": {\"running\": $up, \"cli_build\": \"shot\"}, \"daemon\": {\"running\": $up, \"pid\": 0, \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot\", \"file\": \"/tmp/shot.service\", \"installed\": false, \"loaded\": false}}, \"herdr_login_service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.herdr.shot\", \"file\": \"/tmp/shot-herdr.service\", \"installed\": false, \"loaded\": false}, \"web\": {\"views\": [], \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot-web\", \"file\": \"/tmp/shot-web.service\", \"installed\": false, \"loaded\": false}}}" > "$bin/status.json"
     # A yard at an address opens from the settings: one far yard, open.
     if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"}" > "$scratch/config/footplate/settings.json"; fi

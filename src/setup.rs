@@ -247,6 +247,40 @@ impl Yardr {
             .map_err(|err| format!("yardr up answered what footplate cannot read ({err})."))
     }
 
+    /// How the yard's agents work with its operator: `settings get`
+    /// lists every setting, of which the style and the note are read.
+    /// Either is empty where the yard has none set.
+    pub fn operator(&self) -> Result<OperatorSettings, String> {
+        let listed = self.run(&["settings", "get"], &[])?.done("settings get")?;
+        let listed = listed
+            .as_array()
+            .ok_or("yardr settings get answered what footplate cannot read.")?;
+        let value = |key: &str| {
+            listed
+                .iter()
+                .find(|entry| entry.get("key").and_then(Value::as_str) == Some(key))
+                .and_then(|entry| entry.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        Ok(OperatorSettings {
+            style: value("operator_style"),
+            note: value("operator_note"),
+        })
+    }
+
+    /// Sets how the yard's agents work with its operator: the style, then
+    /// the line about them. An empty line unsets the note, as `settings
+    /// set` has it: there is no `settings unset`.
+    pub fn set_operator(&self, style: &str, note: &str) -> Result<(), String> {
+        self.run(&["settings", "set"], &["operator_style", style])?
+            .done("settings set")?;
+        self.run(&["settings", "set"], &["operator_note", note])?
+            .done("settings set")?;
+        Ok(())
+    }
+
     /// Removes the daemon's login service. The manager stops the daemon
     /// it ran; one started any other way runs on.
     pub fn daemon_uninstall(&self) -> Result<Uninstalled, String> {
@@ -536,6 +570,27 @@ pub const STYLES: [(&str, &str, &str); 4] = [
         "Agents decide what is theirs to decide and come to you only for what is yours.",
     ),
 ];
+
+/// The name of the style at `at` on the four-step scale: its number and
+/// its label, from "1 · Guide me" to "4 · Just report". The setup and
+/// the settings show the same scale.
+pub fn style_name(at: usize) -> String {
+    format!("{} · {}", at + 1, STYLES[at].1)
+}
+
+/// The place on the scale of the style called `key`, if it names one.
+pub fn style_at(key: &str) -> Option<usize> {
+    STYLES.iter().position(|style| style.0 == key)
+}
+
+/// How the yard's agents work with its operator, and the line they know
+/// about them: `operator_style` and `operator_note`. Either is empty
+/// where the yard has none set, as `settings get` lists it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OperatorSettings {
+    pub style: String,
+    pub note: String,
+}
 
 /// What the person said of the yard to create.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1665,6 +1720,88 @@ mod tests {
         );
     }
 
+    /// The four styles are a numbered scale: each number with its
+    /// label, and each key with its place. The setup and the settings
+    /// show the same row.
+    #[test]
+    fn the_styles_are_a_numbered_scale() {
+        assert_eq!(
+            (0..STYLES.len()).map(style_name).collect::<Vec<_>>(),
+            [
+                "1 · Guide me",
+                "2 · Show me",
+                "3 · Work with me",
+                "4 · Just report",
+            ]
+        );
+        assert_eq!(style_at("guide"), Some(0));
+        assert_eq!(style_at("report"), Some(3));
+        assert_eq!(style_at(""), None);
+        assert_eq!(style_at("fifth"), None);
+    }
+
+    /// The operator's settings are read as a pair and set one by one: an
+    /// empty line unsets the note, as `settings set` has it. The key and
+    /// the value stand behind `--`, so a line starting with a dash is one.
+    #[test]
+    fn the_operator_s_settings_are_read_as_a_pair_and_set_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let yardr = yardr(dir.path());
+        standin::answers(
+            &yardr.program,
+            "settings-get",
+            0,
+            &json!([
+                {"key": "operator_style", "value": "work", "from": "set"},
+                {"key": "operator_note", "value": "", "from": ""},
+            ]),
+        );
+        assert_eq!(
+            yardr.operator().unwrap(),
+            OperatorSettings {
+                style: "work".into(),
+                note: "".into(),
+            }
+        );
+        // What is no list is not read as one.
+        standin::answers(
+            &yardr.program,
+            "settings-get.2",
+            0,
+            &json!({"key": "operator_style", "value": "work", "from": "set"}),
+        );
+        assert_eq!(
+            yardr.operator().unwrap_err(),
+            "yardr settings get answered what footplate cannot read."
+        );
+
+        standin::answers(
+            &yardr.program,
+            "settings-set",
+            0,
+            &json!({"operator_style": "report"}),
+        );
+        yardr
+            .set_operator("report", "-a line that starts with a dash")
+            .unwrap();
+        let home = dir.path().join("home/.yardr");
+        assert_eq!(
+            standin::calls(&yardr.program),
+            [
+                format!("[settings] [get] [--json] [--home] [{}]", home.display()),
+                format!("[settings] [get] [--json] [--home] [{}]", home.display()),
+                format!(
+                    "[settings] [set] [--json] [--home] [{}] [--] [operator_style] [report]",
+                    home.display()
+                ),
+                format!(
+                    "[settings] [set] [--json] [--home] [{}] [--] [operator_note] [-a line that starts with a dash]",
+                    home.display()
+                ),
+            ]
+        );
+    }
+
     /// What yardr refuses is said in its words, and an import that asks
     /// for what footplate has no answer to is not answered with a guess.
     #[test]
@@ -1751,6 +1888,25 @@ mod tests {
         let ran = (|| {
             yardr.init(&form)?;
             yardr.init(&form)?;
+            // Init stored the style and the line as the operator's
+            // settings; setting them again reads back, and an emptied
+            // line unsets the note.
+            assert_eq!(
+                yardr.operator()?,
+                OperatorSettings {
+                    style: "guide".into(),
+                    note: "-a line that starts with a dash".into(),
+                }
+            );
+            yardr.set_operator("report", "")?;
+            assert_eq!(
+                yardr.operator()?,
+                OperatorSettings {
+                    style: "report".into(),
+                    note: "".into(),
+                }
+            );
+            yardr.set_operator("guide", "-a line that starts with a dash")?;
             let folder = home.parent().unwrap().join("My Essays");
             std::fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
             let name = depot_name(&folder);

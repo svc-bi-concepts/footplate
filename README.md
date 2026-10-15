@@ -116,9 +116,11 @@ with the start-at-login switch), `reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
 first screen's way to a yard at an address, with a pairing's http address
 refused under its fields), `undelivered` (the conversation with one of
-a linked yard whose mail was refused over the hour) and `answered` (the
+a linked yard whose mail was refused over the hour), `answered` (the
 first screen with a way's fields open after the yard answered, with the
-line that esc opens it). With no state the first screen is shot, as
+line that esc opens it) and `setup` (step 2 of setting up a yard here,
+posed: the working styles as a numbered scale). With no state the first
+screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
 that variable.

@@ -21,19 +21,20 @@ use crate::yard::Env;
 /// the composer, an open card whose note carries a page and an image, the
 /// first screen's way to a yard at an address, with a pairing's http
 /// address refused under its fields, the conversation with one of a
-/// linked yard whose mail was refused over the hour, and the first screen
+/// linked yard whose mail was refused over the hour, the first screen
 /// with a way's fields open after the yard answered, with the line that
-/// esc opens it.
+/// esc opens it, and step 2 of setting up a yard here, posed.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
-/// both open on a yard that is down. The yard at an address is opened
-/// from the settings the shot script writes; the settings open over a
-/// running yard; the page's card stands expanded at its end, with the
-/// web view taken as answering, so the row carries Open and run. The undelivered
-/// conversation opens on the row the shot names, with the hour's line under
-/// the mail. The answered yard serves the yardmaster's conversation, as
-/// the running ones do; the window opens with the way's fields standing,
-/// so the yard answers under them. The script answers the switch's
-/// yardr for every state, so the head draws the same on every shot.
+/// both open on a yard that is down, as the posed setup does. The yard at
+/// an address is opened from the settings the shot script writes; the
+/// settings open over a running yard; the page's card stands expanded at
+/// its end, with the web view taken as answering, so the row carries Open
+/// and run. The undelivered conversation opens on the row the shot names,
+/// with the hour's line under the mail. The answered yard serves the
+/// yardmaster's conversation, as the running ones do; the window opens
+/// with the way's fields standing, so the yard answers under them. The
+/// script answers the switch's yardr for every state, so the head draws
+/// the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
     "plain",
@@ -46,6 +47,7 @@ pub const STATES: &[&str] = &[
     "refusal",
     "undelivered",
     "answered",
+    "setup",
 ];
 
 /// The note's image in the `page` state, and its hash: the yard serves
@@ -125,12 +127,13 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
 }
 
 /// The run for `state`: the fake yard serves it, and the run's socket
-/// points there. For `stopped` and `refusal` no yard listens: the socket
-/// names a directory that holds none, so the window opens on a yard that
-/// is down, and the switch says the stopped one is stopped. The refusal
-/// shot is the first screen, with the pairing's fields open on it.
+/// points there. For `stopped`, `refusal` and `setup` no yard listens:
+/// the socket names a directory that holds none, so the window opens on
+/// a yard that is down, and the switch says the stopped one is stopped.
+/// The refusal shot is the first screen, with the pairing's fields open
+/// on it; the setup shot is the first run posed at step 2.
 fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
-    if state == "stopped" || state == "refusal" {
+    if state == "stopped" || state == "refusal" || state == "setup" {
         let mut env = env;
         env.socket = std::env::temp_dir().join(format!(
             "footplate-shot-{}-{state}/yard.sock",
@@ -459,12 +462,13 @@ mod tests {
     /// Every state reads as the window reads it: the login name is no user
     /// of the yard, so the window is for its operator, jo, and the state
     /// opens where the shot says. A state added to [`STATES`] lands in the
-    /// unreachable arm until it is covered here. `stopped` and `refusal`
-    /// listen nowhere: their run's socket names a yard that is down.
+    /// unreachable arm until it is covered here. `stopped`, `refusal` and
+    /// `setup` listen nowhere: their run's socket names a yard that is
+    /// down.
     #[test]
     fn every_state_loads_as_the_window_reads_it() {
         for state in STATES {
-            if *state == "stopped" || *state == "refusal" {
+            if *state == "stopped" || *state == "refusal" || *state == "setup" {
                 let env = Env {
                     socket: PathBuf::from("/none"),
                     ..Env::default()
