@@ -86,6 +86,6 @@ tempfile = "3"
 # with it come scrypt and rpassword, for the passwords of keys, which the
 # tests do not use. Nothing of it is in the built footplate.
 minisign = "0.10"
-# Two tests of refusals a file's mode carries tell root, which no mode
-# holds, by its effective uid. Nothing of it is in the built footplate.
+# The root guards use geteuid in tests on macOS too; the libc dependency
+# above is Linux-only, where it also pins gpui's build tree.
 libc = ">=0.2.170, <0.2.190"
