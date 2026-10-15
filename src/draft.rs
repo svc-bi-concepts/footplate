@@ -282,30 +282,72 @@ fn dropped_file(
     existing: usize,
     letter: Letter,
 ) -> Found {
+    dropped_file_with_limit(path, name, cap, max, existing, letter, None).0
+}
+
+/// A file in a folder drop: as `dropped_file`, with the remaining unpack
+/// budget and the drop's ceiling. The return says whether this file took
+/// the folder past that ceiling, so the walk stops there.
+fn dropped_file_with_limit(
+    path: &Path,
+    name: &str,
+    cap: Option<u64>,
+    max: u64,
+    existing: usize,
+    letter: Letter,
+    unpack_left: Option<(u64, u64)>,
+) -> (Found, bool) {
     if existing as u64 >= max {
         let size = path.metadata().map(|meta| meta.len()).unwrap_or(0);
-        return Found {
-            name: name.to_string(),
-            bytes: Vec::new(),
-            size,
-            refused: Some(single_over_count(letter, name, existing, max)),
-        };
+        return (
+            Found {
+                name: name.to_string(),
+                bytes: Vec::new(),
+                size,
+                refused: Some(single_over_count(letter, name, existing, max)),
+            },
+            false,
+        );
     }
-    let read = || -> io::Result<(Vec<u8>, u64, Option<String>)> {
+    let read = || -> io::Result<(Vec<u8>, u64, Option<String>, bool)> {
         let mut file = File::open(path)?;
         let size = file.metadata()?.len();
         let mut head = Vec::new();
         file.by_ref().take(HEAD as u64).read_to_end(&mut head)?;
         if let Some(refused) = unattachable(name, &head, size, cap) {
-            return Ok((Vec::new(), size, Some(refused)));
+            return Ok((Vec::new(), size, Some(refused), false));
+        }
+        if let Some((left, ceiling)) = unpack_left {
+            if size > left {
+                return Ok((
+                    Vec::new(),
+                    size,
+                    Some(over_unpack_ceiling(name, ceiling)),
+                    true,
+                ));
+            }
+            let limit = left.saturating_add(1).saturating_sub(head.len() as u64);
+            let mut rest = Vec::new();
+            file.take(limit).read_to_end(&mut rest)?;
+            let mut bytes = head;
+            bytes.extend_from_slice(&rest);
+            if bytes.len() as u64 > left {
+                return Ok((
+                    Vec::new(),
+                    size,
+                    Some(over_unpack_ceiling(name, ceiling)),
+                    true,
+                ));
+            }
+            return Ok((bytes, size, None, false));
         }
         let mut bytes = head;
         file.read_to_end(&mut bytes)?;
-        Ok((bytes, size, None))
+        Ok((bytes, size, None, false))
     };
-    let (bytes, size, refused) = read().unwrap_or_else(|err| {
+    let (bytes, size, refused, over_ceiling) = read().unwrap_or_else(|err| {
         let why = format!("{name} could not be read: {err}");
-        (Vec::new(), 0, Some(why))
+        (Vec::new(), 0, Some(why), false)
     });
     // The name it goes under: fitted, since it can go. Unrefused, the
     // fit cannot fail: it is the same name the check fitted.
@@ -314,12 +356,15 @@ fn dropped_file(
         true => name.to_string(),
         false => fit_name(stem, "", ext).unwrap_or_else(|_| name.to_string()),
     };
-    Found {
-        name,
-        bytes,
-        size,
-        refused,
-    }
+    (
+        Found {
+            name,
+            bytes,
+            size,
+            refused,
+        },
+        over_ceiling,
+    )
 }
 
 /// A folder dropped on the window: its files one level deep, in the order
@@ -368,13 +413,29 @@ fn dropped_folder(
             refused: Some(batch_over_count(letter, files.len(), existing, max)),
         }];
     }
-    files
-        .iter()
-        .enumerate()
-        .map(|(at, (file_name, file_path))| {
-            dropped_file(file_path, file_name, cap, max, existing + at, letter)
-        })
-        .collect()
+    let ceiling = unpack_ceiling(cap, max);
+    let mut total = 0u64;
+    let mut out = Vec::with_capacity(files.len());
+    for (at, (file_name, file_path)) in files.iter().enumerate() {
+        let left = ceiling.saturating_sub(total);
+        let (found, over_ceiling) = dropped_file_with_limit(
+            file_path,
+            file_name,
+            cap,
+            max,
+            existing + at,
+            letter,
+            Some((left, ceiling)),
+        );
+        if !over_ceiling {
+            total = total.saturating_add(found.bytes.len() as u64);
+        }
+        out.push(found);
+        if over_ceiling {
+            break;
+        }
+    }
+    out
 }
 
 /// An entry of a zip to unpack: its index in the archive, and its base
@@ -592,6 +653,14 @@ fn unpack_ceiling(cap: Option<u64>, max: u64) -> u64 {
         Some(cap) => UNPACK_BYTES.min(cap.saturating_mul(max)),
         None => UNPACK_BYTES,
     }
+}
+
+/// Why `name` cannot unpack without taking the drop past its byte ceiling.
+fn over_unpack_ceiling(name: &str, ceiling: u64) -> String {
+    format!(
+        "{name} takes the drop past {}: one drop unpacks no more",
+        model::size(ceiling)
+    )
 }
 
 /// The base name of a zip entry to unpack, if it unpacks: a directory,
@@ -1329,6 +1398,31 @@ mod tests {
             )
         );
         assert!(found[0].bytes.is_empty());
+    }
+
+    #[test]
+    fn a_folder_stops_when_its_files_pass_the_unpack_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("papers");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.pdf"), b"a").unwrap();
+        // A sparse file keeps this boundary test small on disk. Its size
+        // is one byte more than remains after a.pdf, so it must be marked
+        // without reading the rest of it into memory.
+        File::create(root.join("b.pdf"))
+            .unwrap()
+            .set_len(UNPACK_BYTES)
+            .unwrap();
+
+        let found = dropped(&root, Some(UNPACK_BYTES + 1), 2, 0);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].bytes, b"a");
+        assert_eq!(found[0].refused, None);
+        assert!(found[1].bytes.is_empty());
+        assert_eq!(
+            found[1].refused.as_deref(),
+            Some("b.pdf takes the drop past 256.0 MiB: one drop unpacks no more")
+        );
     }
 
     #[test]
