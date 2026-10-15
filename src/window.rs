@@ -10,7 +10,7 @@ use std::thread;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton,
-    ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Task, Window, actions, div, img,
+    ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Size, Task, Window, actions, div, img,
     prelude::*, px, relative, rems,
 };
 
@@ -970,6 +970,10 @@ pub struct Footplate {
     /// stood, and whether the layout has put it at the top of the view
     /// yet. See [`Footplate::keep_place`].
     anchor: Option<(Anchor, bool)>,
+    /// The conversation's viewport size and whether it stood at its
+    /// newest when last laid out: a resize that finds it there puts it
+    /// at its newest again, since its offset is counted from the top.
+    stood: Option<(Size<Pixels>, bool)>,
     /// Where the open conversation stood when its older mail was last
     /// asked for: the conversation, its oldest mail and the scroll offset.
     /// Standing there still asks for nothing again, so a page the yard
@@ -1383,6 +1387,7 @@ impl Footplate {
             new_below: 0,
             bottom_pending: false,
             anchor: None,
+            stood: None,
             older_at: None,
             back_position: None,
             decision: ScrollHandle::new(),
@@ -2446,6 +2451,17 @@ impl Footplate {
             None => {}
         }
         self.come_back(window);
+        // A resize keeps a conversation that stood at its newest there:
+        // the offset counts from the top, so a smaller view ends above
+        // it. One scrolled up is not moved. A jump the layout has not
+        // put there yet counts as standing there.
+        let size = self.conversation.bounds().size;
+        if let Some((stood_size, stood_bottom)) = self.stood {
+            if size != stood_size && stood_bottom {
+                self.scroll_to_newest();
+            }
+        }
+        self.stood = Some((size, self.bottom_pending || self.at_bottom()));
         if self.bottom_pending {
             self.bottom_pending = false;
             return;
@@ -19387,6 +19403,54 @@ mod tests {
         cx.run_until_parked();
         assert!(at_bottom(&view, cx));
         assert!(!shows_jump(&view, cx));
+    }
+
+    /// A conversation at its newest stays there through a window resize,
+    /// smaller then larger; one scrolled up keeps its offset through the
+    /// same resizes, and the jump control stands throughout.
+    #[gpui::test]
+    fn a_conversation_at_its_newest_stays_there_through_a_resize(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let full = ["A long enough letter to make the conversation scroll."; 60];
+        mails(&yard, &full);
+        let (view, cx) = opened(&yard, &full, cx);
+        frames(cx);
+        // Sixty mails overflow the pane: there is further up to stand.
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > px(40.), "the conversation does not scroll: {over:?}");
+        assert!(at_bottom(&view, cx));
+
+        // Smaller, then larger: the width stays, so no mail rewraps and
+        // only the viewport's height moves the newest.
+        cx.simulate_resize(gpui::size(px(1920.), px(640.)));
+        frames(cx);
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+        cx.simulate_resize(gpui::size(px(1920.), px(900.)));
+        frames(cx);
+        assert!(at_bottom(&view, cx));
+        assert!(!shows_jump(&view, cx));
+
+        // Up by a page: the same resizes keep the offset, and the
+        // control with its mark nowhere, since no mail arrived below.
+        cx.simulate_keystrokes("pageup");
+        cx.run_until_parked();
+        assert!(!at_bottom(&view, cx));
+        assert!(shows_jump(&view, cx));
+        let place = offset_of(&view, cx);
+        cx.simulate_resize(gpui::size(px(1920.), px(640.)));
+        frames(cx);
+        assert_eq!(offset_of(&view, cx), place);
+        assert!(!at_bottom(&view, cx));
+        assert!(shows_jump(&view, cx));
+        assert!(drawn(cx, "jump newest"));
+        cx.simulate_resize(gpui::size(px(1920.), px(900.)));
+        frames(cx);
+        assert_eq!(offset_of(&view, cx), place);
+        assert!(!at_bottom(&view, cx));
+        assert!(shows_jump(&view, cx));
+        assert!(drawn(cx, "jump newest"));
     }
 
     /// The yardmaster's conversation is the mails 1 to `n`, each of three
