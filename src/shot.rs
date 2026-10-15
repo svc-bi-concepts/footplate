@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::fake::Yard;
+use crate::fake::{Router, Yard};
 use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
@@ -26,11 +26,14 @@ use crate::yard::Env;
 /// linked yard whose mail was refused over the hour, the first screen
 /// with a way's fields open after the yard answered, with the line that
 /// esc opens it, step 2 of setting up a yard here, posed with a
-/// canned doctor of two providers and their model offers, and the first
-/// screen with the hosted way's fields open and filled.
+/// canned doctor of two providers and their model offers, the first
+/// screen with the hosted way's fields open and filled, and the away
+/// screen of a hosted yard that is signed out.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
+/// signed-out yard from settings the state writes itself, against a
+/// throwaway config, with a session the edge no longer knows; the
 /// settings open over a running yard; the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
 /// and run. The mail's conversation opens on the mail, with the web view
@@ -59,6 +62,7 @@ pub const STATES: &[&str] = &[
     "answered",
     "setup",
     "hosted",
+    "signedout",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -85,6 +89,10 @@ const FILE_HASH: &str = "efefefefefefefefefefefefefefefefefefefefefefefefefefefe
 pub(super) struct ShotYard {
     yard: std::sync::Arc<Yard>,
     directory: PathBuf,
+    /// The hosted yard and the edge in front of it, for `signedout` alone:
+    /// the window opens the hosted yard through the edge, whose session
+    /// is none the edge knows.
+    edge: Option<(Yard, Router)>,
 }
 
 impl ShotYard {
@@ -113,6 +121,7 @@ impl ShotYard {
             ShotYard {
                 yard: std::sync::Arc::new(yard),
                 directory,
+                edge: None,
             },
         ))
     }
@@ -152,7 +161,9 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
 /// stopped. The refusal shot is the first screen, with the pairing's
 /// fields open on it; the setup shot is the first run posed at step 2;
 /// the hosted shot is the first screen with the hosted way's fields open
-/// on it.
+/// on it. The signedout shot opens the hosted yard south through an edge
+/// that no longer knows its session, so the window opens on the away
+/// screen of a yard that is signed out.
 fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     if state == "stopped" || state == "refusal" || state == "setup" || state == "hosted" {
         let mut env = env;
@@ -162,13 +173,24 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         ));
         return (env, None);
     }
-    let (socket, shot) = match ShotYard::start(&std::env::temp_dir(), state) {
+    let (socket, mut shot) = match ShotYard::start(&std::env::temp_dir(), state) {
         Ok(shot) => shot,
         Err(error) => {
             eprintln!("footplate: the screenshot yard has nowhere to listen: {error}");
             std::process::exit(1);
         }
     };
+    if state == "signedout" {
+        // The window opens south through the edge, as the sign-in-again
+        // test has it: the session stands in its file, and the edge knew
+        // it until it was revoked there.
+        let hosted = Yard::start_tcp();
+        populate(&hosted, state);
+        let edge = Router::start(&hosted, crate::fake::SESSION);
+        edge.revoke(crate::fake::SESSION);
+        write_signedout_settings(edge.address());
+        shot.edge = Some((hosted, edge));
+    }
     if state == "reconnecting" {
         // The yard answers, the window reads it, and then its server is
         // stopped: the shot is the reconnecting state. The stop waits for
@@ -197,6 +219,56 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     let mut env = env;
     env.socket = socket;
     (env, Some(shot))
+}
+
+/// The settings the `signedout` shot opens: the hosted yard south at the
+/// edge's address, with the account it was signed in as, its device token
+/// and the session in files beside them, as the sign-in-again test keeps
+/// them. The shot script runs against a throwaway config, which keeps no
+/// settings; where a settings file already stands, the state is refused
+/// rather than overwrite it.
+fn write_signedout_settings(address: &str) {
+    let Some(file) = crate::settings::file() else {
+        eprintln!("footplate: the signedout shot keeps no settings without a home");
+        std::process::exit(1);
+    };
+    if file.exists() {
+        eprintln!(
+            "footplate: the signedout shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh does",
+            file.display()
+        );
+        std::process::exit(2);
+    }
+    let mut south =
+        crate::settings::Yard::hosted("south", address, "yard-south.token", "yard-south.session");
+    south.account = crate::fake::KRATOS_EMAIL.to_string();
+    crate::settings::Settings::default()
+        .with_yard(None, south, Some(&file))
+        .and_then(|set| {
+            set.opening("south")
+                .write(&file)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the signedout shot keeps no settings: {error}");
+            std::process::exit(1);
+        });
+    let edge = crate::api::Address::parse(address).unwrap_or_else(|error| {
+        eprintln!("footplate: the signedout shot's edge has no address: {error}");
+        std::process::exit(1);
+    });
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    crate::yard::token_place(&dir.join("yard-south.token"))
+        .and_then(|place| place.keep(crate::fake::TOKEN, &edge))
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the signedout shot keeps no token: {error}");
+            std::process::exit(1);
+        });
+    crate::yard::keep_session(&dir.join("yard-south.session"), crate::fake::SESSION, &edge)
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the signedout shot keeps no session: {error}");
+            std::process::exit(1);
+        });
 }
 
 /// Doctor's answer for the `setup` shot: git and herdr installed, and
@@ -280,9 +352,10 @@ fn populate(yard: &Yard, state: &str) {
         // The yard at an address is opened from the settings, not from
         // this yard, and the settings open over a running one: both
         // serve the yardmaster's conversation, as does the yard that is
-        // stopped once it is read, and the one that answers under the
-        // first screen's open fields.
-        "yardmaster" | "far" | "settings" | "reconnecting" | "answered" => {
+        // stopped once it is read, the one that answers under the
+        // first screen's open fields, and the signed-out yard's, which
+        // the window never reaches past the edge.
+        "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -586,7 +659,7 @@ mod tests {
             assert_eq!(loaded.me, "jo", "{state}");
             assert_eq!(loaded.asks.decided.len(), 0, "{state}");
             match *state {
-                "yardmaster" | "far" | "settings" | "reconnecting" | "answered" => {
+                "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");

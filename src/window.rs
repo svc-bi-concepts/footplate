@@ -7474,6 +7474,13 @@ impl Footplate {
             }
         };
         let answers = self.answers_under_adding();
+        let pair_again =
+            self.client.as_ref().is_some_and(Client::is_remote) && self.away != Away::SignedOut;
+        let sign_in_again = self.env.yard.is_none()
+            && self
+                .settings
+                .yard(&self.yard)
+                .is_some_and(|yard| yard.is_hosted());
         div()
             .flex_1()
             .min_w_0()
@@ -7582,55 +7589,43 @@ impl Footplate {
                         .children(self.yard_asked(palette, cx)),
                 )
             })
-            // A yard at an address that is away for whatever reason: the
-            // device can be paired again, which is what helps when the yard
-            // no longer knows it. Where the session is what is out, pairing
-            // again helps nothing, so it is not offered. The actions stand
-            // in their own row under the ways, in the ways' own column, so
-            // no button ever stands on a way's lines.
-            .when(
-                self.client.as_ref().is_some_and(Client::is_remote) && self.away != Away::SignedOut,
-                |el| {
-                    el.child(
-                        div()
-                            .w_full()
-                            .max_w(rems(32.5))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                small_button("pair again".to_string(), palette)
-                                    .id("pair again")
-                                    .debug_selector(|| "pair again".to_string())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.pair_again(None, window, cx)
-                                    })),
-                            ),
-                    )
-                },
-            )
-            // A hosted yard that is away: its session can be signed in
-            // again, which is what helps when the edge no longer knows it.
-            // The one yard the environment names is reached direct, and is
-            // signed in nowhere.
-            .when(
-                self.env.yard.is_none()
-                    && self
-                        .settings
-                        .yard(&self.yard)
-                        .is_some_and(|yard| yard.is_hosted()),
-                |el| {
-                    el.child(
-                        small_button("sign in again".to_string(), palette)
-                            .id("sign in again")
-                            .debug_selector(|| "sign in again".to_string())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let name = this.yard.clone();
-                                this.sign_in_again(&name, window, cx)
-                            })),
-                    )
-                },
-            )
+            // The actions stand in their own row under the ways, in the
+            // ways' own column, so no button ever stands on a way's
+            // lines. A yard at an address that is away for whatever
+            // reason: the device can be paired again, which is what
+            // helps when the yard no longer knows it. Where the session
+            // is what is out, pairing again helps nothing, so it is not
+            // offered. A hosted yard that is away: its session can be
+            // signed in again, which is what helps when the edge no
+            // longer knows it. The one yard the environment names is
+            // reached direct, and is signed in nowhere.
+            .when(pair_again || sign_in_again, |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .max_w(rems(32.5))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .children(pair_again.then(|| {
+                            small_button("pair again".to_string(), palette)
+                                .id("pair again")
+                                .debug_selector(|| "pair again".to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.pair_again(None, window, cx)
+                                }))
+                        }))
+                        .children(sign_in_again.then(|| {
+                            small_button("sign in again".to_string(), palette)
+                                .id("sign in again")
+                                .debug_selector(|| "sign in again".to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let name = this.yard.clone();
+                                    this.sign_in_again(&name, window, cx)
+                                }))
+                        })),
+                )
+            })
             // The column's foot has the control where there is a column.
             .when(alone, |el| {
                 el.child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
@@ -18090,12 +18085,13 @@ mod tests {
         wait(cx, "that the session is not signed in", |cx| {
             view.read_with(cx, |v, _| v.away == Away::SignedOut)
         });
-        assert!(drawn(cx, "sign in again"));
-        // The away screen's button stands, but its center click lands on
-        // the way above it in a window this short, as the pair-again
-        // button does: the settings' row signs in instead.
-        cx.simulate_keystrokes("secondary-,");
-        click_on(cx, "yard sign in south");
+        // The away screen's own button stands clear of the ways, and its
+        // centre signs this yard in again: not a way, and no settings
+        // first.
+        let (way, again) = (bounds_of(cx, "way far"), bounds_of(cx, "sign in again"));
+        assert!(again.top() >= way.bottom(), "{again:?} {way:?}");
+        click_on(cx, "sign in again");
+        assert!(settings_open(&view, cx));
         assert_eq!(
             view.read_with(cx, |v, _| v.adding.clone()),
             Some(Adding::SignInAgain("south".to_string()))

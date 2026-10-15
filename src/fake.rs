@@ -750,30 +750,31 @@ fn stream(
     }
 }
 
-/// The session token a stand-in edge lets in, in the tests.
-#[cfg(test)]
+/// The session token a stand-in edge lets in, in the tests and the
+/// screenshots.
+#[cfg(any(test, debug_assertions))]
 pub const SESSION: &str = "kratos-dev-session";
 
 /// The Kratos account the stand-in edge signs in, and its password: what
-/// the hosted tests sign in with.
-#[cfg(test)]
+/// the hosted tests sign in with, and the signed-out shot's account.
+#[cfg(any(test, debug_assertions))]
 pub const KRATOS_EMAIL: &str = "jo@example.net";
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 pub const KRATOS_PASSWORD: &str = "sign-me-in-1";
 /// The handle Kratos answers the account has.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const KRATOS_HANDLE: &str = "jo";
 /// The login flow the stand-in answers: any other is expired.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const KRATOS_FLOW: &str = "test-flow-id";
 
 /// What the edge answers a session it does not know: its own 401, naming
 /// the edge, carrying `X-Edge-Refusal: session`. The yard's own 401 it
 /// passes through byte for byte, adding nothing.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const NO_SESSION: &str = "{\"error\":\"edge: no Kratos session; sign in first\"}\n";
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 struct EdgeShared {
     sessions: Mutex<Vec<String>>,
     last_request: Mutex<String>,
@@ -800,7 +801,7 @@ struct EdgeShared {
 /// account it knows. The yard answers the device token as ever; a test
 /// stops the yard before the edge, so no relayed stream outlives what it
 /// relays.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 pub struct Router {
     /// `http://127.0.0.1:<port>`.
     address: String,
@@ -808,7 +809,7 @@ pub struct Router {
     accept: Mutex<Option<JoinHandle<()>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 impl Router {
     /// An edge in front of `yard`, which lets `session` in.
     pub fn start(yard: &Yard, session: &str) -> Router {
@@ -921,7 +922,7 @@ impl Router {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 impl Drop for Router {
     fn drop(&mut self) {
         self.stop();
@@ -932,7 +933,7 @@ impl Drop for Router {
 /// takes no session, else refused with the edge's own 401 where the
 /// session is none it knows, else proxied to the yard with the credential
 /// stripped and the yard's answer relayed byte for byte.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) -> io::Result<()> {
     // The listener is nonblocking so it can be stopped, and what it
     // accepts inherits that: serve blocking, as the yard does, or a
@@ -1010,7 +1011,7 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
 /// Kratos refuses it, in the flow with its messages. The flow's own action
 /// names another flow than the one opened: the client answers the flow it
 /// opened, never the action's.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn serve_kratos(
     mut conn: TcpStream,
     origin: &str,
@@ -1097,7 +1098,7 @@ fn serve_kratos(
 
 /// One request proxied to the yard, its answer relayed byte for byte. The
 /// relay is cut when its session is revoked, and forgotten when it ends.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn relay(
     mut conn: TcpStream,
     head: &str,
@@ -1123,7 +1124,7 @@ fn relay(
     result
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> io::Result<()> {
     let mut yard = TcpStream::connect(target)?;
     yard.write_all(head.as_bytes())?;

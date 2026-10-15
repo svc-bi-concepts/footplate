@@ -178,8 +178,9 @@ a linked yard whose mail was refused over the hour), `answered` (the
 first screen with a way's fields open after the yard answered, with the
 line that esc opens it), `setup` (step 2 of setting up a yard here,
 posed: a canned doctor of two providers and their model offers, and the
-working styles as a numbered scale) and `hosted` (the first screen with
-the hosted way's fields open and filled). With no state the first
+working styles as a numbered scale), `hosted` (the first screen with
+the hosted way's fields open and filled) and `signedout` (the away
+screen of a hosted yard that is signed out). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
