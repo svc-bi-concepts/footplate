@@ -3203,6 +3203,44 @@ mod tests {
         assert_eq!(yard.asked("Head").len(), 1);
     }
 
+    /// A connection whose request has not arrived when the edge reads for
+    /// it is held open for the request, not reset: the stranger's answer
+    /// stays the edge's own 401, whatever its accept loop found first.
+    #[test]
+    fn a_request_that_is_not_there_when_the_edge_reads_is_waited_for() {
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let at = edge.address().strip_prefix("http://").unwrap();
+        let mut conn = TcpStream::connect(at).unwrap();
+        // Nothing is sent, so the edge reads for the request before it
+        // comes. A connection it closed would answer EOF; one it holds
+        // open holds this read to its timeout instead.
+        conn.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        conn.read(&mut [0u8; 1]).unwrap_err();
+        // And the request that comes then is refused as ever, at the edge.
+        conn.set_read_timeout(Some(CALL_TIMEOUT)).unwrap();
+        conn.write_all(
+            b"POST /user/call HTTP/1.1\r\nHost: edge\r\nX-Edge-Token: kratos-dev-unknown\r\nContent-Length: 0\r\n\r\n",
+        )
+        .unwrap();
+        let mut answer = String::new();
+        conn.read_to_string(&mut answer).unwrap();
+        assert!(
+            answer.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("\r\nX-Edge-Refusal: session\r\n"),
+            "{answer}"
+        );
+        assert_eq!(edge.proxied(), 0);
+        assert_eq!(yard.requests(), 0);
+    }
+
     /// The shapes the two refusals are told by: the edge's carries
     /// `X-Edge-Refusal: session` with a body naming the edge, the yard's
     /// is plain `Unauthorized` with `WWW-Authenticate: Bearer` and no
