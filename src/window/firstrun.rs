@@ -545,17 +545,23 @@ impl FirstRun {
             .map(|offer| offer.model.clone())
     }
 
-    /// The text of a provider's button: the harness's label where doctor
-    /// carries one, else the kind. One with no login recipe says it needs
-    /// a terminal once.
+    /// The text of a provider's button: the maker and the program where
+    /// doctor carries both ("Anthropic · Claude Code"), the one it
+    /// carries where it carries one ("Claude Code", or the maker with
+    /// the kind: "Anthropic · claude"), else the kind. One with no
+    /// login recipe says it needs a terminal once.
     fn provider_text(item: &Item) -> String {
-        let name = item
-            .label
-            .as_deref()
-            .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| item.harness.as_deref().unwrap_or_default());
+        let kind = item.harness.as_deref().unwrap_or_default();
+        let provider = item.provider.as_deref().filter(|name| !name.is_empty());
+        let label = item.label.as_deref().filter(|name| !name.is_empty());
+        let name = match (provider, label) {
+            (Some(provider), Some(label)) => format!("{provider} · {label}"),
+            (None, Some(label)) => label.to_string(),
+            (Some(provider), None) => format!("{provider} · {kind}"),
+            (None, None) => kind.to_string(),
+        };
         match item.harness_login {
-            true => name.to_string(),
+            true => name,
             false => format!("{name} (needs a terminal once to log in)"),
         }
     }

@@ -430,9 +430,13 @@ pub struct Item {
     /// The kind, of a harness.
     #[serde(default)]
     pub harness: Option<String>,
-    /// The harness's name as people write it, where doctor carries it.
+    /// The harness's program as people write it, where doctor
+    /// carries it ("Claude Code").
     #[serde(default)]
     pub label: Option<String>,
+    /// The harness's maker, where doctor carries it ("Anthropic").
+    #[serde(default)]
+    pub provider: Option<String>,
     /// The models the kind's file suggests a person pick, where it names
     /// any.
     #[serde(default)]
@@ -1366,8 +1370,9 @@ exit 0
         })
     }
 
-    /// Doctor's answer where the harnesses name their labels and the
-    /// models they offer, one recommended for a yardmaster each.
+    /// Doctor's answer where the harnesses name their maker and
+    /// program and the models they offer, one recommended for a
+    /// yardmaster each.
     pub fn doctor_ready_with_offers() -> serde_json::Value {
         serde_json::json!({
             "yard": false,
@@ -1377,14 +1382,14 @@ exit 0
                 {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
                 {"program": "claude", "for": "a harness a yard can be created on", "found": true,
                  "path": "/opt/stand-in/bin/claude", "harness": "claude", "harness_login": true,
-                 "label": "Anthropic · Claude Code",
+                 "provider": "Anthropic", "label": "Claude Code",
                  "offers": [
                      {"model": "opus", "label": "Opus 5.5", "recommended": "yardmaster"},
                      {"model": "fable", "label": "Fable 5.1"},
                      {"model": "sonnet", "label": "Sonnet 5"}]},
                 {"program": "codex", "for": "a harness a yard can be created on", "found": true,
                  "path": "/opt/stand-in/bin/codex", "harness": "codex",
-                 "label": "OpenAI · Codex",
+                 "provider": "OpenAI", "label": "Codex",
                  "offers": [
                      {"model": "gpt-6-luna", "label": "GPT-6 Luna", "recommended": "yardmaster"},
                      {"model": "gpt-6-astra", "label": "GPT-6 Astra"}]}
@@ -1493,22 +1498,24 @@ mod tests {
         );
     }
 
-    /// A harness names its label and the models it offers, one
-    /// recommended for a yardmaster; one that names neither has none,
-    /// and only the yardmaster's mark counts.
+    /// A harness names its maker and program and the models it
+    /// offers, one recommended for a yardmaster; one that names none
+    /// of them has none, and only the yardmaster's mark counts.
     #[test]
     fn a_harness_names_its_label_and_the_models_it_offers() {
         let doctor: Doctor = serde_json::from_value(standin::doctor_ready_with_offers()).unwrap();
         assert!(doctor.ready());
         let claude = doctor.item("claude").unwrap();
-        assert_eq!(claude.label.as_deref(), Some("Anthropic · Claude Code"));
+        assert_eq!(claude.provider.as_deref(), Some("Anthropic"));
+        assert_eq!(claude.label.as_deref(), Some("Claude Code"));
         assert_eq!(claude.offers.len(), 3);
         assert_eq!(
             claude.recommended_offer().unwrap().model,
             "opus".to_string()
         );
         let codex = doctor.item("codex").unwrap();
-        assert_eq!(codex.label.as_deref(), Some("OpenAI · Codex"));
+        assert_eq!(codex.provider.as_deref(), Some("OpenAI"));
+        assert_eq!(codex.label.as_deref(), Some("Codex"));
         assert_eq!(
             codex.recommended_offer().unwrap().model,
             "gpt-6-luna".to_string()
@@ -1518,6 +1525,7 @@ mod tests {
         // the name, and the harness's own choice for the model.
         let bare: Doctor = serde_json::from_value(standin::doctor_ready()).unwrap();
         let claude = bare.item("claude").unwrap();
+        assert_eq!(claude.provider, None);
         assert_eq!(claude.label, None);
         assert!(claude.offers.is_empty());
         assert_eq!(claude.recommended_offer(), None);

@@ -17047,6 +17047,45 @@ mod tests {
         );
     }
 
+    /// The provider buttons read the maker and the program from doctor's
+    /// harness items: both where it carries both, the one where it
+    /// carries one (an empty one counting as none carried), and the
+    /// kind where it carries neither.
+    #[gpui::test]
+    fn the_provider_buttons_read_the_maker_and_the_program_or_the_kind(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let doctor = json!({
+            "yard": false,
+            "machine": [
+                {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": true,
+                 "path": "/opt/stand-in/bin/herdr", "server": {"state": "not_running", "output": "no server"}},
+                {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+                {"program": "claude", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/claude", "harness": "claude", "harness_login": true,
+                 "provider": "Anthropic", "label": "Claude Code"},
+                {"program": "codex", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/codex", "harness": "codex", "harness_login": true,
+                 "provider": "", "label": "Codex"},
+                {"program": "kimi", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/kimi", "harness": "kimi", "harness_login": true,
+                 "provider": "Moonshot", "label": ""},
+                {"program": "opencode", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/opencode", "harness": "opencode", "harness_login": true}
+            ],
+            "faults": []
+        });
+        let (view, cx, _) = at_yard(&dir, &doctor, cx);
+        assert_eq!(
+            setup_providers(&view, cx),
+            [
+                ("claude".to_string(), "Anthropic · Claude Code".to_string()),
+                ("codex".to_string(), "Codex".to_string()),
+                ("kimi".to_string(), "Moonshot · kimi".to_string()),
+                ("opencode".to_string(), "opencode".to_string()),
+            ]
+        );
+    }
+
     /// Choosing another provider moves the model pick to its recommended
     /// entry, and creating the yard sends that id.
     #[gpui::test]

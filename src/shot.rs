@@ -192,14 +192,14 @@ pub(crate) fn setup_doctor() -> crate::setup::Doctor {
             {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
             {"program": "claude", "for": "a harness a yard can be created on", "found": true,
              "path": "/usr/bin/claude", "harness": "claude", "harness_login": true,
-             "label": "Anthropic · Claude Code",
+             "provider": "Anthropic", "label": "Claude Code",
              "offers": [
                  {"model": "opus", "label": "Opus 5.5", "recommended": "yardmaster"},
                  {"model": "fable", "label": "Fable 5.1"},
                  {"model": "sonnet", "label": "Sonnet 5"}]},
             {"program": "codex", "for": "a harness a yard can be created on", "found": true,
              "path": "/usr/bin/codex", "harness": "codex",
-             "label": "OpenAI · Codex",
+             "provider": "OpenAI", "label": "Codex",
              "offers": [
                  {"model": "gpt-6-luna", "label": "GPT-6 Luna", "recommended": "yardmaster"},
                  {"model": "gpt-6-astra", "label": "GPT-6 Astra"}]}
