@@ -5835,9 +5835,9 @@ impl Footplate {
                     .child(view)
                     .child(run)
                     .child(login)
-                    .child(agents)
                     .child(notifications)
-                    .child(menu_bar),
+                    .child(menu_bar)
+                    .child(agents),
             )
             .when_some(self.unkept.clone(), |el, why| {
                 el.child(
@@ -13532,6 +13532,9 @@ mod tests {
             bind_keys(cx);
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
+        // The section is the last of the settings: the window is tall
+        // enough to hold every section, so its buttons take clicks.
+        cx.simulate_resize(gpui::size(px(1200.), px(1800.)));
         let (means, program, _) = stand_in_means(dir.path(), false);
         standin::answers(&program, "doctor", 0, &standin::doctor_ready());
         standin::answers(&program, "status", 0, &standin::status(true, false));
