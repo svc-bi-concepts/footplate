@@ -1833,7 +1833,7 @@ impl Footplate {
         // answered, and goes on being followed.
         if self.answered_while_adding {
             self.answered_while_adding = false;
-            if self.unreached.get(&self.yard).is_none() {
+            if !self.unreached.contains_key(&self.yard) {
                 self.down = None;
             }
         }
@@ -4637,7 +4637,7 @@ impl Footplate {
         // it answers, it opens under the first run.
         if self.answered_while_adding {
             self.answered_while_adding = false;
-            if self.unreached.get(&self.yard).is_none() {
+            if !self.unreached.contains_key(&self.yard) {
                 self.down = None;
                 self.refresh_switch(cx);
             }
@@ -4882,7 +4882,7 @@ impl Footplate {
     /// while they stood open, and is not away again since. The screen
     /// says so, and leaving the fields opens it.
     fn answers_under_adding(&self) -> bool {
-        self.answered_while_adding && self.unreached.get(&self.yard).is_none()
+        self.answered_while_adding && !self.unreached.contains_key(&self.yard)
     }
 
     /// The quiet line where the head has no status row for it: a yard at
