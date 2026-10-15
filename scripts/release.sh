@@ -151,6 +151,13 @@ for arch in arm64 amd64; do
     release_container=""
 done
 
+# The emulated build leaves the debian:13 image in the local store as
+# amd64, under which the next native `docker run` would emulate with a
+# warning: pull the host's own back. Past the builds, so a failure here
+# warns and the release still stands.
+docker pull -q debian:13 >&2 \
+    || echo "release.sh: could not restore the native debian:13 image" >&2
+
 (cd "$out" && shasum -a 256 \
     "Footplate_${number}_darwin_arm64.zip" \
     "Footplate_${number}_darwin_amd64.zip" \
