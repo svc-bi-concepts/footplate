@@ -11,7 +11,7 @@ use gpui::{
     Action, AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton,
     ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Size, Task, Window, actions, div, img,
-    prelude::*, px, relative, rems,
+    prelude::*, px, relative, rems, rgba, white,
 };
 
 use crate::api::{self, Address, BlobRef, Client};
@@ -99,6 +99,10 @@ const SWITCH_CONTEXT: &str = "FootplateSwitch";
 /// reader when it comes.
 const IMAGE_HEIGHT: f32 = 240.;
 
+/// The margin an image open over the window leaves out, each side, in
+/// rems: what its fit is short of the window by.
+const IMAGE_MARGIN: f32 = 2.;
+
 /// The side of an attachment of the draft, above the line, in rems: its
 /// name stands in it where it is no image, so it goes with the text size.
 const ATTACHMENT: f32 = 3.5;
@@ -138,6 +142,15 @@ impl Picture {
     }
 }
 
+/// The image shown full size over the window: its hash, its bytes for
+/// the line while they are not there yet, and the focus to give back
+/// when it shuts.
+struct ImageOpen {
+    hash: String,
+    bytes: u64,
+    back: Option<FocusHandle>,
+}
+
 /// An image's tooltip: what a click does with it.
 struct OpenTip;
 
@@ -158,9 +171,8 @@ impl Render for OpenTip {
 }
 
 /// Whether the web view answers at the setting's base address: a page
-/// carries Open when it does, and how to start it when it does not, and
-/// an image opens through it. Asked once per address; the answer stands
-/// until the address changes.
+/// carries Open when it does, and how to start it when it does not.
+/// Asked once per address; the answer stands until the address changes.
 #[derive(Clone, Debug, PartialEq)]
 enum ViewUp {
     /// No probe has gone for the setting's address.
@@ -1016,6 +1028,10 @@ pub struct Footplate {
     /// The images of the conversations and cards that were open, by hash:
     /// an image never changes under its hash, so each is asked for once.
     images: HashMap<String, Picture>,
+    /// The image shown full size over the window, while one is: a click
+    /// on a thumbnail opens it, and Esc, a click outside or its × shuts
+    /// it again.
+    image_open: Option<ImageOpen>,
     /// Whether the web view answers at the setting's address: what a
     /// note's page is drawn with.
     view_up: ViewUp,
@@ -1456,6 +1472,7 @@ impl Footplate {
             decision: ScrollHandle::new(),
             selection,
             images: HashMap::new(),
+            image_open: None,
             view_up: ViewUp::Unknown,
             run_up: ViewUp::Unknown,
             drafts: Drafts::default(),
@@ -2202,6 +2219,19 @@ impl Footplate {
                             false,
                         ));
                     }
+                    // The image shot opens the mail's image over the
+                    // window, as a click on its thumbnail does: the yard
+                    // holds the shot's bytes, and they show when they
+                    // come. A debug build's alone, as above.
+                    #[cfg(debug_assertions)]
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("image") {
+                        let (hash, bytes) = crate::shot::IMAGE_OPEN;
+                        self.image_open = Some(ImageOpen {
+                            hash: hash.to_string(),
+                            bytes,
+                            back: None,
+                        });
+                    }
                 }
                 self.model = Some(model);
                 // The yard answers: the away screen's details are shut,
@@ -2781,8 +2811,7 @@ impl Footplate {
 
     /// Asks whether the web view answers at the setting's base address,
     /// once per address: a page carries Open when it does, and how to
-    /// start it when it does not, and an image opens through it. Off the
-    /// window's thread, as a call.
+    /// start it when it does not. Off the window's thread, as a call.
     fn view_probe(&mut self, cx: &mut Context<Self>) {
         let base = self.settings.web_view.clone();
         match &self.view_up {
@@ -2824,7 +2853,7 @@ impl Footplate {
     }
 
     /// Whether the web view answers at the setting's address, if that was
-    /// asked: what a page and an image are drawn with.
+    /// asked: what a page is drawn with.
     fn view_up_now(&self) -> Option<bool> {
         match &self.view_up {
             ViewUp::Answered(asked, up) if asked == &self.settings.web_view => Some(*up),
@@ -4340,9 +4369,13 @@ impl Footplate {
         window.focus(&field.focus_handle(cx));
     }
 
-    /// Esc leaves what it can: a decline asked for words, the words for
-    /// the card's keys, the pick, then the words.
+    /// Esc leaves what it can: the image over the window, a decline
+    /// asked for words, the words for the card's keys, the pick, then
+    /// the words.
     fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
+        if self.image_open.is_some() {
+            return self.shut_image(window, cx);
+        }
         if self.switch_question.is_some() {
             return self.stop_left(cx);
         }
@@ -7419,11 +7452,164 @@ impl Footplate {
             )
     }
 
+    /// Clicks a thumbnail: the image shows full size over the window,
+    /// from the bytes the window holds, or the line while they are not
+    /// there yet. Over one already shown the second shows instead, and
+    /// the focus still goes back where the first found it. While one
+    /// shows, the window holds the keys: nothing typed goes to a line
+    /// that is not in view.
+    fn open_image(
+        &mut self,
+        hash: String,
+        bytes: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let back = self
+            .image_open
+            .take()
+            .and_then(|open| open.back)
+            .or_else(|| window.focused(cx));
+        self.image_open = Some(ImageOpen { hash, bytes, back });
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Shuts the image shown over the window, and the focus goes back
+    /// where it was before it opened. Shutting none shuts nothing: the
+    /// × stands on the backdrop, and its click shuts through both.
+    fn shut_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = self.image_open.take() {
+            match open.back {
+                Some(back) => window.focus(&back),
+                None => window.focus(&self.focus.clone()),
+            }
+        }
+        cx.notify();
+    }
+
+    /// The image open over the window: the dark backdrop, the image
+    /// scaled down to fit it with a margin, and the × in a corner. A
+    /// click outside the image or on the × shuts it, as Esc does; a
+    /// click on the image shuts nothing. Drawn from the bytes the
+    /// window holds, with no second fetch; while they are not there
+    /// yet the line, as the thumbnail shows it.
+    fn image_layer(
+        &self,
+        open: &ImageOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hash = open.hash.clone();
+        let shown = match self.images.get(&open.hash) {
+            Some(Picture::Here(image)) => {
+                // The box the image draws in: its own size, scaled down
+                // to fit the window minus the margin, the shape kept.
+                // The element's own sizing caps each side apart, and
+                // where one side binds the box would outgrow the image:
+                // a click there must shut. While the bytes are not
+                // drawn yet the caps stand in.
+                let fit = image
+                    .clone()
+                    .use_render_image(window, cx)
+                    .filter(|rendered| rendered.frame_count() > 0)
+                    .map(|rendered| rendered.size(0))
+                    .map(|size| {
+                        let scale = window.scale_factor();
+                        (
+                            i32::from(size.width) as f32 / scale,
+                            i32::from(size.height) as f32 / scale,
+                        )
+                    })
+                    .filter(|(w, h)| *w > 0. && *h > 0.)
+                    .map(|(w, h)| {
+                        let margin = f32::from(window.rem_size()) * IMAGE_MARGIN;
+                        let avail = window.viewport_size();
+                        let scale = ((f32::from(avail.width) - 2. * margin) / w)
+                            .min((f32::from(avail.height) - 2. * margin) / h)
+                            .clamp(0., 1.);
+                        (w * scale, h * scale)
+                    });
+                let mut shown = img(image.clone()).object_fit(ObjectFit::ScaleDown);
+                match fit {
+                    Some((w, h)) => shown = shown.w(px(w)).h(px(h)),
+                    None => shown = shown.max_w_full().max_h_full(),
+                }
+                shown
+                    .debug_selector({
+                        let hash = hash.clone();
+                        move || format!("image shown {hash}")
+                    })
+                    .with_fallback(move || {
+                        div()
+                            .text_sm()
+                            .text_color(white())
+                            .child("an image footplate cannot draw".to_string())
+                            .into_any_element()
+                    })
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .into_any_element()
+            }
+            Some(Picture::Not(why)) => {
+                let why = why.clone();
+                div()
+                    .id(SharedString::from(format!("image line {hash}")))
+                    .text_sm()
+                    .text_color(white())
+                    .debug_selector(move || format!("image line {hash}"))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(why)
+                    .into_any_element()
+            }
+            Some(Picture::Asked) | None => div()
+                .id(SharedString::from(format!("image line {hash}")))
+                .text_sm()
+                .text_color(white())
+                .debug_selector(move || format!("image line {hash}"))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(format!("image, {}…", model::size(open.bytes)))
+                .into_any_element(),
+        };
+        div()
+            .id("image overlay")
+            .debug_selector(|| "image overlay".to_string())
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .bg(rgba(0x000000cc))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, window, cx| this.shut_image(window, cx)))
+            .child(shown)
+            .child(
+                div()
+                    .id("image close")
+                    .debug_selector(|| "image close".to_string())
+                    .absolute()
+                    .top(rems(0.75))
+                    .right(rems(1.))
+                    .text_xl()
+                    .text_color(white())
+                    .cursor_pointer()
+                    .child("×")
+                    .on_click(cx.listener(|this, _, window, cx| this.shut_image(window, cx))),
+            )
+    }
+
     /// A file of a mail or of a note: an image, a page's row, or the
-    /// line that says why there is none. The image opens in the browser
-    /// through the web view, as a page's Open does; `note` says it is a
-    /// note's, whose page carries run beside Open.
-    fn picture(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
+    /// line that says why there is none. A click on the image shows it
+    /// full size over the window, from the bytes the window holds;
+    /// `note` says it is a note's, whose page carries run beside Open.
+    fn picture(
+        &self,
+        file: &BlobRef,
+        note: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
         if !file.not_taken.is_empty() {
             return line(model::not_taken(file)).into_any_element();
@@ -7440,59 +7626,51 @@ impl Footplate {
                     .with_fallback(move || {
                         line("an image footplate cannot draw".to_string()).into_any_element()
                     });
-                // Where the view answers a click opens the image in the
-                // browser, as a page's Open does; where it does not the
-                // thumbnail stands with how to start it, as the page's
-                // row does. Where it was not asked yet the thumbnail
-                // stands alone.
-                match self.view_up_now() {
-                    Some(true) => {
-                        // The probe answered at this address, so it
-                        // parses: the same reading, not another. A hash
-                        // that is no hex names no image, and it opens
-                        // nothing.
-                        let hash = file.hash.clone();
-                        let Some(url) = Address::parse_view(&self.settings.web_view)
-                            .expect("the web view answered at this address")
-                            .page_url(&file.hash)
-                        else {
-                            return shown.into_any_element();
-                        };
-                        let open = self.means.open.clone();
-                        shown
-                            .id(SharedString::from(format!("image open {hash}")))
-                            .debug_selector({
-                                let hash = hash.clone();
-                                move || format!("image open {hash}")
-                            })
-                            .cursor_pointer()
-                            .tooltip(|_, cx| cx.new(|_| OpenTip).into())
-                            .on_click(move |_, _, cx| (open)(&url, cx))
-                            .into_any_element()
-                    }
-                    Some(false) => div()
-                        .flex()
-                        .flex_col()
-                        .child(shown)
-                        .child(
-                            line(
-                                "the web view is not reached: start it with yardr web start"
-                                    .to_string(),
-                            )
-                            .debug_selector({
-                                let hash = file.hash.clone();
-                                move || format!("image start {hash}")
-                            }),
-                        )
-                        .into_any_element(),
-                    None => shown.into_any_element(),
-                }
+                // A click shows it full size over the window, from the
+                // bytes the window holds: no second fetch, and no
+                // browser. The press takes no focus: the window holds
+                // the keys once it shows, and the focus goes back where
+                // the click found it when it shuts.
+                let hash = file.hash.clone();
+                let bytes = file.bytes;
+                shown
+                    .id(SharedString::from(format!("image open {hash}")))
+                    .debug_selector({
+                        let hash = hash.clone();
+                        move || format!("image open {hash}")
+                    })
+                    .cursor_pointer()
+                    .tooltip(|_, cx| cx.new(|_| OpenTip).into())
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_image(hash.clone(), bytes, window, cx)
+                    }))
+                    .into_any_element()
             }
             Some(Picture::Not(why)) => line(why.clone()).into_any_element(),
-            Some(Picture::Asked) | None => div()
-                .h(px(IMAGE_HEIGHT))
-                .child(line(format!("image, {}…", model::size(file.bytes))))
-                .into_any_element(),
+            // The bytes are not there yet: a click opens the overlay all
+            // the same, with this line, and the image shows when they
+            // come.
+            Some(Picture::Asked) | None => {
+                let hash = file.hash.clone();
+                let bytes = file.bytes;
+                let text = format!("image, {}…", model::size(file.bytes));
+                div()
+                    .h(px(IMAGE_HEIGHT))
+                    .id(SharedString::from(format!("image open {hash}")))
+                    .debug_selector({
+                        let hash = hash.clone();
+                        move || format!("image open {hash}")
+                    })
+                    .cursor_pointer()
+                    .tooltip(|_, cx| cx.new(|_| OpenTip).into())
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_image(hash.clone(), bytes, window, cx)
+                    }))
+                    .child(line(text))
+                    .into_any_element()
+            }
         }
     }
 
@@ -7663,7 +7841,12 @@ impl Footplate {
             )
     }
 
-    fn entry(&self, entry: Entry, palette: Palette) -> impl IntoElement + use<> {
+    fn entry(
+        &self,
+        entry: Entry,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let seq = entry.seq;
         div()
             .flex()
@@ -7698,7 +7881,7 @@ impl Footplate {
                 div()
                     .pl_4()
                     .pt_1()
-                    .child(self.picture(file, false, palette))
+                    .child(self.picture(file, false, palette, cx))
             }))
             .when_some(entry.standing, |el, standing| {
                 el.child(
@@ -7845,7 +8028,11 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child(top),
             )
-            .children(entries.into_iter().map(|entry| self.entry(entry, palette)))
+            .children(
+                entries
+                    .into_iter()
+                    .map(|entry| self.entry(entry, palette, cx)),
+            )
         };
         // The jump control stands over the mail, at its bottom right,
         // while the view is above its newest.
@@ -7995,7 +8182,9 @@ impl Footplate {
             list.children(said.into_iter().map(|(_, said)| {
                 let n = match said {
                     Said::Notice(n) => n,
-                    Said::Mail(entry) => return self.entry(entry, palette).into_any_element(),
+                    Said::Mail(entry) => {
+                        return self.entry(entry, palette, cx).into_any_element();
+                    }
                 };
                 div()
                     .flex()
@@ -8451,11 +8640,14 @@ impl Footplate {
         if ask.expanded {
             card = card.child(self.expanded_body(
                 select::key((bead_id, ask_seq)),
-                &detail.body,
-                &detail.notes,
-                &ask.about,
-                &detail.doc,
+                Expanded {
+                    body: &detail.body,
+                    notes: &detail.notes,
+                    about: &ask.about,
+                    doc: &detail.doc,
+                },
                 palette,
+                cx,
             ));
         }
         card
@@ -8870,11 +9062,14 @@ impl Footplate {
             if detail.expanded {
                 body = body.child(self.expanded_body(
                     select::key((bead, ask)),
-                    &detail.body,
-                    &detail.notes,
-                    &detail.about,
-                    &detail.doc,
+                    Expanded {
+                        body: &detail.body,
+                        notes: &detail.notes,
+                        about: &detail.about,
+                        doc: &detail.doc,
+                    },
                     palette,
+                    cx,
                 ));
             }
         }
@@ -8892,18 +9087,33 @@ impl Footplate {
                 )
             })
     }
+}
 
+/// What an expanded card shows of its bead: the body, the notes with
+/// their pictures, the about-beads and the design doc.
+struct Expanded<'a> {
+    body: &'a str,
+    notes: &'a [model::CardNote],
+    about: &'a [crate::api::AboutBead],
+    doc: &'a str,
+}
+
+impl Footplate {
     /// The bead whole, expanded in place: its body, notes and about-beads.
     /// A design bead's document is named by path and branch, not fetched.
     fn expanded_body(
         &self,
         card_key: u64,
-        body: &str,
-        notes: &[model::CardNote],
-        about: &[crate::api::AboutBead],
-        doc: &str,
+        content: Expanded<'_>,
         palette: Palette,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let Expanded {
+            body,
+            notes,
+            about,
+            doc,
+        } = content;
         let mut out = div().flex().flex_col().gap_2();
         if !body.is_empty() {
             out = out
@@ -8945,7 +9155,7 @@ impl Footplate {
                         &self.selection,
                     ));
                 for file in &note.files {
-                    block = block.child(self.picture(file, true, palette));
+                    block = block.child(self.picture(file, true, palette, cx));
                 }
                 out = out.child(block);
             }
@@ -9008,6 +9218,9 @@ impl Render for Footplate {
             // The settings stand where the card or the notices do: the keys
             // that pick and mark read are not for what is not in view.
             _ if self.settings_open => CONTEXT,
+            // Nor are they for the window with an image over it: the
+            // window holds the keys until it shuts.
+            _ if self.image_open.is_some() => CONTEXT,
             // Nor are they for the first run, whose fields take names.
             _ if self.first_run.is_some() => CONTEXT,
             // Nor for the question before stopping, which stands where
@@ -9086,7 +9299,7 @@ impl Render for Footplate {
             _ => None,
         };
         let root = root.children(beside);
-        match (&self.down, &self.model) {
+        let shown = match (&self.down, &self.model) {
             (Some(_), _) if self.settings_open && !self.reconnecting() => {
                 root.child(self.talk_settings(palette, cx))
             }
@@ -9130,6 +9343,14 @@ impl Render for Footplate {
                 .child(self.list(model, palette, cx))
                 .child(self.talk(model, palette, cx)),
             (None, None) => root,
+        };
+        // The image open over the window, where one is: over whatever
+        // shows, the settings and the first run with it.
+        match &self.image_open {
+            Some(open) => shown
+                .child(self.image_layer(open, window, cx))
+                .into_any_element(),
+            None => shown.into_any_element(),
         }
     }
 }
@@ -9425,6 +9646,73 @@ mod tests {
         })
     }
 
+    /// A PNG `width` by `height`: black, for an image larger than the
+    /// window. Written out here, its deflate stream uncompressed: the
+    /// `image` crate is Linux-only, and a test needs nothing more.
+    fn big_png(width: u32, height: u32) -> Vec<u8> {
+        // CRC-32 (ISO HDLC), tabled: megabytes at a test's pace.
+        fn crc(data: &[u8]) -> [u8; 4] {
+            let mut table = [0u32; 256];
+            for (n, cell) in table.iter_mut().enumerate() {
+                let mut crc = n as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xedb8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+                *cell = crc;
+            }
+            let mut crc = 0xffff_ffffu32;
+            for byte in data {
+                crc = table[(crc as u8 ^ byte) as usize] ^ (crc >> 8);
+            }
+            (!crc).to_be_bytes()
+        }
+        fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::with_capacity(12 + data.len());
+            out.extend((data.len() as u32).to_be_bytes());
+            out.extend(kind);
+            out.extend(data);
+            let mut whole = Vec::with_capacity(4 + data.len());
+            whole.extend(kind);
+            whole.extend(data);
+            out.extend(crc(&whole));
+            out
+        }
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend(width.to_be_bytes());
+        ihdr.extend(height.to_be_bytes());
+        ihdr.extend([8, 2, 0, 0, 0]);
+        png.extend(chunk(b"IHDR", &ihdr));
+        // The scanlines, each a zero filter byte and black pixels, in
+        // one zlib stream of stored blocks.
+        let mut raw = Vec::new();
+        for _ in 0..height {
+            raw.push(0);
+            raw.extend(std::iter::repeat_n(0, 3 * width as usize));
+        }
+        let mut zlib = vec![0x78, 0x01];
+        let blocks = raw.len().div_ceil(65535);
+        for (n, block) in raw.chunks(65535).enumerate() {
+            zlib.push(u8::from(n + 1 == blocks));
+            zlib.extend((block.len() as u16).to_le_bytes());
+            zlib.extend((!(block.len() as u16)).to_le_bytes());
+            zlib.extend(block);
+        }
+        let mut adler = (1u32, 0u32);
+        for byte in &raw {
+            adler.0 = (adler.0 + u32::from(*byte)) % 65521;
+            adler.1 = (adler.1 + adler.0) % 65521;
+        }
+        zlib.extend(((adler.1 << 16) | adler.0).to_be_bytes());
+        png.extend(chunk(b"IDAT", &zlib));
+        png.extend(chunk(b"IEND", &[]));
+        png
+    }
+
     /// The PNG of docs/api.md of the yardr repository: one pixel, 70 bytes.
     fn png() -> Vec<u8> {
         let mut bytes =
@@ -9439,6 +9727,20 @@ mod tests {
 
     fn notice(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.model.as_ref().unwrap().notice.clone())
+    }
+
+    /// The hash of the image open over the window, if one is. The
+    /// window's debug bounds only ever gain selectors, so what shuts is
+    /// said here, not by a selector going missing.
+    fn overlay_image(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
+        view.read_with(cx, |v, _| {
+            v.image_open.as_ref().map(|open| open.hash.clone())
+        })
+    }
+
+    /// Whether the line has the keys.
+    fn line_focused(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| view.read(cx).line.focus_handle(cx).is_focused(window))
     }
 
     /// What the window has of the image `hash`: `here`, `asked`, the line
@@ -11367,59 +11669,89 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_mail_s_image_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
+    fn a_mail_s_image_opens_full_size_over_the_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        // The mail carries an image, which the yard holds.
+        // The mail carries an image larger than the window, which the
+        // yard holds. No web view answers: the window opens it itself.
         let image = "ab".repeat(32);
-        yard.blob(&image, &png());
+        let bytes = big_png(3200, 2400);
+        yard.blob(&image, &bytes);
         yard.answer(
             "Conversation",
             &json!({"result": [
                 {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
                  "text": "Like this?", "read": false,
-                 "files": [{"hash": image, "type": "image/png", "bytes": 70}]}
+                 "files": [{"hash": image, "type": "image/png", "bytes": bytes.len()}]}
             ]})
             .to_string(),
         );
-        // The view's address is set as the window is built, before any
-        // frame: the mail is shown from the first, so what the image
-        // carries is what this address says, whatever answers elsewhere.
-        let base = view_up();
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
-        });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            view.settings.web_view = base.clone();
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the yardmaster's conversation", |cx| {
-            texts(&view, cx) == ["Like this?"]
-        });
+        let (view, cx) = opened(&yard, &["Like this?"], cx);
         wait(cx, "the image of the mail", |cx| {
             picture(&view, cx, &image) == "here"
         });
-        // The view answers at its address: a click opens the image.
-        wait(cx, "the web view", |cx| {
-            view_answered(&view, cx) == Some(true)
-        });
-        assert!(drawn(cx, &format!("image open {image}")));
-        assert!(!drawn(cx, &format!("image start {image}")));
-        // A click hands the view's image to the browser.
-        let opened = opened_pages(&view, cx);
+        // A click opens it over the window: the overlay, the image, and
+        // the ×, over the thumbnail, which stays 240 points high.
+        assert!(!drawn(cx, "image overlay"));
         click_on(cx, &format!("image open {image}"));
-        cx.run_until_parked();
-        assert_eq!(
-            opened.borrow().as_slice(),
-            [format!("{base}/blobs/{image}")]
+        assert!(drawn(cx, "image overlay"));
+        assert!(drawn(cx, &format!("image shown {image}")));
+        assert!(!drawn(cx, &format!("image line {image}")));
+        assert!(drawn(cx, "image close"));
+        let over = bounds_of(cx, "image overlay");
+        let shown = bounds_of(cx, &format!("image shown {image}"));
+        let thumb = bounds_of(cx, &format!("image open {image}"));
+        assert!((thumb.size.height - px(IMAGE_HEIGHT)).abs() < px(1.));
+        // The window's size minus a margin, with the image's shape kept:
+        // 4:3, within the margin on every side, one side binding, and
+        // centred.
+        let (w, h) = (f32::from(shown.size.width), f32::from(shown.size.height));
+        assert!((w / h - 4. / 3.).abs() < 0.01, "{w} by {h}");
+        let (ow, oh) = (f32::from(over.size.width), f32::from(over.size.height));
+        let margin = IMAGE_MARGIN * f32::from(view.read_with(cx, |v, _| v.settings.rem()));
+        assert!(ow - w >= 2. * margin - 2., "{w} of {ow}");
+        assert!(oh - h >= 2. * margin - 2., "{h} of {oh}");
+        assert!(
+            (ow - w - 2. * margin).abs() < 2. || (oh - h - 2. * margin).abs() < 2.,
+            "{w} by {h} of {ow} by {oh}"
         );
+        let (left, top) = (
+            f32::from(shown.origin.x - over.origin.x),
+            f32::from(shown.origin.y - over.origin.y),
+        );
+        assert!((left - (ow - w) / 2.).abs() < 2., "{left} of {ow} and {w}");
+        assert!((top - (oh - h) / 2.).abs() < 2., "{top} of {oh} and {h}");
+        // While it shows, the window holds the keys.
+        assert!(!line_focused(&view, cx));
+        // Esc shuts it, and the line has the keys again; a click on the
+        // thumbnail reaches through again, and opens it.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(overlay_image(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        click_on(cx, &format!("image open {image}"));
+        assert_eq!(overlay_image(&view, cx), Some(image.clone()));
+        // A click outside shuts it too.
+        let over = bounds_of(cx, "image overlay");
+        let outside = gpui::point(over.origin.x + px(4.), over.origin.y + px(4.));
+        cx.simulate_click(outside, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(overlay_image(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        // And the × in the corner.
+        click_on(cx, &format!("image open {image}"));
+        assert_eq!(overlay_image(&view, cx), Some(image.clone()));
+        click_on(cx, "image close");
+        cx.run_until_parked();
+        assert_eq!(overlay_image(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        // The overlay draws from the bytes the window holds: the yard
+        // was asked for them once, for the thumbnail.
+        assert_eq!(yard.blobs_asked(), [image]);
     }
 
     #[gpui::test]
-    fn a_note_s_image_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
+    fn a_note_s_image_opens_full_size_over_the_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_three());
@@ -11444,22 +11776,8 @@ mod tests {
             })
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
-        // The view answers at its address.
-        let base = view_up();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
-        wait(cx, "the web view", |cx| {
-            view_answered(&view, cx) == Some(true)
-        });
-        // One key expands the card: the image is drawn, and a click
-        // opens it.
+        // One key expands the card, and a click on the note's thumbnail
+        // opens the image over the window: the one pixel, not scaled up.
         view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
         cx.simulate_keystrokes("escape");
         cx.simulate_keystrokes("e");
@@ -11467,60 +11785,91 @@ mod tests {
         wait(cx, "the note's image", |cx| {
             picture(&view, cx, &image) == "here"
         });
-        assert!(drawn(cx, &format!("image open {image}")));
-        // A click hands the view's image to the browser.
-        let opened = opened_pages(&view, cx);
         click_on(cx, &format!("image open {image}"));
+        assert!(drawn(cx, "image overlay"));
+        assert!(drawn(cx, &format!("image shown {image}")));
+        let shown = bounds_of(cx, &format!("image shown {image}"));
+        assert!(f32::from(shown.size.width) <= 2.);
+        assert!(f32::from(shown.size.height) <= 2.);
+        // The × shuts it: a click on the thumbnail reaches through
+        // again. The yard was asked for the bytes once.
+        click_on(cx, "image close");
         cx.run_until_parked();
-        assert_eq!(
-            opened.borrow().as_slice(),
-            [format!("{base}/blobs/{image}")]
-        );
+        assert_eq!(overlay_image(&view, cx), None);
+        click_on(cx, &format!("image open {image}"));
+        assert_eq!(overlay_image(&view, cx), Some(image.clone()));
+        assert_eq!(yard.blobs_asked(), [image]);
     }
 
     #[gpui::test]
-    fn an_image_says_how_to_start_the_view_where_it_does_not_answer(cx: &mut TestAppContext) {
+    fn a_second_image_opens_over_the_first(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        // The mail carries an image, which the yard holds.
-        let image = "ab".repeat(32);
-        yard.blob(&image, &png());
+        // The mail carries two images, which the yard holds.
+        let first = "ab".repeat(32);
+        let second = "cd".repeat(32);
+        yard.blob(&first, &png());
+        yard.blob(&second, &png());
         yard.answer(
             "Conversation",
             &json!({"result": [
                 {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
-                 "text": "Like this?", "read": false,
-                 "files": [{"hash": image, "type": "image/png", "bytes": 70}]}
+                 "text": "Like these?", "read": false,
+                 "files": [{"hash": first, "type": "image/png", "bytes": 70},
+                           {"hash": second, "type": "image/png", "bytes": 70}]}
             ]})
             .to_string(),
         );
-        // The view's address is set as the window is built, before any
-        // frame: the mail is shown from the first, so what the image
-        // carries is what this address says, whatever answers elsewhere.
-        let down = view_down();
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
+        let (view, cx) = opened(&yard, &["Like these?"], cx);
+        wait(cx, "the images of the mail", |cx| {
+            picture(&view, cx, &first) == "here" && picture(&view, cx, &second) == "here"
         });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            view.settings.web_view = down;
-            window.focus(&view.line.focus_handle(cx));
-            view
+        // The first opens over the window, and the second over it: the
+        // overlay is one, and shows the second.
+        click_on(cx, &format!("image open {first}"));
+        assert!(drawn(cx, &format!("image shown {first}")));
+        view.update_in(cx, |v, window, cx| {
+            v.open_image(second.clone(), 70, window, cx)
         });
-        wait(cx, "the yardmaster's conversation", |cx| {
-            texts(&view, cx) == ["Like this?"]
+        assert!(drawn(cx, &format!("image shown {second}")));
+        assert_eq!(overlay_image(&view, cx), Some(second.clone()));
+        // Esc shuts it, and the line has the keys again: the focus goes
+        // back where the first found it.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(overlay_image(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        assert_eq!(yard.blobs_asked().len(), 2);
+    }
+
+    #[gpui::test]
+    fn the_overlay_shows_the_line_while_the_bytes_are_not_there(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The bytes are not there yet: the overlay shows the line, as
+        // the thumbnail does.
+        let image = "ab".repeat(32);
+        view.update_in(cx, |v, window, cx| {
+            v.open_image(image.clone(), 70, window, cx)
         });
-        wait(cx, "the image of the mail", |cx| {
-            picture(&view, cx, &image) == "here"
+        assert!(drawn(cx, "image overlay"));
+        assert!(drawn(cx, &format!("image line {image}")));
+        assert!(!drawn(cx, &format!("image shown {image}")));
+        // When they come the image shows, from the bytes the window
+        // holds: the overlay asks for nothing.
+        view.update(cx, |v, cx| {
+            v.images.insert(
+                image.clone(),
+                Picture::Here(Arc::new(Image::from_bytes(ImageFormat::Png, png()))),
+            );
+            cx.notify();
         });
-        // Nothing answers at the view's address: the thumbnail stands
-        // with how to start it, instead of opening nowhere.
-        wait(cx, "the view not answering", |cx| {
-            view_answered(&view, cx) == Some(false)
-        });
-        assert!(drawn(cx, &format!("image start {image}")));
-        assert!(!drawn(cx, &format!("image open {image}")));
+        assert!(drawn(cx, &format!("image shown {image}")));
+        assert!(yard.blobs_asked().is_empty());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(overlay_image(&view, cx), None);
     }
 
     /// A page dropped on a card goes with its note: one that is no page

@@ -19,8 +19,9 @@ use crate::yard::Env;
 /// address, the settings with the start-at-login switch, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page and an image, a
-/// mail with a page and an image, the first screen's way to a yard at an
-/// address, with a pairing's http address refused under its fields, the
+/// mail with a page and an image, that mail's image open full size over
+/// the window, the first screen's way to a yard at an address, with a
+/// pairing's http address refused under its fields, the
 /// conversation with one of a
 /// linked yard whose mail was refused over the hour, the first screen
 /// with a way's fields open after the yard answered, with the line that
@@ -32,7 +33,9 @@ use crate::yard::Env;
 /// settings open over a running yard; the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
 /// and run. The mail's conversation opens on the mail, with the web view
-/// taken as answering, so the row carries Open and the image opens. The
+/// taken as answering, so the row carries Open; a click on its image
+/// opens it over the window, and the image state serves the same mail
+/// with it open. The
 /// undelivered conversation opens on the row the shot names,
 /// with the hour's line under the mail. The answered yard serves the
 /// yardmaster's conversation, as the running ones do; the window opens
@@ -49,16 +52,21 @@ pub const STATES: &[&str] = &[
     "reconnecting",
     "page",
     "mail",
+    "image",
     "refusal",
     "undelivered",
     "answered",
     "setup",
 ];
 
-/// The image in the `page` and `mail` states, and its hash: the yard
-/// serves the bytes, and the note or the mail names them.
+/// The image in the `page`, `mail` and `image` states, and its hash: the
+/// yard serves the bytes, and the note or the mail names them.
 const IMAGE: &[u8] = include_bytes!("fixtures/shot-page.png");
 const IMAGE_HASH: &str = "ca2421063b23c6ff5739c2000b22125bea109764fff6e643eccea0c00f6fe6c3";
+
+/// The overlay the `image` state opens with: the hash it shows, and its
+/// bytes for the line while they are not there yet.
+pub(crate) const IMAGE_OPEN: (&str, u64) = (IMAGE_HASH, IMAGE.len() as u64);
 
 /// The pages in the `page` and `mail` states: the note's, which Open
 /// takes to the browser, and a mail's, which Open takes there too, with
@@ -400,11 +408,12 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
-        "mail" => {
+        "mail" | "image" => {
             // The yardmaster's mail carries a page and an image, as the
             // bead's note does in the page state: the yard holds the
             // image, and the page is never asked for, since Open takes
-            // it to the browser, with no run.
+            // it to the browser, with no run. The image state serves
+            // the same mail, and the window opens its image over it.
             yard.blob(IMAGE_HASH, IMAGE);
             yard.answer(
                 "UserInbox",
@@ -601,7 +610,7 @@ mod tests {
                     assert_eq!(letters[0].files.len(), 1, "{state}");
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
                 }
-                "mail" => {
+                "mail" | "image" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     // The mail carries the page and the image; the yard
                     // holds the image, and the page is named only.
