@@ -15367,6 +15367,88 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), kept);
     }
 
+    /// Under `FOOTPLATE_YARD` without `FOOTPLATE_TOKEN_FILE`, where the
+    /// token's file is a listed yard's, a pairing is refused before its
+    /// code is sent, saying which yard and file and that the environment
+    /// names another: the listed yard stays paired, and without the
+    /// environment it opens as it was.
+    #[gpui::test]
+    fn pairing_under_the_environment_refuses_a_listed_yard_s_token_file(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("footplate/yard.token");
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far_a = Yard::start_tcp();
+        a_far_yard_of_jo(&far_a);
+        let far_b = Yard::start_tcp();
+        a_far_yard_of_jo(&far_b);
+        // A settings file from before there were several yards, paired
+        // with its yard: its token is in `yard.token` beside it.
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            format!(
+                "{{\n  \"remote\": true,\n  \"address\": \"{}\"\n}}\n",
+                far_a.address()
+            ),
+        )
+        .unwrap();
+        let address_a = Address::parse(far_a.address()).unwrap();
+        yard::token_place(&token)
+            .unwrap()
+            .keep(crate::fake::TOKEN, &address_a)
+            .unwrap();
+        let kept = std::fs::read(&token).unwrap();
+
+        // With the environment naming another yard, the token's file is
+        // the listed yard's: the yard is not opened, and nothing is sent
+        // to either.
+        let env = Env {
+            yard: Some(far_b.address().to_string()),
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        cx.run_until_parked();
+        let (why, away) = view.read_with(cx, |v, _| (v.down.clone().unwrap(), v.away));
+        assert!(why.contains("share one token file"), "{why}");
+        assert_eq!(away, Away::Stopped);
+        assert_eq!((far_a.requests(), far_b.requests()), (0, 0));
+
+        // Pairing again there is refused the same way: the code is not
+        // spent, and the listed yard's token is untouched.
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "yard again");
+        far_b.pair("K7QM-2XPD");
+        view.update(cx, |v, cx| {
+            v.code.update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
+        });
+        click_on(cx, "yard pair");
+        cx.run_until_parked();
+        let said = yard_said(&view, cx);
+        assert!(
+            said.contains(&format!(
+                "the listed yard {} at",
+                settings::host_of(far_a.address())
+            )) && said.contains("FOOTPLATE_TOKEN_FILE"),
+            "{said}"
+        );
+        assert!(far_b.pairing_open());
+        assert_eq!((far_a.requests(), far_b.requests()), (0, 0));
+        assert_eq!(std::fs::read(&token).unwrap(), kept);
+
+        // Without the environment the listed yard opens paired, as it was.
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the listed yard, still paired", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+    }
+
     /// A yard that cannot be opened is said why, and not tried: plain http
     /// off this machine, and a token file open to others. The settings
     /// are there to open another.
