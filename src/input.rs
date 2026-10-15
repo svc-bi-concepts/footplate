@@ -1430,12 +1430,12 @@ mod tests {
         cx.simulate_input("two");
         // Up with shift selects to the column above, and left one more.
         cx.simulate_keystrokes("shift-up");
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("\ntwo"));
-        cx.simulate_keystrokes("shift-left cmd-c");
+        cx.simulate_keystrokes("shift-left secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("e\ntwo"));
         // Cut takes the break with it.
-        cx.simulate_keystrokes("cmd-x");
+        cx.simulate_keystrokes("secondary-x");
         assert_eq!(text(&line, cx), "on");
         assert_eq!(shown(&line, cx).0, 1);
     }
@@ -1445,7 +1445,7 @@ mod tests {
         let (line, cx) = opened(cx);
         cx.simulate_input("> ");
         cx.write_to_clipboard(ClipboardItem::new_string("one\r\ntwo\n\nfour".to_string()));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(text(&line, cx), "> one\ntwo\n\nfour");
         assert_eq!(shown(&line, cx).0, 4);
     }
@@ -1553,15 +1553,15 @@ mod tests {
     fn a_masked_line_takes_what_is_pasted_and_copies_nothing_out(cx: &mut TestAppContext) {
         let (line, cx) = opened_masked(cx);
         cx.write_to_clipboard(ClipboardItem::new_string("pasted-k3y".to_string()));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(text(&line, cx), "pasted-k3y");
         assert_eq!(drawn_text(&line, cx), MARK.repeat(10));
         // Copy and cut of all of it leave the clipboard as it was, and cut
         // leaves the text.
         cx.write_to_clipboard(ClipboardItem::new_string("before".to_string()));
-        cx.simulate_keystrokes("cmd-a cmd-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
-        cx.simulate_keystrokes("cmd-x");
+        cx.simulate_keystrokes("secondary-x");
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
         assert_eq!(text(&line, cx), "pasted-k3y");
     }
@@ -1582,7 +1582,7 @@ mod tests {
         // A line break that is pasted is a mark as any character, in the
         // one line.
         cx.write_to_clipboard(ClipboardItem::new_string("\ntwo".to_string()));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(text(&line, cx), "one\ntwo");
         assert_eq!(drawn_text(&line, cx), MARK.repeat(7));
         assert_eq!(shown(&line, cx).0, 1);

@@ -341,6 +341,14 @@ pub fn read_token(file: &Path) -> Result<String, String> {
     kept(file).map(|kept| kept.token)
 }
 
+/// Whether the tests run as root, which no file mode holds: a test of a
+/// refusal a mode carries says so and returns instead of trying it.
+#[cfg(test)]
+pub fn running_as_root() -> bool {
+    // SAFETY: geteuid takes nothing, touches nothing, and fails nowhere.
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// Whether this is a regular token file that a pairing wrote. A settings
 /// entry may name an existing token from another program; removing that
 /// entry must leave it there.
@@ -1125,6 +1133,12 @@ mod tests {
 
     #[test]
     fn a_token_file_open_to_others_is_refused_with_the_reason() {
+        // No file mode holds root: what is refused below for another
+        // user is let through here.
+        if running_as_root() {
+            eprintln!("skipped: root (euid 0) is not held by a file's mode");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let env = |file: PathBuf| Env {
             yard: Some("https://mac.example.net".into()),

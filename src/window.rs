@@ -9145,7 +9145,7 @@ mod tests {
         cx.simulate_input("Paint the fence like this.");
         let image = Image::from_bytes(ImageFormat::Png, png());
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         let over = "the image is 70 bytes, and this yard takes one of 69 bytes at most (yardr settings: blob_max_bytes)";
         wait(cx, "that the image is over the cap", |cx| {
             attached(&view, cx) == [(1, PASTED.to_string(), Some(over.to_string()))]
@@ -9169,10 +9169,10 @@ mod tests {
         // Under the cap: two images wait in the draft, with what is typed,
         // until Enter.
         yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         let jpeg = Image::from_bytes(ImageFormat::Jpeg, vec![0xff, 0xd8, 0xff, 0xe0, 0, 16]);
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&jpeg));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -9215,7 +9215,7 @@ mod tests {
 
         // With nothing typed the image is the mail.
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-        cx.simulate_keystrokes("cmd-v enter");
+        cx.simulate_keystrokes("secondary-v enter");
         wait(cx, "the mail that is an image only", |_| {
             yard.asked("Mail").last()
                 == Some(&json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [HASH]}))
@@ -9226,7 +9226,7 @@ mod tests {
 
         // Backspace takes text while there is text, and then the last
         // attachment.
-        cx.simulate_keystrokes("cmd-v cmd-v");
+        cx.simulate_keystrokes("secondary-v secondary-v");
         cx.simulate_input("x");
         cx.simulate_keystrokes("backspace");
         assert_eq!(attached(&view, cx).len(), 2);
@@ -9262,7 +9262,7 @@ mod tests {
         // the window.
         let tiff = Image::from_bytes(ImageFormat::Tiff, b"II*\0".to_vec());
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&tiff));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         let neither = "mail carries a PNG or a JPEG, and what was pasted is neither";
         assert_eq!(
             attached(&view, cx),
@@ -9344,7 +9344,7 @@ mod tests {
         );
         cx.simulate_input("Hello north.");
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-        cx.simulate_keystrokes("cmd-v enter");
+        cx.simulate_keystrokes("secondary-v enter");
         wait(cx, "the yard's refusal", |cx| {
             notice(&view, cx) == format!("not sent to clerk@north: {NO_FILES}")
         });
@@ -9381,7 +9381,7 @@ mod tests {
         // Once the link carries files the image goes with the mail, and is
         // shown from the bytes that were pasted.
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-        cx.simulate_keystrokes("cmd-v enter");
+        cx.simulate_keystrokes("secondary-v enter");
         wait(cx, "the image queued for the peer", |_| {
             yard.asked("MailPeer").last()
                 == Some(
@@ -9398,7 +9398,7 @@ mod tests {
         // with its line break.
         cx.simulate_keystrokes("shift-tab");
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(" Two\nlines.".into()));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(typed(&view, cx), "And this. Two\nlines.");
     }
 
@@ -9968,7 +9968,7 @@ mod tests {
         );
         // Nothing is copied before the key.
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("https://example.org/a"));
 
         // From right to left it is the same selection.
@@ -9989,7 +9989,7 @@ mod tests {
         });
         cx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::default());
         assert_eq!(selected(&view, cx).as_deref(), Some("now"));
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("now"));
 
         // A press on the talk where no text is drops it, and the key then
@@ -9998,7 +9998,7 @@ mod tests {
         cx.simulate_click(name, gpui::Modifiers::default());
         assert_eq!(selected(&view, cx), None);
         cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
 
         // What is selected is of the open conversation: another one opened
@@ -10031,7 +10031,7 @@ mod tests {
             selected(&view, cx).as_deref(),
             Some("https://example.org/a")
         );
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("https://example.org/a"));
         cx.simulate_mouse_down(from, MouseButton::Left, none);
         cx.simulate_mouse_move(to, MouseButton::Left, none);
@@ -10116,7 +10116,7 @@ mod tests {
         // begins after them, and has every mark after that.
         let copied = &text["## ".len()..];
         assert_eq!(selected(&view, cx).as_deref(), Some(copied));
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some(copied));
         drag(cx, bottom, top);
         assert_eq!(selected(&view, cx).as_deref(), Some(copied));
@@ -10231,7 +10231,7 @@ mod tests {
             gpui::point(second.right() + px(40.), second.bottom() - px(2.)),
         );
         assert_eq!(selected(&view, cx).as_deref(), Some(lines));
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("one\ntwo"));
 
         // A press in the first again drops that of the second.
@@ -10285,17 +10285,17 @@ mod tests {
 
         cx.simulate_input("Land it today.");
         cx.simulate_keystrokes("shift-left shift-left shift-left shift-left shift-left shift-left");
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("today."));
 
         // Also while a message has a selection: the focus is in the line,
         // so the key is the line's.
         let (from, to) = (place(cx, 12, LINK, 0, 0.), place(cx, 12, LINK, 3, 0.));
         drag(cx, from, to);
-        cx.simulate_keystrokes("cmd-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("see"));
         cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
-        cx.simulate_keystrokes("cmd-a cmd-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("Land it today."));
         assert_eq!(selected(&view, cx).as_deref(), Some("see"));
     }
@@ -13510,7 +13510,7 @@ mod tests {
         // Switched on in the settings: the system is asked, once, and what
         // it refuses is said there in its words.
         *told.answer.borrow_mut() = Permission::Refused("The system says no.".into());
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
         assert!(!drawn(cx, "notify mail"));
         click_on(cx, "notify on");
         assert!(settings_of(&view, cx).notifications.on);
@@ -13575,7 +13575,7 @@ mod tests {
         wait(cx, "the pending mail", |cx| {
             unread_of(&view, cx, "assembly") == 2
         });
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
         click_on(cx, "notify off");
         assert_eq!(told.shown(cx), []);
         click_on(cx, "notify on");
@@ -13589,11 +13589,11 @@ mod tests {
         wait(cx, "the mail", |cx| texts(&view, cx).len() == 3);
         assert_eq!(told.shown(cx), []);
         // With the settings where the conversation would be, it is not.
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
         yard.emit(&mail_event(25, "yardmaster", "Shall I go on?"));
         wait(cx, "the mail", |cx| texts(&view, cx).len() == 4);
         assert_eq!(told.shown(cx).len(), 1);
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
 
         // In front on another conversation: a burst is one notification.
         for (seq, text) in [(26, "One."), (27, "Two."), (28, "Three.")] {
@@ -13641,7 +13641,7 @@ mod tests {
 
         // Activating a notification brings the window forward on its row,
         // out of the settings too.
-        cx.simulate_keystrokes("cmd-,");
+        cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         let open = view.read_with(cx, |v, _| v.yard.clone());
         told.activated
@@ -14720,7 +14720,7 @@ mod tests {
         cx.simulate_input("For the mac.");
         let image = Image::from_bytes(ImageFormat::Png, png());
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         wait(cx, "the image in the draft", |cx| {
             attached(&view, cx) == [(1, PASTED.to_string(), None)]
         });
@@ -15160,6 +15160,12 @@ mod tests {
     /// its pairing stays open for the code.
     #[gpui::test]
     fn a_token_file_that_cannot_be_written_keeps_the_code_from_the_yard(cx: &mut TestAppContext) {
+        // No file mode holds root: the directory below that cannot be
+        // written for another user takes the token here.
+        if yard::running_as_root() {
+            eprintln!("skipped: root (euid 0) is not held by a file's mode");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let tokens = dir.path().join("tokens");
@@ -17521,14 +17527,14 @@ mod tests {
         nowhere(&view, cx, "typed");
         // Nothing copies out, by copy or by cut.
         cx.write_to_clipboard(ClipboardItem::new_string("before".to_string()));
-        cx.simulate_keystrokes("cmd-a cmd-c cmd-x");
+        cx.simulate_keystrokes("secondary-a secondary-c secondary-x");
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("before".to_string())
         );
         assert_eq!(secret_field(&view, cx).0, VALUE);
         // A setting kept while it is typed keeps none of it.
-        cx.simulate_keystrokes("cmd-=");
+        cx.simulate_keystrokes("secondary-=");
         cx.run_until_parked();
         assert!(file.exists());
         nowhere(&view, cx, "a setting kept");
@@ -17549,7 +17555,7 @@ mod tests {
         // the call without the break, and the card says where to answer.
         cx.write_to_clipboard(ClipboardItem::new_string(format!("{VALUE}\n")));
         cx.simulate_keystrokes("i");
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes("secondary-v");
         assert_eq!(secret_field(&view, cx).1, marks(VALUE.len() + 1));
         cx.simulate_keystrokes("enter");
         assert_eq!(secret_field(&view, cx).0, "");
