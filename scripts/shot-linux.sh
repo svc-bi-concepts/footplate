@@ -110,10 +110,16 @@ target_vol=footplate-shot-target
 # shared, and cargo locks those.
 path_hash=$(printf '%s' "$root" | cksum | cut -d' ' -f1)
 target_dir=/target/$suffix-$path_hash
+target_marker=/target/.shot-active/$suffix-$path_hash-$$
 
 # The shot leaves nothing behind: the container goes when the script ends,
 # however it ends.
-trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+cleanup() {
+    # Let later shots prune this tree once this shot has finished using it.
+    docker exec "$name" rm -f "$target_marker" >/dev/null 2>&1 || true
+    docker rm -f "$name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 have() {
@@ -160,8 +166,9 @@ fi
 
 # Build trees of checkouts long gone are pruned before building: each costs
 # GBs no shot will warm from. Only trees with nothing written in the last
-# week go, never this shot's own, and the helper says what went.
-docker exec "$name" sh /src/scripts/shot-linux-prune.sh /target "$target_dir" >&2
+# week go, never this shot's own or another active shot's, and the helper
+# says what went.
+docker exec "$name" sh /src/scripts/shot-linux-prune.sh /target "$target_dir" "$target_marker" >&2
 
 docker exec "$name" sh -c 'cd /src && /cargo/bin/cargo build --locked' >&2
 

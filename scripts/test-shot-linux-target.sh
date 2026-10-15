@@ -123,5 +123,9 @@ build=$(grep -n -F 'cargo build' "$tmp/log-t1" | cut -d: -f1 | head -n 1)
 [ -n "$prune" ] || fail "no shot pruned stale trees"
 [ -n "$build" ] || fail "no shot built"
 [ "$prune" -lt "$build" ] || fail "the prune ran after the build"
+grep -F -q -- "/target/.shot-active/checkout-$key1-" "$tmp/log-t1" \
+    || fail "the shot registered no active target marker"
+grep -F -q -- "rm -f /target/.shot-active/checkout-$key1-" "$tmp/log-t1" \
+    || fail "the shot did not remove its active target marker"
 
 echo "test-shot-linux-target.sh: pass"
