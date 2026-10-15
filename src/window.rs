@@ -13727,6 +13727,11 @@ mod tests {
         wait(cx, "what waits in the second home's yard", |cx| {
             state_of(&view, cx, "second home") == "2 mail"
         });
+        // The stream is asked for after the state above arrived, so it may
+        // not have been asked for yet.
+        wait(cx, "the second home's stream", |_| {
+            second.streams_asked().len() == 1
+        });
         (view, cx)
     }
 
@@ -13767,11 +13772,6 @@ mod tests {
         };
         // What was unread when the window started tells of nothing.
         assert_eq!(tellings(cx), []);
-        // The stream is asked for after the state above arrived, so it may
-        // not have been asked for yet.
-        wait(cx, "the second home's stream", |_| {
-            second.streams_asked().len() == 1
-        });
         let (loads, streams) = (second.asked("Head").len(), second.streams_asked().len());
         assert_eq!(streams, 1);
         // The dock's icon says what waits over both yards: nothing in the
