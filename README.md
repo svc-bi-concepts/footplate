@@ -82,6 +82,62 @@ over the four archives. The archives go to out-dir, else to `dist/`. The
 Linux binaries link Debian 13's glibc and loaders, so they run on
 distributions as new as that.
 
+With the yard a release bead cuts the release instead: `build` makes the
+archives and the GitHub release, `sign` asks mckean to sign the checksums,
+`verify` checks the signature, and `publish` files the yardr.dev sync bead
+(the release flow, `.yardr/flows/type/release.flow`; the script its stages
+run is `scripts/release-stage`).
+
+    yardr bead create "footplate v0.5.0" -t release -d footplate -b - < notes.md
+    yardr bead advance <id> --to build
+
+The title's last word is the version, which must equal `Cargo.toml`'s; the
+body is the release notes as they will stand on the GitHub release. The
+yardmaster shapes the bead in `backlog`, then advances it to `build`, and
+from there:
+
+- `build` refuses a bad title, a version that is not `Cargo.toml`'s, an
+  existing release or tag, a dirty tree, or a checkout that is not the
+  remote's `main`; builds the four archives and `checksums.txt` with
+  `scripts/release.sh`; tags the base commit, pushes the tag, and makes
+  the GitHub release; notes the five signing commands on the bead.
+- `sign` asks mckean whether `checksums.txt.minisig` is uploaded. Run the
+  five commands from the build's note, in a directory of their own, then
+  Done. Each names the version, so a stale file or a wrong release shows
+  itself.
+- `verify` downloads the release, checks the signature against the release
+  key and the archives against the checksums. A bad signature asks `sign`
+  again.
+- `publish` files the yardr.dev sync bead
+  (`scripts/sync-release footplate <version>`) and advances it to `new`;
+  the release bead is `published`.
+
+Anything failed or questioned waits in `decide` for a person.
+
+Once, the yardmaster adds one exec group and four routes; from then on a
+release bead cuts the release:
+
+    yardr group add footplate-release --runner exec --limit 1 \
+      --set cmd='scripts/release-stage $YARDR_STAGE' \
+      --set log="$HOME/.yardr/logs/release-footplate.log"
+    yardr route add --stage build --group footplate-release --depot footplate
+    yardr route add --stage verify --group footplate-release --depot footplate
+    yardr route add --stage publish --group footplate-release --depot footplate
+    yardr route add --stage sign --group decisions --depot footplate
+
+The group runs the depot's own script, one release at a time; the stage in
+`cmd` says which of `build`, `verify` or `publish` it is. The build refuses
+a checkout that is not clean at the remote's `main`, so the script it runs
+is `main`'s. `sign` goes to the manual group mckean is in, whose Done says
+the signature is uploaded; `backlog` and `decide` ride the depot's existing
+routes. The group runs on a Mac, where `scripts/release.sh` builds, and
+where `jq`, `git`, `gh` (logged in) and `minisign` are.
+`scripts/release-stage` is vendored from yardr's `contrib/release/stage`
+(yardr@a3870526) with footplate's release as its default: one checkout
+holds the whole release, and no release depends on what a sibling yardr
+clone has checked out. A fix upstream is mirrored here, and a fix here
+belongs upstream too.
+
 A builder with a bead to prove takes a picture of the window with
 `scripts/shot-linux.sh`, from the worktree, after the last commit:
 
