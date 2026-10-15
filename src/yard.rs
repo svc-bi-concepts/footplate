@@ -323,7 +323,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// yard's session token. Both are read the same way; only the marker and
 /// the words differ.
 #[derive(Clone, Copy)]
-struct KeptKind {
+pub(crate) struct KeptKind {
     /// The marker footplate writes under a token it kept.
     marker: &'static str,
     /// `token` or `session`, as a refusal names the file and what it holds.
@@ -334,14 +334,14 @@ struct KeptKind {
     giver: &'static str,
 }
 
-const TOKEN_KIND: KeptKind = KeptKind {
+pub(crate) const TOKEN_KIND: KeptKind = KeptKind {
     marker: FOOTPLATE_TOKEN,
     noun: "token",
     open: "whoever reads it calls the yard as you",
     giver: "the yard",
 };
 
-const SESSION_KIND: KeptKind = KeptKind {
+pub(crate) const SESSION_KIND: KeptKind = KeptKind {
     marker: FOOTPLATE_SESSION,
     noun: "session",
     open: "whoever reads it is signed in as this yard's user",
@@ -658,11 +658,20 @@ impl TokenPlace {
     /// under it: a token is never on disk without its yard. The file is
     /// whole or not there: it is written beside itself and renamed.
     pub fn keep(self, token: &str, address: &Address) -> io::Result<()> {
-        self.keep_as(token, Some(address), FOOTPLATE_TOKEN)
+        self.keep_as(token, Some(address), TOKEN_KIND)
     }
 
-    fn keep_as(mut self, token: &str, address: Option<&Address>, marker: &str) -> io::Result<()> {
-        let mut text = format!("{token}\n{marker}\n");
+    /// The same private, atomic write for a device token or hosted yard's
+    /// session. The marker distinguishes the two files; an addressed
+    /// session can be written by the hosted sign-in flow without ever
+    /// putting its value in settings.
+    pub(crate) fn keep_as(
+        mut self,
+        token: &str,
+        address: Option<&Address>,
+        kind: KeptKind,
+    ) -> io::Result<()> {
+        let mut text = format!("{token}\n{}\n", kind.marker);
         if let Some(address) = address {
             text.push_str(&format!("{address}\n"));
         }
@@ -689,14 +698,14 @@ impl Drop for TokenPlace {
 /// address has been bound by [`token_for`].
 #[cfg(test)]
 pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
-    token_place(file)?.keep_as(token, None, FOOTPLATE_TOKEN)
+    token_place(file)?.keep_as(token, None, TOKEN_KIND)
 }
 
 /// A session token alone in `file`, for tests that need a file before its
 /// address has been bound by [`session_for`].
 #[cfg(test)]
 pub fn keep_session_token(file: &Path, token: &str) -> io::Result<()> {
-    token_place(file)?.keep_as(token, None, FOOTPLATE_SESSION)
+    token_place(file)?.keep_as(token, None, SESSION_KIND)
 }
 
 /// The address and the code as they were typed. What a pairing's QR code
@@ -1387,6 +1396,30 @@ mod tests {
                 Err(why)
             );
         }
+    }
+
+    #[test]
+    fn a_kept_session_is_private_and_bound_to_its_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("yard.session");
+        let address = Address::parse("https://south.example.net").unwrap();
+        let session = "kratos-dev-south";
+
+        token_place(&file)
+            .unwrap()
+            .keep_as(session, Some(&address), SESSION_KIND)
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            format!("{session}\n{FOOTPLATE_SESSION}\n{address}\n")
+        );
+        assert_eq!(session_for(&file, &address).unwrap(), session);
+        assert!(is_managed_session_file(&file));
     }
 
     #[test]

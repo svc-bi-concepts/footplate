@@ -494,8 +494,17 @@ mod tests {
             }
         });
         let wait = Duration::from_secs(10);
-        let Update::Up(state) = rx.recv_timeout(wait).unwrap() else {
-            panic!("the yard is there")
+        let state = loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Up(state) => break state,
+                // A startup read can fail transiently; the follower says
+                // Down and retries before it has a state to show.
+                Update::Down(..) => continue,
+                Update::Event(event) => panic!("an event before the state: {event:?}"),
+                Update::Out(why) | Update::SignedOut(why) => {
+                    panic!("the edge and yard let the device in: {why}")
+                }
+            }
         };
         assert_eq!(state.me, "jo");
         assert_eq!(state.yard.as_ref().unwrap().said_by, "laptop");
@@ -554,8 +563,19 @@ mod tests {
             panic!("the yard is there")
         };
         assert_eq!(state.me, "jo");
+        // `Up` is told before the follower opens its event stream. Wait
+        // until the fake yard has accepted that stream before emitting, so
+        // this checks a live relay instead of racing its setup.
+        let deadline = std::time::Instant::now() + wait;
+        while yard.streams_asked().is_empty() && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(yard.streams_asked(), vec![20]);
         yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
-        assert!(matches!(rx.recv_timeout(wait).unwrap(), Update::Event(_)));
+        let Update::Event(event) = rx.recv_timeout(wait).unwrap() else {
+            panic!("the live stream carries the event")
+        };
+        assert_eq!(event.seq, 21);
 
         // The session is revoked at the edge: what it relayed is cut, and
         // the next request is answered with the edge's own 401.
