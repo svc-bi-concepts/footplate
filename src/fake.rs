@@ -934,6 +934,11 @@ impl Drop for Router {
 /// stripped and the yard's answer relayed byte for byte.
 #[cfg(test)]
 fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) -> io::Result<()> {
+    // The listener is nonblocking so it can be stopped, and what it
+    // accepts inherits that: serve blocking, as the yard does, or a
+    // request read before its bytes arrive hangs up instead of waiting
+    // for them.
+    conn.set_nonblocking(false)?;
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut conn = conn;
     let mut head = String::new();

@@ -3136,6 +3136,31 @@ mod tests {
         );
     }
 
+    /// Through the edge, a request written after the edge has accepted
+    /// waits for its bytes: the edge blocks for them instead of hanging
+    /// up on the empty read, as a nonblocking accept would.
+    #[test]
+    fn the_edge_waits_for_a_request_written_late() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let edge = Router::start(&yard, SESSION);
+        let target = edge.address().strip_prefix("http://").unwrap().to_string();
+        let mut conn = TcpStream::connect(target).unwrap();
+        // The edge accepts and reaches its read with nothing written:
+        // many of its accept polls pass first.
+        thread::sleep(Duration::from_millis(100));
+        write!(
+            conn,
+            "POST /user/call/Head HTTP/1.1\r\nHost: edge\r\nAuthorization: Bearer {TOKEN}\r\nX-Edge-Token: {SESSION}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        )
+        .unwrap();
+        conn.flush().unwrap();
+        let mut reply = String::new();
+        BufReader::new(conn).read_to_string(&mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200 "), "{reply}");
+        assert_eq!(edge.proxied(), 1);
+    }
+
     /// The two 401s through the edge are told apart by the response's
     /// shape: the edge's own refuses the session, the yard's the device,
     /// and neither is asked twice.
