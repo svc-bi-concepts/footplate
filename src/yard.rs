@@ -27,6 +27,10 @@ const NO_HOME: &str = "There is no home directory to keep this device's token in
 /// remove that file.
 const FOOTPLATE_TOKEN: &str = "!footplate-token-v1";
 
+/// Marks a session file that footplate wrote after signing in: a token
+/// file's marker never stands in one, and this one never in a token's.
+const FOOTPLATE_SESSION: &str = "!footplate-session-v1";
+
 /// What the environment says of the yard, read once when footplate starts.
 #[derive(Debug, Clone, Default)]
 pub struct Env {
@@ -130,7 +134,10 @@ impl Env {
     /// A client of the yard to show, or why there is none: an address that
     /// is refused, or a token that is missing or open to others. It is the
     /// yard the environment names, else the one `set` opens; `settings` is
-    /// the file they are kept in.
+    /// the file they are kept in. The environment's yard is reached direct;
+    /// a hosted yard is opened from the settings, with its session beside
+    /// its device token, and where neither is there signing in is what is
+    /// said first.
     pub fn open(&self, set: &Settings, settings: Option<&Path>) -> Result<Client, String> {
         let opened = set.opened();
         let Some(address) = self.address(set) else {
@@ -151,9 +158,55 @@ impl Env {
             return Ok(Client::new(socket));
         };
         let address = Address::parse(address)?;
+        let session = match self.session_of(set, &opened.name, settings)? {
+            Some(file) => Some(session_for(&file, &address)?),
+            None => None,
+        };
         let file = self.token_of(set, &opened.name, settings)?;
         let token = token_for(&file, &address)?;
-        Ok(Client::remote(address, token))
+        Ok(match session {
+            Some(session) => Client::remote_hosted(address, token, session),
+            None => Client::remote(address, token),
+        })
+    }
+
+    /// The file the session token of the far yard called `name` is in,
+    /// where that yard is a hosted one: where it is read from, and where
+    /// signing in writes it. `None` is a yard reached direct, and the one
+    /// yard the environment names, which is direct too. A file another
+    /// yard's token or session is in, and the yard's own token file, are
+    /// refused as a session file.
+    pub fn session_of(
+        &self,
+        set: &Settings,
+        name: &str,
+        settings: Option<&Path>,
+    ) -> Result<Option<PathBuf>, String> {
+        if self.yard.is_some() {
+            return Ok(None);
+        }
+        let Some(yard) = set.yard(name) else {
+            return Err(format!("The settings list no yard called {name}."));
+        };
+        if !yard.is_hosted() {
+            return Ok(None);
+        }
+        if let Some((other, shared)) = set.session_shares(name, settings) {
+            return Err(format!(
+                "The yard {name} keeps its session in the file the yard {} keeps a token in, {}, and is not opened until they differ: name another for one of them where the settings are kept.",
+                other.name,
+                shared.display()
+            ));
+        }
+        let file = token_path(&yard.session_file, settings)?;
+        if token_path(&yard.token_file, settings).is_ok_and(|token| same_file(&file, &token)) {
+            return Err(format!(
+                "The yard {name} keeps its session in its device token's file, {}, and is not opened until they differ: name another for one of them where the settings are kept.",
+                file.display()
+            ));
+        }
+        check_token_file_target(&file)?;
+        Ok(Some(file))
     }
 }
 
@@ -266,6 +319,56 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// A credential kept in a file of its own: a device's token or a hosted
+/// yard's session token. Both are read the same way; only the marker and
+/// the words differ.
+#[derive(Clone, Copy)]
+struct KeptKind {
+    /// The marker footplate writes under a token it kept.
+    marker: &'static str,
+    /// `token` or `session`, as a refusal names the file and what it holds.
+    noun: &'static str,
+    /// Why the file may not be read by others, past the mode.
+    open: &'static str,
+    /// What gave the token: `the yard` or `signing in`.
+    giver: &'static str,
+}
+
+const TOKEN_KIND: KeptKind = KeptKind {
+    marker: FOOTPLATE_TOKEN,
+    noun: "token",
+    open: "whoever reads it calls the yard as you",
+    giver: "the yard",
+};
+
+const SESSION_KIND: KeptKind = KeptKind {
+    marker: FOOTPLATE_SESSION,
+    noun: "session",
+    open: "whoever reads it is signed in as this yard's user",
+    giver: "signing in",
+};
+
+impl KeptKind {
+    /// The token `file` holds, and the address it is for where the file
+    /// says.
+    fn read(&self, file: &Path) -> Result<KeptToken, String> {
+        kept_as(file, *self)
+    }
+
+    /// Why there is no token where the file is not there: pairing for a
+    /// device, signing in for a session.
+    fn missing(&self, at: &std::path::Display<'_>) -> String {
+        match self.noun {
+            "session" => format!(
+                "Not signed in: {at} is not there. Sign in to this hosted yard, and keep the session token in that file."
+            ),
+            _ => format!(
+                "This device has no token: {at} is not there. Pair it in the settings, with a code the yard's operator opens: yardr user device pair <user> <device>"
+            ),
+        }
+    }
+}
+
 /// Reads a device's token from its file, and the address of the yard it
 /// is for where the file says. A file others can read is refused, as every
 /// file of a secret is in yardr: the token is all that says who a request
@@ -278,39 +381,52 @@ struct KeptToken {
 }
 
 fn kept(file: &Path) -> Result<KeptToken, String> {
+    TOKEN_KIND.read(file)
+}
+
+fn kept_session(file: &Path) -> Result<KeptToken, String> {
+    SESSION_KIND.read(file)
+}
+
+fn kept_as(file: &Path, kind: KeptKind) -> Result<KeptToken, String> {
     let at = file.display();
+    let noun = kind.noun;
     let meta = match fs::metadata(file) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(format!(
-                "This device has no token: {at} is not there. Pair it in the settings, with a code the yard's operator opens: yardr user device pair <user> <device>"
-            ));
+            return Err(kind.missing(&at));
         }
-        Err(err) => return Err(format!("The token file {at} cannot be read: {err}")),
+        Err(err) => return Err(format!("The {noun} file {at} cannot be read: {err}")),
     };
     if !meta.file_type().is_file() {
         return Err(format!(
-            "The token file {at} is not a regular file, and is refused."
+            "The {noun} file {at} is not a regular file, and is refused."
         ));
     }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(format!(
-            "The token file {at} is open to others (mode {mode:04o}), and is refused: whoever reads it calls the yard as you. Make it yours alone: chmod 600 {at}"
+            "The {noun} file {at} is open to others (mode {mode:04o}), and is refused: {}. Make it yours alone: chmod 600 {at}",
+            kind.open
         ));
     }
     let text = fs::read_to_string(file)
-        .map_err(|err| format!("The token file {at} cannot be read: {err}"))?;
+        .map_err(|err| format!("The {noun} file {at} cannot be read: {err}"))?;
     let ends_newline = text.ends_with('\n');
     let none = || {
         format!(
-            "The token file {at} holds no token: one is a line, as the yard gave it, with footplate's marker and the address of its yard where it wrote them."
+            "The {noun} file {at} holds no {noun}: one is a line, as {} gave it, with footplate's marker and the address of its {} where it wrote them.",
+            kind.giver,
+            match noun {
+                "session" => "edge",
+                _ => "yard",
+            }
         )
     };
     let lines: Vec<&str> = text.trim().lines().collect();
     let token = lines.first().copied().unwrap_or_default().trim();
     let (managed, address_line) = match lines.get(1) {
-        Some(line) if line.trim() == FOOTPLATE_TOKEN => (true, lines.get(2).copied()),
+        Some(line) if line.trim() == kind.marker => (true, lines.get(2).copied()),
         Some(line) => (false, Some(*line)),
         None => (false, None),
     };
@@ -341,6 +457,13 @@ pub fn read_token(file: &Path) -> Result<String, String> {
     kept(file).map(|kept| kept.token)
 }
 
+/// The session `file` holds, whichever edge it is for: what a test reads
+/// back. A request takes its session from [`session_for`].
+#[cfg(test)]
+pub fn read_session(file: &Path) -> Result<String, String> {
+    kept_session(file).map(|kept| kept.token)
+}
+
 /// Whether the tests run as root, which no file mode holds: a test of a
 /// refusal a mode carries says so and returns instead of trying it.
 #[cfg(test)]
@@ -359,6 +482,16 @@ pub(crate) fn is_managed_token_file(file: &Path) -> bool {
     kept(file).is_ok_and(|kept| kept.managed)
 }
 
+/// Whether this is a regular session file that signing in wrote. A
+/// settings entry may name an existing session from another program;
+/// removing that entry must leave it there.
+pub(crate) fn is_managed_session_file(file: &Path) -> bool {
+    if !fs::symlink_metadata(file).is_ok_and(|meta| meta.file_type().is_file()) {
+        return false;
+    }
+    kept_session(file).is_ok_and(|kept| kept.managed)
+}
+
 /// The token `file` holds, to call the yard at `address` with. A token is
 /// for the yard that gave it and for no other: the file names that yard's
 /// address under the token, and with another address the token is refused
@@ -370,15 +503,54 @@ pub(crate) fn is_managed_token_file(file: &Path) -> bool {
 /// to the first yard it is opened for only when that address can be saved;
 /// otherwise no request is sent.
 pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
-    let saved = kept(file)?;
+    kept_for(file, address, TOKEN_KIND, |at, given, address| {
+        format!(
+            "The token in {at} is of this device at {given}, and is not sent to {address}: whoever answers there would call that yard as you. Pair this device with the yard at {address} in the settings, with a code its operator opens: yardr user device pair <user> <device>"
+        )
+    })
+}
+
+/// The session `file` holds, to call the hosted yard at `address` with. A
+/// session is for the edge that signed it and for no other: the file names
+/// that edge's address under the session, and with another address the
+/// session is refused and sent nowhere, until signed in there. Signing in
+/// writes the address with the session. A file that names no address, as
+/// one from another program is, is bound to the first edge it is opened
+/// for only when that address can be saved; otherwise no request is sent.
+pub fn session_for(file: &Path, address: &Address) -> Result<String, String> {
+    kept_for(file, address, SESSION_KIND, |at, given, address| {
+        format!(
+            "The session in {at} is this yard's sign-in at {given}, and is not sent to {address}: whoever answers there could sign in as you. Sign in to the yard at {address}."
+        )
+    })
+}
+
+/// The token `file` holds for the yard at `address`: refused and sent
+/// nowhere with another address than the one the file names, and bound
+/// to `address` where the file names none. `wrong` says a token of
+/// another address, with what to do instead.
+fn kept_for(
+    file: &Path,
+    address: &Address,
+    kind: KeptKind,
+    wrong: impl FnOnce(&std::path::Display<'_>, &Address, &Address) -> String,
+) -> Result<String, String> {
+    let saved = kind.read(file)?;
     let mut token = saved.token;
+    let at = file.display();
+    let noun = kind.noun;
+    let edge = match noun {
+        "session" => "edge",
+        _ => "yard",
+    };
+    let instead = match noun {
+        "session" => "Sign in to that yard.",
+        _ => "Pair this device with that yard.",
+    };
     match saved.address {
         Some(given) if given.is(address) => {}
         Some(given) => {
-            return Err(format!(
-                "The token in {} is of this device at {given}, and is not sent to {address}: whoever answers there would call that yard as you. Pair this device with the yard at {address} in the settings, with a code its operator opens: yardr user device pair <user> <device>",
-                file.display()
-            ));
+            return Err(wrong(&at, &given, address));
         }
         // A token without a recorded address is not safe to send until the
         // address is durably bound to it.
@@ -393,14 +565,12 @@ pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
                 .and_then(|mut out| out.write_all(line.as_bytes()));
             if bound.is_err() {
                 return Err(format!(
-                    "The token file {} has no saved yard address and cannot be safely bound to {address}; no request was sent. Pair this device with that yard.",
-                    file.display()
+                    "The {noun} file {at} has no saved {edge} address and cannot be safely bound to {address}; no request was sent. {instead}",
                 ));
             }
-            let verified = kept(file).map_err(|_| {
+            let verified = kind.read(file).map_err(|_| {
                 format!(
-                    "The token file {} could not be safely bound to {address}; no request was sent. Pair this device with that yard.",
-                    file.display()
+                    "The {noun} file {at} could not be safely bound to {address}; no request was sent. {instead}",
                 )
             })?;
             if !verified
@@ -409,8 +579,7 @@ pub fn token_for(file: &Path, address: &Address) -> Result<String, String> {
                 .is_some_and(|given| given.is(address))
             {
                 return Err(format!(
-                    "The token file {} could not be safely bound to {address}; no request was sent. Pair this device with that yard.",
-                    file.display()
+                    "The {noun} file {at} could not be safely bound to {address}; no request was sent. {instead}",
                 ));
             }
             token = verified.token;
@@ -489,11 +658,11 @@ impl TokenPlace {
     /// under it: a token is never on disk without its yard. The file is
     /// whole or not there: it is written beside itself and renamed.
     pub fn keep(self, token: &str, address: &Address) -> io::Result<()> {
-        self.keep_with_address(token, Some(address))
+        self.keep_as(token, Some(address), FOOTPLATE_TOKEN)
     }
 
-    fn keep_with_address(mut self, token: &str, address: Option<&Address>) -> io::Result<()> {
-        let mut text = format!("{token}\n{FOOTPLATE_TOKEN}\n");
+    fn keep_as(mut self, token: &str, address: Option<&Address>, marker: &str) -> io::Result<()> {
+        let mut text = format!("{token}\n{marker}\n");
         if let Some(address) = address {
             text.push_str(&format!("{address}\n"));
         }
@@ -520,7 +689,14 @@ impl Drop for TokenPlace {
 /// address has been bound by [`token_for`].
 #[cfg(test)]
 pub fn keep_token(file: &Path, token: &str) -> io::Result<()> {
-    token_place(file)?.keep_with_address(token, None)
+    token_place(file)?.keep_as(token, None, FOOTPLATE_TOKEN)
+}
+
+/// A session token alone in `file`, for tests that need a file before its
+/// address has been bound by [`session_for`].
+#[cfg(test)]
+pub fn keep_session_token(file: &Path, token: &str) -> io::Result<()> {
+    token_place(file)?.keep_as(token, None, FOOTPLATE_SESSION)
 }
 
 /// The address and the code as they were typed. What a pairing's QR code
@@ -1092,6 +1268,237 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_yard_opens_with_its_session_beside_its_token() {
+        use crate::fake::{Router, SESSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        let edge = Router::start(&yard, SESSION);
+        let set = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::hosted(
+                    "south",
+                    edge.address(),
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&settings),
+            )
+            .unwrap()
+            .opening("south");
+        let env = Env::default();
+        // Neither file there: signing in is said first.
+        let why = env.open(&set, Some(&settings)).unwrap_err();
+        assert!(why.starts_with("Not signed in: "), "{why}");
+        assert!(why.contains("yard-south.session"), "{why}");
+        // The session alone: the device is still to pair.
+        keep_session_token(&dir.path().join("yard-south.session"), SESSION).unwrap();
+        let why = env.open(&set, Some(&settings)).unwrap_err();
+        assert!(why.starts_with("This device has no token"), "{why}");
+        // Both: every call carries both.
+        keep_token(&dir.path().join("yard-south.token"), TOKEN).unwrap();
+        let client = env.open(&set, Some(&settings)).unwrap();
+        let state = session::load(&client, "mac-login").unwrap();
+        assert_eq!(state.me, "jo");
+        let request = edge.last_request();
+        assert!(
+            request.contains(&format!("X-Edge-Token: {SESSION}\r\n")),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!("Authorization: Bearer {TOKEN}\r\n")),
+            "{request}"
+        );
+        // A bare session is bound to the edge on its first opening, and
+        // the settings hold neither token.
+        assert_eq!(
+            fs::read_to_string(dir.path().join("yard-south.session")).unwrap(),
+            format!("{SESSION}\n{FOOTPLATE_SESSION}\n{}\n", edge.address())
+        );
+        set.write(&settings).unwrap();
+        let kept = fs::read_to_string(&settings).unwrap();
+        assert!(!kept.contains(TOKEN) && !kept.contains(SESSION));
+
+        // The environment names a direct yard: no session rides along,
+        // and the edge says to sign in.
+        let direct = Env {
+            yard: Some(edge.address().to_string()),
+            token_file: Some(dir.path().join("yard-south.token")),
+            ..Env::default()
+        };
+        let client = direct.open(&set, Some(&settings)).unwrap();
+        assert!(matches!(client.head(), Err(api::Error::NotSignedIn)));
+    }
+
+    #[test]
+    fn a_session_goes_to_the_edge_it_was_first_opened_for_and_to_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        keep_session_token(&dir.path().join("yard-south.session"), "kratos-dev-south").unwrap();
+        keep_token(&dir.path().join("yard-south.token"), TOKEN).unwrap();
+        let at = |address: &str| {
+            Settings::default()
+                .with_yard(
+                    None,
+                    settings::Yard::hosted(
+                        "south",
+                        address,
+                        "yard-south.token",
+                        "yard-south.session",
+                    ),
+                    Some(&settings),
+                )
+                .unwrap()
+                .opening("south")
+        };
+        let env = Env::default();
+        let open = |address: &str| env.open(&at(address), Some(&settings));
+
+        // Opened once, the file says whose the session is.
+        assert!(open("https://south.example.net").is_ok());
+        assert_eq!(
+            read_session(&dir.path().join("yard-south.session")).unwrap(),
+            "kratos-dev-south"
+        );
+        // The address changed where the settings are kept: the session is
+        // of the edge that signed it, and is not read out for another,
+        // nor named in the refusal.
+        for other in [
+            "https://plantime.example.net",
+            "https://south.example.net:8443",
+        ] {
+            let why = open(other).unwrap_err();
+            assert!(
+                why.contains(
+                    "is this yard's sign-in at https://south.example.net, and is not sent to"
+                ),
+                "{why}"
+            );
+            assert!(why.contains("Sign in to the yard at"), "{why}");
+            assert!(!why.contains("kratos-dev-south"), "{why}");
+            assert_eq!(
+                session_for(
+                    &dir.path().join("yard-south.session"),
+                    &Address::parse(other).unwrap()
+                ),
+                Err(why)
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_file_open_to_others_or_holding_none_is_refused() {
+        // No file mode holds root: what is refused below for another
+        // user is let through here.
+        if running_as_root() {
+            eprintln!("skipped: root (euid 0) is not held by a file's mode");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let at = |session: &str| {
+            Settings::default()
+                .with_yard(
+                    None,
+                    settings::Yard::hosted(
+                        "south",
+                        "https://south.example.net",
+                        "yard-south.token",
+                        session,
+                    ),
+                    Some(&settings),
+                )
+                .unwrap()
+                .opening("south")
+        };
+        let env = Env::default();
+        for mode in [0o644, 0o640] {
+            let file = file_of_mode(dir.path(), "open.session", mode, "kratos-dev-south\n");
+            let why = env.open(&at("open.session"), Some(&settings)).unwrap_err();
+            assert!(
+                why.contains(&format!("is open to others (mode {mode:04o})")),
+                "{why}"
+            );
+            assert!(
+                why.ends_with(&format!("chmod 600 {}", file.display())),
+                "{why}"
+            );
+        }
+        for none in ["", "\n", "two words"] {
+            let file = file_of_mode(dir.path(), "none.session", 0o600, none);
+            let why = env.open(&at("none.session"), Some(&settings)).unwrap_err();
+            assert!(why.contains("holds no session"), "{none:?}: {why}");
+            assert!(
+                session_for(&file, &Address::parse("https://south.example.net").unwrap()).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_file_shared_or_the_token_s_is_refused_until_they_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        file_of_mode(dir.path(), "yard.token", 0o600, TOKEN);
+        // Only a list edited by hand comes to this.
+        fs::write(
+            &settings,
+            r#"{"yards": [{"name": "mac", "address": "https://mac.example.net", "token_file": "yard.token"},
+                          {"name": "south", "address": "https://south.example.net", "token_file": "yard-south.token", "session_file": "yard.token"},
+                          {"name": "twin", "address": "https://twin.example.net", "token_file": "yard-twin.token", "session_file": "yard-twin.token"}]}"#,
+        )
+        .unwrap();
+        let set = Settings::read(&settings);
+        let env = Env::default();
+        let why = env
+            .open(&set.clone().opening("south"), Some(&settings))
+            .unwrap_err();
+        assert!(
+            why.starts_with(&format!(
+                "The yard south keeps its session in the file the yard mac keeps a token in, {}",
+                dir.path().join("yard.token").display()
+            )),
+            "{why}"
+        );
+        let why = env
+            .open(&set.clone().opening("twin"), Some(&settings))
+            .unwrap_err();
+        assert!(
+            why.starts_with(&format!(
+                "The yard twin keeps its session in its device token's file, {}",
+                dir.path().join("yard-twin.token").display()
+            )),
+            "{why}"
+        );
+        // The direct yard opens as ever: the sharing is the hosted one's
+        // to answer.
+        assert_eq!(env.session_of(&set, "mac", Some(&settings)), Ok(None));
+    }
+
+    #[test]
+    fn only_a_well_formed_session_file_is_managed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("yard.session");
+        keep_session_token(&file, "kratos-dev-south").unwrap();
+        assert!(is_managed_session_file(&file));
+        // The markers do not cross: neither file is the other's kind.
+        assert!(!is_managed_token_file(&file));
+        let token = dir.path().join("yard.token");
+        keep_token(&token, TOKEN).unwrap();
+        assert!(is_managed_token_file(&token));
+        assert!(!is_managed_session_file(&token));
+
+        fs::write(
+            &file,
+            format!("kratos-dev-south\n{FOOTPLATE_SESSION}\nnot-an-address\nextra\n"),
+        )
+        .unwrap();
+        assert!(!is_managed_session_file(&file));
+    }
+
+    #[test]
     fn the_settings_file_is_no_token_file_and_a_socket_is_a_whole_path() {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
@@ -1120,7 +1527,7 @@ mod tests {
                 .is_err()
         );
         // Removing that yard leaves the settings where they are.
-        let (less, left) = set.clone().without("mac", Some(&settings));
+        let (less, left, _) = set.clone().without("mac", Some(&settings));
         assert_eq!(left, settings::TokenLeft::None);
         assert!(settings.exists() && less.yard("mac").is_none());
 

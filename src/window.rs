@@ -778,6 +778,8 @@ enum Away {
     Stopped,
     /// Not until the device is paired again: the yard does not let it in.
     Out,
+    /// Not until signed in again: the edge does not let the session in.
+    SignedOut,
 }
 
 /// What is typed in the settings for a yard: one to add, or a code for one
@@ -2159,6 +2161,11 @@ impl Footplate {
                 held.away = Away::Out;
                 self.unreached.insert(yard, session::PAIR_AGAIN);
             }
+            Update::SignedOut(why) => {
+                held.down = Some(why);
+                held.away = Away::SignedOut;
+                self.unreached.insert(yard, session::SIGN_IN_AGAIN);
+            }
         }
         cx.notify();
     }
@@ -2304,6 +2311,13 @@ impl Footplate {
                 self.away = Away::Out;
                 self.unreached
                     .insert(self.yard.clone(), session::PAIR_AGAIN);
+                self.switch_question = None;
+            }
+            Update::SignedOut(why) => {
+                self.down = Some(why);
+                self.away = Away::SignedOut;
+                self.unreached
+                    .insert(self.yard.clone(), session::SIGN_IN_AGAIN);
                 self.switch_question = None;
             }
         }
@@ -5432,7 +5446,9 @@ impl Footplate {
     /// Sends the code that is typed to the yard it is for, and opens that
     /// yard as the device the code was for: a yard that is added, at the
     /// address that is typed, or one of the list whose device is paired
-    /// again. The token goes into that yard's own file and no other's.
+    /// again. The token goes into that yard's own file and no other's. At
+    /// a hosted yard of the list the session rides beside the code, and
+    /// where it cannot be read that is said instead of pairing.
     /// What keeps a yard out of the list is said before anything is sent,
     /// and so is a token file that cannot be written: a code is used up by
     /// the yard it is sent to.
@@ -5500,6 +5516,25 @@ impl Footplate {
             );
             return;
         }
+        // Pairing a hosted yard of the list again: the code is the edge's
+        // to let through, with the session beside it.
+        let session: Result<Option<String>, String> = match &adding {
+            Adding::Again(name) => self
+                .env
+                .session_of(&self.settings, name, kept.as_deref())
+                .and_then(|file| {
+                    file.map(|file| yard::session_for(&file, &address))
+                        .transpose()
+                }),
+            _ => Ok(None),
+        };
+        let session = match session {
+            Ok(session) => session,
+            Err(why) => {
+                self.yard_said = Some(why);
+                return;
+            }
+        };
         self.pairing = true;
         self.yard_said = None;
         cx.spawn(async move |this, cx| {
@@ -5515,7 +5550,11 @@ impl Footplate {
                             file.display()
                         )
                     })?;
-                    let paired = api::pair(&address, &code).map_err(|err| err.to_string())?;
+                    let paired = match &session {
+                        Some(session) => api::pair_hosted(&address, &code, session),
+                        None => api::pair(&address, &code),
+                    }
+                    .map_err(|err| err.to_string())?;
                     // The token goes from the yard's answer into its file
                     // with the address the code went to, and nowhere else.
                     place.keep(&paired.token, &address).map_err(|err| {
@@ -5622,11 +5661,16 @@ impl Footplate {
         let device = model
             .zip(said)
             .map(|(model, said)| (model.me().to_string(), said.said_by.clone()));
-        let (settings, left) = self.settings.clone().without(name, self.kept.as_deref());
+        let (settings, left, session) = self.settings.clone().without(name, self.kept.as_deref());
         let device = device
             .as_ref()
             .map(|(user, device)| (user.as_str(), device.as_str()));
-        self.yard_said = Some(left.said(name, device));
+        let mut said = left.said(name, device);
+        if let Some(sessions) = session.said_session() {
+            said.push(' ');
+            said.push_str(&sessions);
+        }
+        self.yard_said = Some(said);
         if self.adding == Some(Adding::Again(name.to_string())) {
             self.shut_adding(cx);
         }
@@ -6938,8 +6982,10 @@ impl Footplate {
     /// the error and the hint at yardr status hide under details, shut at
     /// first; "set up a yard here" is the first way, and the marked one.
     /// A yard that no longer lets this device in is not: the device is
-    /// paired again from here. A yard that is only stopped says that, and
-    /// points at Start in the head. It stands beside the head of the
+    /// paired again from here. One whose session the edge no longer lets
+    /// in says to sign in again, and pairing is not offered. A yard that
+    /// is only stopped says that, and points at Start in the head. It
+    /// stands beside the head of the
     /// left column, which opens another yard; the one yard the environment
     /// names has no other, and its settings are reached from under the
     /// words. Under the words are the ways to a yard from here, which are
@@ -6959,6 +7005,9 @@ impl Footplate {
             ),
             Away::Out => {
                 "footplate does not ask again until this device has a token again.".to_string()
+            }
+            Away::SignedOut => {
+                "footplate does not ask again until signed in again.".to_string()
             }
             Away::Stopped if alone => {
                 "footplate does not try again: the settings open a yard, and so does the next start."
@@ -7073,17 +7122,23 @@ impl Footplate {
             })
             // A yard at an address that is away for whatever reason: the
             // device can be paired again, which is what helps when the yard
-            // no longer knows it.
-            .when(self.client.as_ref().is_some_and(Client::is_remote), |el| {
-                el.child(
-                    small_button("pair again".to_string(), palette)
-                        .id("pair again")
-                        .debug_selector(|| "pair again".to_string())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.pair_again(None, window, cx)),
-                        ),
-                )
-            })
+            // no longer knows it. Where the session is what is out, pairing
+            // again helps nothing, so it is not offered.
+            .when(
+                self.client.as_ref().is_some_and(Client::is_remote) && self.away != Away::SignedOut,
+                |el| {
+                    el.child(
+                        small_button("pair again".to_string(), palette)
+                            .id("pair again")
+                            .debug_selector(|| "pair again".to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.pair_again(None, window, cx)
+                                }),
+                            ),
+                    )
+                },
+            )
             // The column's foot has the control where there is a column.
             .when(alone, |el| {
                 el.child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
@@ -16054,7 +16109,7 @@ mod tests {
             v.line
                 .update(cx, |line, cx| line.set_text("private to old far", cx));
             v.send(cx);
-            let (without, _) = v.settings.clone().without("far", Some(&file));
+            let (without, _, _) = v.settings.clone().without("far", Some(&file));
             yard::keep_token(&token, crate::fake::TOKEN).unwrap();
             let replacement = without
                 .with_yard(
@@ -16160,7 +16215,7 @@ mod tests {
         a_far_yard_of_jo(&far);
         // This machine's and a paired one, to begin with.
         let file = three_yards(dir.path(), &second, &far);
-        let (set, _) = Settings::read(&file).without("second home", Some(&file));
+        let (set, _, _) = Settings::read(&file).without("second home", Some(&file));
         set.write(&file).unwrap();
         let beside = |name: &str| dir.path().join("footplate").join(name);
         let env = Env {
@@ -16870,6 +16925,143 @@ mod tests {
             texts(&view, cx) == ["Shall I land it?"]
         });
         assert_eq!(state_of(&view, cx, "second home"), "1 mail");
+    }
+
+    /// A hosted yard whose session the edge stops letting in: the window
+    /// says to sign in again, and does not ask again; pairing again is not
+    /// offered, since the device is still paired.
+    #[gpui::test]
+    fn a_hosted_yard_whose_session_is_out_says_to_sign_in_again(cx: &mut TestAppContext) {
+        use crate::fake::{Router, SESSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::hosted(
+                    "south",
+                    edge.address(),
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-south.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        // This machine's yard is open; the hosted one is followed too, and
+        // read through the edge.
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the hosted yard", |cx| {
+            state_of(&view, cx, "south") == "1 mail"
+        });
+
+        // The session is revoked at the edge: the hosted yard is said with
+        // signing in again as what to do, there and where it is opened.
+        edge.revoke(SESSION);
+        wait(cx, "that the session is not signed in", |cx| {
+            state_of(&view, cx, "south") == "not reached: sign in again"
+        });
+        click_on(cx, "which yard");
+        click_on(cx, "switch south");
+        wait(cx, "the hosted yard signed out", |cx| {
+            view.read_with(cx, |v, _| v.away == Away::SignedOut)
+        });
+        let why = view.read_with(cx, |v, _| v.down.clone().unwrap());
+        assert!(
+            why.starts_with("This session is no longer signed in"),
+            "{why}"
+        );
+        assert_eq!(open_yard(&view, cx), "south");
+        assert_eq!(head_line(&view, cx), "jo · south · sign in again");
+        assert!(drawn(cx, "away why"));
+        assert!(!drawn(cx, "pair again"));
+    }
+
+    /// Pairing a hosted yard of the list again: the session rides beside
+    /// the code, and the yard opens as the new device.
+    #[gpui::test]
+    fn pairing_a_hosted_yard_again_sends_the_session_beside_the_code(cx: &mut TestAppContext) {
+        use crate::fake::{Router, SESSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        let file = dir.path().join("footplate/settings.json");
+        let token = dir.path().join("footplate/yard-south.token");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::hosted(
+                    "south",
+                    edge.address(),
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .opening("south")
+            .write(&file)
+            .unwrap();
+        yard::keep_token(&token, crate::fake::TOKEN).unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the hosted yard's conversations", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+
+        // The operator removes the device; the session stands. The window
+        // offers to pair again, and the code goes with the session: the
+        // yard answers only a pairing that carries one. The token is the
+        // same yard's, in the same file.
+        far.add_device("yardr-dev-phone");
+        far.remove_device(crate::fake::TOKEN);
+        wait(cx, "that the device is not let in", |cx| {
+            view.read_with(cx, |v, _| v.away == Away::Out)
+        });
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "yard again south");
+        assert!(drawn(cx, "yard pair"));
+        far.pair("ABCD-EFGH");
+        cx.simulate_input("abcd efgh");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the pairing", |cx| {
+            yard_said(&view, cx).starts_with("Paired:")
+        });
+        wait(cx, "the yard again", |cx| {
+            texts(&view, cx) == ["From afar."] && view.read_with(cx, |v, _| v.down.is_none())
+        });
+        assert_ne!(yard::read_token(&token).unwrap(), crate::fake::TOKEN);
+        assert_eq!(mode_of(&token), 0o600);
     }
 
     /// A yard that answered and goes away keeps its view: the sidebar,

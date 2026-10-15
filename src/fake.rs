@@ -542,13 +542,17 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
         let under = target.strip_prefix("/user").map(str::to_string);
         match under {
             Some(path) if known => target = path,
+            // As the yard refuses a token it does not know: plain
+            // `Unauthorized` with `WWW-Authenticate: Bearer`, which the
+            // edge passes through byte for byte, adding nothing.
             _ => {
-                return plain(
-                    &mut conn,
-                    "401 Unauthorized",
-                    "text/plain",
-                    "Unauthorized\n",
-                );
+                let body = "Unauthorized\n";
+                write!(
+                    conn,
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )?;
+                return conn.flush();
             }
         }
         if target == "/me" {
@@ -744,4 +748,256 @@ fn stream(
         }
         state = shared.changed.wait(state).unwrap();
     }
+}
+
+/// The session token a stand-in edge lets in, in the tests.
+#[cfg(test)]
+pub const SESSION: &str = "kratos-dev-session";
+
+/// What the edge answers a session it does not know: its own 401, naming
+/// the edge, carrying `X-Edge-Refusal: session`. The yard's own 401 it
+/// passes through byte for byte, adding nothing.
+#[cfg(test)]
+const NO_SESSION: &str = "{\"error\":\"edge: no Kratos session; sign in first\"}\n";
+
+#[cfg(test)]
+struct EdgeShared {
+    sessions: Mutex<Vec<String>>,
+    last_request: Mutex<String>,
+    /// How many requests were proxied to the yard.
+    proxied: Mutex<usize>,
+    /// The open relays, each with the session it was proxied for.
+    relays: Mutex<Vec<(String, TcpStream)>>,
+    stopped: Mutex<bool>,
+}
+
+/// A stand-in for the hosted edge in front of a yard at its listener: it
+/// checks `X-Edge-Token` as the router checks the Kratos session, proxies
+/// a known session to the yard with the credential stripped, and refuses
+/// any other with the edge's own 401, reaching no yard. The yard answers
+/// the device token as ever; a test stops the yard before the edge, so no
+/// relayed stream outlives what it relays.
+#[cfg(test)]
+pub struct Router {
+    /// `http://127.0.0.1:<port>`.
+    address: String,
+    shared: Arc<EdgeShared>,
+    accept: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[cfg(test)]
+impl Router {
+    /// An edge in front of `yard`, which lets `session` in.
+    pub fn start(yard: &Yard, session: &str) -> Router {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let target = yard
+            .address()
+            .strip_prefix("http://")
+            .unwrap_or_else(|| yard.address())
+            .to_string();
+        let shared = Arc::new(EdgeShared {
+            sessions: Mutex::new(vec![session.to_string()]),
+            last_request: Mutex::new(String::new()),
+            proxied: Mutex::new(0),
+            relays: Mutex::new(Vec::new()),
+            stopped: Mutex::new(false),
+        });
+        let accept = thread::spawn({
+            let shared = shared.clone();
+            move || {
+                while !*shared.stopped.lock().unwrap() {
+                    match listener.accept() {
+                        Ok((conn, _)) => {
+                            let shared = shared.clone();
+                            let target = target.clone();
+                            thread::spawn(move || {
+                                let _ = serve_edge(conn, &target, &shared);
+                            });
+                        }
+                        Err(_) => thread::sleep(Duration::from_millis(2)),
+                    }
+                }
+            }
+        });
+        Router {
+            address,
+            shared,
+            accept: Mutex::new(Some(accept)),
+        }
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// A client at the edge's address with this device token and session.
+    pub fn client_with(&self, token: &str, session: &str) -> Client {
+        Client::remote_hosted(Address::parse(self.address()).unwrap(), token, session)
+    }
+
+    /// The edge knows this session from now on.
+    pub fn allow(&self, session: &str) {
+        self.shared
+            .sessions
+            .lock()
+            .unwrap()
+            .push(session.to_string());
+    }
+
+    /// The edge knows this session no more, as Kratos after a revocation:
+    /// the next request with it is refused, and what it relayed is cut,
+    /// as a removed device's streams are.
+    pub fn revoke(&self, session: &str) {
+        self.shared
+            .sessions
+            .lock()
+            .unwrap()
+            .retain(|known| known != session);
+        let mut relays = self.shared.relays.lock().unwrap();
+        for (_, live) in relays.iter().filter(|(known, _)| known == session) {
+            let _ = live.shutdown(std::net::Shutdown::Both);
+        }
+        relays.retain(|(known, _)| known != session);
+    }
+
+    /// The head of the last request, as it came to the edge.
+    pub fn last_request(&self) -> String {
+        self.shared.last_request.lock().unwrap().clone()
+    }
+
+    /// How many requests reached the yard through the edge.
+    pub fn proxied(&self) -> usize {
+        *self.shared.proxied.lock().unwrap()
+    }
+
+    /// The edge goes away: nothing listens any more.
+    pub fn stop(&self) {
+        *self.shared.stopped.lock().unwrap() = true;
+        if let Some(accept) = self.accept.lock().unwrap().take() {
+            accept.join().unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Router {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// One request at the edge: refused with the edge's own 401 where the
+/// session is none it knows, else proxied to the yard with the credential
+/// stripped and the yard's answer relayed byte for byte.
+#[cfg(test)]
+fn serve_edge(conn: TcpStream, target: &str, shared: &EdgeShared) -> io::Result<()> {
+    let mut reader = BufReader::new(conn.try_clone()?);
+    let mut conn = conn;
+    let mut head = String::new();
+    let mut length = 0usize;
+    let mut session = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        head.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("x-edge-token") {
+                session = Some(value.trim().to_string());
+            }
+        }
+    }
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    *shared.last_request.lock().unwrap() = head.clone();
+    let known = session
+        .as_ref()
+        .is_some_and(|token| shared.sessions.lock().unwrap().contains(token));
+    if !known {
+        write!(
+            conn,
+            "HTTP/1.1 401 Unauthorized\r\nX-Edge-Refusal: session\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{NO_SESSION}",
+            NO_SESSION.len()
+        )?;
+        return conn.flush();
+    }
+    *shared.proxied.lock().unwrap() += 1;
+    // The Kratos credential never rides on: the yard verifies devices,
+    // not the account's session.
+    let mut head: String = head
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            line.split_once(':')
+                .is_none_or(|(name, _)| !name.eq_ignore_ascii_case("x-edge-token"))
+        })
+        .map(|line| format!("{line}\r\n"))
+        .collect();
+    head.push_str("\r\n");
+    relay(
+        conn,
+        &head,
+        &body,
+        target,
+        &session.unwrap_or_default(),
+        shared,
+    )
+}
+
+/// One request proxied to the yard, its answer relayed byte for byte. The
+/// relay is cut when its session is revoked, and forgotten when it ends.
+#[cfg(test)]
+fn relay(
+    mut conn: TcpStream,
+    head: &str,
+    body: &[u8],
+    target: &str,
+    session: &str,
+    shared: &EdgeShared,
+) -> io::Result<()> {
+    let peer = conn.peer_addr().ok();
+    shared
+        .relays
+        .lock()
+        .unwrap()
+        .push((session.to_string(), conn.try_clone()?));
+    let result = relay_inner(&mut conn, head, body, target);
+    if let Some(peer) = peer {
+        shared
+            .relays
+            .lock()
+            .unwrap()
+            .retain(|(_, live)| live.peer_addr().ok() != Some(peer));
+    }
+    result
+}
+
+#[cfg(test)]
+fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> io::Result<()> {
+    let mut yard = TcpStream::connect(target)?;
+    yard.write_all(head.as_bytes())?;
+    yard.write_all(body)?;
+    yard.flush()?;
+    let mut yard = BufReader::new(yard);
+    loop {
+        let mut line = String::new();
+        if yard.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        conn.write_all(line.as_bytes())?;
+        if line == "\r\n" {
+            break;
+        }
+    }
+    conn.flush()?;
+    io::copy(&mut yard, conn)?;
+    Ok(())
 }

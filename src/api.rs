@@ -72,6 +72,11 @@ pub enum Error {
     /// the device was removed. It is no fault that passes, so nothing is
     /// asked again until the device has a token again.
     NotLetIn,
+    /// The edge answered 401 carrying `X-Edge-Refusal: session`: the
+    /// session token is none Kratos knows, or none was sent. It is no
+    /// fault that passes either, so nothing is asked again until signed
+    /// in again. The device pairing is untouched.
+    NotSignedIn,
     /// At the yard's address nothing is under `/user/`: 404 to a call. A
     /// yard answers so while it has no device at all, with a token or
     /// without, and so does an address that is no yard's listener.
@@ -95,6 +100,7 @@ impl fmt::Display for Error {
                 write!(f, "the yard answered what footplate cannot read: {what}")
             }
             Error::NotLetIn => f.write_str("this device is no longer let in"),
+            Error::NotSignedIn => f.write_str("this session is no longer signed in"),
             Error::NoDevice => {
                 f.write_str("the yard has no device, or the address is not a yard's")
             }
@@ -1099,11 +1105,25 @@ pub fn is_token(token: &str) -> bool {
 /// answered with the device's. The code is sent as it was typed; the yard
 /// reads it without its dash and in either case.
 pub fn pair(address: &Address, code: &str) -> Result<Paired> {
+    pair_with(address, code, None)
+}
+
+/// As [`pair`], at a hosted yard: the session token rides beside the code,
+/// which the edge checks before the code reaches the yard.
+pub fn pair_hosted(address: &Address, code: &str, session: &str) -> Result<Paired> {
+    pair_with(address, code, Some(session))
+}
+
+fn pair_with(address: &Address, code: &str, session: Option<&str>) -> Result<Paired> {
     let body = json!({ "code": code }).to_string();
     let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+    let edge = session
+        .filter(|session| is_token(session))
+        .map(|session| format!("X-Edge-Token: {session}\r\n"))
+        .unwrap_or_default();
     conn.write_all(
         format!(
-            "POST {}/user/pair HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST {}/user/pair HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\n{edge}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             address.path,
             address.authority,
             body.len()
@@ -1111,11 +1131,17 @@ pub fn pair(address: &Address, code: &str) -> Result<Paired> {
         .as_bytes(),
     )?;
     conn.flush()?;
-    let (status, mut reply) = respond(conn)?;
+    let (status, refused_session, mut reply) = respond_call(conn)?;
     let refused = |code: &str, message: &str| Error::Refused {
         code: code.to_string(),
         message: message.to_string(),
     };
+    if status == 401 && refused_session {
+        return Err(refused(
+            "no_session",
+            "Sign in first: the edge does not know this session, and the code never reached the yard. Then pair this device with the code.",
+        ));
+    }
     match status {
         200 => {
             let mut bytes = Vec::new();
@@ -1221,7 +1247,7 @@ pub fn download(url: &str, most: u64) -> Result<Vec<u8>> {
             .as_bytes(),
         )?;
         conn.flush()?;
-        let (status, location, reply) = respond_with_location(conn)?;
+        let (status, location, _, reply) = respond_with_location(conn)?;
         match status {
             200 => {
                 let mut bytes = Vec::new();
@@ -1296,11 +1322,16 @@ fn split_url(url: &str) -> Result<(Address, String)> {
 }
 
 /// How a yard is reached: by the socket of this machine's, or by the
-/// address of another's listener with a device's token.
+/// address of another's listener with a device's token, and at a hosted
+/// yard the session token beside it.
 #[derive(Clone)]
 enum Way {
     Socket(PathBuf),
-    Listener { address: Address, token: String },
+    Listener {
+        address: Address,
+        token: String,
+        session: Option<String>,
+    },
 }
 
 /// A client of one yard. It holds no connection: every call opens its own.
@@ -1330,6 +1361,25 @@ impl Client {
             way: Way::Listener {
                 address,
                 token: token.into(),
+                session: None,
+            },
+        }
+    }
+
+    /// A hosted yard at its edge's address, as the device `token` is of
+    /// with the Kratos `session` beside it. Every call carries both; one
+    /// that is no token rides on no request, and the edge refuses the
+    /// session for it.
+    pub fn remote_hosted(
+        address: Address,
+        token: impl Into<String>,
+        session: impl Into<String>,
+    ) -> Self {
+        Client {
+            way: Way::Listener {
+                address,
+                token: token.into(),
+                session: Some(session.into()),
             },
         }
     }
@@ -1369,7 +1419,8 @@ impl Client {
 
     /// Sends one request on a connection of its own and reads the answer's
     /// head. `path` is as docs/api.md has it on the socket; at an address
-    /// it stands under `/user/`, with the token beside it. `headers` are
+    /// it stands under `/user/`, with the token beside it, and at a hosted
+    /// yard the session token in `X-Edge-Token` beside that. `headers` are
     /// whole lines. A call's answer is waited for `timeout` long.
     fn send(
         &self,
@@ -1389,20 +1440,38 @@ impl Client {
                     format!("{verb} {path} HTTP/1.1\r\nHost: yard\r\n"),
                 )
             }
-            Way::Listener { address, token } => (
-                address.connect(timeout)?,
-                format!(
-                    "{verb} {}/user{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n",
-                    address.path, address.authority
-                ),
-            ),
+            Way::Listener {
+                address,
+                token,
+                session,
+            } => {
+                let edge = session
+                    .as_deref()
+                    .filter(|session| is_token(session))
+                    .map(|session| format!("X-Edge-Token: {session}\r\n"))
+                    .unwrap_or_default();
+                (
+                    address.connect(timeout)?,
+                    format!(
+                        "{verb} {}/user{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n{edge}",
+                        address.path, address.authority
+                    ),
+                )
+            }
         };
         // In one write: over TLS each write is a record of its own.
         conn.write_all(
             format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes(),
         )?;
         conn.flush()?;
-        let (status, body) = respond(conn)?;
+        let (status, refused_session, body) = respond_call(conn)?;
+        // A 401 is a state of its own: the edge refused the session, or
+        // the yard the device, told apart by the response's shape. The
+        // yard's own 401 the edge passes through byte for byte, adding
+        // nothing, so without its header it is the device that is out.
+        if status == 401 && refused_session {
+            return Err(Error::NotSignedIn);
+        }
         if status == 401 {
             return Err(Error::NotLetIn);
         }
@@ -1806,12 +1875,20 @@ impl Iterator for Events {
 
 /// Reads the status and the headers of a response, and gives its body.
 fn respond(conn: Conn) -> Result<(u16, Body)> {
-    let (status, _, body) = respond_with_location(conn)?;
+    let (status, _, _, body) = respond_with_location(conn)?;
     Ok((status, body))
 }
 
-/// As [`respond`], with where the response sends on to, when it does.
-fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Body)> {
+/// As [`respond`], with whether the edge refused the session: a 401
+/// carrying `X-Edge-Refusal: session`. A call's answer is read so.
+fn respond_call(conn: Conn) -> Result<(u16, bool, Body)> {
+    let (status, _, refused, body) = respond_with_location(conn)?;
+    Ok((status, refused, body))
+}
+
+/// As [`respond`], with where the response sends on to, when it does,
+/// and whether the edge refused the session.
+fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)> {
     let mut conn = BufReader::new(conn);
     let mut line = String::new();
     // A line of the head, read within what is left of the head's limit.
@@ -1836,6 +1913,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Body)> {
     let mut length = None;
     let mut chunked = false;
     let mut location = None;
+    let mut refused = false;
     loop {
         line.clear();
         if read_line(&mut conn, &mut line)? == 0 {
@@ -1855,6 +1933,8 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Body)> {
             chunked = value.to_ascii_lowercase().contains("chunked");
         } else if name.eq_ignore_ascii_case("location") {
             location = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("x-edge-refusal") {
+            refused = value.eq_ignore_ascii_case("session");
         }
     }
     let framing = match (chunked, length) {
@@ -1865,7 +1945,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Body)> {
         (false, Some(n)) => Framing::Length(n),
         (false, None) => Framing::UntilClosed,
     };
-    Ok((status, location, Body { conn, framing }))
+    Ok((status, location, refused, Body { conn, framing }))
 }
 
 /// The body of a response, as the server frames it. Go's server sends a
@@ -1999,7 +2079,7 @@ mod tests {
             ("https://example.com", "/?x=1")
         );
     }
-    use crate::fake::{TOKEN, Yard};
+    use crate::fake::{Router, SESSION, TOKEN, Yard};
 
     #[test]
     fn socket_is_under_yardr_home_else_the_home() {
@@ -2692,6 +2772,207 @@ mod tests {
         // An image that is gone is 404 too, and is no such thing.
         yard.add_device(TOKEN);
         assert_eq!(client.blob(HASH).unwrap(), None);
+    }
+
+    /// Through the edge, a good pair reaches the yard: every call carries
+    /// the session token beside the device's, and the yard answers the
+    /// device as ever, without ever seeing the session.
+    #[test]
+    fn through_the_edge_a_good_pair_reaches_the_yard() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let edge = Router::start(&yard, SESSION);
+        let client = edge.client_with(TOKEN, SESSION);
+        assert_eq!(client.head().unwrap(), 12);
+        assert_eq!(edge.proxied(), 1);
+        // The call's body crossed the edge whole.
+        assert_eq!(yard.asked("Head"), vec![serde_json::json!({})]);
+        // Both tokens rode to the edge.
+        let request = edge.last_request();
+        assert!(
+            request.starts_with("POST /user/call/Head HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!("Authorization: Bearer {TOKEN}\r\n")),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!("X-Edge-Token: {SESSION}\r\n")),
+            "{request}"
+        );
+        // And the yard saw the device alone.
+        let request = yard.last_request();
+        assert!(
+            request.contains(&format!("Authorization: Bearer {TOKEN}\r\n")),
+            "{request}"
+        );
+        assert!(
+            !request.to_ascii_lowercase().contains("x-edge-token"),
+            "{request}"
+        );
+        // The session is in no word a client says of itself.
+        assert!(!format!("{client:?}").contains(SESSION));
+        // Who the pair is, and the stream after it.
+        assert_eq!(client.me().unwrap().user, "jo");
+        let _stream = client.events(0).unwrap();
+        assert_eq!(edge.proxied(), 3);
+        assert!(
+            edge.last_request()
+                .contains(&format!("X-Edge-Token: {SESSION}\r\n"))
+        );
+
+        // A direct client sends no session header.
+        yard.client().head().unwrap();
+        assert!(
+            !yard
+                .last_request()
+                .to_ascii_lowercase()
+                .contains("x-edge-token"),
+            "{}",
+            yard.last_request()
+        );
+    }
+
+    /// The two 401s through the edge are told apart by the response's
+    /// shape: the edge's own refuses the session, the yard's the device,
+    /// and neither is asked twice.
+    #[test]
+    fn a_refused_session_and_a_refused_device_are_told_apart() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let edge = Router::start(&yard, SESSION);
+
+        // No session the edge knows: its own 401, and the yard hears
+        // nothing of any of it.
+        let stranger = edge.client_with(TOKEN, "kratos-dev-unknown");
+        let err = stranger.head().unwrap_err();
+        assert!(matches!(err, Error::NotSignedIn), "{err:?}");
+        assert_eq!(err.to_string(), "this session is no longer signed in");
+        assert_eq!(edge.proxied(), 0);
+        assert_eq!(yard.requests(), 0);
+        assert!(matches!(stranger.me(), Err(Error::NotSignedIn)));
+        assert!(matches!(stranger.blob(HASH), Err(Error::NotSignedIn)));
+        assert!(matches!(stranger.events(0), Err(Error::NotSignedIn)));
+        assert_eq!(edge.proxied(), 0);
+        assert_eq!(yard.requests(), 0);
+
+        // A session revoked at the edge is refused from then on.
+        let client = edge.client_with(TOKEN, SESSION);
+        assert_eq!(client.head().unwrap(), 12);
+        edge.revoke(SESSION);
+        assert!(matches!(client.head(), Err(Error::NotSignedIn)));
+        assert_eq!(edge.proxied(), 1);
+        assert_eq!(yard.asked("Head").len(), 1);
+
+        // A device the yard does not know, with a good session: the
+        // yard's own 401, passed through, which offers pairing again.
+        edge.allow(SESSION);
+        let wrong = edge.client_with("yardr-dev-unknown", SESSION);
+        let err = wrong.head().unwrap_err();
+        assert!(matches!(err, Error::NotLetIn), "{err:?}");
+        assert_eq!(edge.proxied(), 2);
+        // The call reached the yard, but never its store.
+        assert_eq!(yard.asked("Head").len(), 1);
+    }
+
+    /// The shapes the two refusals are told by: the edge's carries
+    /// `X-Edge-Refusal: session` with a body naming the edge, the yard's
+    /// is plain `Unauthorized` with `WWW-Authenticate: Bearer` and no
+    /// edge header — through the edge byte for byte.
+    #[test]
+    fn the_two_refusals_have_the_shapes_they_are_told_by() {
+        use std::net::TcpStream;
+
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let ask = |at: &str, head: &str| -> String {
+            let mut conn = TcpStream::connect(at.strip_prefix("http://").unwrap()).unwrap();
+            conn.write_all(head.as_bytes()).unwrap();
+            let mut answer = String::new();
+            conn.read_to_string(&mut answer).unwrap();
+            answer
+        };
+        // The edge, with no session it knows.
+        let answer = ask(
+            edge.address(),
+            "GET /user/me HTTP/1.1\r\nHost: edge\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            answer.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("\r\nX-Edge-Refusal: session\r\n"),
+            "{answer}"
+        );
+        assert!(
+            answer.ends_with("{\"error\":\"edge: no Kratos session; sign in first\"}\n"),
+            "{answer}"
+        );
+        // The yard, with no device it knows: direct, and through the edge
+        // with a good session. The edge adds nothing.
+        let head = "GET /user/me HTTP/1.1\r\nHost: yard\r\nAuthorization: Bearer unknown\r\nConnection: close\r\n\r\n";
+        let direct = ask(yard.address(), head);
+        assert!(
+            direct.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{direct}"
+        );
+        assert!(
+            direct.contains("\r\nWWW-Authenticate: Bearer\r\n"),
+            "{direct}"
+        );
+        assert!(
+            !direct.to_ascii_lowercase().contains("x-edge-refusal"),
+            "{direct}"
+        );
+        assert!(direct.ends_with("Unauthorized\n"), "{direct}");
+        let head = format!(
+            "GET /user/me HTTP/1.1\r\nHost: edge\r\nAuthorization: Bearer unknown\r\nX-Edge-Token: {SESSION}\r\nConnection: close\r\n\r\n"
+        );
+        assert_eq!(ask(edge.address(), &head), direct);
+    }
+
+    /// Pairing through the edge: with a good session the code reaches the
+    /// yard and the device is the yard's; with none the edge answers, and
+    /// the code is never spent.
+    #[test]
+    fn pairing_through_the_edge_takes_a_session_first() {
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let address = Address::parse(edge.address()).unwrap();
+
+        // Without a session the edge knows, pairing says to sign in
+        // first, and the pairing stays open.
+        yard.pair("K7QM-2XPD");
+        let Err(Error::Refused { code, message }) = pair(&address, "K7QM-2XPD") else {
+            panic!("the edge let no session in");
+        };
+        assert_eq!(code, "no_session");
+        assert!(message.starts_with("Sign in first"), "{message}");
+        assert!(yard.pairing_open());
+        assert_eq!(edge.proxied(), 0);
+
+        // With one, the code is the device's token, once.
+        let paired = pair_hosted(&address, "K7QM-2XPD", SESSION).unwrap();
+        assert!(!yard.pairing_open());
+        assert_eq!(edge.proxied(), 1);
+        assert!(yard.devices().contains(&paired.token));
+        assert_eq!(
+            edge.client_with(&paired.token, SESSION).me().unwrap().user,
+            "jo"
+        );
+        // The code is good once, and the session rode beside it.
+        let Err(Error::Refused { code, .. }) = pair_hosted(&address, "K7QM-2XPD", SESSION) else {
+            panic!("the code was good once");
+        };
+        assert_eq!(code, "no_pairing");
+        assert!(
+            edge.last_request()
+                .contains(&format!("X-Edge-Token: {SESSION}\r\n")),
+            "{}",
+            edge.last_request()
+        );
     }
 
     #[test]

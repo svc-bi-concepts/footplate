@@ -31,6 +31,10 @@ pub enum Update {
     /// yard is not asked again; the thread has ended. In a word or two it
     /// is [`PAIR_AGAIN`].
     Out(String),
+    /// It is there and does not let this session in: why, in words. The
+    /// yard is not asked again; the thread has ended. In a word or two it
+    /// is [`SIGN_IN_AGAIN`].
+    SignedOut(String),
 }
 
 #[derive(Default)]
@@ -88,6 +92,9 @@ pub const NOTHING_ANSWERS: &str = "nothing answers";
 /// The same of a yard that no longer lets this device in.
 pub const PAIR_AGAIN: &str = "pair again";
 
+/// The same of a hosted yard that no longer lets this session in.
+pub const SIGN_IN_AGAIN: &str = "sign in again";
+
 /// Why there is nothing to show.
 #[derive(Debug)]
 pub enum Trouble {
@@ -98,6 +105,10 @@ pub enum Trouble {
     /// The yard at an address answered 401: the device was removed, or its
     /// token is not that yard's. Trying again changes nothing.
     NotLetIn,
+    /// The edge answered 401 carrying `X-Edge-Refusal: session`: the
+    /// session was revoked, or is not that edge's. Trying again changes
+    /// nothing; the device pairing is untouched.
+    NotSignedIn,
     /// Nothing answers at the yard's address.
     Unreached(std::io::Error),
 }
@@ -106,6 +117,7 @@ impl From<api::Error> for Trouble {
     fn from(err: api::Error) -> Self {
         match err {
             api::Error::NotLetIn => Trouble::NotLetIn,
+            api::Error::NotSignedIn => Trouble::NotSignedIn,
             err => Trouble::Yard(err),
         }
     }
@@ -129,6 +141,7 @@ impl Trouble {
         match self {
             Trouble::Yard(api::Error::Down(_)) | Trouble::Unreached(_) => NOTHING_ANSWERS,
             Trouble::NotLetIn | Trouble::Yard(api::Error::NoDevice) => PAIR_AGAIN,
+            Trouble::NotSignedIn => SIGN_IN_AGAIN,
             Trouble::NoUser(_) => "no user here",
             Trouble::Yard(_) => "cannot be read",
         }
@@ -158,6 +171,9 @@ impl fmt::Display for Trouble {
             }
             Trouble::NotLetIn => f.write_str(
                 "This device is no longer let in: the yard refuses its token. Its operator removed the device, or the token is not this yard's. Pair it again, with a code the operator opens: yardr user device pair <user> <device>",
+            ),
+            Trouble::NotSignedIn => f.write_str(
+                "This session is no longer signed in: the edge refuses its token. It was revoked, or is not this edge's. Sign in to this hosted yard again.",
             ),
             Trouble::Unreached(err) => {
                 write!(
@@ -246,7 +262,8 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
 /// state, then every event after it. When the stream ends the state is read
 /// again, so nothing in between is lost; when that fails the window is told
 /// why, and the yard is tried again after `retry`. A yard that does not let
-/// the device in is not tried again: the window is told, and this returns.
+/// the device in, or the edge that does not let the session in, is not
+/// tried again: the window is told, and this returns.
 /// The handle stops the current stream from another thread, so switching
 /// yards does not leave an idle old yard's connection alive indefinitely.
 pub fn follow_with_control(
@@ -300,6 +317,10 @@ pub fn follow_with_control(
             }
             Err(Trouble::NotLetIn) => {
                 tell(Update::Out(Trouble::NotLetIn.to_string()));
+                return;
+            }
+            Err(Trouble::NotSignedIn) => {
+                tell(Update::SignedOut(Trouble::NotSignedIn.to_string()));
                 return;
             }
             Err(trouble) => trouble.with(client),
@@ -489,6 +510,7 @@ mod tests {
         let why = loop {
             match rx.recv_timeout(wait).unwrap() {
                 Update::Out(why) => break why,
+                Update::SignedOut(why) => panic!("no edge stands here: {why}"),
                 Update::Down(why, _) => panic!("it is there, and says no: {why}"),
                 Update::Up(_) | Update::Event(_) => continue,
             }
@@ -500,6 +522,64 @@ mod tests {
         follower.join().unwrap();
         let asked = yard.requests();
         thread::sleep(Duration::from_millis(200));
+        assert_eq!(yard.requests(), asked);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Through the edge: a session that is revoked is told so and never
+    /// asked after again, with signing in again as what to do, while the
+    /// device pairing stands as it was.
+    #[test]
+    fn a_session_that_is_revoked_is_told_so_and_the_yard_is_not_asked_again() {
+        use crate::fake::{Router, SESSION};
+
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        let edge = Router::start(&yard, SESSION);
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn({
+            let client = edge.client_with(crate::fake::TOKEN, SESSION);
+            move || {
+                follow_with_control(
+                    &client,
+                    "mac-login",
+                    Duration::from_millis(20),
+                    FollowControl::default(),
+                    |update| tx.send(update).is_ok(),
+                )
+            }
+        });
+        let wait = Duration::from_secs(10);
+        let Update::Up(state) = rx.recv_timeout(wait).unwrap() else {
+            panic!("the yard is there")
+        };
+        assert_eq!(state.me, "jo");
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        assert!(matches!(rx.recv_timeout(wait).unwrap(), Update::Event(_)));
+
+        // The session is revoked at the edge: what it relayed is cut, and
+        // the next request is answered with the edge's own 401.
+        edge.revoke(SESSION);
+        let why = loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::SignedOut(why) => break why,
+                Update::Out(why) => panic!("the device is still paired: {why}"),
+                Update::Down(why, _) => panic!("it is there, and says no: {why}"),
+                Update::Up(_) | Update::Event(_) => continue,
+            }
+        };
+        assert!(
+            why.starts_with("This session is no longer signed in"),
+            "{why}"
+        );
+        assert!(why.contains("Sign in to this hosted yard again"), "{why}");
+        // The thread has ended with the window still there, and many of its
+        // 20 milliseconds later nothing more was asked, of the edge or of
+        // the yard.
+        follower.join().unwrap();
+        let (proxied, asked) = (edge.proxied(), yard.requests());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(edge.proxied(), proxied);
         assert_eq!(yard.requests(), asked);
         assert!(rx.try_recv().is_err());
     }
@@ -572,6 +652,7 @@ mod tests {
         );
         assert_eq!(Trouble::Unreached(gone()).short(), "nothing answers");
         assert_eq!(Trouble::NotLetIn.short(), "pair again");
+        assert_eq!(Trouble::NotSignedIn.short(), "sign in again");
         assert_eq!(Trouble::NoUser("jo".into()).short(), "no user here");
         assert_eq!(
             Trouble::Yard(api::Error::Protocol("x".into())).short(),
@@ -651,7 +732,9 @@ mod tests {
                 Update::Down(..) => continue,
                 Update::Up(state) => break state,
                 Update::Event(e) => panic!("an event before the state: {e:?}"),
-                Update::Out(why) => panic!("the socket lets everyone in: {why}"),
+                Update::Out(why) | Update::SignedOut(why) => {
+                    panic!("the socket lets everyone in: {why}")
+                }
             }
         };
         assert_eq!((state.me.as_str(), state.head), ("jo", 20));
@@ -667,7 +750,9 @@ mod tests {
                 Update::Down(why, _) => break why,
                 // The state may be read once more as the stream ends.
                 Update::Up(_) | Update::Event(_) => continue,
-                Update::Out(why) => panic!("the socket lets everyone in: {why}"),
+                Update::Out(why) | Update::SignedOut(why) => {
+                    panic!("the socket lets everyone in: {why}")
+                }
             }
         };
         assert!(why.starts_with("No yard"), "{why}");

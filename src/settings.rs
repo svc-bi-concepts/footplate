@@ -56,6 +56,11 @@ pub struct Yard {
     /// beside the settings or a whole path. The token is never here.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub token_file: String,
+    /// Of a hosted yard: the file its session token is in, as the
+    /// device's is, beside it. Empty on a yard reached direct. The
+    /// session is never here.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session_file: String,
 }
 
 impl Yard {
@@ -79,8 +84,26 @@ impl Yard {
         }
     }
 
+    /// A hosted yard at the edge's `address`, whose device's token is in
+    /// `token_file` and whose session token is in `session_file`.
+    pub fn hosted(name: &str, address: &str, token_file: &str, session_file: &str) -> Yard {
+        Yard {
+            name: name.to_string(),
+            address: address.to_string(),
+            token_file: token_file.to_string(),
+            session_file: session_file.to_string(),
+            ..Yard::default()
+        }
+    }
+
     pub fn is_far(&self) -> bool {
         !self.address.is_empty()
+    }
+
+    /// Whether the yard is reached through its edge, with a session token
+    /// beside the device's.
+    pub fn is_hosted(&self) -> bool {
+        self.is_far() && !self.session_file.is_empty()
     }
 
     /// What kind of yard it is, as the switcher and the settings say it.
@@ -404,12 +427,34 @@ impl Settings {
         Some((other, at))
     }
 
+    /// The far yard other than `name` whose token or session is in the
+    /// same file as that one's session, and the file: only a list edited
+    /// by hand has such a pair, and the hosted yard is not opened until
+    /// they differ. `file` is where the settings are kept.
+    pub fn session_shares(&self, name: &str, file: Option<&Path>) -> Option<(&Yard, PathBuf)> {
+        let yard = self.yard(name).filter(|yard| yard.is_hosted())?;
+        let at = yard::token_path(&yard.session_file, file).ok()?;
+        let other = self
+            .yards
+            .iter()
+            .filter(|other| other.is_far() && other.name != name)
+            .find(|other| {
+                [other.token_file.as_str(), other.session_file.as_str()]
+                    .into_iter()
+                    .filter(|held| !held.is_empty())
+                    .filter_map(|held| yard::token_path(held, file).ok())
+                    .any(|path| yard::same_file(&path, &at))
+            })?;
+        Some((other, at))
+    }
+
     /// With `yard` in place of the one called `at`, or after the last of
     /// the list: a yard added, renamed or edited. What cannot stand in the
     /// list is refused with its reason before anything is paired or
-    /// written: a name another yard has, an address or a token file that
-    /// is none, and a token file another yard's token is in. A yard that is
-    /// renamed keeps its token file, and stays the open one if it was.
+    /// written: a name another yard has, an address, a token file or a
+    /// session file that is none, and a file another yard's token or
+    /// session is in. A yard that is renamed keeps its files, and stays
+    /// the open one if it was.
     pub fn with_yard(
         mut self,
         at: Option<&str>,
@@ -434,10 +479,9 @@ impl Settings {
             true => {
                 Address::parse(&yard.address)?;
                 let path = yard::token_path(&yard.token_file, file)?;
-                let taken = others().filter(|other| other.is_far()).find(|other| {
-                    yard::token_path(&other.token_file, file)
-                        .is_ok_and(|theirs| yard::same_file(&theirs, &path))
-                });
+                let taken = others()
+                    .filter(|other| other.is_far())
+                    .find(|other| holds(other, &path, file));
                 if let Some(other) = taken {
                     return Err(format!(
                         "The token file {} is the yard {}'s, and two yards may not share one: whoever holds a token calls its yard as you. Name another file.",
@@ -445,7 +489,29 @@ impl Settings {
                         other.name
                     ));
                 }
-                Yard::far(&name, yard.address.trim(), yard.token_file.trim())
+                let session = yard.session_file.trim();
+                if session.is_empty() {
+                    Yard::far(&name, yard.address.trim(), yard.token_file.trim())
+                } else {
+                    let at = yard::token_path(session, file)?;
+                    if yard::same_file(&at, &path) {
+                        return Err(format!(
+                            "The session file {} is the yard's own token file, and a session is kept in a file of its own. Name another file.",
+                            at.display()
+                        ));
+                    }
+                    let taken = others()
+                        .filter(|other| other.is_far())
+                        .find(|other| holds(other, &at, file));
+                    if let Some(other) = taken {
+                        return Err(format!(
+                            "The session file {} is the yard {}'s, and two yards may not share one: whoever holds a session token is its yard's user at the edge. Name another file.",
+                            at.display(),
+                            other.name
+                        ));
+                    }
+                    Yard::hosted(&name, yard.address.trim(), yard.token_file.trim(), session)
+                }
             }
             false => {
                 let socket = yard.socket.trim();
@@ -501,8 +567,8 @@ impl Settings {
     /// The token file a new far yard called `name` gets: `yard-<name>.token`
     /// beside the settings, the name in small letters with `-` for what is
     /// neither a letter nor a digit, and with `-2`, `-3` and so on while
-    /// another yard's token is in a file of that name or such a file is
-    /// there already.
+    /// another yard's token or session is in a file of that name or such
+    /// a file is there already.
     pub fn token_name(&self, name: &str, file: Option<&Path>) -> String {
         let mut slug = String::new();
         for c in name.trim().chars().flat_map(char::to_lowercase) {
@@ -524,10 +590,8 @@ impl Settings {
                 .filter(|other| other.is_far())
                 .any(|other| {
                     other.token_file == token_file
-                        || yard::token_path(&other.token_file, file)
-                            .ok()
-                            .zip(path.as_ref())
-                            .is_some_and(|(theirs, path)| yard::same_file(&theirs, path))
+                        || other.session_file == token_file
+                        || path.as_ref().is_some_and(|path| holds(other, path, file))
                 });
             theirs || path.is_some_and(|path| path.exists())
         };
@@ -541,37 +605,34 @@ impl Settings {
     }
 
     /// Without the yard called `name`, and what became of its token's
-    /// file. That is deleted only where it is a bare name beside the
-    /// settings, footplate wrote it for a pairing, and no other yard's
-    /// token is in it; other files are left. A list is never empty: the
-    /// last yard removed leaves this machine's.
-    pub fn without(mut self, name: &str, file: Option<&Path>) -> (Settings, TokenLeft) {
+    /// file and its session's file. Each is deleted only where it is a
+    /// bare name beside the settings, footplate wrote it, and no other
+    /// yard's token or session is in it; other files are left. A list is
+    /// never empty: the last yard removed leaves this machine's.
+    pub fn without(mut self, name: &str, file: Option<&Path>) -> (Settings, TokenLeft, TokenLeft) {
         let Some(yard) = self.yard(name).cloned() else {
-            return (self, TokenLeft::None);
+            return (self, TokenLeft::None, TokenLeft::None);
         };
-        let left = match yard::token_path(&yard.token_file, file) {
-            _ if !yard.is_far() => TokenLeft::None,
-            Err(_) => TokenLeft::None,
-            Ok(path) => match self.shares(name, file) {
-                Some((other, _)) => TokenLeft::Shared(path, other.name.clone()),
-                None if yard::is_bare(&yard.token_file) => match fs::symlink_metadata(&path) {
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => TokenLeft::Deleted(path),
-                    Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
-                    Ok(meta)
-                        if meta.file_type().is_file() && yard::is_managed_token_file(&path) =>
-                    {
-                        match fs::remove_file(&path) {
-                            Ok(()) => TokenLeft::Deleted(path),
-                            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                                TokenLeft::Deleted(path)
-                            }
-                            Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
-                        }
-                    }
-                    Ok(_) => TokenLeft::Unmanaged(path),
+        let (token, session) = match yard.is_far() {
+            false => (TokenLeft::None, TokenLeft::None),
+            true => (
+                leave(
+                    &yard.token_file,
+                    self.shares(name, file).map(|(other, _)| other.name.clone()),
+                    yard::is_managed_token_file,
+                    file,
+                ),
+                match yard.is_hosted() {
+                    false => TokenLeft::None,
+                    true => leave(
+                        &yard.session_file,
+                        self.session_shares(name, file)
+                            .map(|(other, _)| other.name.clone()),
+                        yard::is_managed_session_file,
+                        file,
+                    ),
                 },
-                None => TokenLeft::Elsewhere(path),
-            },
+            ),
         };
         self.yards.retain(|other| other.name != name);
         if self.yards.is_empty() {
@@ -580,7 +641,7 @@ impl Settings {
         if self.open == name {
             self.open.clear();
         }
-        (self, left)
+        (self, token, session)
     }
 
     /// The text `by` steps larger, or smaller, within the ends.
@@ -598,6 +659,48 @@ impl Settings {
     /// gpui's own 16 pixels.
     pub fn rem(&self) -> Pixels {
         px(16. * f32::from(self.text) / f32::from(TEXT))
+    }
+}
+
+/// Whether the yard keeps a token or a session in `path`: either file
+/// it names, by whichever way its directory is named.
+fn holds(other: &Yard, path: &Path, file: Option<&Path>) -> bool {
+    [other.token_file.as_str(), other.session_file.as_str()]
+        .into_iter()
+        .filter(|held| !held.is_empty())
+        .filter_map(|held| yard::token_path(held, file).ok())
+        .any(|theirs| yard::same_file(&theirs, path))
+}
+
+/// What became of the file `held` names where its yard goes: deleted
+/// where it is a bare name beside the settings that footplate wrote and
+/// no other yard keeps a token in, else left for its reason. `shared` is
+/// the yard that keeps a token in it, where one does, and `managed`
+/// whether footplate wrote this file.
+fn leave(
+    held: &str,
+    shared: Option<String>,
+    managed: impl FnOnce(&Path) -> bool,
+    file: Option<&Path>,
+) -> TokenLeft {
+    let Ok(path) = yard::token_path(held, file) else {
+        return TokenLeft::None;
+    };
+    if let Some(other) = shared {
+        return TokenLeft::Shared(path, other);
+    }
+    if !yard::is_bare(held) {
+        return TokenLeft::Elsewhere(path);
+    }
+    match fs::symlink_metadata(&path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => TokenLeft::Deleted(path),
+        Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
+        Ok(meta) if meta.file_type().is_file() && managed(&path) => match fs::remove_file(&path) {
+            Ok(()) => TokenLeft::Deleted(path),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => TokenLeft::Deleted(path),
+            Err(err) => TokenLeft::DeleteFailed(path, err.to_string()),
+        },
+        Ok(_) => TokenLeft::Unmanaged(path),
     }
 }
 
@@ -649,6 +752,35 @@ impl TokenLeft {
                 "{name} is removed. Its token's file {} is left: the yard {other} keeps its token in it. {stays}",
                 path.display()
             ),
+        }
+    }
+
+    /// What the settings say of the session's file of a yard that was
+    /// removed, beside what [`TokenLeft::said`] says of its token's:
+    /// nothing where it had none.
+    pub fn said_session(&self) -> Option<String> {
+        match self {
+            TokenLeft::None => None,
+            TokenLeft::Deleted(path) => Some(format!(
+                "Its session's file {} goes with it. The session itself stays signed in at the edge until it expires or is revoked.",
+                path.display()
+            )),
+            TokenLeft::DeleteFailed(path, why) => Some(format!(
+                "Its session's file {} could not be removed ({why}): remove it by hand. The session itself stays signed in at the edge until it expires or is revoked.",
+                path.display()
+            )),
+            TokenLeft::Unmanaged(path) => Some(format!(
+                "Its file {} is left alone: footplate did not write it as a session file.",
+                path.display()
+            )),
+            TokenLeft::Elsewhere(path) => Some(format!(
+                "Its session's file {} is not beside the settings, and is left alone.",
+                path.display()
+            )),
+            TokenLeft::Shared(path, other) => Some(format!(
+                "Its session's file {} is left: the yard {other} keeps a token in it.",
+                path.display()
+            )),
         }
     }
 }
@@ -950,7 +1082,7 @@ mod tests {
         assert_eq!(set.shares("mac 2", Some(&file)).unwrap().0.name, "mac");
         // Removing one leaves the other, and the file both name.
         fs::write(dir.path().join("yard.token"), "yardr-dev-kept\n").unwrap();
-        let (less, left) = set.clone().without("mac 2", Some(&file));
+        let (less, left, _) = set.clone().without("mac 2", Some(&file));
         assert_eq!(
             left,
             TokenLeft::Shared(dir.path().join("yard.token"), "mac".into())
@@ -1114,6 +1246,137 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_yard_keeps_a_session_file_beside_its_token_and_none_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = two_far(&file);
+        let refused = |at: Option<&str>, yard: Yard| {
+            set.clone().with_yard(at, yard, Some(&file)).unwrap_err()
+        };
+
+        // A hosted yard stands in the list with both files, and reads back.
+        let hosted = set
+            .clone()
+            .with_yard(
+                None,
+                Yard::hosted(
+                    "south",
+                    "https://south.example.net",
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&file),
+            )
+            .unwrap();
+        let south = hosted.yard("south").unwrap();
+        assert!(south.is_far() && south.is_hosted());
+        assert!(!hosted.yard("mac").unwrap().is_hosted());
+        hosted.write(&file).unwrap();
+        let read = Settings::read(&file);
+        assert_eq!(read.yard("south"), Some(south));
+        // The session is never in the settings, only its file.
+        crate::yard::keep_session_token(
+            &dir.path().join("yard-south.session"),
+            "kratos-dev-session",
+        )
+        .unwrap();
+        let kept = fs::read_to_string(&file).unwrap();
+        assert!(kept.contains("\"session_file\": \"yard-south.session\""));
+        assert!(!kept.contains("kratos-dev-session"));
+
+        // A session file that is none, the yard's own token file, and
+        // another yard's token or session file are all refused.
+        let why = refused(
+            None,
+            Yard::hosted(
+                "shop",
+                "https://shop.example.net",
+                "shop.token",
+                "tokens/shop.session",
+            ),
+        );
+        assert!(why.contains("names no token file"), "{why}");
+        let why = refused(
+            None,
+            Yard::hosted(
+                "shop",
+                "https://shop.example.net",
+                "shop.token",
+                "shop.token",
+            ),
+        );
+        assert!(
+            why.starts_with("The session file") && why.contains("own token file"),
+            "{why}"
+        );
+        let why = refused(
+            None,
+            Yard::hosted(
+                "shop",
+                "https://shop.example.net",
+                "shop.token",
+                "yard.token",
+            ),
+        );
+        assert!(
+            why.starts_with(&format!(
+                "The session file {} is the yard mac's",
+                dir.path().join("yard.token").display()
+            )),
+            "{why}"
+        );
+        // And a token file another yard's session is in.
+        let with_hosted = hosted.clone();
+        let why = with_hosted
+            .with_yard(
+                None,
+                Yard::far("shop", "https://shop.example.net", "yard-south.session"),
+                Some(&file),
+            )
+            .unwrap_err();
+        assert!(
+            why.starts_with(&format!(
+                "The token file {} is the yard south's",
+                dir.path().join("yard-south.session").display()
+            )),
+            "{why}"
+        );
+
+        // A list edited by hand may still share: the hosted yard's
+        // session against another's token or session is found.
+        let mut edited = hosted.clone();
+        edited.yards.push(Yard::hosted(
+            "twin",
+            "https://twin.example.net",
+            "twin.token",
+            "yard.token",
+        ));
+        let (other, at) = edited.session_shares("twin", Some(&file)).unwrap();
+        assert_eq!(
+            (other.name.as_str(), at),
+            ("mac", dir.path().join("yard.token"))
+        );
+        assert_eq!(edited.session_shares("mac", Some(&file)), None);
+        assert_eq!(edited.session_shares(HERE, Some(&file)), None);
+        // A token file named for a new yard skips another yard's session
+        // file of that name, as it skips its token file.
+        let odd = hosted
+            .clone()
+            .with_yard(
+                None,
+                Yard::hosted(
+                    "odd",
+                    "https://odd.example.net",
+                    "odd.token",
+                    "yard-shop.token",
+                ),
+                Some(&file),
+            )
+            .unwrap();
+        assert_eq!(odd.token_name("shop", Some(&file)), "yard-shop-2.token");
+    }
+
+    #[test]
     fn a_new_yard_s_token_file_is_named_for_it_and_skips_what_is_taken() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
@@ -1178,7 +1441,7 @@ mod tests {
 
         // A bare name beside the settings, and no other yard's: deleted.
         // The open yard removed leaves the first to open.
-        let (less, left) = set.clone().without("plantime", Some(&file));
+        let (less, left, _) = set.clone().without("plantime", Some(&file));
         assert_eq!(left, TokenLeft::Deleted(beside("yard-plantime.token")));
         assert!(!beside("yard-plantime.token").exists() && beside("yard.token").exists());
         assert_eq!(less.yard("plantime"), None);
@@ -1191,7 +1454,7 @@ mod tests {
         assert!(said.ends_with("yardr user device rm jo laptop"), "{said}");
 
         // A whole path is the person's own file: left, and said so.
-        let (less, left) = less.without("shop", Some(&file));
+        let (less, left, _) = less.without("shop", Some(&file));
         assert_eq!(left, TokenLeft::Elsewhere(own.clone()));
         assert!(own.exists());
         let said = left.said("shop", None);
@@ -1207,7 +1470,7 @@ mod tests {
         edited
             .yards
             .push(Yard::far("twin", "https://twin.example.net", "yard.token"));
-        let (edited, left) = edited.without("twin", Some(&file));
+        let (edited, left, _) = edited.without("twin", Some(&file));
         assert_eq!(left, TokenLeft::Shared(beside("yard.token"), "mac".into()));
         assert!(beside("yard.token").exists());
         assert!(
@@ -1218,7 +1481,7 @@ mod tests {
 
         // A yard of this machine has no token, and one that is not listed
         // changes nothing.
-        let (less, left) = less.without(HERE, Some(&file));
+        let (less, left, _) = less.without(HERE, Some(&file));
         assert_eq!(left, TokenLeft::None);
         assert_eq!(
             left.said(HERE, None),
@@ -1226,11 +1489,11 @@ mod tests {
         );
         assert_eq!(
             less.clone().without("nobody", Some(&file)),
-            (less.clone(), TokenLeft::None)
+            (less.clone(), TokenLeft::None, TokenLeft::None)
         );
         // The last one removed leaves this machine's: a list is never
         // empty.
-        let (none, left) = less.without("mac", Some(&file));
+        let (none, left, _) = less.without("mac", Some(&file));
         assert_eq!(left, TokenLeft::Deleted(beside("yard.token")));
         assert_eq!(none.yards, [Yard::near(HERE, "")]);
 
@@ -1249,7 +1512,7 @@ mod tests {
                 Some(&file),
             )
             .unwrap();
-        let (_, left) = blocked_set.without("blocked", Some(&file));
+        let (_, left, _) = blocked_set.without("blocked", Some(&file));
         assert_eq!(left, TokenLeft::Unmanaged(blocked.clone()));
         assert!(left.said("blocked", None).contains("left alone"));
         assert!(blocked.is_dir());
@@ -1270,13 +1533,89 @@ mod tests {
             )
             .unwrap();
 
-        let (less, left) = set.without("external", Some(&file));
+        let (less, left, _) = set.without("external", Some(&file));
         assert_eq!(left, TokenLeft::Unmanaged(token.clone()));
         assert_eq!(
             fs::read_to_string(token).unwrap(),
             format!("{}\n", crate::fake::TOKEN)
         );
         assert!(less.yard("external").is_none());
+    }
+
+    #[test]
+    fn removing_a_hosted_yard_deletes_its_session_file_with_its_token_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = Settings::default()
+            .with_yard(
+                None,
+                Yard::hosted(
+                    "south",
+                    "https://south.example.net",
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .with_yard(
+                None,
+                Yard::far("mac", "https://mac.example.net", "yard.token"),
+                Some(&file),
+            )
+            .unwrap();
+        let beside = |name: &str| dir.path().join(name);
+        crate::yard::keep_token(&beside("yard-south.token"), "yardr-dev-kept").unwrap();
+        crate::yard::keep_session_token(&beside("yard-south.session"), "kratos-dev-kept").unwrap();
+
+        // Both files footplate's own: both go, and both are said.
+        let (less, token, session) = set.clone().without("south", Some(&file));
+        assert_eq!(token, TokenLeft::Deleted(beside("yard-south.token")));
+        assert_eq!(session, TokenLeft::Deleted(beside("yard-south.session")));
+        assert!(!beside("yard-south.token").exists() && !beside("yard-south.session").exists());
+        let said = session.said_session().unwrap();
+        assert!(
+            said.starts_with(&format!(
+                "Its session's file {} goes with it.",
+                beside("yard-south.session").display()
+            )),
+            "{said}"
+        );
+        assert!(said.contains("stays signed in at the edge"), "{said}");
+        // A yard reached direct has no session to say.
+        let (_, _, session) = less.clone().without("mac", Some(&file));
+        assert_eq!(session, TokenLeft::None);
+        assert_eq!(session.said_session(), None);
+
+        // A session file another yard's token is in is left, and the
+        // settings say which yard keeps it; one footplate did not write
+        // is left alone.
+        let mut edited = set.clone();
+        crate::yard::keep_token(&beside("yard.token"), "yardr-dev-kept").unwrap();
+        edited.yards[1].session_file = "yard.token".into();
+        let (_, _, session) = edited.without("south", Some(&file));
+        assert_eq!(
+            session,
+            TokenLeft::Shared(beside("yard.token"), "mac".into())
+        );
+        assert!(beside("yard.token").exists());
+        assert!(
+            session
+                .said_session()
+                .unwrap()
+                .contains("the yard mac keeps a token in it")
+        );
+
+        fs::write(beside("yard-south.session"), "kratos-dev-outside\n").unwrap();
+        let (_, _, session) = set.clone().without("south", Some(&file));
+        assert_eq!(session, TokenLeft::Unmanaged(beside("yard-south.session")));
+        assert!(beside("yard-south.session").exists());
+        assert!(
+            session
+                .said_session()
+                .unwrap()
+                .contains("footplate did not write it as a session file")
+        );
     }
 
     #[test]
@@ -1297,7 +1636,7 @@ mod tests {
             )
             .unwrap();
 
-        let (_, left) = set.without("linked", Some(&file));
+        let (_, left, _) = set.without("linked", Some(&file));
         assert_eq!(left, TokenLeft::Unmanaged(link.clone()));
         assert!(
             fs::symlink_metadata(&link)
