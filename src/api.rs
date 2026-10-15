@@ -3220,7 +3220,14 @@ mod tests {
         // open holds this read to its timeout instead.
         conn.set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
-        conn.read(&mut [0u8; 1]).unwrap_err();
+        let waiting = conn.read(&mut [0u8; 1]).unwrap_err();
+        assert!(
+            matches!(
+                waiting.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ),
+            "expected the edge to keep waiting for a request, got {waiting:?}"
+        );
         // And the request that comes then is refused as ever, at the edge.
         conn.set_read_timeout(Some(CALL_TIMEOUT)).unwrap();
         conn.write_all(
