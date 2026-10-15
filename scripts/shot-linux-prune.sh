@@ -1,21 +1,21 @@
 #!/bin/sh
-# Drop checkout build trees under the shot target volume when nothing in
-# them was written in the last week. A deleted or idle checkout's tree costs
-# GBs no shot will warm from. Active shots leave markers so another shot
-# cannot prune a tree between its build and launch. Says what went, on
-# stderr; files at the volume's root are left alone.
+# Drop checkout build trees under a Linux target volume when nothing in
+# them was written in the last week. Active builds leave markers so another
+# build cannot prune a tree while it is in use. Says what went, on stderr;
+# files at the volume's root are left alone.
 set -e
 
 root=${1:?target volume is required}
 own=${2:?own build tree is required}
-marker=${3:?active shot marker is required}
+marker=${3:?active build marker is required}
+label=${4:-shot-linux.sh}
 active=$root/.shot-active
 mkdir -p "$active"
 
-# Register before pruning and keep the marker until shot-linux.sh has copied
-# the picture. Markers left by a killed run age out with the build tree.
+# Register before pruning and keep the marker until the caller no longer uses
+# the tree. Markers left by a killed run age out with the build tree.
 # The build starts only after this helper returns, so a concurrent prune that
-# wins the marker-creation race can only discard this shot's old cache.
+# wins the marker-creation race can only discard this build's old cache.
 touch "$marker"
 for stale_marker in "$active"/*; do
     [ -f "$stale_marker" ] || continue
@@ -44,8 +44,8 @@ for d in "$root"/*; do
         continue
     fi
     if rm -rf "$d"; then
-        echo "shot-linux.sh: pruned stale build tree $d" >&2
+        echo "$label: pruned stale build tree $d" >&2
     else
-        echo "shot-linux.sh: could not prune stale build tree $d" >&2
+        echo "$label: could not prune stale build tree $d" >&2
     fi
 done

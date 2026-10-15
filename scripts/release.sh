@@ -49,10 +49,16 @@ for tool in cargo docker ditto shasum file; do
 done
 
 work=$(mktemp -d)
+stage_out=$work/out
+mkdir -p "$stage_out"
 release_container=""
+release_marker=""
 # Each Linux container goes when the release ends, however it ends, and the
 # staging with it.
 cleanup() {
+    if [ -n "$release_container" ] && [ -n "$release_marker" ]; then
+        docker exec "$release_container" rm -f "$release_marker" >/dev/null 2>&1 || true
+    fi
     if [ -n "$release_container" ]; then
         docker rm -f "$release_container" >/dev/null 2>&1 || true
     fi
@@ -80,7 +86,6 @@ if command -v rustup >/dev/null 2>&1; then
     done
 fi
 
-mkdir -p "$out"
 for triple in aarch64-apple-darwin x86_64-apple-darwin; do
     case "$triple" in
         aarch64-*) arch=arm64 ;;
@@ -95,13 +100,13 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
     esac
     echo "release.sh: macOS $arch: bundling Footplate.app" >&2
     scripts/bundle-mac.sh "$binary" "$work/mac-$arch/Footplate.app" >/dev/null
-    zip=$out/Footplate_${number}_darwin_${arch}.zip
+    zip=$stage_out/Footplate_${number}_darwin_${arch}.zip
     echo "release.sh: macOS $arch: zipping $zip" >&2
     (cd "$work/mac-$arch" && ditto -c -k --keepParent --norsrc --noextattr Footplate.app "$zip")
 done
 
-# One container per checkout, from its directory's name, as the shot's:
-# two releases never share one.
+# One container per checkout and arch. The path hash keeps same-named
+# worktrees' containers and build trees apart.
 suffix=$(basename "$root")
 suffix=$(printf '%s' "$suffix" | tr -c 'a-zA-Z0-9_.-' '-' | tr 'A-Z' 'a-z')
 path_hash=$(printf '%s' "$root" | cksum | cut -d' ' -f1)
@@ -127,13 +132,18 @@ for arch in arm64 amd64; do
             ;;
     esac
     # Its own tree in the shared volume, apart from the shot's: a release
-    # must not contend with a shot building beside it. A later shot's
-    # prune drops it once nothing was written in a week.
+    # must not contend with a shot building beside it. The prune helper
+    # protects it while this build runs and drops it after a week of quiet.
     target_dir=/target/release-$suffix-$path_hash
-    name=footplate-release-$suffix-$arch
+    # The path hash keeps same-named worktrees' containers apart, just as
+    # it keeps their build trees apart.
+    name=footplate-release-$path_hash-$arch
     release_container=$name
     echo "release.sh: Linux $arch: provisioning the container" >&2
     linux_provision "$name"
+    release_marker=/target/.shot-active/release-$suffix-$path_hash-$$
+    docker exec "$name" sh /src/scripts/shot-linux-prune.sh \
+        /target "$target_dir" "$release_marker" release.sh >&2
     echo "release.sh: Linux $arch: building (release; the first build takes a while, longer under emulation)" >&2
     docker exec "$name" sh -c "cd /src && $cargo_home/bin/cargo build --release --locked" >&2
     stage=$work/linux-$arch
@@ -144,11 +154,13 @@ for arch in arm64 amd64; do
         *) expect_binary "$stage/footplate" "x86-64" ;;
     esac
     cp README.md LICENSE NOTICE "$stage/"
-    archive=$out/footplate_${number}_linux_${arch}.tar.gz
+    archive=$stage_out/footplate_${number}_linux_${arch}.tar.gz
     echo "release.sh: Linux $arch: packing $archive" >&2
     (cd "$stage" && tar -czf "$archive" LICENSE NOTICE README.md footplate)
+    docker exec "$name" rm -f "$release_marker" >/dev/null
     docker rm -f "$name" >/dev/null
     release_container=""
+    release_marker=""
 done
 
 # The emulated build leaves the debian:13 image in the local store as
@@ -158,11 +170,22 @@ done
 docker pull -q debian:13 >&2 \
     || echo "release.sh: could not restore the native debian:13 image" >&2
 
-(cd "$out" && shasum -a 256 \
+(cd "$stage_out" && shasum -a 256 \
     "Footplate_${number}_darwin_arm64.zip" \
     "Footplate_${number}_darwin_amd64.zip" \
     "footplate_${number}_linux_arm64.tar.gz" \
     "footplate_${number}_linux_amd64.tar.gz" > checksums.txt)
+
+mkdir -p "$out"
+rm -f "$out/checksums.txt"
+for f in \
+        "Footplate_${number}_darwin_arm64.zip" \
+        "Footplate_${number}_darwin_amd64.zip" \
+        "footplate_${number}_linux_arm64.tar.gz" \
+        "footplate_${number}_linux_amd64.tar.gz"; do
+    mv "$stage_out/$f" "$out/$f"
+done
+mv "$stage_out/checksums.txt" "$out/checksums.txt"
 
 for f in \
         "$out/Footplate_${number}_darwin_arm64.zip" \

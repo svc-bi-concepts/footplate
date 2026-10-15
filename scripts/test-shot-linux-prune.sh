@@ -50,11 +50,11 @@ out=$(sh "$helper" "$root" "$own" "$active/this-checkout-111-456" 2>"$tmp/stderr
 # A stale tree can still be in use by a shot whose build has not written to
 # it recently. Once that shot removes its marker, the tree can be pruned.
 rm -f "$active/stale-checkout-333-123"
-out=$(sh "$helper" "$root" "$own" "$active/this-checkout-111-456" 2>>"$tmp/stderr") \
+out=$(sh "$helper" "$root" "$own" "$active/this-checkout-111-456" release.sh 2>>"$tmp/stderr") \
     || fail "the helper failed after the active shot ended"
 [ -z "$out" ] || fail "the helper wrote to stdout: $out"
 [ ! -e "$root/stale-checkout-333" ] || fail "a stale tree survived"
-grep -F -q "pruned stale build tree $root/stale-checkout-333" "$tmp/stderr" \
+grep -F -q "release.sh: pruned stale build tree $root/stale-checkout-333" "$tmp/stderr" \
     || fail "the helper did not say what it pruned: $(cat "$tmp/stderr")"
 
 # With nothing stale the helper is silent, and a first shot's tree, not
