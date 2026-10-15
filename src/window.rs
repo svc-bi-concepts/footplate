@@ -4623,7 +4623,10 @@ impl Footplate {
             !yard.is_far()
                 && (yard.socket.is_empty() || std::path::Path::new(&yard.socket) == self.env.socket)
         });
-        here && self.env.yard.is_none() && self.away == Away::Trying && !self.yard_is_stopped()
+        here && self.env.yard.is_none()
+            && self.away == Away::Trying
+            && !self.yard_is_stopped()
+            && !self.answers_under_adding()
     }
 
     /// "Set up a yard here": the first run begins, where the window said
@@ -4860,7 +4863,7 @@ impl Footplate {
     /// Whether the open yard is proven to be a stopped one: its home
     /// holds a yard, and nothing answers there.
     fn yard_is_stopped(&self) -> bool {
-        self.down.is_some() && self.switch_status.is_some()
+        self.down.is_some() && self.switch_status.is_some() && !self.answers_under_adding()
     }
 
     /// Whether the open yard answered in this run and is away now, asked
@@ -6226,7 +6229,7 @@ impl Footplate {
     /// Reconnecting with a grey dot, and Start stands where a reading
     /// knows what to start.
     fn switch_state(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let running = self.down.is_none() && self.model.is_some();
+        let running = self.model.is_some() && (self.down.is_none() || self.answers_under_adding());
         let (state, dot, button): (String, Rgba, Option<(&str, &str)>) = match self.switch_busy {
             Some(SwitchBusy::Starting) => ("Starting…".to_string(), palette.accent, None),
             Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), palette.accent, None),
@@ -6603,11 +6606,11 @@ impl Footplate {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("{} · {short}", self.which_yard_short()))
                     }))
-                    .child(
+                    .children((!answers).then(|| {
                         div()
                             .debug_selector(|| "away lead".to_string())
-                            .child(self.away_lead(why)),
-                    )
+                            .child(self.away_lead(why))
+                    }))
                     // Where no yard was ever made the socket, the error and
                     // the hint at yardr status hide under details, shut at
                     // first; anywhere else they stand as they did.
@@ -17489,6 +17492,14 @@ mod tests {
     fn no_yard_is_tried_again_while_a_way_is_open(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = no_yard(dir.path(), cx);
+        // The switch last read a stopped yard. Once the socket answers,
+        // its status is up even though the away screen stays for the form.
+        view.update(cx, |v, cx| {
+            v.switch_status =
+                Some(serde_json::from_value(crate::setup::standin::status(false, false)).unwrap());
+            cx.notify();
+        });
+        assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
         click_on(cx, "way near");
         cx.simulate_input("second home");
         let near = Yard::start_at(&dir.path().join("yard.sock"));
@@ -17503,8 +17514,9 @@ mod tests {
             Some(Adding::Near)
         );
         assert!(view.read_with(cx, |v, _| v.down.is_some()));
-        assert!(drawn(cx, "away lead") && drawn(cx, "yard name"));
+        assert!(drawn(cx, "yard name"));
         assert!(!drawn(cx, "rows"));
+        assert!(view.read_with(cx, |v, _| !v.yard_is_stopped() && !v.sets_up_here()));
         // What is typed now is the field's, not the line's, and the
         // yard that came back has no mail.
         cx.simulate_input("hello");
@@ -17521,6 +17533,50 @@ mod tests {
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
         cx.simulate_input("hello");
         assert_eq!(typed(&view, cx), "hello");
+        assert_eq!(near.asked("Mail"), Vec::<Value>::new());
+    }
+
+    /// If the yard goes away again under the still-open form, the answer
+    /// notice clears and retrying returns. A later answer still preserves
+    /// the form and its focus.
+    #[gpui::test]
+    fn no_yard_keeps_its_fields_through_a_flap(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        click_on(cx, "way near");
+        cx.simulate_input("second home");
+        let near = Yard::start_at(&dir.path().join("yard.sock"));
+        a_yard_of_jo(&near);
+        wait(cx, "that the yard answers again", |cx| {
+            drawn(cx, "away answers")
+        });
+        assert!(view.read_with(cx, |v, _| v.answers_under_adding()));
+        assert!(view.read_with(cx, |v, _| { !v.unreached.contains_key(&v.yard) }));
+
+        near.stop();
+        wait(cx, "that the yard is away again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.unreached.contains_key(&v.yard) && !v.answers_under_adding()
+            })
+        });
+        assert!(view.read_with(cx, |v, _| {
+            v.unreached.contains_key(&v.yard) && !v.answers_under_adding()
+        }));
+        assert!(view.read_with(cx, |v, _| {
+            v.adding == Some(Adding::Near) && v.down.is_some()
+        }));
+
+        let near = Yard::start_at(&dir.path().join("yard.sock"));
+        a_yard_of_jo(&near);
+        wait(cx, "that the yard answers after the flap", |cx| {
+            view.read_with(cx, |v, _| v.answers_under_adding())
+        });
+        assert!(view.read_with(cx, |v, _| v.answers_under_adding()));
+        cx.simulate_input("hello");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.yard_name.read(cx).text().to_string(), "second homehello");
+        });
+        assert_eq!(typed(&view, cx), "");
         assert_eq!(near.asked("Mail"), Vec::<Value>::new());
     }
 
