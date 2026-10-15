@@ -786,6 +786,9 @@ struct EdgeShared {
     expire: Mutex<u32>,
     /// How many sessions a sign-in minted: each is known from then on.
     logins: Mutex<u32>,
+    /// A pause before login answers, so the window can be checked while
+    /// its request is still in flight.
+    login_delay: Mutex<Duration>,
     stopped: Mutex<bool>,
 }
 
@@ -824,6 +827,7 @@ impl Router {
             relays: Mutex::new(Vec::new()),
             expire: Mutex::new(0),
             logins: Mutex::new(0),
+            login_delay: Mutex::new(Duration::ZERO),
             stopped: Mutex::new(false),
         });
         let accept = thread::spawn({
@@ -865,6 +869,12 @@ impl Router {
     /// client opens another.
     pub fn expire_logins(&self, n: u32) {
         *self.shared.expire.lock().unwrap() = n;
+    }
+
+    /// Holds login answers for `delay`, so an in-flight request can be
+    /// observed in a window test.
+    pub fn delay_logins(&self, delay: Duration) {
+        *self.shared.login_delay.lock().unwrap() = delay;
     }
 
     /// The edge knows this session from now on.
@@ -1048,6 +1058,8 @@ fn serve_kratos(
     let good = answered["method"].as_str() == Some("password")
         && answered["identifier"].as_str() == Some(KRATOS_EMAIL)
         && answered["password"].as_str() == Some(KRATOS_PASSWORD);
+    let delay = *shared.login_delay.lock().unwrap();
+    thread::sleep(delay);
     if !good {
         let refused = serde_json::json!({
             "id": KRATOS_FLOW,

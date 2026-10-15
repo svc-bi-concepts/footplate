@@ -747,11 +747,13 @@ through a shell:
 | `notify-send`, on Linux | a [notification](#notifications) |
 
 It never runs anything as another user, types into a pane, starts herdr's
-server itself (that is `yardr up`'s), or drives a login: the login command
-is yardr's to hold, and footplate shows what it asks for. The code a login
-page gives is passed to yardr's input as it is typed and is in the field no
-longer; it is in no file, no setting and no error. The credential the login
-makes is the harness's own, kept where the harness keeps it.
+server itself (that is `yardr up`'s), or drives a harness login: that login
+command is yardr's to hold, and footplate shows what it asks for. A code
+from the harness's login page is passed to yardr's input as it is typed and
+is in the field no longer; it is in no file, no setting and no error. The
+credential that login makes is the harness's own, kept where the harness
+keeps it. A hosted-yard sign-in goes to the edge's Kratos API as described
+in [A hosted yard](#a-hosted-yard); it starts no process.
 
 ### Trying the setup without touching your yard
 
@@ -1195,9 +1197,10 @@ options have no icon, so the program sees to it when it starts
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON; a stand-in edge in front of it with the login flow |
 
 The tests run without a yard and without a screen: the client against the
-fake yard for each call, an image and the stream, by its socket and at an
-address, with a pairing, a wrong code and a removed device, the model as it
-is, and
+fake yard for each call, and through a stand-in edge for Kratos sign-in,
+including wrong passwords and expired flows; an image and the stream, by
+its socket and at an address, with a pairing, a wrong code and a removed
+device, the model as it is, and
 the window itself on gpui's test platform, where an image on its clipboard
 is pasted and the draft sent with Enter. gpui gives a test no way to make
 the paths of a file drop, so the window's test hands the files to what a

@@ -826,6 +826,33 @@ enum Adding {
     SignInAgain(String),
 }
 
+/// What a pairing failure says, with its next step. Refusals already say
+/// why the yard declined the code; transport and unreadable-answer errors
+/// need a way to recover too.
+fn pairing_failure(error: api::Error) -> String {
+    match error {
+        api::Error::Refused { code, message } if code == "wrong_code" => format!(
+            "Pairing failed: {message} Check the code on the ready page before trying again; if the pairing ended, ask the operator to open another one."
+        ),
+        api::Error::Refused { message, .. } => format!("Pairing failed: {message}"),
+        api::Error::Down(why) => format!(
+            "Pairing failed because the yard does not answer ({why}). Check the origin and your connection, then try the code again. If it has been used, ask the operator to open another pairing."
+        ),
+        api::Error::Protocol(why) => format!(
+            "Pairing failed because the yard's answer could not be read: {why}. Check the origin and ask the operator to open another pairing."
+        ),
+        api::Error::NotLetIn => {
+            "Pairing failed: this device is no longer let in. Ask the operator to open another pairing for this device.".to_string()
+        }
+        api::Error::NotSignedIn => {
+            "Pairing failed: this session is no longer signed in. Sign in again, then pair this device.".to_string()
+        }
+        api::Error::NoDevice => {
+            "Pairing failed: no yard answers at this origin. Check the origin and ask its operator to open a pairing.".to_string()
+        }
+    }
+}
+
 /// What the switch is doing: nothing else of it starts meanwhile. Asking
 /// is down's question being read, which is too quick to show.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -5695,10 +5722,11 @@ impl Footplate {
                         )
                     })?;
                     let paired = match &session {
-                        Some(session) => api::pair_hosted(&address, &code, session),
-                        None => api::pair(&address, &code),
-                    }
-                    .map_err(|err| err.to_string())?;
+                        Some(session) => {
+                            api::pair_hosted(&address, &code, session).map_err(pairing_failure)
+                        }
+                        None => api::pair(&address, &code).map_err(|err| err.to_string()),
+                    }?;
                     // The token goes from the yard's answer into its file
                     // with the address the code went to, and nowhere else.
                     place.keep(&paired.token, &address).map_err(|err| {
@@ -5848,7 +5876,9 @@ impl Footplate {
                 Some("An email is wanted: the Kratos account to sign in as.".to_string());
             return;
         }
-        let password = self.password.read(cx).text().to_string();
+        // The masked line gives up the password before the request starts,
+        // whatever the edge takes to answer.
+        let password = self.password.update(cx, |line, cx| line.take_text(cx));
         if password.is_empty() {
             self.yard_said = Some("A password is wanted: the Kratos account's.".to_string());
             return;
@@ -9946,6 +9976,36 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::time::Duration;
+
+    #[test]
+    fn pairing_failures_name_the_pairing_and_give_a_next_step() {
+        let refused = pairing_failure(api::Error::Refused {
+            code: "wrong_code".to_string(),
+            message: "That is not the code. The fifth wrong code ends the pairing.".to_string(),
+        });
+        assert!(refused.starts_with("Pairing failed: That is not the code."));
+        assert!(refused.contains("Check the code on the ready page before trying again;"));
+        assert!(refused.contains("if the pairing ended, ask the operator to open another one."));
+
+        let down = pairing_failure(api::Error::Down(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )));
+        assert!(down.starts_with("Pairing failed because the yard does not answer"));
+        assert!(down.contains("Check the origin and your connection, then try the code again."));
+
+        let unreadable = pairing_failure(api::Error::Protocol("status 503".to_string()));
+        assert!(
+            unreadable.starts_with("Pairing failed because the yard's answer could not be read")
+        );
+        assert!(
+            unreadable.ends_with("Check the origin and ask the operator to open another pairing.")
+        );
+
+        let signed_out = pairing_failure(api::Error::NotSignedIn);
+        assert!(signed_out.starts_with("Pairing failed:"));
+        assert!(signed_out.contains("Sign in again, then pair this device."));
+    }
 
     #[test]
     fn expanded_text_keys_include_the_card_identity() {
@@ -17794,6 +17854,7 @@ mod tests {
         // A session nobody holds: the only one that works is minted by
         // signing in.
         let edge = Router::start(&far, "kratos-dev-other");
+        edge.delay_logins(Duration::from_millis(150));
         let file = dir.path().join("footplate/settings.json");
         let session = dir.path().join("footplate/yard-south.session");
         let token = dir.path().join("footplate/yard-south.token");
@@ -17833,6 +17894,9 @@ mod tests {
             KRATOS_PASSWORD,
         );
         click_on(cx, "yard sign in");
+        view.read_with(cx, |v, cx| {
+            assert!(v.password.read(cx).text().is_empty());
+        });
         wait(cx, "the sign-in", |cx| {
             yard_said(&view, cx).starts_with(&format!("Signed in as {KRATOS_EMAIL}: now pair"))
         });
@@ -17868,6 +17932,17 @@ mod tests {
         // with the session beside it: the yard's conversations, with the
         // signed-in account under the yard's name.
         far.pair("K7QM-2XPD");
+        view.update(cx, |v, cx| {
+            v.code.update(cx, |line, cx| line.set_text("WXYZ-2345", cx));
+        });
+        click_on(cx, "yard pair");
+        wait(cx, "that hosted pairing rejected the code", |cx| {
+            yard_said(&view, cx).starts_with("Pairing failed: That is not the code.")
+        });
+        assert!(yard_said(&view, cx).contains("Check the code on the ready page"));
+        assert!(far.pairing_open());
+        assert!(!token.exists());
+
         view.update(cx, |v, cx| {
             v.code.update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
         });
