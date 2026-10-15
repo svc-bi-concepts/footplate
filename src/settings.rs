@@ -33,7 +33,7 @@ pub const TEXT_MAX: u8 = 20;
 pub const HERE: &str = "this machine";
 
 /// The web view's base address where none is set: its default, as `yardr
-/// web start` prints it. A note's pages open in the browser through it.
+/// web start` prints it. Pages and images open in the browser through it.
 pub const WEB_VIEW: &str = "http://127.0.0.1:8791/";
 
 /// A yard the window can show: its name in the switcher, and how it is
@@ -132,9 +132,9 @@ pub struct Settings {
     /// window does ([`Settings::closing_hides`]).
     #[serde(skip_serializing_if = "is_on")]
     pub menu_bar: bool,
-    /// The web view's base address, through which a note's pages open in
-    /// the browser. The view's default until one is set, and left out of
-    /// the file while it is that. A yard reached by pairing opens its
+    /// The web view's base address, through which pages and images open
+    /// in the browser. The view's default until one is set, and left out
+    /// of the file while it is that. A yard reached by pairing opens its
     /// pages once this names the address that yard's view is reached by.
     #[serde(skip_serializing_if = "is_usual_view")]
     pub web_view: String,

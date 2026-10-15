@@ -138,9 +138,29 @@ impl Picture {
     }
 }
 
-/// Whether the web view answers at the setting's base address: a note's
-/// page carries Open when it does, and how to start it when it does not.
-/// Asked once per address; the answer stands until the address changes.
+/// An image's tooltip: what a click does with it.
+struct OpenTip;
+
+impl Render for OpenTip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::now(window, cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.ground)
+            .text_sm()
+            .text_color(palette.text)
+            .child("Open")
+    }
+}
+
+/// Whether the web view answers at the setting's base address: a page
+/// carries Open when it does, and how to start it when it does not, and
+/// an image opens through it. Asked once per address; the answer stands
+/// until the address changes.
 #[derive(Clone, Debug, PartialEq)]
 enum ViewUp {
     /// No probe has gone for the setting's address.
@@ -2760,21 +2780,25 @@ impl Footplate {
     }
 
     /// Asks whether the web view answers at the setting's base address,
-    /// once per address: a note's page carries Open when it does, and how
-    /// to start it when it does not. Off the window's thread, as a call.
+    /// once per address: a page carries Open when it does, and how to
+    /// start it when it does not, and an image opens through it. Off the
+    /// window's thread, as a call.
     fn view_probe(&mut self, cx: &mut Context<Self>) {
         let base = self.settings.web_view.clone();
         match &self.view_up {
             ViewUp::Asked(asked) | ViewUp::Answered(asked, _) if asked == &base => return,
             _ => {}
         }
-        // The page shot shows the row with Open and run: the view is
-        // taken as answering at its address, so the shot is the row and
-        // not the probe. A debug build's alone; where the address reads
-        // as none, the probe below says so.
+        // The page shot shows the row with Open and run, and the mail
+        // shot the mail's row with Open and its image: the view is taken
+        // as answering at its address, so the shot is the row and not
+        // the probe. A debug build's alone; where the address reads as
+        // none, the probe below says so.
         #[cfg(debug_assertions)]
-        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("page")
-            && api::Address::parse_view(&base).is_ok()
+        if matches!(
+            std::env::var("FOOTPLATE_SHOT").as_deref(),
+            Ok("page") | Ok("mail")
+        ) && api::Address::parse_view(&base).is_ok()
         {
             self.view_up = ViewUp::Answered(base, true);
             return;
@@ -2800,7 +2824,7 @@ impl Footplate {
     }
 
     /// Whether the web view answers at the setting's address, if that was
-    /// asked: what a note's page is drawn with.
+    /// asked: what a page and an image are drawn with.
     fn view_up_now(&self) -> Option<bool> {
         match &self.view_up {
             ViewUp::Answered(asked, up) if asked == &self.settings.web_view => Some(*up),
@@ -7396,8 +7420,9 @@ impl Footplate {
     }
 
     /// A file of a mail or of a note: an image, a page's row, or the
-    /// line that says why there is none. `note` says it is a note's, whose
-    /// page opens in the browser; a mail's page opens from no mail.
+    /// line that says why there is none. The image opens in the browser
+    /// through the web view, as a page's Open does; `note` says it is a
+    /// note's, whose page carries run beside Open.
     fn picture(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
         let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
         if !file.not_taken.is_empty() {
@@ -7407,14 +7432,62 @@ impl Footplate {
             return self.page_row(file, note, palette).into_any_element();
         }
         match self.images.get(&file.hash) {
-            Some(Picture::Here(image)) => img(image.clone())
-                .h(px(IMAGE_HEIGHT))
-                .max_w_full()
-                .object_fit(ObjectFit::ScaleDown)
-                .with_fallback(move || {
-                    line("an image footplate cannot draw".to_string()).into_any_element()
-                })
-                .into_any_element(),
+            Some(Picture::Here(image)) => {
+                let shown = img(image.clone())
+                    .h(px(IMAGE_HEIGHT))
+                    .max_w_full()
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(move || {
+                        line("an image footplate cannot draw".to_string()).into_any_element()
+                    });
+                // Where the view answers a click opens the image in the
+                // browser, as a page's Open does; where it does not the
+                // thumbnail stands with how to start it, as the page's
+                // row does. Where it was not asked yet the thumbnail
+                // stands alone.
+                match self.view_up_now() {
+                    Some(true) => {
+                        // The probe answered at this address, so it
+                        // parses: the same reading, not another. A hash
+                        // that is no hex names no image, and it opens
+                        // nothing.
+                        let hash = file.hash.clone();
+                        let Some(url) = Address::parse_view(&self.settings.web_view)
+                            .expect("the web view answered at this address")
+                            .page_url(&file.hash)
+                        else {
+                            return shown.into_any_element();
+                        };
+                        let open = self.means.open.clone();
+                        shown
+                            .id(SharedString::from(format!("image open {hash}")))
+                            .debug_selector({
+                                let hash = hash.clone();
+                                move || format!("image open {hash}")
+                            })
+                            .cursor_pointer()
+                            .tooltip(|_, cx| cx.new(|_| OpenTip).into())
+                            .on_click(move |_, _, cx| (open)(&url, cx))
+                            .into_any_element()
+                    }
+                    Some(false) => div()
+                        .flex()
+                        .flex_col()
+                        .child(shown)
+                        .child(
+                            line(
+                                "the web view is not reached: start it with yardr web start"
+                                    .to_string(),
+                            )
+                            .debug_selector({
+                                let hash = file.hash.clone();
+                                move || format!("image start {hash}")
+                            }),
+                        )
+                        .into_any_element(),
+                    None => shown.into_any_element(),
+                }
+            }
             Some(Picture::Not(why)) => line(why.clone()).into_any_element(),
             Some(Picture::Asked) | None => div()
                 .h(px(IMAGE_HEIGHT))
@@ -7423,13 +7496,13 @@ impl Footplate {
         }
     }
 
-    /// A page of a mail or of a note: a row with its size, and for a
-    /// note's page Open in the browser, through the web view's base
-    /// address, with run beside it, through the run base. Where the view
-    /// does not answer the row says how to start it instead of opening
+    /// A page of a mail or of a note: a row with its size, and Open
+    /// in the browser, through the web view's base address, with run
+    /// beside it for a note's, through the run base. Where the view does
+    /// not answer the row says how to start it instead of opening
     /// nowhere; where the sandbox origin does not answer the row says so
-    /// beside Open. A mail's page is the row without either, since the
-    /// view serves no mail's bytes.
+    /// beside Open. A mail's page is the row without run, since the
+    /// sandbox origin serves no mail's bytes, and that stays.
     fn page_row(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
         let hash = file.hash.clone();
         let row = div()
@@ -7445,17 +7518,6 @@ impl Footplate {
         let label = div()
             .text_color(palette.faint)
             .child(format!("page, {}", model::size(file.bytes)));
-        if !note {
-            return row
-                .child(label)
-                .child(
-                    div()
-                        .text_color(palette.faint)
-                        .debug_selector(move || format!("page mail {hash}"))
-                        .child("pages open from notes"),
-                )
-                .into_any_element();
-        }
         match self.view_up_now() {
             Some(true) => {
                 // The probe answered at this address, so it parses: the
@@ -7480,6 +7542,11 @@ impl Footplate {
                         .on_click(move |_, _, cx| (open)(&url, cx))
                         .child("Open"),
                 );
+                // No run for a mail's page: the sandbox origin
+                // serves no mail's bytes, and that stays.
+                if !note {
+                    return row.into_any_element();
+                }
                 // Run beside Open, through the run base: the same
                 // reading, not another. A hash that is no hex runs
                 // nothing, and the row has no run; where the origin
@@ -10834,6 +10901,34 @@ mod tests {
         .to_string()
     }
 
+    fn bead_note_image(image: &str) -> String {
+        json!({"result": {
+            "id": "bead-a", "title": "Move the links",
+            "body": "The body of bead-a.",
+            "stage": "new", "labels": ["topic:linear-out"],
+            "notes": [
+                {"seq": 2, "kind": "note", "author": "yardmaster",
+                 "text": "the test passed, like this:", "at": "2026-10-10T09:30:00Z",
+                 "files": [{"hash": image, "type": "image/png", "bytes": 70}]},
+                {"seq": 3, "kind": "note", "author": "yardmaster",
+                 "text": "no pictures here", "at": "2026-10-10T09:31:00Z"}
+            ],
+            "asks": [
+                {"ask": 3, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Move them now?",
+                 "context": ["The links file declares the new source."],
+                 "options": [
+                    {"label": "Move them now", "consequence": "all 64 links point tonight"},
+                    {"label": "You decide", "consequence": "leave it to yardmaster"}
+                 ],
+                 "recommend": 1, "why": "the test passed",
+                 "state": "open"}
+            ]
+        }})
+        .to_string()
+    }
+
     /// A port whose listener answers the web view's front page to every
     /// connection: the view, up. Its base address.
     fn view_up() -> String {
@@ -11229,7 +11324,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_mail_s_page_is_a_row_without_open(cx: &mut TestAppContext) {
+    fn a_mail_s_page_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         // The mail carries a page, which the yard is never asked for.
@@ -11244,13 +11339,188 @@ mod tests {
             .to_string(),
         );
         let (view, cx) = opened(&yard, &["Like this?"], cx);
-        // The page is a row without Open: pages open from notes.
+        // The view answers at its address: the row carries Open, with no
+        // run, and the yard is asked for none of the page's bytes.
+        let base = view_up();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
         assert!(drawn(cx, &format!("page row {page}")));
-        assert!(drawn(cx, &format!("page mail {page}")));
-        assert!(!drawn(cx, &format!("page open {page}")));
+        assert!(drawn(cx, &format!("page open {page}")));
         assert!(!drawn(cx, &format!("page run {page}")));
         assert_eq!(yard.blobs_asked(), Vec::<String>::new());
         assert_eq!(picture(&view, cx, &page), "");
+        // Open hands the view's page to the browser.
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("page open {page}"));
+        cx.run_until_parked();
+        assert_eq!(opened.borrow().as_slice(), [format!("{base}/blobs/{page}")]);
+    }
+
+    #[gpui::test]
+    fn a_mail_s_image_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The mail carries an image, which the yard holds.
+        let image = "ab".repeat(32);
+        yard.blob(&image, &png());
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Like this?", "read": false,
+                 "files": [{"hash": image, "type": "image/png", "bytes": 70}]}
+            ]})
+            .to_string(),
+        );
+        // The view's address is set as the window is built, before any
+        // frame: the mail is shown from the first, so what the image
+        // carries is what this address says, whatever answers elsewhere.
+        let base = view_up();
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            view.settings.web_view = base.clone();
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Like this?"]
+        });
+        wait(cx, "the image of the mail", |cx| {
+            picture(&view, cx, &image) == "here"
+        });
+        // The view answers at its address: a click opens the image.
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        assert!(drawn(cx, &format!("image open {image}")));
+        assert!(!drawn(cx, &format!("image start {image}")));
+        // A click hands the view's image to the browser.
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("image open {image}"));
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [format!("{base}/blobs/{image}")]
+        );
+    }
+
+    #[gpui::test]
+    fn a_note_s_image_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        // The note names an image, which the yard holds.
+        let image = "ab".repeat(32);
+        yard.blob(&image, &png());
+        yard.answer("Bead", &bead_note_image(&image));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // The view answers at its address.
+        let base = view_up();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        // One key expands the card: the image is drawn, and a click
+        // opens it.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        wait(cx, "the note's image", |cx| {
+            picture(&view, cx, &image) == "here"
+        });
+        assert!(drawn(cx, &format!("image open {image}")));
+        // A click hands the view's image to the browser.
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("image open {image}"));
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [format!("{base}/blobs/{image}")]
+        );
+    }
+
+    #[gpui::test]
+    fn an_image_says_how_to_start_the_view_where_it_does_not_answer(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The mail carries an image, which the yard holds.
+        let image = "ab".repeat(32);
+        yard.blob(&image, &png());
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Like this?", "read": false,
+                 "files": [{"hash": image, "type": "image/png", "bytes": 70}]}
+            ]})
+            .to_string(),
+        );
+        // The view's address is set as the window is built, before any
+        // frame: the mail is shown from the first, so what the image
+        // carries is what this address says, whatever answers elsewhere.
+        let down = view_down();
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            view.settings.web_view = down;
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Like this?"]
+        });
+        wait(cx, "the image of the mail", |cx| {
+            picture(&view, cx, &image) == "here"
+        });
+        // Nothing answers at the view's address: the thumbnail stands
+        // with how to start it, instead of opening nowhere.
+        wait(cx, "the view not answering", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
+        assert!(drawn(cx, &format!("image start {image}")));
+        assert!(!drawn(cx, &format!("image open {image}")));
     }
 
     /// A page dropped on a card goes with its note: one that is no page

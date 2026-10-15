@@ -18,9 +18,10 @@ use crate::yard::Env;
 /// ask, an open card of a run ask, a yard that is stopped, a yard at an
 /// address, the settings with the start-at-login switch, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
-/// the composer, an open card whose note carries a page and an image, the
-/// first screen's way to a yard at an address, with a pairing's http
-/// address refused under its fields, the conversation with one of a
+/// the composer, an open card whose note carries a page and an image, a
+/// mail with a page and an image, the first screen's way to a yard at an
+/// address, with a pairing's http address refused under its fields, the
+/// conversation with one of a
 /// linked yard whose mail was refused over the hour, the first screen
 /// with a way's fields open after the yard answered, with the line that
 /// esc opens it, and step 2 of setting up a yard here, posed with a
@@ -30,7 +31,9 @@ use crate::yard::Env;
 /// an address is opened from the settings the shot script writes; the
 /// settings open over a running yard; the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
-/// and run. The undelivered conversation opens on the row the shot names,
+/// and run. The mail's conversation opens on the mail, with the web view
+/// taken as answering, so the row carries Open and the image opens. The
+/// undelivered conversation opens on the row the shot names,
 /// with the hour's line under the mail. The answered yard serves the
 /// yardmaster's conversation, as the running ones do; the window opens
 /// with the way's fields standing, so the yard answers under them. The
@@ -45,20 +48,21 @@ pub const STATES: &[&str] = &[
     "settings",
     "reconnecting",
     "page",
+    "mail",
     "refusal",
     "undelivered",
     "answered",
     "setup",
 ];
 
-/// The note's image in the `page` state, and its hash: the yard serves
-/// the bytes, and the note names them.
+/// The image in the `page` and `mail` states, and its hash: the yard
+/// serves the bytes, and the note or the mail names them.
 const IMAGE: &[u8] = include_bytes!("fixtures/shot-page.png");
 const IMAGE_HASH: &str = "ca2421063b23c6ff5739c2000b22125bea109764fff6e643eccea0c00f6fe6c3";
 
-/// The pages in the `page` state: the note's, which Open takes to the
-/// browser, and a mail's, which opens from no mail. Named, never served:
-/// the yard is asked for neither.
+/// The pages in the `page` and `mail` states: the note's, which Open
+/// takes to the browser, and a mail's, which Open takes there too, with
+/// no run. Named, never served: the yard is asked for neither.
 const PAGE_HASH: &str = "abababababababababababababababababababababababababababababababab";
 const MAIL_PAGE_HASH: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
@@ -334,7 +338,7 @@ fn populate(yard: &Yard, state: &str) {
             // The plain ask above, whose note carries a page and an image:
             // the yard holds the image, and the page is never asked for,
             // since Open and run take it to the browser. The mail carries
-            // a page too, which opens from no mail.
+            // a page too, which Open takes to the browser, with no run.
             yard.blob(IMAGE_HASH, IMAGE);
             yard.answer(
                 "UserInbox",
@@ -395,6 +399,35 @@ fn populate(yard: &Yard, state: &str) {
                 }})
                 .to_string(),
             );
+        }
+        "mail" => {
+            // The yardmaster's mail carries a page and an image, as the
+            // bead's note does in the page state: the yard holds the
+            // image, and the page is never asked for, since Open takes
+            // it to the browser, with no run.
+            yard.blob(IMAGE_HASH, IMAGE);
+            yard.answer(
+                "UserInbox",
+                &json!({"result": {"mail": [
+                    {"seq": 12, "from": "yardmaster", "to": "jo",
+                     "text": "The mockup is in the mail.", "read": false},
+                ], "unread": 1, "last": 12, "from": ["yardmaster"]}})
+                .to_string(),
+            );
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "The mockup is in the mail.",
+                     "files": [{"hash": MAIL_PAGE_HASH, "type": "text/html; charset=utf-8",
+                                "bytes": 18000},
+                               {"hash": IMAGE_HASH, "type": "image/png",
+                                "bytes": IMAGE.len()}],
+                     "read": false},
+                ]})
+                .to_string(),
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         }
         "undelivered" => {
             // The conversation with one of a linked yard whose mail the
@@ -567,6 +600,18 @@ mod tests {
                     assert_eq!(letters.len(), 1, "{state}");
                     assert_eq!(letters[0].files.len(), 1, "{state}");
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
+                }
+                "mail" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    // The mail carries the page and the image; the yard
+                    // holds the image, and the page is named only.
+                    let image = yard.client().blob(IMAGE_HASH).unwrap().unwrap();
+                    assert_eq!(image.len(), IMAGE.len(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 1, "{state}");
+                    assert_eq!(letters[0].files.len(), 2, "{state}");
+                    assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
+                    assert!(!crate::model::is_page(&letters[0].files[1]), "{state}");
                 }
                 "undelivered" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
