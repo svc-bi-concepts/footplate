@@ -2456,10 +2456,11 @@ impl Footplate {
         // it. One scrolled up is not moved. A jump the layout has not
         // put there yet counts as standing there.
         let size = self.conversation.bounds().size;
-        if let Some((stood_size, stood_bottom)) = self.stood {
-            if size != stood_size && stood_bottom {
-                self.scroll_to_newest();
-            }
+        if let Some((stood_size, stood_bottom)) = self.stood
+            && size != stood_size
+            && stood_bottom
+        {
+            self.scroll_to_newest();
         }
         self.stood = Some((size, self.bottom_pending || self.at_bottom()));
         if self.bottom_pending {
