@@ -359,9 +359,9 @@ impl KeptKind {
     /// device, signing in for a session.
     fn missing(&self, at: &std::path::Display<'_>) -> String {
         match self.noun {
-            "session" => format!(
-                "Not signed in: {at} is not there. Sign in to this hosted yard, and keep the session token in that file."
-            ),
+            "session" => {
+                format!("Not signed in: {at} is not there. Sign in to this hosted yard again.")
+            }
             _ => format!(
                 "This device has no token: {at} is not there. Pair it in the settings, with a code the yard's operator opens: yardr user device pair <user> <device>"
             ),
@@ -692,6 +692,14 @@ impl Drop for TokenPlace {
             let _ = fs::remove_file(&self.new);
         }
     }
+}
+
+/// Keeps a session token in `file`, for its user alone, with the
+/// address of the edge that signed it under it: a session is never on
+/// disk without its edge. The file is whole or not there: it is written
+/// beside itself and renamed.
+pub fn keep_session(file: &Path, token: &str, address: &Address) -> io::Result<()> {
+    token_place(file)?.keep_as(token, Some(address), SESSION_KIND)
 }
 
 /// A legacy token alone in `file`, for tests that need a file before its
@@ -1529,6 +1537,30 @@ mod tests {
         )
         .unwrap();
         assert!(!is_managed_session_file(&file));
+    }
+
+    #[test]
+    fn signing_in_keeps_the_session_with_its_edge_for_its_user_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("yard-south.session");
+        let address = Address::parse("https://south.example.net").unwrap();
+        keep_session(&file, "kratos-dev-south", &address).unwrap();
+        // Mode 0600, the session's marker, the edge's address, and the
+        // session reads back for that edge.
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "kratos-dev-south\n!footplate-session-v1\nhttps://south.example.net\n"
+        );
+        assert!(is_managed_session_file(&file));
+        assert!(!is_managed_token_file(&file));
+        assert_eq!(session_for(&file, &address).unwrap(), "kratos-dev-south");
+        // And for no other edge.
+        let elsewhere = Address::parse("https://north.example.net").unwrap();
+        assert!(session_for(&file, &elsewhere).is_err());
     }
 
     #[test]

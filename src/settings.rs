@@ -61,6 +61,11 @@ pub struct Yard {
     /// session is never here.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub session_file: String,
+    /// Of a hosted yard: the Kratos account signed in, as the sign-in
+    /// answered it. Empty where none signed in, and on every yard
+    /// reached direct.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub account: String,
 }
 
 impl Yard {
@@ -510,7 +515,10 @@ impl Settings {
                             other.name
                         ));
                     }
-                    Yard::hosted(&name, yard.address.trim(), yard.token_file.trim(), session)
+                    let mut kept =
+                        Yard::hosted(&name, yard.address.trim(), yard.token_file.trim(), session);
+                    kept.account = yard.account.trim().to_string();
+                    kept
                 }
             }
             false => {
@@ -570,6 +578,21 @@ impl Settings {
     /// another yard's token or session is in a file of that name or such
     /// a file is there already.
     pub fn token_name(&self, name: &str, file: Option<&Path>) -> String {
+        self.credential_name(name, file, "token")
+    }
+
+    /// The session file a new hosted yard called `name` gets: as the
+    /// token's, with `session` for its kind.
+    pub fn session_name(&self, name: &str, file: Option<&Path>) -> String {
+        self.credential_name(name, file, "session")
+    }
+
+    /// The file a new yard's token or session goes in: `yard-<name>.<kind>`
+    /// beside the settings, the name in small letters with `-` for what is
+    /// neither a letter nor a digit, and with `-2`, `-3` and so on while
+    /// another yard's token or session is in a file of that name or such
+    /// a file is there already.
+    fn credential_name(&self, name: &str, file: Option<&Path>, kind: &str) -> String {
         let mut slug = String::new();
         for c in name.trim().chars().flat_map(char::to_lowercase) {
             match c.is_alphanumeric() {
@@ -582,26 +605,26 @@ impl Settings {
             "" => "yard",
             slug => slug,
         };
-        let taken = |token_file: &str| {
-            let path = yard::token_path(token_file, file).ok();
+        let taken = |credential_file: &str| {
+            let path = yard::token_path(credential_file, file).ok();
             let theirs = self
                 .yards
                 .iter()
                 .filter(|other| other.is_far())
                 .any(|other| {
-                    other.token_file == token_file
-                        || other.session_file == token_file
+                    other.token_file == credential_file
+                        || other.session_file == credential_file
                         || path.as_ref().is_some_and(|path| holds(other, path, file))
                 });
             theirs || path.is_some_and(|path| path.exists())
         };
-        let mut token_file = format!("yard-{slug}.token");
+        let mut credential_file = format!("yard-{slug}.{kind}");
         let mut n = 1;
-        while taken(&token_file) {
+        while taken(&credential_file) {
             n += 1;
-            token_file = format!("yard-{slug}-{n}.token");
+            credential_file = format!("yard-{slug}-{n}.{kind}");
         }
-        token_file
+        credential_file
     }
 
     /// Without the yard called `name`, and what became of its token's
@@ -1377,6 +1400,42 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_yard_names_its_signed_in_account_and_a_direct_one_names_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = two_far(&file);
+
+        // The account stands with the hosted yard, trimmed, and reads back.
+        let mut south = Yard::hosted(
+            "south",
+            "https://south.example.net",
+            "yard-south.token",
+            "yard-south.session",
+        );
+        south.account = " jo@example.net ".to_string();
+        let hosted = set.clone().with_yard(None, south, Some(&file)).unwrap();
+        assert_eq!(hosted.yard("south").unwrap().account, "jo@example.net");
+        hosted.write(&file).unwrap();
+        let read = Settings::read(&file);
+        assert_eq!(read.yard("south").unwrap().account, "jo@example.net");
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"account\": \"jo@example.net\"")
+        );
+
+        // A yard reached direct keeps none, whatever it was given.
+        let mut shop = Yard::far("shop", "https://shop.example.net", "yard-shop.token");
+        shop.account = "jo@example.net".to_string();
+        let direct = set.clone().with_yard(None, shop, Some(&file)).unwrap();
+        assert_eq!(direct.yard("shop").unwrap().account, "");
+        let mut near = Yard::near("home", "");
+        near.account = "jo@example.net".to_string();
+        let direct = set.clone().with_yard(None, near, Some(&file)).unwrap();
+        assert_eq!(direct.yard("home").unwrap().account, "");
+    }
+
+    #[test]
     fn a_new_yard_s_token_file_is_named_for_it_and_skips_what_is_taken() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
@@ -1414,6 +1473,39 @@ mod tests {
             more.token_name("plantime", Some(&file)),
             "yard-plantime-4.token"
         );
+    }
+
+    #[test]
+    fn a_new_hosted_yard_s_session_file_is_named_for_it_and_skips_what_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = two_far(&file);
+        assert_eq!(set.session_name("Shop", Some(&file)), "yard-shop.session");
+        assert_eq!(
+            set.session_name("  The Shop, north (2) ", Some(&file)),
+            "yard-the-shop-north-2.session"
+        );
+        // Another yard's session is in a file of that name.
+        let hosted = set
+            .clone()
+            .with_yard(
+                None,
+                Yard::hosted(
+                    "south",
+                    "https://south.example.net",
+                    "yard-south.token",
+                    "yard-shop.session",
+                ),
+                Some(&file),
+            )
+            .unwrap();
+        assert_eq!(
+            hosted.session_name("shop", Some(&file)),
+            "yard-shop-2.session"
+        );
+        // A file of that name is there already, whoever's it is.
+        fs::write(dir.path().join("yard-shop.session"), "").unwrap();
+        assert_eq!(set.session_name("shop", Some(&file)), "yard-shop-2.session");
     }
 
     #[test]

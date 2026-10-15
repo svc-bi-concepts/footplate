@@ -176,9 +176,10 @@ first screen's way to a yard at an address, with a pairing's http address
 refused under its fields), `undelivered` (the conversation with one of
 a linked yard whose mail was refused over the hour), `answered` (the
 first screen with a way's fields open after the yard answered, with the
-line that esc opens it) and `setup` (step 2 of setting up a yard here,
+line that esc opens it), `setup` (step 2 of setting up a yard here,
 posed: a canned doctor of two providers and their model offers, and the
-working styles as a numbered scale). With no state the first
+working styles as a numbered scale) and `hosted` (the first screen with
+the hosted way's fields open and filled). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
@@ -372,14 +373,20 @@ goes on trying the one that is away meanwhile:
   user of that yard, as "[A yard at an address](#a-yard-at-an-address)"
   has it. It is not yardr's peer pairing, which links two yards to each
   other and stays a command of the terminal.
+- **open a hosted yard** asks for the edge's one origin, and the Kratos
+  account's email and password, in the window. Signing in keeps the
+  session as the device's token is kept, and the road goes on to pairing
+  the device with the code from the ready page, as
+  "[A hosted yard](#a-hosted-yard)" has it.
 
-The last two are the settings' own entries, "add a yard of this machine"
-and "add a yard at an address", in the same fields with the same rules: Enter or the
+The last three are the settings' own entries, "add a yard of this machine",
+"add a yard at an address" and "add a hosted yard", in the same fields with
+the same rules: Enter or the
 button adds the yard to the settings' list and opens it, what keeps it out
 of the list is said under the fields, and Esc leaves them. The ways stand
 under any yard that is away, also one that no longer lets this device in,
 but not in a window of the one yard `FOOTPLATE_YARD` names, which has no
-list to add to. Neither of these two creates a yard or starts one. Where
+list to add to. None of these three creates a yard or starts one. Where
 the yard that is away answers while a way's fields are open, the fields
 and the screen stand until `esc` leaves them, and the screen says the
 yard answers again: what is typed stays in the field.
@@ -540,6 +547,48 @@ What a device reads and writes, and how it is taken back, is the yard's:
 `docs/users.md` there. In short, it reads what any user of the yard can
 and writes as its user, marked `via <device>`; a token does not end until
 the device is removed.
+
+## A hosted yard
+
+A yard behind the hosted edge, at the edge's one origin, is paired as a
+yard at an address is, with a sign-in first. "open a hosted yard" on the
+[first screen](#what-it-talks-to), or "add a hosted yard" in the settings,
+asks for the origin and the Kratos account's email and password, in the
+window: no terminal, and no token pasted anywhere. Signing in keeps the
+session in a file of the yard's own beside the settings, mode 0600 as the
+device's token is, with the edge's address under it; the settings keep the
+file and the signed-in account, never the session. The road goes on to
+pairing the device with the code from the ready page, and then the yard's
+conversations, with the signed-in account under the yard's name: in the
+head's line, in the whole telling the settings say, and on the yard's row.
+
+Every call to a hosted yard carries both: the device token in
+`Authorization: Bearer`, as ever, and the session token in `X-Edge-Token`
+beside it, which the edge checks before the call reaches the yard. Pairing
+sends the session beside the code. A refused session and a refused device
+are told apart on screen, and neither is tried again: the edge refuses a
+session it does not know with 401 carrying `X-Edge-Refusal: session`, and
+the window says to sign in again; the yard refuses a token that is not a
+device's with its own 401, which the edge passes through byte for byte,
+and the window says to pair again. "sign in again" stands under the words
+and on the yard's row in the settings; where the session is what is out,
+pairing again is not offered, since it helps nothing. Removing the yard
+deletes its session's file with its token's, where footplate wrote them;
+the session itself stays signed in at the edge until it expires or is
+revoked, and the device stays at the yard until its operator removes it.
+
+The sign-in is Kratos's API login flow at the origin's `/kratos` path, as
+a native client uses it: one flow is opened
+(`GET /kratos/self-service/login/api`), and the password method answers it
+(`POST /kratos/self-service/login?flow=<id>` with the email and the
+password). The password goes to the typed origin alone: the flow's own
+action is not followed anywhere else, and no redirect is. An `http://`
+origin off this machine is refused before anything is sent, as a yard's
+is, so a password crosses the network only over `https://` or to this
+machine. A flow the edge forgot meanwhile is opened once more; one that is
+forgotten twice is said. The password is in the request's body and in
+nothing else of footplate: no field once it is sent, no file, no setting,
+no error and no log.
 
 ## yardr, fetched
 
@@ -1127,10 +1176,10 @@ options have no icon, so the program sees to it when it starts
 
 | File | Holds |
 |---|---|
-| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed |
+| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a Kratos account signed in at a hosted edge |
 | `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
 | `src/setup.rs` | the first run as yardr's commands, with no window: each run with its arguments and its JSON read, the PATH made from doctor's data, the import's questions answered, a login led by what yardr prints |
-| `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode |
+| `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode, a hosted yard's session file beside it |
 | `src/session.rs` | following a yard on a thread, one for each yard of the settings: who the window is for, the state it starts from, trying again, or not when the device is not let in |
 | `src/model.rs` | what the window shows, as plain functions: the rows, the open conversation, unread and what is acknowledged |
 | `src/draft.rs` | what is not sent yet, as plain functions: for each yard each conversation's attachments and text, what is refused and why |
@@ -1143,7 +1192,7 @@ options have no icon, so the program sees to it when it starts
 | `src/dock.rs` | macOS: the number on the dock's icon, of what waits |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON; a stand-in edge in front of it with the login flow |
 
 The tests run without a yard and without a screen: the client against the
 fake yard for each call, an image and the stream, by its socket and at an

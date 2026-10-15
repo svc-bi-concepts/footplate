@@ -754,6 +754,19 @@ fn stream(
 #[cfg(test)]
 pub const SESSION: &str = "kratos-dev-session";
 
+/// The Kratos account the stand-in edge signs in, and its password: what
+/// the hosted tests sign in with.
+#[cfg(test)]
+pub const KRATOS_EMAIL: &str = "jo@example.net";
+#[cfg(test)]
+pub const KRATOS_PASSWORD: &str = "sign-me-in-1";
+/// The handle Kratos answers the account has.
+#[cfg(test)]
+const KRATOS_HANDLE: &str = "jo";
+/// The login flow the stand-in answers: any other is expired.
+#[cfg(test)]
+const KRATOS_FLOW: &str = "test-flow-id";
+
 /// What the edge answers a session it does not know: its own 401, naming
 /// the edge, carrying `X-Edge-Refusal: session`. The yard's own 401 it
 /// passes through byte for byte, adding nothing.
@@ -768,15 +781,22 @@ struct EdgeShared {
     proxied: Mutex<usize>,
     /// The open relays, each with the session it was proxied for.
     relays: Mutex<Vec<(String, TcpStream)>>,
+    /// How many logins to answer expired before one succeeds: a flow the
+    /// edge forgot is opened again.
+    expire: Mutex<u32>,
+    /// How many sessions a sign-in minted: each is known from then on.
+    logins: Mutex<u32>,
     stopped: Mutex<bool>,
 }
 
 /// A stand-in for the hosted edge in front of a yard at its listener: it
 /// checks `X-Edge-Token` as the router checks the Kratos session, proxies
 /// a known session to the yard with the credential stripped, and refuses
-/// any other with the edge's own 401, reaching no yard. The yard answers
-/// the device token as ever; a test stops the yard before the edge, so no
-/// relayed stream outlives what it relays.
+/// any other with the edge's own 401, reaching no yard. Under `/kratos`
+/// it answers the login API flow, minting a session a sign-in for the
+/// account it knows. The yard answers the device token as ever; a test
+/// stops the yard before the edge, so no relayed stream outlives what it
+/// relays.
 #[cfg(test)]
 pub struct Router {
     /// `http://127.0.0.1:<port>`.
@@ -802,18 +822,22 @@ impl Router {
             last_request: Mutex::new(String::new()),
             proxied: Mutex::new(0),
             relays: Mutex::new(Vec::new()),
+            expire: Mutex::new(0),
+            logins: Mutex::new(0),
             stopped: Mutex::new(false),
         });
         let accept = thread::spawn({
             let shared = shared.clone();
+            let origin = address.clone();
             move || {
                 while !*shared.stopped.lock().unwrap() {
                     match listener.accept() {
                         Ok((conn, _)) => {
                             let shared = shared.clone();
                             let target = target.clone();
+                            let origin = origin.clone();
                             thread::spawn(move || {
-                                let _ = serve_edge(conn, &target, &shared);
+                                let _ = serve_edge(conn, &target, &origin, &shared);
                             });
                         }
                         Err(_) => thread::sleep(Duration::from_millis(2)),
@@ -835,6 +859,12 @@ impl Router {
     /// A client at the edge's address with this device token and session.
     pub fn client_with(&self, token: &str, session: &str) -> Client {
         Client::remote_hosted(Address::parse(self.address()).unwrap(), token, session)
+    }
+
+    /// The next `n` logins answer expired, as a flow the edge forgot: the
+    /// client opens another.
+    pub fn expire_logins(&self, n: u32) {
+        *self.shared.expire.lock().unwrap() = n;
     }
 
     /// The edge knows this session from now on.
@@ -888,11 +918,12 @@ impl Drop for Router {
     }
 }
 
-/// One request at the edge: refused with the edge's own 401 where the
+/// One request at the edge: under `/kratos` the login API flow, which
+/// takes no session, else refused with the edge's own 401 where the
 /// session is none it knows, else proxied to the yard with the credential
 /// stripped and the yard's answer relayed byte for byte.
 #[cfg(test)]
-fn serve_edge(conn: TcpStream, target: &str, shared: &EdgeShared) -> io::Result<()> {
+fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) -> io::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut conn = conn;
     let mut head = String::new();
@@ -918,6 +949,12 @@ fn serve_edge(conn: TcpStream, target: &str, shared: &EdgeShared) -> io::Result<
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
     *shared.last_request.lock().unwrap() = head.clone();
+    let asked = head.lines().next().unwrap_or_default().to_string();
+    if asked.starts_with("GET /kratos/self-service/login/api ")
+        || asked.starts_with("POST /kratos/self-service/login")
+    {
+        return serve_kratos(conn, origin, &asked, &body, shared);
+    }
     let known = session
         .as_ref()
         .is_some_and(|token| shared.sessions.lock().unwrap().contains(token));
@@ -950,6 +987,95 @@ fn serve_edge(conn: TcpStream, target: &str, shared: &EdgeShared) -> io::Result<
         &session.unwrap_or_default(),
         shared,
     )
+}
+
+/// One request of the login API flow: a flow is opened, and the
+/// password method answers it. A sign-in for the account the edge knows
+/// mints a session, which is known from then on; any other is refused as
+/// Kratos refuses it, in the flow with its messages. The flow's own action
+/// names another flow than the one opened: the client answers the flow it
+/// opened, never the action's.
+#[cfg(test)]
+fn serve_kratos(
+    mut conn: TcpStream,
+    origin: &str,
+    asked: &str,
+    body: &[u8],
+    shared: &EdgeShared,
+) -> io::Result<()> {
+    let reply = |conn: &mut TcpStream, status: &str, body: String| -> io::Result<()> {
+        write!(
+            conn,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        conn.flush()
+    };
+    let action = format!("{origin}/kratos/self-service/login?flow=another-flow");
+    if asked.starts_with("GET ") {
+        let flow = serde_json::json!({
+            "id": KRATOS_FLOW,
+            "type": "api",
+            "ui": {"action": action, "method": "POST", "nodes": []},
+        });
+        return reply(&mut conn, "200 OK", flow.to_string());
+    }
+    let expired = {
+        let mut expire = shared.expire.lock().unwrap();
+        match *expire {
+            0 => false,
+            n => {
+                *expire = n - 1;
+                true
+            }
+        }
+    };
+    let flow = asked
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .split("flow=")
+        .nth(1)
+        .unwrap_or_default()
+        .split('&')
+        .next()
+        .unwrap_or_default();
+    if expired || flow != KRATOS_FLOW {
+        let gone = serde_json::json!({"error": {"code": 410, "status": "Gone", "message": "The login flow expired."}});
+        return reply(&mut conn, "410 Gone", gone.to_string());
+    }
+    let answered: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let good = answered["method"].as_str() == Some("password")
+        && answered["identifier"].as_str() == Some(KRATOS_EMAIL)
+        && answered["password"].as_str() == Some(KRATOS_PASSWORD);
+    if !good {
+        let refused = serde_json::json!({
+            "id": KRATOS_FLOW,
+            "type": "api",
+            "ui": {
+                "action": action,
+                "method": "POST",
+                "messages": [{"id": 4000006, "text": "The provided credentials are invalid, check for spelling mistakes in your password or username, email address, or phone number.", "type": "error"}],
+                "nodes": [],
+            },
+        });
+        return reply(&mut conn, "400 Bad Request", refused.to_string());
+    }
+    let mut logins = shared.logins.lock().unwrap();
+    *logins += 1;
+    let session = format!("kratos-test-session-{}", *logins);
+    shared.sessions.lock().unwrap().push(session.clone());
+    let signed = serde_json::json!({
+        "session_token": session,
+        "session": {
+            "id": "test-session-id",
+            "identity": {
+                "id": "test-identity-id",
+                "traits": {"email": KRATOS_EMAIL, "handle": KRATOS_HANDLE},
+            },
+        },
+    });
+    reply(&mut conn, "200 OK", signed.to_string())
 }
 
 /// One request proxied to the yard, its answer relayed byte for byte. The

@@ -1174,6 +1174,15 @@ pub fn is_token(token: &str) -> bool {
     !token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// The call reached the server, and the server said no: `message` is a
+/// sentence for a person, shown, never read.
+fn refused(code: &str, message: &str) -> Error {
+    Error::Refused {
+        code: code.to_string(),
+        message: message.to_string(),
+    }
+}
+
 /// Redeems a pairing code at a yard's address: one request with no token,
 /// answered with the device's. The code is sent as it was typed; the yard
 /// reads it without its dash and in either case.
@@ -1205,10 +1214,6 @@ fn pair_with(address: &Address, code: &str, session: Option<&str>) -> Result<Pai
     )?;
     conn.flush()?;
     let (status, refused_session, mut reply) = respond_call(conn)?;
-    let refused = |code: &str, message: &str| Error::Refused {
-        code: code.to_string(),
-        message: message.to_string(),
-    };
     if status == 401 && refused_session {
         return Err(refused(
             "no_session",
@@ -1246,6 +1251,192 @@ fn pair_with(address: &Address, code: &str, session: Option<&str>) -> Result<Pai
         )),
         _ => Err(Error::Protocol(format!("the pairing: status {status}"))),
     }
+}
+
+/// What signing in at the edge answers: the session token, kept as the
+/// device's is, and the account it signed in as.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignedIn {
+    pub session: String,
+    pub account: String,
+}
+
+/// Signs the Kratos account in at the edge's `/kratos` path, with the API
+/// flow a native client uses: one flow is opened, and the password method
+/// answers it. The password goes to the typed address alone: the flow's
+/// own action is not followed anywhere else, and no redirect is. A
+/// refused sign-in names signing in, never pairing: the code is another
+/// road. The password is in the request's body and in nothing else: no
+/// error and no log.
+pub fn sign_in(address: &Address, email: &str, password: &str) -> Result<SignedIn> {
+    let flow = login_flow(address)?;
+    match submit_login(address, &flow, email, password) {
+        // A flow the edge forgot meanwhile is opened once more; one that
+        // is forgotten twice is said, not tried a third time.
+        Err(Error::Refused { code, .. }) if code == EXPIRED_FLOW => {
+            let flow = login_flow(address)?;
+            match submit_login(address, &flow, email, password) {
+                Err(Error::Refused { code, .. }) if code == EXPIRED_FLOW => Err(refused(
+                    "bad_sign_in",
+                    "The sign-in expired before it was sent. Sign in again.",
+                )),
+                answered => answered,
+            }
+        }
+        answered => answered,
+    }
+}
+
+/// A submitted flow the edge forgot: answered once more with a new flow,
+/// and never shown.
+const EXPIRED_FLOW: &str = "expired_flow";
+
+/// Opens a login flow at the edge's `/kratos` path: its id, which the
+/// password answers.
+fn login_flow(address: &Address) -> Result<String> {
+    let mut conn = address
+        .connect(Some(CALL_TIMEOUT))
+        .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    conn.write_all(
+        format!(
+            "GET {}/kratos/self-service/login/api HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+            address.path, address.authority
+        )
+        .as_bytes(),
+    )
+    .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    conn.flush()
+        .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    let (status, mut reply) = respond(conn).map_err(|err| no_sign_in(address, &err.to_string()))?;
+    if status != 200 {
+        return Err(no_sign_in(address, &format!("status {status}")));
+    }
+    let mut bytes = Vec::new();
+    reply
+        .read_to_end(&mut bytes)
+        .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    let flow: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| no_sign_in(address, "an answer that cannot be read"))?;
+    flow["id"]
+        .as_str()
+        .filter(|id| is_token(id))
+        .map(str::to_string)
+        .ok_or_else(|| no_sign_in(address, "an answer with no flow"))
+}
+
+/// Answers the flow with the password method: the session token and the
+/// account, the flow expired meanwhile, or the refusal in Kratos's words.
+/// The submit goes to the typed address with the flow's id: the flow's own
+/// action names the same URL by the edge's shape, and is not read for
+/// where to send the password.
+fn submit_login(address: &Address, flow: &str, email: &str, password: &str) -> Result<SignedIn> {
+    let body = json!({
+        "method": "password",
+        "identifier": email,
+        "password": password,
+    })
+    .to_string();
+    let mut conn = address
+        .connect(Some(CALL_TIMEOUT))
+        .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    conn.write_all(
+        format!(
+            "POST {}/kratos/self-service/login?flow={flow} HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            address.path,
+            address.authority,
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    conn.flush()
+        .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    let (status, mut reply) = respond(conn).map_err(|err| no_sign_in(address, &err.to_string()))?;
+    let mut bytes = Vec::new();
+    reply
+        .read_to_end(&mut bytes)
+        .map_err(|err| no_sign_in(address, &format!("nothing answers ({err})")))?;
+    match status {
+        200 => {
+            let answered: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| no_sign_in(address, "an answer that cannot be read"))?;
+            let session = answered["session_token"]
+                .as_str()
+                .filter(|session| is_token(session))
+                .ok_or_else(|| no_sign_in(address, "an answer with no session token"))?;
+            let traits = &answered["session"]["identity"]["traits"];
+            let account = [traits["email"].as_str(), traits["handle"].as_str()]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .find(|held| !held.is_empty())
+                .map(|held| held.lines().next().unwrap_or_default().trim().to_string())
+                .filter(|held| !held.is_empty())
+                .unwrap_or_else(|| email.to_string());
+            Ok(SignedIn {
+                session: session.to_string(),
+                account,
+            })
+        }
+        400 => {
+            let why = kratos_errors(&bytes)
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "the edge refused it with no reason".to_string());
+            Err(refused(
+                "bad_sign_in",
+                &format!(
+                    "The sign-in failed: {why}. Check the email and password, and sign in again."
+                ),
+            ))
+        }
+        410 => Err(refused(EXPIRED_FLOW, "The login flow expired.")),
+        _ => Err(no_sign_in(address, &format!("status {status}"))),
+    }
+}
+
+/// No sign-in answers there at all: nothing listens, it is no edge, or its
+/// answer cannot be read. `why` is what was found, in a few words.
+fn no_sign_in(address: &Address, why: &str) -> Error {
+    refused(
+        "no_sign_in",
+        &format!("No sign-in answers at {address}: {why}. Check the origin, and sign in again."),
+    )
+}
+
+/// What a refused login flow says: its messages, then each field's, in
+/// Kratos's words.
+fn kratos_errors(bytes: &[u8]) -> Vec<String> {
+    let Ok(flow) = serde_json::from_slice::<Value>(bytes) else {
+        return Vec::new();
+    };
+    let mut errors: Vec<String> = flow["ui"]["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["text"].as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .collect();
+    errors.extend(
+        flow["ui"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|node| {
+                node["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|message| message["text"].as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+    );
+    errors
 }
 
 /// Reads the file a site has at `path`, which is no yard: one `GET` with
@@ -2152,7 +2343,7 @@ mod tests {
             ("https://example.com", "/?x=1")
         );
     }
-    use crate::fake::{Router, SESSION, TOKEN, Yard};
+    use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router, SESSION, TOKEN, Yard};
 
     #[test]
     fn socket_is_under_yardr_home_else_the_home() {
@@ -3084,6 +3275,127 @@ mod tests {
             "{}",
             edge.last_request()
         );
+    }
+
+    #[test]
+    fn signing_in_at_the_edge_answers_a_session_and_the_account() {
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let address = Address::parse(edge.address()).unwrap();
+
+        // One flow, then the password method: the session and the account
+        // it signed in as. The flow's own action names another flow, and
+        // is not followed: the submit answers the flow that was opened,
+        // at the typed origin.
+        let signed = sign_in(&address, KRATOS_EMAIL, KRATOS_PASSWORD).unwrap();
+        assert!(is_token(&signed.session));
+        assert_ne!(signed.session, SESSION);
+        assert_eq!(signed.account, KRATOS_EMAIL);
+        let submit = edge.last_request();
+        assert!(
+            submit.starts_with("POST /kratos/self-service/login?flow=test-flow-id HTTP/1.1\r\n"),
+            "{submit}"
+        );
+        assert!(!submit.contains("another-flow"), "{submit}");
+        // The minted session is the edge's from then on: every call with
+        // it reaches the yard, and it opens no pairing's road by itself.
+        assert_eq!(
+            edge.client_with(TOKEN, &signed.session).me().unwrap().user,
+            "jo"
+        );
+        assert!(!yard.pairing_open());
+        assert!(yard.requests() > 0);
+    }
+
+    #[test]
+    fn a_wrong_password_fails_the_sign_in_and_names_it() {
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let address = Address::parse(edge.address()).unwrap();
+
+        let Err(Error::Refused { code, message }) =
+            sign_in(&address, KRATOS_EMAIL, "not-the-password")
+        else {
+            panic!("a wrong password signed in");
+        };
+        assert_eq!(code, "bad_sign_in");
+        assert!(message.starts_with("The sign-in failed: "), "{message}");
+        assert!(
+            message.contains("provided credentials are invalid"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("Check the email and password, and sign in again."),
+            "{message}"
+        );
+        // The password is in no error, and the refusal reached no yard.
+        assert!(!message.contains("not-the-password"), "{message}");
+        assert_eq!(edge.proxied(), 0);
+        assert_eq!(yard.requests(), 0);
+    }
+
+    #[test]
+    fn a_forgotten_flow_is_opened_once_more_then_said() {
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let address = Address::parse(edge.address()).unwrap();
+
+        // Forgotten once: opened again, and the sign-in stands.
+        edge.expire_logins(1);
+        let signed = sign_in(&address, KRATOS_EMAIL, KRATOS_PASSWORD).unwrap();
+        assert_eq!(signed.account, KRATOS_EMAIL);
+        assert_eq!(
+            edge.client_with(TOKEN, &signed.session).me().unwrap().user,
+            "jo"
+        );
+
+        // Forgotten twice: said, not tried a third time, and the code for
+        // it never leaves the client.
+        edge.expire_logins(2);
+        let Err(Error::Refused { code, message }) =
+            sign_in(&address, KRATOS_EMAIL, KRATOS_PASSWORD)
+        else {
+            panic!("an expired sign-in stood");
+        };
+        assert_eq!(code, "bad_sign_in");
+        assert_eq!(
+            message,
+            "The sign-in expired before it was sent. Sign in again."
+        );
+        assert_ne!(code, "expired_flow");
+    }
+
+    #[test]
+    fn where_no_sign_in_answers_that_is_said() {
+        let yard = Yard::start_tcp();
+        let address = Address::parse(yard.address()).unwrap();
+
+        // A yard with no edge has no such path: the sign-in names itself.
+        let Err(Error::Refused { code, message }) =
+            sign_in(&address, KRATOS_EMAIL, KRATOS_PASSWORD)
+        else {
+            panic!("no edge signed in");
+        };
+        assert_eq!(code, "no_sign_in");
+        assert!(
+            message.starts_with(&format!("No sign-in answers at {address}")),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("Check the origin, and sign in again."),
+            "{message}"
+        );
+
+        // And where nothing listens, the sign-in names itself too.
+        yard.stop();
+        let Err(Error::Refused { code, message }) =
+            sign_in(&address, KRATOS_EMAIL, KRATOS_PASSWORD)
+        else {
+            panic!("nothing signed in");
+        };
+        assert_eq!(code, "no_sign_in");
+        assert!(message.contains("nothing answers"), "{message}");
+        assert!(!message.contains(KRATOS_PASSWORD), "{message}");
     }
 
     #[test]

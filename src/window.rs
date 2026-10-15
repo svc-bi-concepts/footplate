@@ -806,8 +806,8 @@ enum Away {
     SignedOut,
 }
 
-/// What is typed in the settings for a yard: one to add, or a code for one
-/// that is listed.
+/// What is typed in the settings for a yard: one to add, a sign-in for
+/// a hosted one, or a code for one that is listed.
 #[derive(Clone, Debug, PartialEq)]
 enum Adding {
     /// A yard of this machine: its name and its socket.
@@ -817,6 +817,13 @@ enum Adding {
     /// A pairing's code for the yard of this name, to pair its device
     /// again.
     Again(String),
+    /// A hosted yard: its name, the edge's origin, and the Kratos
+    /// account's email and password to sign in with. Signing in writes
+    /// the session file and moves to pairing the device.
+    Hosted,
+    /// The Kratos account's email and password for the hosted yard of
+    /// this name, whose session is signed in again.
+    SignInAgain(String),
 }
 
 /// What the switch is doing: nothing else of it starts meanwhile. Asking
@@ -1136,16 +1143,20 @@ pub struct Footplate {
     unkept: Option<String>,
     /// The settings are shown where the conversation is.
     settings_open: bool,
-    /// A yard in the settings, to add or to pair again: its name, its
-    /// socket or its address and a pairing's code as they are typed, which
-    /// of them show, whether a code is on its way to the yard, and what
-    /// came of the last.
+    /// A yard in the settings, to add, to sign in or to pair again: its
+    /// name, its socket or its address, a pairing's code and a sign-in's
+    /// email and password as they are typed, which of them show, whether
+    /// a code or a sign-in is on its way to the yard, and what came of
+    /// the last.
     yard_name: Entity<Line>,
     socket: Entity<Line>,
     address: Entity<Line>,
     code: Entity<Line>,
+    email: Entity<Line>,
+    password: Entity<Line>,
     adding: Option<Adding>,
     pairing: bool,
+    signing_in: bool,
     yard_said: Option<String>,
     /// The web view's base address as it is typed: what opens a note's
     /// pages in the browser, and what a typed one that is none says.
@@ -1299,6 +1310,22 @@ impl Footplate {
             this.socket
                 .update(cx, |line, cx| line.set_text(&socket, cx));
         }
+        // The hosted shot is the first screen with the hosted way's fields
+        // open and filled: the origin, and the Kratos account's email and
+        // password, the password showing marks. Nothing is sent. A debug
+        // build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("hosted") {
+            this.adding = Some(Adding::Hosted);
+            this.yard_name
+                .update(cx, |line, cx| line.set_text("trial", cx));
+            this.address
+                .update(cx, |line, cx| line.set_text("https://my.yardr.dev", cx));
+            this.email
+                .update(cx, |line, cx| line.set_text("jo@example.net", cx));
+            this.password
+                .update(cx, |line, cx| line.set_text("joes-password", cx));
+        }
         // The setup shot is step 2 of setting up a yard here, posed: no
         // yard answers, and the first run stands at the yard's form. A
         // debug build's alone, as above.
@@ -1354,6 +1381,12 @@ impl Footplate {
         let socket = field("/Users/plantime/.yardr/yard.sock", cx);
         let address = field("https://mac.example.net", cx);
         let code = field("K7QM-2XPD", cx);
+        let email = field("jo@example.net", cx);
+        // The password shows marks, as a secret ask's field does: what is
+        // typed is in no draft and with no ask's words.
+        let password = cx.new(Line::masked);
+        cx.subscribe(&password, |this, _, _: &Submitted, cx| this.submit_yard(cx))
+            .detach();
         // Enter in the web view's address keeps it: a note's pages open
         // through it.
         let view = cx.new(|cx| {
@@ -1531,8 +1564,11 @@ impl Footplate {
             socket,
             address,
             code,
+            email,
+            password,
             adding: None,
             pairing: false,
+            signing_in: false,
             yard_said: None,
             view,
             view_said: None,
@@ -2097,10 +2133,14 @@ impl Footplate {
         let opened = self.settings.opened();
         match (self.env.address(&self.settings), &self.said) {
             (Some(address), Some(me)) => {
-                format!(
+                let mut told = format!(
                     "the yard {} at {address}, as its device {}",
                     me.yard, me.said_by
-                )
+                );
+                if self.env.yard.is_none() && opened.is_hosted() && !opened.account.is_empty() {
+                    told.push_str(&format!(", signed in as {}", opened.account));
+                }
+                told
             }
             (Some(address), None) => format!("the yard at {address}"),
             (None, _) if opened.socket.is_empty() => "this machine's yard".to_string(),
@@ -2109,9 +2149,9 @@ impl Footplate {
     }
 
     /// The head's line: who the window is for, where the yard said, the
-    /// open yard, and why it is not reached while it is not. The
-    /// switcher's chevron stands beside it where there are yards to
-    /// switch between.
+    /// open yard, the Kratos account a hosted yard is signed in as, and
+    /// why it is not reached while it is not. The switcher's chevron
+    /// stands beside it where there are yards to switch between.
     fn head_line(&self, me: Option<&str>) -> String {
         let yard = self.which_yard_short();
         // Where no yard was ever made, and where the yard is only
@@ -2122,11 +2162,25 @@ impl Footplate {
             true => None,
             false => self.unreached.get(&self.yard).copied(),
         };
-        [me, Some(yard.as_str()), why]
+        let signed = self.signed_in_as();
+        [me, Some(yard.as_str()), signed.as_deref(), why]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ")
+    }
+
+    /// The Kratos account the open yard is signed in as, where it is a
+    /// hosted one that names it: the head's line names it with the yard.
+    fn signed_in_as(&self) -> Option<String> {
+        if self.env.yard.is_some() {
+            return None;
+        }
+        let yard = self.settings.yard(&self.yard)?;
+        match yard.is_hosted() && !yard.account.is_empty() {
+            true => Some(format!("signed in as {}", yard.account)),
+            false => None,
+        }
     }
 
     /// Which yard the head's line names, short: the open one by the name
@@ -5432,19 +5486,24 @@ impl Footplate {
     /// yard: its fields are asked for, with the focus in its name. They
     /// are empty but for the socket of a yard of this machine, where this
     /// run's stands: the path to change for another home's yard.
-    fn add_yard(&mut self, far: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pairing || self.env.yard.is_some() {
+    fn add_yard(&mut self, adding: Adding, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
             return;
         }
-        self.adding = Some(match far {
-            true => Adding::Far,
-            false => Adding::Near,
-        });
+        let near = adding == Adding::Near;
+        self.adding = Some(adding);
         self.yard_said = None;
-        for field in [&self.yard_name, &self.socket, &self.address, &self.code] {
+        for field in [
+            &self.yard_name,
+            &self.socket,
+            &self.address,
+            &self.code,
+            &self.email,
+            &self.password,
+        ] {
             field.update(cx, |line, cx| line.set_text("", cx));
         }
-        if !far {
+        if near {
             let socket = self.env.socket.to_string_lossy().into_owned();
             self.socket
                 .update(cx, |line, cx| line.set_text(&socket, cx));
@@ -5457,7 +5516,7 @@ impl Footplate {
     /// settings, with a code to type for that yard's address. From where a
     /// yard said this device is not let in, it is the open one.
     fn pair_again(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pairing {
+        if self.pairing || self.signing_in {
             return;
         }
         if !self.settings_open {
@@ -5470,12 +5529,40 @@ impl Footplate {
         cx.notify();
     }
 
+    /// The hosted yard called `name` is to be signed in again: the
+    /// settings, with the Kratos account's email and password to type for
+    /// that yard's address. From where the edge no longer knows the
+    /// session, it is the open one. The email stands filled where the yard
+    /// names its account.
+    fn sign_in_again(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
+            return;
+        }
+        if !self.settings_open {
+            self.toggle_settings(window, cx);
+        }
+        self.adding = Some(Adding::SignInAgain(name.to_string()));
+        self.yard_said = None;
+        let account = self
+            .settings
+            .yard(name)
+            .map(|yard| yard.account.clone())
+            .unwrap_or_default();
+        self.email
+            .update(cx, |line, cx| line.set_text(&account, cx));
+        self.password.update(cx, |line, cx| line.set_text("", cx));
+        window.focus(&self.email.focus_handle(cx));
+        cx.notify();
+    }
+
     /// Enter in a field of a yard, and the button under them: the yard of
-    /// this machine is added, or the code goes to the yard at the address.
+    /// this machine is added, the code goes to the yard at the address, or
+    /// the Kratos account is signed in at the edge's origin.
     fn submit_yard(&mut self, cx: &mut Context<Self>) {
         match self.adding {
             Some(Adding::Near) => self.add_near(cx),
             Some(Adding::Far) | Some(Adding::Again(_)) => self.pair(cx),
+            Some(Adding::Hosted) | Some(Adding::SignInAgain(_)) => self.sign_in(cx),
             None => {}
         }
     }
@@ -5483,7 +5570,7 @@ impl Footplate {
     /// Adds the yard of this machine that is typed, and opens it. What
     /// keeps it out of the list is said, and nothing changed.
     fn add_near(&mut self, cx: &mut Context<Self>) {
-        if self.pairing {
+        if self.pairing || self.signing_in {
             return;
         }
         let name = self.yard_name.read(cx).text().trim().to_string();
@@ -5510,7 +5597,7 @@ impl Footplate {
     /// and so is a token file that cannot be written: a code is used up by
     /// the yard it is sent to.
     fn pair(&mut self, cx: &mut Context<Self>) {
-        if self.pairing {
+        if self.pairing || self.signing_in {
             return;
         }
         let Some(adding) = self.adding.clone() else {
@@ -5522,7 +5609,7 @@ impl Footplate {
         // The yard's address, the code, the file its token goes in, and
         // the settings once it is paired.
         let asked = match (&self.env.yard, &adding) {
-            (_, Adding::Near) => return,
+            (_, Adding::Near) | (_, Adding::Hosted) | (_, Adding::SignInAgain(_)) => return,
             // The environment's yard is the one there is, and its token's
             // file the environment's.
             (Some(address), _) => self
@@ -5657,7 +5744,9 @@ impl Footplate {
                                 .settings
                                 .yard(name)
                                 .map(|_| this.settings.clone().opening(name)),
-                            (None, Adding::Near) => None,
+                            (None, Adding::Near)
+                            | (None, Adding::Hosted)
+                            | (None, Adding::SignInAgain(_)) => None,
                         };
                         if let Some(settings) = next {
                             this.set(settings, cx);
@@ -5675,6 +5764,213 @@ impl Footplate {
                         }
                     }
                     Err(why) => this.yard_said = Some(why),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Signs the Kratos account in for a hosted yard: one that is added,
+    /// at the address that is typed, or one of the list whose session is
+    /// signed in again. The session goes into that yard's own file and no
+    /// other's, and the account stands with the yard. What keeps a yard
+    /// out of the list is said before anything is sent. A yard that is
+    /// added is paired next: the code's fields stand open with what the
+    /// sign-in said. The password is sent and then stands nowhere: not in
+    /// a field, a file or a setting.
+    fn sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.pairing || self.signing_in {
+            return;
+        }
+        let Some(adding) = self.adding.clone() else {
+            return;
+        };
+        cx.notify();
+        let kept = self.kept.clone();
+        // The yard's name and address, the file its session goes in, and
+        // the settings once it is signed in.
+        let asked = match (&self.env.yard, &adding) {
+            (_, Adding::Near) | (_, Adding::Far) | (_, Adding::Again(_)) => return,
+            // The environment's yard is reached direct, and is signed in
+            // nowhere: its fields are never asked for.
+            (Some(_), _) => return,
+            (None, Adding::SignInAgain(name)) => {
+                let listed = match self.settings.yard(name) {
+                    Some(listed) if listed.is_hosted() => listed.clone(),
+                    _ => {
+                        self.yard_said = Some(format!(
+                            "The yard {name} is no longer a hosted yard of the list."
+                        ));
+                        return;
+                    }
+                };
+                self.env
+                    .session_of(&self.settings, name, kept.as_deref())
+                    .and_then(|file| {
+                        file.map(|file| (listed.address.clone(), file, self.settings.clone()))
+                            .ok_or_else(|| {
+                                format!("The yard {name} is no longer a hosted yard of the list.")
+                            })
+                    })
+            }
+            (None, Adding::Hosted) => {
+                let address = self.address.read(cx).text().trim().to_string();
+                // Called by its address's host where no name is typed.
+                let name = match self.yard_name.read(cx).text().trim() {
+                    "" => settings::host_of(&address),
+                    name => name.to_string(),
+                };
+                let token_file = self.settings.token_name(&name, kept.as_deref());
+                let session_file = self.settings.session_name(&name, kept.as_deref());
+                let yard = settings::Yard::hosted(&name, &address, &token_file, &session_file);
+                let settings = self.settings.clone();
+                settings
+                    .with_yard(None, yard, kept.as_deref())
+                    .and_then(|settings| {
+                        let file = yard::token_path(&session_file, kept.as_deref())?;
+                        Ok((address, file, settings.opening(&name)))
+                    })
+            }
+        };
+        let parsed =
+            asked.and_then(|(text, file, settings)| Ok((Address::parse(&text)?, file, settings)));
+        let (address, file, settings) = match parsed {
+            Ok(asked) => asked,
+            Err(why) => {
+                self.yard_said = Some(why);
+                return;
+            }
+        };
+        let email = self.email.read(cx).text().trim().to_string();
+        if email.is_empty() {
+            self.yard_said =
+                Some("An email is wanted: the Kratos account to sign in as.".to_string());
+            return;
+        }
+        let password = self.password.read(cx).text().to_string();
+        if password.is_empty() {
+            self.yard_said = Some("A password is wanted: the Kratos account's.".to_string());
+            return;
+        }
+        self.signing_in = true;
+        self.yard_said = None;
+        cx.spawn(async move |this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move {
+                    let signed =
+                        api::sign_in(&address, &email, &password).map_err(|err| err.to_string())?;
+                    // The session goes from the sign-in's answer into its
+                    // file with the address it was signed in at, and
+                    // nowhere else. The password bought nothing that is
+                    // lost: where the file cannot be written, signing in
+                    // again is the whole of it.
+                    yard::keep_session(&file, &signed.session, &address).map_err(|err| {
+                        format!(
+                            "Signed in as {}, but {} could not be written ({err}). Sign in again.",
+                            signed.account,
+                            file.display()
+                        )
+                    })?;
+                    Ok::<_, String>(signed.account)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.signing_in = false;
+                cx.notify();
+                // The password is sent: it stands in no field any longer,
+                // whatever the sign-in came to.
+                this.password.update(cx, |line, cx| line.set_text("", cx));
+                let account = match answer {
+                    Ok(account) => account,
+                    Err(why) => {
+                        this.yard_said = Some(why);
+                        return;
+                    }
+                };
+                this.email.update(cx, |line, cx| line.set_text("", cx));
+                match &adding {
+                    Adding::Hosted => {
+                        // The account stands with the added yard, and the
+                        // road goes on to pairing: the code's fields stand
+                        // open with what the sign-in said. Ordinary
+                        // settings may have changed while its answer was
+                        // away, as with a pairing's.
+                        let next = settings
+                            .yard(&settings.opened().name)
+                            .cloned()
+                            .and_then(|mut yard| {
+                                yard.account = account.clone();
+                                let name = yard.name.clone();
+                                this.settings
+                                    .clone()
+                                    .with_yard(None, yard, this.kept.as_deref())
+                                    .ok()
+                                    .map(|settings| (settings.opening(&name), name))
+                            });
+                        match next {
+                            Some((settings, name)) => {
+                                this.set(settings, cx);
+                                this.reopen(cx);
+                                this.adding = Some(Adding::Again(name));
+                                this.yard_said = Some(format!(
+                                    "Signed in as {account}: now pair this device with the code from the ready page."
+                                ));
+                                let focus = this.code.focus_handle(cx);
+                                let handle = this.handle;
+                                // Afterwards: the window is not to be had
+                                // while the sign-in's answer is still on
+                                // its way.
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, _| {
+                                        window.focus(&focus)
+                                    });
+                                });
+                            }
+                            None => {
+                                this.yard_said = Some(
+                                    "Signed in, but its settings entry is no longer there. Add the yard again."
+                                        .to_string(),
+                                );
+                                this.shut_adding(cx);
+                            }
+                        }
+                    }
+                    Adding::SignInAgain(name) => {
+                        let next = this
+                            .settings
+                            .yard(name)
+                            .cloned()
+                            .and_then(|mut yard| match yard.is_hosted() {
+                                true => {
+                                    yard.account = account.clone();
+                                    this.settings
+                                        .clone()
+                                        .with_yard(Some(name), yard, this.kept.as_deref())
+                                        .ok()
+                                        .map(|settings| settings.opening(name))
+                                }
+                                false => None,
+                            });
+                        match next {
+                            Some(settings) => {
+                                this.yard_said = Some(format!("Signed in as {account}."));
+                                this.shut_adding(cx);
+                                this.set(settings, cx);
+                                // The session it was opened with is not
+                                // the edge's any more: the yard is opened
+                                // with the new one.
+                                this.reopen_anew(Some(name), cx);
+                            }
+                            None => {
+                                this.yard_said = Some(format!(
+                                    "Signed in, but the yard {name} is no longer a hosted yard of the list. Add it again."
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             })
             .ok();
@@ -5706,7 +6002,7 @@ impl Footplate {
     /// device is removed at the yard: taking it off here does not. Where
     /// it was the open one, the first of the list is shown.
     fn remove_yard(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.pairing || self.env.yard.is_some() {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
             return;
         }
         // Who the device is there is what the yard said when it was read.
@@ -5728,7 +6024,7 @@ impl Footplate {
             said.push_str(&sessions);
         }
         self.yard_said = Some(said);
-        if self.adding == Some(Adding::Again(name.to_string())) {
+        if matches!(&self.adding, Some(Adding::Again(at) | Adding::SignInAgain(at)) if at == name) {
             self.shut_adding(cx);
         }
         self.set(settings, cx);
@@ -6090,6 +6386,9 @@ impl Footplate {
                 for listed in &self.settings.yards {
                     let name = listed.name.clone();
                     let reach = match (listed.is_far(), listed.socket.is_empty()) {
+                        (true, _) if listed.is_hosted() && !listed.account.is_empty() => {
+                            format!("{} · signed in as {}", listed.address, listed.account)
+                        }
                         (true, _) => listed.address.clone(),
                         (false, true) => "by this run's socket".to_string(),
                         (false, false) => listed.socket.clone(),
@@ -6135,6 +6434,13 @@ impl Footplate {
                             }
                         })));
                     }
+                    if listed.is_hosted() {
+                        row =
+                            row.child(button("sign in", "sign in again").on_click(cx.listener({
+                                let name = name.clone();
+                                move |this, _, window, cx| this.sign_in_again(&name, window, cx)
+                            })));
+                    }
                     row = row.child(button("remove", "remove").on_click(cx.listener({
                         let name = name.clone();
                         move |this, _, _, cx| this.remove_yard(&name, cx)
@@ -6153,7 +6459,7 @@ impl Footplate {
                                 .debug_selector(|| "add near".to_string())
                                 .when(self.adding == Some(Adding::Near), |el| el.bg(palette.open))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_yard(false, window, cx)
+                                    this.add_yard(Adding::Near, window, cx)
                                 })),
                         )
                         .child(
@@ -6162,7 +6468,18 @@ impl Footplate {
                                 .debug_selector(|| "add far".to_string())
                                 .when(self.adding == Some(Adding::Far), |el| el.bg(palette.open))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_yard(true, window, cx)
+                                    this.add_yard(Adding::Far, window, cx)
+                                })),
+                        )
+                        .child(
+                            small_button("add a hosted yard".to_string(), palette)
+                                .id("add hosted")
+                                .debug_selector(|| "add hosted".to_string())
+                                .when(self.adding == Some(Adding::Hosted), |el| {
+                                    el.bg(palette.open)
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_yard(Adding::Hosted, window, cx)
                                 })),
                         ),
                 );
@@ -6595,18 +6912,23 @@ impl Footplate {
                 .child(text)
         };
         let mut asked: Vec<AnyElement> = Vec::new();
-        let submit = |text: &str, cx: &mut Context<Self>| {
+        let busy = self.pairing || self.signing_in;
+        let submit = |text: &str, id: &'static str, cx: &mut Context<Self>| {
             div().flex().child(
                 small_button(text.to_string(), palette)
-                    .id("yard pair")
-                    .debug_selector(|| "yard pair".to_string())
-                    .when(self.pairing, |el| el.opacity(0.5))
+                    .id(id)
+                    .debug_selector(move || id.to_string())
+                    .when(busy, |el| el.opacity(0.5))
                     .on_click(cx.listener(|this, _, _, cx| this.submit_yard(cx))),
             )
         };
         let pair = match self.pairing {
             true => "asking the yard…",
             false => "pair (enter)",
+        };
+        let sign = match self.signing_in {
+            true => "signing in…",
+            false => "sign in (enter)",
         };
         const OPERATOR: &str = "The yard's operator opens a pairing for this device and gives you the address and the code: yardr user device pair <user> <device>. A code is for one yard, and is used up there.";
         // What came of the last change stands directly under the button,
@@ -6620,7 +6942,7 @@ impl Footplate {
                 asked.extend([
                     typed("name", &self.yard_name, cx).into_any_element(),
                     typed("socket", &self.socket, cx).into_any_element(),
-                    submit("add (enter)", cx).into_any_element(),
+                    submit("add (enter)", "yard pair", cx).into_any_element(),
                 ]);
                 help = Some(
                     faint(
@@ -6635,7 +6957,7 @@ impl Footplate {
                     typed("name", &self.yard_name, cx).into_any_element(),
                     typed("address", &self.address, cx).into_any_element(),
                     typed("code", &self.code, cx).into_any_element(),
-                    submit(pair, cx).into_any_element(),
+                    submit(pair, "yard pair", cx).into_any_element(),
                 ]);
                 help = Some(
                     faint(format!(
@@ -6669,9 +6991,55 @@ impl Footplate {
                         .child(format!("a code for {whose}, at {address}"))
                         .into_any_element(),
                     typed("code", &self.code, cx).into_any_element(),
-                    submit(pair, cx).into_any_element(),
+                    submit(pair, "yard pair", cx).into_any_element(),
                 ]);
                 help = Some(faint(format!("{OPERATOR} {token}")).into_any_element());
+            }
+            Some(Adding::Hosted) => {
+                asked.extend([
+                    typed("name", &self.yard_name, cx).into_any_element(),
+                    typed("address", &self.address, cx).into_any_element(),
+                    typed("email", &self.email, cx).into_any_element(),
+                    typed("password", &self.password, cx).into_any_element(),
+                    submit(sign, "yard sign in", cx).into_any_element(),
+                ]);
+                help = Some(
+                    faint(
+                        "The edge's one origin, as the ready page shows it, and the Kratos account's email and password. Signing in keeps the session in a file of this yard's own beside the settings, for you alone, and never with the settings; pairing the device comes next, with the code from the ready page."
+                            .to_string(),
+                    )
+                    .into_any_element(),
+                );
+            }
+            Some(Adding::SignInAgain(name)) => {
+                let listed = self.settings.yard(name);
+                let address = listed.map(|yard| yard.address.clone()).unwrap_or_default();
+                let session = match self
+                    .env
+                    .session_of(&self.settings, name, self.kept.as_deref())
+                {
+                    Ok(Some(file)) => format!(
+                        "The session is kept in {}, for you alone, and never with the settings.",
+                        file.display()
+                    ),
+                    Ok(None) => format!("The yard {name} is no hosted yard."),
+                    Err(why) => why,
+                };
+                asked.extend([
+                    div()
+                        .debug_selector(|| "yard sign in for".to_string())
+                        .child(format!("a sign-in for {name}, at {address}"))
+                        .into_any_element(),
+                    typed("email", &self.email, cx).into_any_element(),
+                    typed("password", &self.password, cx).into_any_element(),
+                    submit(sign, "yard sign in", cx).into_any_element(),
+                ]);
+                help = Some(
+                    faint(format!(
+                        "The Kratos account's email and password. {session}"
+                    ))
+                    .into_any_element(),
+                );
             }
         }
         if let Some(said) = &self.yard_said {
@@ -7136,6 +7504,7 @@ impl Footplate {
                 let ways = [
                     ("way near", "open a yard on this machine", Adding::Near),
                     ("way far", "pair with a yard at an address", Adding::Far),
+                    ("way hosted", "open a hosted yard", Adding::Hosted),
                 ];
                 el.child(
                     div()
@@ -7164,13 +7533,14 @@ impl Footplate {
                                     )
                                 }))
                                 .children(ways.map(|(id, text, adding)| {
-                                    let far = adding == Adding::Far;
                                     small_button(text.to_string(), palette)
                                         .id(id)
                                         .debug_selector(move || id.to_string())
-                                        .when(self.adding == Some(adding), |el| el.bg(palette.open))
+                                        .when(self.adding == Some(adding.clone()), |el| {
+                                            el.bg(palette.open)
+                                        })
                                         .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.add_yard(far, window, cx)
+                                            this.add_yard(adding.clone(), window, cx)
                                         }))
                                 })),
                         )
@@ -7193,6 +7563,28 @@ impl Footplate {
                                     this.pair_again(None, window, cx)
                                 }),
                             ),
+                    )
+                },
+            )
+            // A hosted yard that is away: its session can be signed in
+            // again, which is what helps when the edge no longer knows it.
+            // The one yard the environment names is reached direct, and is
+            // signed in nowhere.
+            .when(
+                self.env.yard.is_none()
+                    && self
+                        .settings
+                        .yard(&self.yard)
+                        .is_some_and(|yard| yard.is_hosted()),
+                |el| {
+                    el.child(
+                        small_button("sign in again".to_string(), palette)
+                            .id("sign in again")
+                            .debug_selector(|| "sign in again".to_string())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let name = this.yard.clone();
+                                this.sign_in_again(&name, window, cx)
+                            })),
                     )
                 },
             )
@@ -15731,6 +16123,25 @@ mod tests {
         });
     }
 
+    /// Puts a hosted yard's name, its origin and a sign-in's email and
+    /// password where they are typed.
+    fn type_sign_in(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        name: &str,
+        address: &str,
+        email: &str,
+        password: &str,
+    ) {
+        view.update(cx, |v, cx| {
+            v.yard_name.update(cx, |line, cx| line.set_text(name, cx));
+            v.address.update(cx, |line, cx| line.set_text(address, cx));
+            v.email.update(cx, |line, cx| line.set_text(email, cx));
+            v.password
+                .update(cx, |line, cx| line.set_text(password, cx));
+        });
+    }
+
     /// What came of the last change to the yards.
     fn yard_said(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.yard_said.clone().unwrap_or_default())
@@ -15854,7 +16265,7 @@ mod tests {
             PAIRING_GIVES,
             "A paired yard is called with this device's own token, so your picks and approvals there count as yours, where over a peer link you only see what the link carries and an approval never crosses."
         );
-        assert!(drawn(cx, "add near") && drawn(cx, "add far"));
+        assert!(drawn(cx, "add near") && drawn(cx, "add far") && drawn(cx, "add hosted"));
         assert!(!drawn(cx, "yard pair"));
         click_on(cx, "add far");
         assert!(drawn(cx, "yard name") && drawn(cx, "yard address") && drawn(cx, "yard code"));
@@ -16873,7 +17284,7 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         assert!(drawn(cx, "yard again"));
         view.update_in(cx, |v, window, cx| {
-            v.add_yard(true, window, cx);
+            v.add_yard(Adding::Far, window, cx);
             v.remove_yard("far", cx);
         });
         assert_eq!(view.read_with(cx, |v, _| v.adding.clone()), None);
@@ -17366,6 +17777,255 @@ mod tests {
         assert_eq!(mode_of(&token), 0o600);
     }
 
+    /// From no yard, the hosted road ends in the yard's conversations:
+    /// the fourth way signs the Kratos account in, the session is kept
+    /// as the device's is, and the pair-by-code road comes next, with
+    /// the signed-in account under the yard's name. No terminal, and no
+    /// pasted token anywhere.
+    #[gpui::test]
+    fn opening_a_hosted_yard_signs_in_then_pairs_and_shows_its_conversations(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router};
+
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        // A session nobody holds: the only one that works is minted by
+        // signing in.
+        let edge = Router::start(&far, "kratos-dev-other");
+        let file = dir.path().join("footplate/settings.json");
+        let session = dir.path().join("footplate/yard-south.session");
+        let token = dir.path().join("footplate/yard-south.token");
+        let (view, cx) = no_yard(dir.path(), cx);
+
+        // The fourth way, with the origin and the account's email and
+        // password to type.
+        click_on(cx, "way hosted");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Hosted)
+        );
+        assert!(
+            drawn(cx, "yard name")
+                && drawn(cx, "yard address")
+                && drawn(cx, "yard email")
+                && drawn(cx, "yard password")
+                && drawn(cx, "yard sign in")
+        );
+        // An email and a password are wanted, before anything is sent.
+        type_sign_in(&view, cx, "south", edge.address(), "", "");
+        cx.simulate_keystrokes("enter");
+        assert!(yard_said(&view, cx).starts_with("An email is wanted:"));
+        type_sign_in(&view, cx, "south", edge.address(), KRATOS_EMAIL, "");
+        click_on(cx, "yard sign in");
+        assert!(yard_said(&view, cx).starts_with("A password is wanted:"));
+        assert!(!file.exists() && !session.exists());
+
+        // Signing in keeps the session in a file of the yard's own, for
+        // its user alone, and the road goes on to pairing the device.
+        type_sign_in(
+            &view,
+            cx,
+            "south",
+            edge.address(),
+            KRATOS_EMAIL,
+            KRATOS_PASSWORD,
+        );
+        click_on(cx, "yard sign in");
+        wait(cx, "the sign-in", |cx| {
+            yard_said(&view, cx).starts_with(&format!("Signed in as {KRATOS_EMAIL}: now pair"))
+        });
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Again("south".to_string()))
+        );
+        assert_eq!(open_yard(&view, cx), "south");
+        let minted = yard::read_session(&session).unwrap();
+        assert!(minted.starts_with("kratos-test-session-"), "{minted}");
+        assert_eq!(mode_of(&session), 0o600);
+        assert_eq!(
+            yard::session_for(&session, &api::Address::parse(edge.address()).unwrap()).unwrap(),
+            minted
+        );
+        // The password stands nowhere: not in a field, a file or a
+        // setting. The session is in its file alone.
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.password.read(cx).text().to_string(), "");
+            assert_eq!(v.email.read(cx).text().to_string(), "");
+        });
+        let kept = std::fs::read_to_string(&file).unwrap();
+        assert!(kept.contains(&format!("\"account\": \"{KRATOS_EMAIL}\"")));
+        for held in [&kept, &std::fs::read_to_string(&session).unwrap()] {
+            assert!(!held.contains(KRATOS_PASSWORD), "{held}");
+        }
+        assert!(!kept.contains(&minted));
+        let south = Settings::read(&file).yard("south").unwrap().clone();
+        assert!(south.is_hosted());
+        assert_eq!(south.account, KRATOS_EMAIL);
+
+        // The code from the ready page pairs the device through the edge,
+        // with the session beside it: the yard's conversations, with the
+        // signed-in account under the yard's name.
+        far.pair("K7QM-2XPD");
+        view.update(cx, |v, cx| {
+            v.code.update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
+        });
+        click_on(cx, "yard pair");
+        wait(cx, "the yard at the origin", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(mode_of(&token), 0o600);
+        assert_eq!(
+            head_line(&view, cx),
+            format!("jo · south · signed in as {KRATOS_EMAIL}")
+        );
+        assert_eq!(
+            which_yard(&view, cx),
+            format!(
+                "the yard south at {}, as its device laptop, signed in as {KRATOS_EMAIL}",
+                edge.address()
+            )
+        );
+    }
+
+    /// A wrong password fails the sign-in and names it: the sign-in, never
+    /// the pairing, with what to do. Nothing is kept, and the pairing
+    /// stays open.
+    #[gpui::test]
+    fn a_wrong_password_says_the_sign_in_failed_and_pairs_nothing(cx: &mut TestAppContext) {
+        use crate::fake::{KRATOS_EMAIL, Router};
+
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, "kratos-dev-other");
+        let file = dir.path().join("footplate/settings.json");
+        let (view, cx) = no_yard(dir.path(), cx);
+        click_on(cx, "way hosted");
+
+        far.pair("K7QM-2XPD");
+        type_sign_in(
+            &view,
+            cx,
+            "south",
+            edge.address(),
+            KRATOS_EMAIL,
+            "not-the-password",
+        );
+        click_on(cx, "yard sign in");
+        wait(cx, "that the sign-in failed", |cx| {
+            yard_said(&view, cx).starts_with("The sign-in failed: ")
+        });
+        let said = yard_said(&view, cx);
+        assert!(said.contains("provided credentials are invalid"), "{said}");
+        assert!(
+            said.ends_with("Check the email and password, and sign in again."),
+            "{said}"
+        );
+        assert!(!said.contains("not-the-password"), "{said}");
+        // Nothing changed: the fields stand with the email, the password
+        // stands nowhere, and the pairing is still open.
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Hosted)
+        );
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.email.read(cx).text().to_string(), KRATOS_EMAIL);
+            assert_eq!(v.password.read(cx).text().to_string(), "");
+        });
+        assert!(!file.exists());
+        assert!(far.pairing_open());
+        assert_eq!(far.devices(), [crate::fake::TOKEN]);
+    }
+
+    /// A hosted yard whose session the edge no longer knows is signed in
+    /// again from where it says so: the session file is renewed, and the
+    /// yard opens with the new one.
+    #[gpui::test]
+    fn signing_in_again_renews_the_session_and_reopens_the_yard(cx: &mut TestAppContext) {
+        use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router, SESSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        let file = dir.path().join("footplate/settings.json");
+        let session = dir.path().join("footplate/yard-south.session");
+        let mut south = settings::Yard::hosted(
+            "south",
+            edge.address(),
+            "yard-south.token",
+            "yard-south.session",
+        );
+        south.account = KRATOS_EMAIL.to_string();
+        Settings::default()
+            .with_yard(None, south, Some(&file))
+            .unwrap()
+            .opening("south")
+            .write(&file)
+            .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-south.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        yard::keep_session_token(&session, SESSION).unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the hosted yard's conversations", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(
+            head_line(&view, cx),
+            format!("jo · south · signed in as {KRATOS_EMAIL}")
+        );
+
+        // The session is revoked at the edge: signing in again is
+        // offered where the yard says so. (That pairing again is not is
+        // the session-out test's: this yard passes through trying first,
+        // whose frame the test still sees.)
+        edge.revoke(SESSION);
+        wait(cx, "that the session is not signed in", |cx| {
+            view.read_with(cx, |v, _| v.away == Away::SignedOut)
+        });
+        assert!(drawn(cx, "sign in again"));
+        // The away screen's button stands, but its center click lands on
+        // the way above it in a window this short, as the pair-again
+        // button does: the settings' row signs in instead.
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "yard sign in south");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::SignInAgain("south".to_string()))
+        );
+        assert!(drawn(cx, "yard sign in for") && drawn(cx, "yard sign in"));
+        // The email stands filled with the yard's account; the password is
+        // typed.
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.email.read(cx).text().to_string()),
+            KRATOS_EMAIL
+        );
+        view.update(cx, |v, cx| {
+            v.password
+                .update(cx, |line, cx| line.set_text(KRATOS_PASSWORD, cx));
+        });
+        click_on(cx, "yard sign in");
+        wait(cx, "the yard again", |cx| {
+            texts(&view, cx) == ["From afar."] && view.read_with(cx, |v, _| v.down.is_none())
+        });
+        assert!(yard_said(&view, cx).starts_with(&format!("Signed in as {KRATOS_EMAIL}.")));
+        let renewed = yard::read_session(&session).unwrap();
+        assert_ne!(renewed, SESSION);
+        assert!(renewed.starts_with("kratos-test-session-"), "{renewed}");
+        assert_eq!(mode_of(&session), 0o600);
+    }
+
     /// A yard that answered and goes away keeps its view: the sidebar,
     /// the decisions and the open conversation stay as last seen, the
     /// head's status row is the one quiet line, and Send is held with
@@ -17607,7 +18267,7 @@ mod tests {
         assert!(drawn(cx, "away why") && drawn(cx, "settings"));
         assert!(!drawn(cx, "which yard"));
         // Nor a way to another yard: it is the one there is.
-        assert!(!drawn(cx, "way near") && !drawn(cx, "way far"));
+        assert!(!drawn(cx, "way near") && !drawn(cx, "way far") && !drawn(cx, "way hosted"));
         assert!(!drawn(cx, "way here"));
         cx.simulate_keystrokes("secondary-y");
         assert_eq!(switching(&view, cx), None);
@@ -17647,8 +18307,8 @@ mod tests {
         let (view, cx) = no_yard(dir.path(), cx);
         assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
         assert!(drawn(cx, "away why"));
-        // The two ways, and nothing asked until one is taken.
-        assert!(drawn(cx, "way near") && drawn(cx, "way far"));
+        // The ways, and nothing asked until one is taken.
+        assert!(drawn(cx, "way near") && drawn(cx, "way far") && drawn(cx, "way hosted"));
         assert!(!drawn(cx, "yard name") && !drawn(cx, "yard pair"));
         let adding = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
             view.read_with(cx, |v, _| v.adding.clone())
@@ -17872,7 +18532,12 @@ mod tests {
         standin::answers(&program, "doctor", 1, &standin::doctor_bare(&home));
         let (view, cx) = no_yard(dir.path(), cx);
         view.update(cx, |v, _| v.means = means);
-        assert!(drawn(cx, "way here") && drawn(cx, "way near") && drawn(cx, "way far"));
+        assert!(
+            drawn(cx, "way here")
+                && drawn(cx, "way near")
+                && drawn(cx, "way far")
+                && drawn(cx, "way hosted")
+        );
         assert!(!drawn(cx, "setup step"));
 
         // What this needs: doctor's rows, each with how it comes.
@@ -18925,8 +19590,13 @@ mod tests {
         assert!(drawn(cx, "away details"));
         assert!(!drawn(cx, "away details why"));
         assert!(!drawn(cx, "away details place"));
-        // The three ways, setting one up first.
-        assert!(drawn(cx, "way here") && drawn(cx, "way near") && drawn(cx, "way far"));
+        // The four ways, setting one up first.
+        assert!(
+            drawn(cx, "way here")
+                && drawn(cx, "way near")
+                && drawn(cx, "way far")
+                && drawn(cx, "way hosted")
+        );
         let (here, near, far) = (
             bounds_of(cx, "way here"),
             bounds_of(cx, "way near"),
