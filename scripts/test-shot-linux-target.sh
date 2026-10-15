@@ -24,9 +24,12 @@ mkdir -p "$tmp/bin" "$tmp/t1/checkout/scripts" "$tmp/t2/checkout/scripts"
 
 # Two checkouts with the same directory name, as /tmp/a/footplate and
 # /tmp/b/footplate: the script under test runs from each through a link,
-# so each shot derives its own root.
+# so each shot derives its own root. Its container provisioning comes
+# along the same way, since the script sources it beside itself.
 ln -s "$script" "$tmp/t1/checkout/scripts/shot-linux.sh"
 ln -s "$script" "$tmp/t2/checkout/scripts/shot-linux.sh"
+ln -s "$script_dir/linux-container.sh" "$tmp/t1/checkout/scripts/linux-container.sh"
+ln -s "$script_dir/linux-container.sh" "$tmp/t2/checkout/scripts/linux-container.sh"
 
 # The shot script only needs Docker to answer whether a stale container is
 # left and to report a visible window here. Stub it so this checks the real

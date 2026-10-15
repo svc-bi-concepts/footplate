@@ -67,6 +67,7 @@ case "$out" in
 esac
 cd "$(dirname "$0")/.."
 root=$PWD
+. ./scripts/linux-container.sh
 size=${SHOT_SIZE:-1280x800}
 case "$size" in
     *[!0-9x]*|x*|*x|*x*x*)
@@ -122,47 +123,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-have() {
-    docker exec "$name" sh -c "command -v $1" >/dev/null 2>&1
-}
-
-# A container of the name may be left by a killed run: remove it before a
-# new one starts.
-if docker inspect "$name" >/dev/null 2>&1; then
-    docker rm -f "$name" >/dev/null
-fi
-docker run -d --name "$name" --init \
-    -v "$root:/src:ro" \
-    -v "$cargo_vol:/cargo" -v "$target_vol:/target" \
-    -e CARGO_HOME=/cargo -e RUSTUP_HOME=/cargo/rustup \
-    -e CARGO_TARGET_DIR=$target_dir \
-    -e PATH=/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    debian:13 sleep infinity >/dev/null
+# Beyond the build's own packages, which the provisioning brings itself,
+# the shot wants the compositor's (sway, grim, seatd), Vulkan's (the
+# loader, the software driver, vulkaninfo to say which driver answers) and
+# a font, so the window's words are drawn as words and not as boxes.
+platform=""
+cargo_home=/cargo
+extra_bins="sway grim seatd vulkaninfo dbus-run-session"
+extra_pkgs="sway grim seatd mesa-vulkan-drivers libvulkan1 vulkan-tools dbus fonts-dejavu-core"
+linux_provision "$name"
 echo "shot-linux.sh: container $name, volumes $cargo_vol $target_vol" >&2
-
-# The checkout is mounted read-only: cargo reads it and writes the build to
-# the checkout's own directory in the target volume, so a shot never
-# dirties the checkout it shoots.
-# Missing tools are installed: the build's (cc, the libraries gpui builds
-# against), the compositor's (sway, grim, seatd), Vulkan's (the loader, the
-# software driver, vulkaninfo to say which driver answers) and a font, so
-# the window's words are drawn as words and not as boxes.
-if ! have sway || ! have grim || ! have seatd || ! have vulkaninfo \
-        || ! have dbus-run-session || ! have cc \
-        || ! docker exec "$name" test -x /cargo/bin/cargo; then
-    docker exec "$name" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        build-essential curl ca-certificates pkg-config \
-        libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
-        libwayland-dev libxcb1-dev libx11-dev libvulkan-dev \
-        sway grim seatd mesa-vulkan-drivers libvulkan1 vulkan-tools \
-        dbus fonts-dejavu-core >/tmp/apt.log 2>&1 || { tail -n 20 /tmp/apt.log >&2; exit 1; }' >&2
-fi
-if ! docker exec "$name" sh -c 'id shot' >/dev/null 2>&1; then
-    docker exec "$name" useradd -m -s /bin/bash shot
-fi
-if ! have cargo; then
-    docker exec "$name" sh -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable -q' >&2
-fi
 
 # Build trees of checkouts long gone are pruned before building: each costs
 # GBs no shot will warm from. Only trees with nothing written in the last

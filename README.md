@@ -69,6 +69,19 @@ application's [notifications](#notifications) under; it is not notarized,
 so it is for the Mac that built it. The script needs `sips` and `iconutil`, which
 macOS has, and says so on another system.
 
+A release is everything the site carries, built by one script from a clean
+tree whose version is the tag:
+
+    scripts/release.sh v0.4.0 [out-dir]
+
+It builds both macOS targets, bundles each as above and zips the bundles,
+then builds both Linux targets in the shot's Debian container (arm64
+natively, amd64 emulated, which takes a while the first time) and packs
+each binary with README.md, LICENSE and NOTICE, with one `checksums.txt`
+over the four archives. The archives go to out-dir, else to `dist/`. The
+Linux binaries link Debian 13's glibc and loaders, so they run on
+distributions as new as that.
+
 A builder with a bead to prove takes a picture of the window with
 `scripts/shot-linux.sh`, from the worktree, after the last commit:
 

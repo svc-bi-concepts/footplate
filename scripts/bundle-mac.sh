@@ -3,7 +3,9 @@
 # icon's sizes are rendered with sips and packed with iconutil, which no
 # other system has. Run it after `cargo build --release`. The bundle is
 # signed ad hoc and not notarized, and there is no installer: it is for the
-# machine that built it.
+# machine that built it. With two arguments another binary is bundled
+# elsewhere, which the release script uses for each darwin target:
+# `scripts/bundle-mac.sh <binary> <app>`.
 set -e
 
 if [ "$(uname -s)" != Darwin ]; then
@@ -11,10 +13,15 @@ if [ "$(uname -s)" != Darwin ]; then
     exit 1
 fi
 
+if [ $# -ne 0 ] && [ $# -ne 2 ]; then
+    echo "bundle-mac.sh: usage: scripts/bundle-mac.sh [<binary> <app>]" >&2
+    exit 2
+fi
+
 cd "$(dirname "$0")/.."
-binary=target/release/footplate
+binary=${1:-target/release/footplate}
 icon=assets/icon.png
-app=target/Footplate.app
+app=${2:-target/Footplate.app}
 
 if [ ! -x "$binary" ]; then
     echo "bundle-mac.sh: no $binary: run cargo build --release first" >&2
