@@ -179,7 +179,7 @@ docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY
     # state says the yard runs, and none starts at login.
     bin="$scratch/config/footplate/bin"
     mkdir -p "$bin"
-    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor, status and the operator's settings answer canned JSON." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "settings) case \"\$2\" in get) cat \"\$D/settings-get.json\" ;; set) echo '{}' ;; *) echo \"{\\\"error\\\":\\\"a shot takes no settings \$2\\\"}\"; exit 1 ;; esac ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
+    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor, status and settings answer canned JSON." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "settings) case \"\$2\" in get) cat \"\$D/settings-get.json\" ;; set) echo {} ;; *) echo \"{\\\"error\\\":\\\"a shot takes no settings \$2\\\"}\"; exit 1 ;; esac ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
     chmod +x "$bin/yardr"
     printf "%s\n" "v99.0.0" > "$bin/yardr.version"
     printf "%s\n" "{\"yard\": false, \"machine\": []}" > "$bin/doctor.json"
