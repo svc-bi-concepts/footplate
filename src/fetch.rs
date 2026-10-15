@@ -56,7 +56,7 @@ const KEY: &str = "RWSzUPGBbv7MDqH+nnbNmYdOm20UTkuk7eC5e6XuVtYRwZtaEZRlV/WB";
 /// The oldest yardr this footplate takes. A release below it is refused
 /// though its signature is good: every release ever signed stays signed,
 /// and an old one with a known fault must not be what the site hands out.
-const LOWEST: Version = Version(0, 10, 0);
+const LOWEST: Version = Version(0, 11, 0);
 
 /// What says which release is the latest, the one address that does not
 /// change with the version.
@@ -2213,7 +2213,7 @@ mod tests {
         let site = Address::parse(SITE).unwrap();
         assert_eq!(site.to_string(), "https://yardr.dev");
         assert!(PublicKey::from_base64(KEY).is_ok());
-        assert!(LOWEST >= Version(0, 10, 0));
+        assert!(LOWEST >= Version(0, 11, 0));
     }
 
     /// The built-in key is the one releases are signed with, and no typo
