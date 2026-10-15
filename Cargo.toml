@@ -39,6 +39,12 @@ socket2 = "0.6"
 minisign-verify = "0.3"
 sha2 = "0.10"
 flate2 = "1"
+# A dropped zip is unpacked on this machine into its files (draft.rs).
+# Pinned exactly: the crate's API moves between major releases. Read-only,
+# and deflate alone: what the usual tools write is stored or deflated, and
+# an entry in another method is a marked row, not an error. flate2 is in
+# the tree already, with its pure-Rust backend, so this adds no C.
+zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2"] }
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on. So is the number

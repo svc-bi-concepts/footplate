@@ -14,7 +14,7 @@ use gpui::{
     prelude::*, px, relative, rems, rgba, white,
 };
 
-use crate::api::{self, Address, BlobRef, Client};
+use crate::api::{self, Address, BlobFile, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
@@ -200,57 +200,70 @@ fn run_address_of(run_base: &str, web_view: &str) -> Option<api::Address> {
 /// that kept it, if it was one, and why.
 struct Unsent {
     text: String,
-    images: Vec<Attachment>,
+    files: Vec<Attachment>,
     at: Option<u64>,
     why: String,
 }
 
-/// A note that did not go: the words and the pages, to be put back, with
-/// the page that kept it, if it was one, and why.
+/// A note that did not go: the words and the files, to be put back, with
+/// the file that kept it, if it was one, and why.
 struct UnsentNote {
     words: String,
-    pages: Vec<Attachment>,
+    files: Vec<Attachment>,
     at: Option<u64>,
     why: String,
 }
 
-/// Sends a draft as one mail from `me`: `PutBlob` for each image in the
+/// Sends a draft as one mail from `me`: `PutBlob` for each file in the
 /// order attached, then `Mail` with the text and the hashes they answered,
-/// `MailPeer` to one of a linked yard. The cap is asked for first, so that
-/// an image over it is refused in footplate's words and none travels.
-/// Whether the link carries an image is the yard's to say: it refuses the
-/// mail when not, in its words. Answers the images as the yard has them, or
-/// the attachment that kept the mail, if it was one, and why.
+/// each with its base name, `MailPeer` to one of a linked yard. The cap
+/// and the count are asked for first, so that a file over the cap is
+/// refused in footplate's words and none travels, and more than the letter
+/// carries is refused whole. Whether the link carries a file is the yard's
+/// to say: it refuses the mail when not, in its words. Answers the files
+/// as the yard has them, or the attachment that kept the mail, if it was
+/// one, and why.
 fn post(
     client: &Client,
     me: &str,
     target: &Target,
     text: &str,
-    images: &[Attachment],
+    files: &[Attachment],
 ) -> Result<Vec<BlobRef>, (Option<u64>, String)> {
     let said = |err: api::Error| (None, err.to_string());
-    let mut blobs = Vec::with_capacity(images.len());
-    if !images.is_empty() {
-        let cap = client.settings().map_err(said)?.blob_cap();
-        if let Some((image, why)) = images
-            .iter()
-            .find_map(|a| Some((a, model::over_cap(a.bytes.len(), cap)?)))
-        {
-            return Err((Some(image.id), why));
+    let mut blobs = Vec::with_capacity(files.len());
+    if !files.is_empty() {
+        let settings = client.settings().map_err(said)?;
+        if files.len() as u64 > settings.files_cap() {
+            return Err((None, draft::over_count(files.len(), settings.files_cap())));
         }
-        for image in images {
+        let cap = settings.blob_cap();
+        if let Some((file, why)) = files
+            .iter()
+            .find_map(|a| Some((a, model::over_cap_for(&a.bytes, a.bytes.len(), cap)?)))
+        {
+            return Err((Some(file.id), why));
+        }
+        for file in files {
             let blob = client
-                .put_blob(&image.bytes)
-                .map_err(|err| (Some(image.id), err.to_string()))?;
+                .put_blob(&file.bytes)
+                .map_err(|err| (Some(file.id), err.to_string()))?;
             blobs.push(blob);
         }
     }
-    let hashes: Vec<String> = blobs.iter().map(|blob| blob.hash.clone()).collect();
+    let carried: Vec<BlobFile> = files
+        .iter()
+        .zip(&blobs)
+        .map(|(file, blob)| BlobFile {
+            hash: blob.hash.clone(),
+            name: file.name.clone(),
+        })
+        .collect();
     match target {
-        Target::Crew(name) => client.mail(name, text, me, &hashes).map_err(said)?,
+        Target::Crew(name) => client.mail(name, text, me, &carried).map_err(said)?,
         Target::Peer { name, peer } => {
             client
-                .mail_peer(name, peer, text, me, &hashes)
+                .mail_peer(name, peer, text, me, &carried)
                 .map_err(said)?;
         }
     }
@@ -258,41 +271,52 @@ fn post(
 }
 
 /// Sends the words as one note on `bead` from `me`: `PutBlob` for each
-/// page in the order attached, then `AddNote` with the text and the hashes
-/// they answered. The cap is asked for first, so that a page over it is
-/// refused in footplate's words and none travels. A yard from before notes
-/// carried files takes the blobs and refuses the note: that is said as
-/// what it is. Answers the attachment that kept the note, if it was one,
-/// and why.
+/// file in the order attached, then `AddNote` with the text and the hashes
+/// they answered, each with its base name. The cap and the count are asked
+/// for first, so that a file over the cap is refused in footplate's words
+/// and none travels, and more than the note carries is refused whole. A
+/// yard from before notes carried files takes the blobs and refuses the
+/// note: that is said as what it is. Answers the attachment that kept the
+/// note, if it was one, and why.
 fn post_note(
     client: &Client,
     me: &str,
     bead: &str,
     words: &str,
-    pages: &[Attachment],
+    files: &[Attachment],
 ) -> Result<(), (Option<u64>, String)> {
     let said = |err: api::Error| (None, err.to_string());
-    let mut hashes = Vec::with_capacity(pages.len());
-    if !pages.is_empty() {
-        let cap = client.settings().map_err(said)?.blob_cap();
-        if let Some((page, why)) = pages
-            .iter()
-            .find_map(|a| Some((a, model::page_over_cap(a.bytes.len(), cap)?)))
-        {
-            return Err((Some(page.id), why));
+    let mut carried = Vec::with_capacity(files.len());
+    if !files.is_empty() {
+        let settings = client.settings().map_err(said)?;
+        if files.len() as u64 > settings.files_cap() {
+            return Err((
+                None,
+                draft::note_over_count(files.len(), settings.files_cap()),
+            ));
         }
-        for page in pages {
+        let cap = settings.blob_cap();
+        if let Some((file, why)) = files
+            .iter()
+            .find_map(|a| Some((a, model::over_cap_for(&a.bytes, a.bytes.len(), cap)?)))
+        {
+            return Err((Some(file.id), why));
+        }
+        for file in files {
             let blob = client
-                .put_blob(&page.bytes)
-                .map_err(|err| (Some(page.id), err.to_string()))?;
-            hashes.push(blob.hash);
+                .put_blob(&file.bytes)
+                .map_err(|err| (Some(file.id), err.to_string()))?;
+            carried.push(BlobFile {
+                hash: blob.hash,
+                name: file.name.clone(),
+            });
         }
     }
-    client.add_note(bead, words, me, &hashes).map_err(|err| {
+    client.add_note(bead, words, me, &carried).map_err(|err| {
         if model::note_files_too_old(&err) {
             (
                 None,
-                "this yard's yardr is too old for a note with a page".to_string(),
+                "this yard's yardr is too old for a note with a file".to_string(),
             )
         } else {
             said(err)
@@ -1049,12 +1073,12 @@ pub struct Footplate {
     /// open yard's again when theirs is opened, and no call of another
     /// yard can name them.
     kept_words: HashMap<String, HashMap<(String, u64), String>>,
-    /// The pages attached to each ask's note of the open yard, by bead
+    /// The files attached to each ask's note of the open yard, by bead
     /// and ask, in the order they came: what a drop on the open card
     /// leaves for Enter to send with the words.
-    note_pages: HashMap<(String, u64), Vec<Attachment>>,
+    note_files: HashMap<(String, u64), Vec<Attachment>>,
     /// The same of the yards that are not open, by yard.
-    kept_note_pages: HashMap<String, HashMap<(String, u64), Vec<Attachment>>>,
+    kept_note_files: HashMap<String, HashMap<(String, u64), Vec<Attachment>>>,
     /// Why each yard that is not reached is not, in a word or two, by
     /// yard: what its row in the switcher says, of the open one and of
     /// every other. A yard that answers is in it no longer.
@@ -1480,8 +1504,8 @@ impl Footplate {
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
-            note_pages: HashMap::new(),
-            kept_note_pages: HashMap::new(),
+            note_files: HashMap::new(),
+            kept_note_files: HashMap::new(),
             unreached: HashMap::new(),
             places: HashMap::new(),
             returning: None,
@@ -1917,11 +1941,11 @@ impl Footplate {
             self.kept_words.insert(self.yard.clone(), words);
         }
         self.ask_words = self.kept_words.remove(to).unwrap_or_default();
-        let pages = std::mem::take(&mut self.note_pages);
-        if !pages.is_empty() {
-            self.kept_note_pages.insert(self.yard.clone(), pages);
+        let files = std::mem::take(&mut self.note_files);
+        if !files.is_empty() {
+            self.kept_note_files.insert(self.yard.clone(), files);
         }
-        self.note_pages = self.kept_note_pages.remove(to).unwrap_or_default();
+        self.note_files = self.kept_note_files.remove(to).unwrap_or_default();
         self.drafts.turn_to(to);
         // A yard that answered under a way's fields is held as up: it
         // answered, and goes on being followed.
@@ -3506,7 +3530,7 @@ impl Footplate {
         }
         // The draft is empty while the mail is on its way, so that Enter
         // again does not send it again.
-        let images = self.drafts.take(&to);
+        let files = self.drafts.take(&to);
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.notice(String::new(), cx);
         // Whom it was written to, which in the row of a user of this yard
@@ -3519,11 +3543,11 @@ impl Footplate {
         let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
-            move |client, me| match post(client, me, &target, &text, &images) {
-                Ok(blobs) => Ok(images.iter().map(|a| a.id).zip(blobs).collect::<Vec<_>>()),
+            move |client, me| match post(client, me, &target, &text, &files) {
+                Ok(blobs) => Ok(files.iter().map(|a| a.id).zip(blobs).collect::<Vec<_>>()),
                 Err((at, why)) => Err(Unsent {
                     text,
-                    images,
+                    files,
                     at,
                     why,
                 }),
@@ -3564,7 +3588,7 @@ impl Footplate {
     fn unsent(&mut self, yard: &str, to: &str, at: &str, unsent: Unsent, cx: &mut Context<Self>) {
         let open = self.drafts.turn_to(yard);
         let here = open == yard;
-        self.drafts.restore(to, unsent.images);
+        self.drafts.restore(to, unsent.files);
         if let Some(id) = unsent.at {
             self.drafts.refuse(id, &unsent.why);
         }
@@ -3786,8 +3810,8 @@ impl Footplate {
             if words.is_empty() {
                 return self.notice("decline needs words: why you will not decide it".into(), cx);
             }
-            if !self.card_pages(&bead, ask).is_empty() {
-                return self.notice("a decline carries no page: remove it, then send".into(), cx);
+            if !self.card_files(&bead, ask).is_empty() {
+                return self.notice("a decline carries no file: remove it, then send".into(), cx);
             }
             return self.send_decline(bead, ask, words, cx);
         }
@@ -3796,24 +3820,24 @@ impl Footplate {
             .model
             .as_ref()
             .and_then(|m| m.answer_action(&bead, ask, &words));
-        // A page attached to the card's note goes with words alone: an
+        // A file attached to the card's note goes with words alone: an
         // answer carries none, and where the words go nowhere as a note,
-        // the page stays until it is removed.
-        if !self.card_pages(&bead, ask).is_empty() {
+        // the file stays until it is removed.
+        if !self.card_files(&bead, ask).is_empty() {
             return match action {
                 Some(AnswerAction::Note { words }) => {
-                    match draft::note_unsendable(&words, self.card_pages(&bead, ask)) {
+                    match draft::note_unsendable(&words, self.card_files(&bead, ask)) {
                         Some(why) => self.notice(why, cx),
                         None => self.send_note(bead, ask, words, cx),
                     }
                 }
                 Some(AnswerAction::Answer { .. }) => {
-                    self.notice("an answer carries no page: remove it, then send".into(), cx)
+                    self.notice("an answer carries no file: remove it, then send".into(), cx)
                 }
-                None => match draft::note_unsendable(&words, self.card_pages(&bead, ask)) {
+                None => match draft::note_unsendable(&words, self.card_files(&bead, ask)) {
                     Some(why) => self.notice(why, cx),
                     None => self.notice(
-                        "words alone go nowhere on this ask: remove the page, then send".into(),
+                        "words alone go nowhere on this ask: remove the file, then send".into(),
                         cx,
                     ),
                 },
@@ -3872,11 +3896,11 @@ impl Footplate {
     }
 
     /// Words with no option chosen go as a plain note, with the card's
-    /// pages; the ask stays open. What the yard refuses is back in the
-    /// line with its pages, and the page that kept it is marked.
+    /// files; the ask stays open. What the yard refuses is back in the
+    /// line with its files, and the file that kept it is marked.
     fn send_note(&mut self, bead: String, ask: u64, words: String, cx: &mut Context<Self>) {
-        let pages = self
-            .note_pages
+        let files = self
+            .note_files
             .remove(&(bead.clone(), ask))
             .unwrap_or_default();
         self.line.update(cx, |line, cx| line.set_text("", cx));
@@ -3887,11 +3911,11 @@ impl Footplate {
         let identity = self.yard_identity(&yard);
         self.ask_through(
             cx,
-            move |client, me| match post_note(client, me, &call_bead, &call_words, &pages) {
+            move |client, me| match post_note(client, me, &call_bead, &call_words, &files) {
                 Ok(()) => Ok(()),
                 Err((at, why)) => Err(UnsentNote {
                     words: call_words,
-                    pages,
+                    files,
                     at,
                     why,
                 }),
@@ -3912,16 +3936,16 @@ impl Footplate {
         );
     }
 
-    /// The pages attached to the ask's note, in the order they came.
-    fn card_pages(&self, bead: &str, ask: u64) -> &[Attachment] {
-        self.note_pages
+    /// The files attached to the ask's note, in the order they came.
+    fn card_files(&self, bead: &str, ask: u64) -> &[Attachment] {
+        self.note_files
             .get(&(bead.to_string(), ask))
             .map_or(&[], Vec::as_slice)
     }
 
     /// Words for the ask `at` of `yard` that the yard did not take are
-    /// back with what was typed since, and their pages before what was
-    /// attached since, the page that kept them marked: in the line while
+    /// back with what was typed since, and their files before what was
+    /// attached since, the file that kept them marked: in the line while
     /// that yard is still the open one, as it was opened then, and else
     /// with the ask they were written for, in its own yard.
     fn note_back(
@@ -3933,16 +3957,16 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) {
         let kept = match yard == self.yard {
-            true => &mut self.note_pages,
-            false => self.kept_note_pages.entry(yard.to_string()).or_default(),
+            true => &mut self.note_files,
+            false => self.kept_note_files.entry(yard.to_string()).or_default(),
         };
-        let pages = kept.entry(at.clone()).or_default();
-        let mut back = unsent.pages;
-        back.append(pages);
-        *pages = back;
+        let files = kept.entry(at.clone()).or_default();
+        let mut back = unsent.files;
+        back.append(files);
+        *files = back;
         if let Some(id) = unsent.at {
-            for page in pages.iter_mut().filter(|a| a.id == id) {
-                page.refused = Some(unsent.why.clone());
+            for file in files.iter_mut().filter(|a| a.id == id) {
+                file.refused = Some(unsent.why.clone());
             }
         }
         self.words_back(
@@ -4031,27 +4055,37 @@ impl Footplate {
         id
     }
 
-    /// Attaches an image that was pasted to the draft of the open
-    /// conversation: Enter sends it. One that cannot go is marked at once,
-    /// and one over the yard's cap as soon as the yard said its cap.
+    /// Attaches a file that was pasted to the draft of the open
+    /// conversation: Enter sends it. One over the yard's cap or past its
+    /// count is marked as soon as the yard said them.
     fn paste(&mut self, image: &Image, cx: &mut Context<Self>) {
         let Some((with, _)) = self.open() else {
             return;
         };
         let found = draft::pasted(image.bytes().to_vec());
-        let (bytes, marked) = (found.bytes.len(), found.refused.is_some());
+        let bytes = found.bytes.clone();
+        let name = found.name.clone();
         let id = self.attach(&with, found, cx);
-        if marked {
-            return;
-        }
         self.ask(
             cx,
-            |client, _| client.settings().map(|settings| settings.blob_cap()),
-            move |this, cap, cx| {
-                // A yard that does not say its cap now is asked at Enter.
-                if let Ok(cap) = cap
-                    && let Some(why) = model::over_cap(bytes, cap)
-                {
+            |client, _| client.settings().ok(),
+            move |this, settings, cx| {
+                // A yard that says nothing now is asked at Enter.
+                let Some(settings) = settings else {
+                    return;
+                };
+                if let Some(why) = model::over_cap_for(&bytes, bytes.len(), settings.blob_cap()) {
+                    this.drafts.refuse(id, &why);
+                    cx.notify();
+                    return;
+                }
+                let attached = this.drafts.attachments(&with).len();
+                if attached as u64 > settings.files_cap() {
+                    let why = draft::one_too_many(
+                        &name,
+                        attached.saturating_sub(1),
+                        settings.files_cap(),
+                    );
                     this.drafts.refuse(id, &why);
                     cx.notify();
                 }
@@ -4061,7 +4095,8 @@ impl Footplate {
 
     /// Attaches the files that were dropped on the window: to the note
     /// of the open card, where one is, else to the draft of the open
-    /// conversation.
+    /// conversation. A zip or a folder drops to its files, each in the
+    /// order it came.
     fn dropped(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         if self.card().is_some() {
             return self.dropped_on_card(paths, cx);
@@ -4070,12 +4105,23 @@ impl Footplate {
             return;
         };
         let paths = paths.to_vec();
+        let existing = self.drafts.attachments(&with).len();
         self.ask(
             cx,
             move |client, _| {
-                let cap = client.settings().ok().map(|settings| settings.blob_cap());
-                let found = paths.iter().map(|path| draft::dropped(path, cap));
-                found.collect::<Vec<Found>>()
+                let settings = client.settings().ok();
+                let cap = settings.as_ref().map(|settings| settings.blob_cap());
+                let max = settings
+                    .map(|settings| settings.files_cap())
+                    .unwrap_or(api::FILES_MAX);
+                let mut at = existing;
+                let mut found = Vec::new();
+                for path in &paths {
+                    let unpacked = draft::dropped(path, cap, max, at);
+                    at += unpacked.len();
+                    found.extend(unpacked);
+                }
+                found
             },
             move |this, found, cx| {
                 for found in found {
@@ -4086,11 +4132,11 @@ impl Footplate {
     }
 
     /// Attaches the files that were dropped on the open card to its note,
-    /// in the order they came: pages, HTML files. A secret, a run, or a
-    /// taken-back ask takes no note, so a drop on its card attaches
-    /// nothing, and says so. They are read off the window's thread, and
-    /// one that is no page the yard takes only as far as it takes to say
-    /// so.
+    /// in the order they came: a note takes files as a conversation does.
+    /// A secret, a run, or a taken-back ask takes no note, so a drop on
+    /// its card attaches nothing, and says so. They are read off the
+    /// window's thread, and one that cannot go only as far as it takes to
+    /// say so.
     fn dropped_on_card(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let Some((bead, ask)) = self.card() else {
             return;
@@ -4115,27 +4161,38 @@ impl Footplate {
             );
         }
         let paths = paths.to_vec();
+        let existing = self.card_files(&bead, ask).len();
         self.ask(
             cx,
             move |client, _| {
-                let cap = client.settings().ok().map(|settings| settings.blob_cap());
-                let found = paths.iter().map(|path| draft::dropped_page(path, cap));
-                found.collect::<Vec<Found>>()
+                let settings = client.settings().ok();
+                let cap = settings.as_ref().map(|settings| settings.blob_cap());
+                let max = settings
+                    .map(|settings| settings.files_cap())
+                    .unwrap_or(api::FILES_MAX);
+                let mut at = existing;
+                let mut found = Vec::new();
+                for path in &paths {
+                    let unpacked = draft::dropped_note(path, cap, max, at);
+                    at += unpacked.len();
+                    found.extend(unpacked);
+                }
+                found
             },
             move |this, found, cx| {
                 for found in found {
-                    this.attach_page(&bead, ask, found, cx);
+                    this.attach_file(&bead, ask, found, cx);
                 }
             },
         );
     }
 
     /// Attaches what was dropped on the open card to its note, after what
-    /// is there. A page is drawn by its name: footplate shows no preview
+    /// is there. A file is drawn by its name: footplate shows no preview
     /// of one.
-    fn attach_page(&mut self, bead: &str, ask: u64, found: Found, cx: &mut Context<Self>) -> u64 {
+    fn attach_file(&mut self, bead: &str, ask: u64, found: Found, cx: &mut Context<Self>) -> u64 {
         let id = self.drafts.next_id();
-        self.note_pages
+        self.note_files
             .entry((bead.to_string(), ask))
             .or_default()
             .push(Attachment {
@@ -4152,8 +4209,8 @@ impl Footplate {
     /// Takes an attachment off its draft or its card's note.
     fn remove(&mut self, id: u64, cx: &mut Context<Self>) {
         self.drafts.remove(id);
-        for pages in self.note_pages.values_mut() {
-            pages.retain(|a| a.id != id);
+        for files in self.note_files.values_mut() {
+            files.retain(|a| a.id != id);
         }
         self.thumbs.remove(&id);
         cx.notify();
@@ -4163,10 +4220,10 @@ impl Footplate {
     /// draft, or off the open card's note.
     fn remove_last(&mut self, cx: &mut Context<Self>) {
         if let Some((bead, ask)) = self.card()
-            && let Some(pages) = self.note_pages.get_mut(&(bead, ask))
-            && let Some(page) = pages.pop()
+            && let Some(files) = self.note_files.get_mut(&(bead, ask))
+            && let Some(file) = files.pop()
         {
-            self.thumbs.remove(&page.id);
+            self.thumbs.remove(&file.id);
             cx.notify();
             return;
         }
@@ -5685,7 +5742,7 @@ impl Footplate {
                 self.thumbs.remove(&id);
             }
             self.kept_words.remove(name);
-            self.kept_note_pages.remove(name);
+            self.kept_note_files.remove(name);
             self.burst.forget(name);
             self.unreached.remove(name);
             self.places.remove(name);
@@ -7654,10 +7711,11 @@ impl Footplate {
             )
     }
 
-    /// A file of a mail or of a note: an image, a page's row, or the
-    /// line that says why there is none. A click on the image shows it
-    /// full size over the window, from the bytes the window holds;
-    /// `note` says it is a note's, whose page carries run beside Open.
+    /// A file of a mail or of a note: an image, a page's row, a file's
+    /// row, or the line that says why there is none. A click on the image
+    /// shows it full size over the window, from the bytes the window
+    /// holds; `note` says it is a note's, whose page carries run beside
+    /// Open.
     fn picture(
         &self,
         file: &BlobRef,
@@ -7671,6 +7729,9 @@ impl Footplate {
         }
         if model::is_page(file) {
             return self.page_row(file, note, palette).into_any_element();
+        }
+        if !model::is_image(file) {
+            return self.file_row(file, palette).into_any_element();
         }
         match self.images.get(&file.hash) {
             Some(Picture::Here(image)) => {
@@ -7829,6 +7890,75 @@ impl Footplate {
                         .child(format!("page, {}…", model::size(file.bytes))),
                 )
                 .into_any_element(),
+        }
+    }
+
+    /// A file of a mail or of a note, neither an image nor a page: a row
+    /// with its name and its size, and Open in the browser, through the
+    /// web view's base address, under the name the browser saves it as.
+    /// Where the view does not answer the row says how to start it instead
+    /// of opening nowhere. Never run: only a page runs.
+    fn file_row(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
+        let hash = file.hash.clone();
+        let row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .debug_selector({
+                let hash = hash.clone();
+                move || format!("file row {hash}")
+            });
+        let label = match file.name.is_empty() {
+            false => format!("{}, {}", file.name, model::size(file.bytes)),
+            true => format!("file, {}", model::size(file.bytes)),
+        };
+        let label = div().text_color(palette.faint).child(label);
+        match self.view_up_now() {
+            Some(true) => {
+                // The probe answered at this address, so it parses: the
+                // same reading, not another. A hash that is no hex names
+                // no file, and the row has no Open.
+                let Some(url) = Address::parse_view(&self.settings.web_view)
+                    .expect("the web view answered at this address")
+                    .file_url(&file.hash, &file.name)
+                else {
+                    return row.child(label).into_any_element();
+                };
+                let open = self.means.open.clone();
+                row.child(label)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("file open {hash}")))
+                            .debug_selector({
+                                let hash = hash.clone();
+                                move || format!("file open {hash}")
+                            })
+                            .text_color(palette.accent)
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| (open)(&url, cx))
+                            .child("Open"),
+                    )
+                    .into_any_element()
+            }
+            Some(false) => row
+                .child(label)
+                .child(
+                    div()
+                        .text_color(palette.faint)
+                        .debug_selector(move || format!("file start {hash}"))
+                        .child("the web view is not reached: start it with yardr web start"),
+                )
+                .into_any_element(),
+            None => {
+                let pending = match file.name.is_empty() {
+                    false => format!("{}, {}…", file.name, model::size(file.bytes)),
+                    true => format!("file, {}…", model::size(file.bytes)),
+                };
+                row.child(div().text_color(palette.faint).child(pending))
+                    .into_any_element()
+            }
         }
     }
 
@@ -8545,21 +8675,21 @@ impl Footplate {
                         .child(field),
                 )
             });
-            // Under the line the pages attached to the ask's note, with
+            // Under the line the files attached to the ask's note, with
             // why a marked one cannot go: what Enter sends with the
-            // words. A page is drawn by its name: footplate shows no
-            // preview of one.
-            let pages = self.card_pages(&bead_id, ask_seq);
-            if !pages.is_empty() {
+            // words. A file is drawn by its name: footplate shows no
+            // preview of one, and an image small.
+            let files = self.card_files(&bead_id, ask_seq);
+            if !files.is_empty() {
                 card = card
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
                             .gap_3()
-                            .children(pages.iter().map(|a| self.attachment(a, palette, cx))),
+                            .children(files.iter().map(|a| self.attachment(a, palette, cx))),
                     )
-                    .children(draft::reasons(pages).into_iter().map(|why| {
+                    .children(draft::reasons(files).into_iter().map(|why| {
                         div()
                             .text_sm()
                             .text_color(palette.warn)
@@ -9832,7 +9962,7 @@ mod tests {
         ask: u64,
     ) -> Vec<(u64, String, Option<String>)> {
         view.read_with(cx, |v, _| {
-            v.card_pages(bead, ask)
+            v.card_files(bead, ask)
                 .iter()
                 .map(|a| (a.id, a.name.clone(), a.refused.clone()))
                 .collect()
@@ -9898,7 +10028,8 @@ mod tests {
         assert_eq!(
             yard.asked("MailPeer"),
             [
-                json!({"to": "clerk", "peer": "north", "text": "Like this.", "actor": "jo", "files": [HASH]})
+                json!({"to": "clerk", "peer": "north", "text": "Like this.", "actor": "jo",
+                    "files": [{"hash": HASH, "name": "what was pasted"}]})
             ]
         );
     }
@@ -10019,12 +10150,13 @@ mod tests {
         assert_eq!(yard.asked("Mail"), Vec::<serde_json::Value>::new());
 
         // Enter: each image is put, in the order attached, and one mail
-        // sent with their hashes and with what is typed.
+        // sent with their hashes and names and with what is typed.
         cx.simulate_keystrokes("enter");
         wait(cx, "the mail with the images", |_| {
             yard.asked("Mail")
                 == [
-                    json!({"to": "yardmaster", "text": "Paint the fence like this.", "actor": "jo", "files": [HASH, HASH]}),
+                    json!({"to": "yardmaster", "text": "Paint the fence like this.", "actor": "jo",
+                        "files": [{"hash": HASH, "name": "what was pasted"}, {"hash": HASH, "name": "what was pasted"}]}),
                 ]
         });
         let put = yard.asked("PutBlob");
@@ -10053,7 +10185,8 @@ mod tests {
         cx.simulate_keystrokes("secondary-v enter");
         wait(cx, "the mail that is an image only", |_| {
             yard.asked("Mail").last()
-                == Some(&json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [HASH]}))
+                == Some(&json!({"to": "yardmaster", "text": "", "actor": "jo",
+                    "files": [{"hash": HASH, "name": "what was pasted"}]}))
         });
         wait(cx, "the draft empty again", |cx| {
             attached(&view, cx).is_empty()
@@ -10072,41 +10205,34 @@ mod tests {
         // the image in the draft, marked with the yard's words, and no mail
         // was sent.
         let mails = yard.asked("Mail").len();
+        let refused = "the file is 70 bytes, over the yard's limit of 69 (yardr settings set blob_max_bytes <bytes>)";
         yard.answer(
             "PutBlob",
-            r#"{"error": {"code": "error", "message": "an image is a PNG or a JPEG"}}"#,
+            &json!({"error": {"code": "error", "message": refused}}).to_string(),
         );
         cx.simulate_input("And this.");
         cx.simulate_keystrokes("enter");
         wait(cx, "why the image was not sent", |cx| {
-            notice(&view, cx) == "not sent to yardmaster: an image is a PNG or a JPEG"
+            notice(&view, cx) == format!("not sent to yardmaster: {refused}")
         });
         assert_eq!(typed(&view, cx), "And this.");
         assert_eq!(
             attached(&view, cx),
-            [(
-                5,
-                PASTED.to_string(),
-                Some("an image is a PNG or a JPEG".to_string())
-            )]
+            [(5, PASTED.to_string(), Some(refused.to_string()))]
         );
         assert_eq!(yard.asked("Mail").len(), mails);
         click_remove(cx, 5);
 
-        // Another kind of image is marked as it is pasted, and never leaves
-        // the window.
+        // Another kind of image pastes as a file, under what it is called:
+        // the yard takes any bytes.
         let tiff = Image::from_bytes(ImageFormat::Tiff, b"II*\0".to_vec());
         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&tiff));
         cx.simulate_keystrokes("secondary-v");
-        let neither = "mail carries a PNG or a JPEG, and what was pasted is neither";
-        assert_eq!(
-            attached(&view, cx),
-            [(7, PASTED.to_string(), Some(neither.to_string()))]
-        );
+        assert_eq!(attached(&view, cx), [(7, PASTED.to_string(), None)]);
         click_remove(cx, 7);
 
-        // Files that are dropped are attached as well, and one that is no
-        // image the yard takes is refused in words, before anything is put.
+        // Files that are dropped are attached as well, each under its base
+        // name, and nothing is put until Enter.
         let puts = yard.asked("PutBlob").len();
         let dir = tempfile::tempdir().unwrap();
         let (fence, notes) = (dir.path().join("fence.png"), dir.path().join("notes.pdf"));
@@ -10118,19 +10244,11 @@ mod tests {
             attached(&view, cx),
             [
                 (8, "fence.png".to_string(), None),
-                (
-                    9,
-                    "notes.pdf".to_string(),
-                    Some("mail carries a PNG or a JPEG, and notes.pdf is neither".to_string())
-                )
+                (9, "notes.pdf".to_string(), None)
             ]
         );
         view.read_with(cx, |v, _| {
-            let reasons = v.drafts.reasons("yardmaster");
-            assert_eq!(
-                reasons,
-                ["mail carries a PNG or a JPEG, and notes.pdf is neither"]
-            );
+            assert_eq!(v.drafts.reasons("yardmaster"), Vec::<String>::new());
             assert!(v.thumbs.contains_key(&8) && !v.thumbs.contains_key(&9));
         });
         // The window draws both, and nothing went to the yard.
@@ -10188,7 +10306,8 @@ mod tests {
         assert_eq!(
             yard.asked("MailPeer"),
             [
-                json!({"to": "clerk", "peer": "north", "text": "Hello north.", "actor": "jo", "files": [HASH]})
+                json!({"to": "clerk", "peer": "north", "text": "Hello north.", "actor": "jo",
+                    "files": [{"hash": HASH, "name": "what was pasted"}]})
             ]
         );
         assert_eq!(yard.asked("Mail").len(), mails);
@@ -10220,7 +10339,8 @@ mod tests {
         wait(cx, "the image queued for the peer", |_| {
             yard.asked("MailPeer").last()
                 == Some(
-                    &json!({"to": "clerk", "peer": "north", "text": "", "actor": "jo", "files": [HASH]}),
+                    &json!({"to": "clerk", "peer": "north", "text": "", "actor": "jo",
+                        "files": [{"hash": HASH, "name": "what was pasted"}]}),
                 )
         });
         wait(cx, "the draft empty again", |cx| {
@@ -11724,6 +11844,167 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_mail_s_file_opens_under_its_name_through_the_web_view(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The mail carries two files, one with a name and one without,
+        // which the yard is never asked for.
+        let report = "cd".repeat(32);
+        let bare = "ef".repeat(32);
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Like these?", "read": false,
+                 "files": [{"hash": report, "type": "application/pdf", "bytes": 900, "name": "figures 2026.pdf"},
+                           {"hash": bare, "type": "application/octet-stream", "bytes": 12}]}
+            ]})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Like these?"], cx);
+        // The view answers at its address: each row carries Open, and the
+        // yard is asked for none of the files' bytes.
+        let base = view_up();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        assert!(drawn(cx, &format!("file row {report}")));
+        assert!(drawn(cx, &format!("file open {report}")));
+        assert!(drawn(cx, &format!("file row {bare}")));
+        assert!(drawn(cx, &format!("file open {bare}")));
+        assert_eq!(yard.blobs_asked(), Vec::<String>::new());
+        assert_eq!(picture(&view, cx, &report), "");
+        // Open hands the view's file to the browser under its name, one
+        // segment whatever it holds; without a name, the bare route.
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("file open {report}"));
+        cx.run_until_parked();
+        click_on(cx, &format!("file open {bare}"));
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [
+                format!("{base}/blobs/{report}/figures%202026.pdf"),
+                format!("{base}/blobs/{bare}")
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_dropped_pdf_goes_with_its_name(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 11, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Well?", "read": true}
+            ]})
+            .to_string(),
+        );
+        yard.answer("Mail", "{}");
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "application/pdf", "bytes": 17}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Well?"], cx);
+
+        // Dropped, the PDF is a name row; Enter puts it and sends one mail
+        // with its hash and its name.
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.pdf");
+        std::fs::write(&notes, b"%PDF-1.7 and more").unwrap();
+        view.update(cx, |v, cx| v.dropped(std::slice::from_ref(&notes), cx));
+        wait(cx, "the dropped file", |cx| {
+            attached(&view, cx) == [(1, "notes.pdf".to_string(), None)]
+        });
+        cx.simulate_input("the figures");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail with the file", |_| {
+            yard.asked("Mail").last()
+                == Some(
+                    &json!({"to": "yardmaster", "text": "the figures", "actor": "jo",
+                    "files": [{"hash": HASH, "name": "notes.pdf"}]}),
+                )
+        });
+        assert_eq!(yard.asked("PutBlob").len(), 1);
+        assert_eq!(attached(&view, cx), []);
+    }
+
+    #[gpui::test]
+    fn a_dropped_zip_goes_as_its_files(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 11, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Well?", "read": true}
+            ]})
+            .to_string(),
+        );
+        yard.answer("Mail", "{}");
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "application/pdf", "bytes": 12}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Well?"], cx);
+
+        // Dropped, the zip is its files, each a name row; the zip itself
+        // never travels.
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let mut names = Vec::new();
+        for n in 0..30 {
+            let name = match n {
+                1 => "papers/report-01.pdf".to_string(),
+                n => format!("report-{n:02}.pdf"),
+            };
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file(&name, options).unwrap();
+            std::io::Write::write_all(&mut zip, format!("%PDF-1.7 {n}").as_bytes()).unwrap();
+            names.push(name.rsplit('/').next().unwrap().to_string());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let papers = dir.path().join("papers.zip");
+        std::fs::write(&papers, zip.finish().unwrap().into_inner()).unwrap();
+        view.update(cx, |v, cx| v.dropped(std::slice::from_ref(&papers), cx));
+        wait(cx, "the unpacked files", |cx| {
+            attached(&view, cx).len() == 30
+        });
+        assert_eq!(
+            attached(&view, cx),
+            names
+                .iter()
+                .enumerate()
+                .map(|(at, name)| (at as u64 + 1, name.clone(), None))
+                .collect::<Vec<_>>()
+        );
+
+        // Enter sends the thirty files, each with its hash and its name.
+        let sent: Vec<_> = names
+            .iter()
+            .map(|name| json!({"hash": HASH, "name": name}))
+            .collect();
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail with the files", |_| {
+            yard.asked("Mail").last()
+                == Some(&json!({"to": "yardmaster", "text": "", "actor": "jo", "files": sent}))
+        });
+        assert_eq!(yard.asked("PutBlob").len(), 30);
+        assert_eq!(attached(&view, cx), []);
+    }
+
+    #[gpui::test]
     fn a_mail_s_image_opens_full_size_over_the_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
@@ -11927,11 +12208,12 @@ mod tests {
         assert_eq!(overlay_image(&view, cx), None);
     }
 
-    /// A page dropped on a card goes with its note: one that is no page
-    /// is marked and holds the note, a page wants words, and Enter sends
-    /// one note with the words and every page, in the order they came.
+    /// Files dropped on a card go with its note: a page as before and a
+    /// PDF as a file, each under its base name. One that is marked holds
+    /// the note, a file wants words, and Enter sends one note with the
+    /// words and every file, in the order they came.
     #[gpui::test]
-    fn a_page_dropped_on_a_card_goes_with_the_note(cx: &mut TestAppContext) {
+    fn files_dropped_on_a_card_go_with_the_note(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_three());
@@ -11965,79 +12247,99 @@ mod tests {
         assert_eq!(current_ask_of(&view, cx), 5);
         cx.run_until_parked();
 
-        // A page and a PNG dropped on the card: the page attaches, the
-        // PNG is marked, and nothing went to the yard.
+        // A page and a PDF dropped on the card: both attach, each under
+        // its base name, and nothing went to the yard.
         let dir = tempfile::tempdir().unwrap();
-        let (mockup, fence) = (dir.path().join("mockup.html"), dir.path().join("fence.png"));
+        let (mockup, notes) = (dir.path().join("mockup.html"), dir.path().join("notes.pdf"));
         std::fs::write(&mockup, PAGE).unwrap();
-        std::fs::write(&fence, png()).unwrap();
-        view.update(cx, |v, cx| v.dropped(&[mockup, fence], cx));
+        std::fs::write(&notes, b"%PDF-1.7 and more").unwrap();
+        view.update(cx, |v, cx| v.dropped(&[mockup, notes], cx));
         wait(cx, "the dropped files", |cx| {
             card_attached(&view, cx, "bead-a", 5).len() == 2
         });
-        let neither = "a note carries an HTML file, and fence.png is not one";
         assert_eq!(
             card_attached(&view, cx, "bead-a", 5),
             [
                 (1, "mockup.html".to_string(), None),
-                (2, "fence.png".to_string(), Some(neither.to_string())),
+                (2, "notes.pdf".to_string(), None),
             ]
         );
         assert_eq!(yard.asked("PutBlob").len(), 0);
 
-        // While one is marked Enter sends nothing and says so.
+        // Without words a file wants them, and sends nothing.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "why the files want words", |cx| {
+            notice(&view, cx) == "a note with a file needs words: say what it shows"
+        });
+        assert_eq!(yard.asked("AddNote").len(), 0);
+
+        // With words Enter sends one note with every file: first the blobs,
+        // in the order attached, then the note with their hashes and names.
+        // The ask stays open.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("the mockup and the figures, third pass");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the note with the files", |_| {
+            yard.asked("AddNote")
+                == [
+                    json!({"bead": "bead-a", "text": "the mockup and the figures, third pass",
+                           "actor": "jo", "files": [{"hash": HASH, "name": "mockup.html"},
+                                                   {"hash": HASH, "name": "notes.pdf"}]}),
+                ]
+        });
+        assert_eq!(yard.asked("PutBlob").len(), 2);
+        assert_eq!(current_ask_of(&view, cx), 5);
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(card_attached(&view, cx, "bead-a", 5), []);
+
+        // One over the yard's cap is marked as it is dropped, and while it
+        // is marked Enter sends nothing and says so.
+        yard.answer(
+            "Settings",
+            r#"{"result": {"operator": "jo", "blob_max_bytes": "10"}}"#,
+        );
+        let fence = dir.path().join("fence.png");
+        std::fs::write(&fence, png()).unwrap();
+        view.update(cx, |v, cx| v.dropped(&[fence], cx));
+        wait(cx, "the dropped image", |cx| {
+            card_attached(&view, cx, "bead-a", 5).len() == 1
+        });
+        let over = "the image is 70 bytes, and this yard takes one of 10 bytes at most (yardr settings: blob_max_bytes)";
+        assert_eq!(
+            card_attached(&view, cx, "bead-a", 5),
+            [(3, "fence.png".to_string(), Some(over.to_string()))]
+        );
         cx.simulate_keystrokes("escape");
         cx.simulate_keystrokes("enter");
         wait(cx, "why the note was not sent", |cx| {
             notice(&view, cx) == "fence.png is marked and cannot go: remove it, then send"
         });
-        assert_eq!(yard.asked("AddNote").len(), 0);
-
-        // The marked one removed at its mark, a page without words wants
-        // them, and sends nothing.
-        click_remove(cx, 2);
-        wait(cx, "one page", |cx| {
-            card_attached(&view, cx, "bead-a", 5).len() == 1
+        assert_eq!(yard.asked("AddNote").len(), 1);
+        click_remove(cx, 3);
+        wait(cx, "no files after remove", |cx| {
+            card_attached(&view, cx, "bead-a", 5).is_empty()
         });
-        cx.simulate_keystrokes("escape");
-        cx.simulate_keystrokes("enter");
-        wait(cx, "why the page wants words", |cx| {
-            notice(&view, cx) == "a note with a page needs words: say what the page shows"
-        });
-        assert_eq!(yard.asked("AddNote").len(), 0);
-
-        // With words Enter sends one note with the page: first the blob,
-        // then the note with its hash. The ask stays open.
-        cx.simulate_keystrokes("i");
-        cx.simulate_input("the mockup, third pass");
-        cx.simulate_keystrokes("enter");
-        wait(cx, "the note with the page", |_| {
-            yard.asked("AddNote")
-                == [json!({"bead": "bead-a", "text": "the mockup, third pass",
-                           "actor": "jo", "files": [HASH]})]
-        });
-        assert_eq!(yard.asked("PutBlob").len(), 1);
-        assert_eq!(current_ask_of(&view, cx), 5);
-        assert_eq!(typed(&view, cx), "");
-        assert_eq!(card_attached(&view, cx, "bead-a", 5), []);
 
         // Backspace in the empty line takes the last attachment off the
         // card's note, as off a draft.
+        yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
         view.update(cx, |v, cx| v.dropped(&[dir.path().join("mockup.html")], cx));
         wait(cx, "the page again", |cx| {
             card_attached(&view, cx, "bead-a", 5).len() == 1
         });
+        cx.simulate_keystrokes("i");
         cx.simulate_keystrokes("backspace");
-        wait(cx, "no pages", |cx| {
+        wait(cx, "no files after backspace", |cx| {
             card_attached(&view, cx, "bead-a", 5).is_empty()
         });
     }
 
-    /// An answer carries no page: with a recommendation or a pick Enter
-    /// says so and sends nothing, and a decline says so too. The page
+    /// An answer carries no file: with a recommendation or a pick Enter
+    /// says so and sends nothing, and a decline says so too. The file
     /// removed, the answer and the decline go.
     #[gpui::test]
-    fn a_card_s_answer_and_decline_carry_no_page(cx: &mut TestAppContext) {
+    fn a_card_s_answer_and_decline_carry_no_file(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_three());
@@ -12075,7 +12377,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.simulate_keystrokes("enter");
         wait(cx, "why no pick went", |cx| {
-            notice(&view, cx) == "an answer carries no page: remove it, then send"
+            notice(&view, cx) == "an answer carries no file: remove it, then send"
         });
         assert_eq!(yard.asked("AnswerAsk").len(), 0);
         assert_eq!(yard.asked("AddNote").len(), 0);
@@ -12084,7 +12386,7 @@ mod tests {
         assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
         cx.simulate_keystrokes("enter");
         wait(cx, "why the pick went nowhere", |cx| {
-            notice(&view, cx) == "an answer carries no page: remove it, then send"
+            notice(&view, cx) == "an answer carries no file: remove it, then send"
         });
         assert_eq!(yard.asked("AnswerAsk").len(), 0);
         // The page removed, the pick goes: escape left it as well, so
@@ -12116,7 +12418,7 @@ mod tests {
         cx.simulate_input("not mine to take");
         cx.simulate_keystrokes("enter");
         wait(cx, "why nothing was declined", |cx| {
-            notice(&view, cx) == "a decline carries no page: remove it, then send"
+            notice(&view, cx) == "a decline carries no file: remove it, then send"
         });
         assert_eq!(yard.asked("DeclineAsk").len(), 0);
         // The page removed, the decline goes with the words.
@@ -12134,11 +12436,11 @@ mod tests {
         });
     }
 
-    /// A note the yard refused is back with its pages: the words in the
-    /// line, the pages with the ask, the page that kept it marked with the
+    /// A note the yard refused is back with its files: the words in the
+    /// line, the files with the ask, the file that kept it marked with the
     /// yard's words. A yard too old for files says so as what it is.
     #[gpui::test]
-    fn a_note_the_yard_refused_is_back_with_its_pages(cx: &mut TestAppContext) {
+    fn a_note_the_yard_refused_is_back_with_its_files(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_three());
@@ -12176,7 +12478,7 @@ mod tests {
         // The yard refuses the blob: the words are back in the line and
         // the page with the ask, marked with the yard's words, and no
         // note went.
-        let kept = "the file is application/octet-stream: the yard keeps only image/png and image/jpeg and text/html; charset=utf-8";
+        let kept = "the file is 51 bytes, over the yard's limit of 50 (yardr settings set blob_max_bytes <bytes>)";
         yard.answer(
             "PutBlob",
             &json!({"error": {"code": "error", "message": kept}}).to_string(),
@@ -12219,7 +12521,7 @@ mod tests {
         cx.simulate_keystrokes("i");
         cx.simulate_keystrokes("enter");
         wait(cx, "why the old yard took no note", |cx| {
-            notice(&view, cx) == "not noted: this yard's yardr is too old for a note with a page"
+            notice(&view, cx) == "not noted: this yard's yardr is too old for a note with a file"
         });
         assert_eq!(typed(&view, cx), "the mockup, third pass");
         assert_eq!(
@@ -12320,8 +12622,8 @@ mod tests {
     }
 
     /// A drop on an ask taken back attaches nothing: its card takes no
-    /// note. Words with a page on a decided ask go nowhere: the ask takes
-    /// no note either, and the page stays until it is removed.
+    /// note. Words with a file on a decided ask go nowhere: the ask takes
+    /// no note either, and the file stays until it is removed.
     #[gpui::test]
     fn a_drop_on_a_taken_back_ask_attaches_nothing_and_a_decided_one_takes_no_note(
         cx: &mut TestAppContext,
@@ -12373,7 +12675,7 @@ mod tests {
         cx.simulate_input("still true?");
         cx.simulate_keystrokes("enter");
         wait(cx, "why the words went nowhere", |cx| {
-            notice(&view, cx) == "words alone go nowhere on this ask: remove the page, then send"
+            notice(&view, cx) == "words alone go nowhere on this ask: remove the file, then send"
         });
         assert_eq!(yard.asked("AddNote").len(), 0);
         assert_eq!(yard.asked("AnswerAsk").len(), 0);

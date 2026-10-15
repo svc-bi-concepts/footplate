@@ -164,7 +164,7 @@ first screen, or with no yard where the state says none:
 
 The states are `yardmaster` (the conversation with the yardmaster, with a
 few mails), `plain` (an open decision card of a plain ask), `page` (an
-open card whose note carries a page and an image), `mail` (a mail with
+open card whose note carries a page, an image and a file), `mail` (a mail with
 a page and an image), `image` (that mail's image open full size over
 the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
@@ -218,7 +218,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
 | `Crew`, `Peers`, `Users` | whom there is to talk with: the crew, `<name>@<peer>` for each one a linked yard exposes, and the users of this yard, yourself among them. A peer's `trust` says which of its names are a user of this yard speaking |
-| `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on an image or a page, before one is sent |
+| `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on a file and how many a letter carries, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
 | `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
@@ -229,11 +229,11 @@ Or a yard that is not on this machine, at the address of its listener: see
 | It writes | When |
 |---|---|
 | `Mail` | Enter, in a conversation with a crew member or a user of this yard, your own too |
-| `PutBlob` for each image, then `Mail` with their hashes | Enter, when images are attached to the draft |
-| `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each image, with their hashes |
+| `PutBlob` for each file, then `Mail` with their hashes and names | Enter, when files are attached to the draft |
+| `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
 | `AnswerAsk` | Enter, on a card: the option chosen, with the line's words in the one answer; an ask with no options is answered with words |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
-| `PutBlob` for each page, then `AddNote` with their hashes | Enter, on a card whose note has pages attached |
+| `PutBlob` for each file, then `AddNote` with their hashes and names | Enter, on a card whose note has files attached |
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
 | `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide"; a secret ask with none |
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
@@ -266,81 +266,81 @@ that shows it and counts it until then: its sender's, the row of the user
 a linked yard's name is trusted as, and the `yard` row for the yard's own
 mail and for anyone who has no row.
 
-**Images.** Mail can carry images, and the window shows those of a mail
-under its text, each in a space 240 points high: scaled down to fit it,
-never up.
-An image is read from the yard once and kept in memory by its hash, for as
-long as the window runs. One the yard no longer has (`yardr store prune`
-removes an image no mail names) is a line that says so.
+**Files.** Mail can carry files, and the window shows those of a mail
+under its text: an image in a space 240 points high, scaled down to fit it,
+never up; a page or any other file as a row with Open. A file's row names
+it, with its size; Open takes it to the browser through the web view, under
+the name the browser saves it as. An image is read from the yard once and
+kept in memory by its hash, for as long as the window runs. One the yard no
+longer has (`yardr store prune` removes a file no mail names) is a line that
+says so. Footplate never opens a file itself.
 
-**Sending images.** Paste an image (`cmd+v`, `ctrl+v` on Linux) or drop
-image files on the window, anywhere: each is attached to the draft of the
-open conversation and shown small above the line. Where a card is open
-instead, a dropped file is for its note: an HTML file attaches as a page,
-anything else is refused in words. Nothing is sent yet. Write
-something or not, and Enter sends one mail with the text and every image
-attached, in the order they came; an image alone is a mail. A draft belongs
-to its conversation: open another, and the text and the images wait where
-they were. The `×` on an attachment removes it, and so does `backspace` in
-an empty line, the last one first.
+**Sending files.** Paste a file (`cmd+v`, `ctrl+v` on Linux) or drop files
+on the window, anywhere: each is attached to the draft of the open
+conversation, an image shown small above the line, anything else by its
+name. A zip drops to its files, each an attachment under its base name,
+and a folder to the files one level deep; the zip itself never travels.
+Where a card is open instead, a dropped file is for its note, as below.
+Nothing is sent yet. Write something or not, and Enter sends one mail with
+the text and every file attached, each with its base name, in the order
+they came; a file alone is a mail. A draft belongs to its conversation:
+open another, and the text and the files wait where they were. The `×` on
+an attachment removes it, and so does `backspace` in an empty line, the
+last one first.
 
 An attachment that cannot go is marked, pale in a frame of the warning
 colour, with the reason above the line:
 
-- one that is neither a PNG nor a JPEG, which are what the yard takes (a
-  screenshot is a PNG; an image copied out of another program may be a TIFF,
-  and a dropped file may be anything). It is told by its first bytes, not by
-  its name, and a dropped file that is none is not read further;
+- one past what a mail carries (`files_max` of `yardr settings`, 64 when
+  the yard answers none), counting what is already attached: a zip of more
+  files than that is one marked row, and none of its files attaches;
 - one over the yard's cap (`blob_max_bytes` of `yardr settings`, 8 MiB when
-  unset);
+  unset), told by its bytes, whatever they are;
+- one with no name the yard takes, or none that fits its 255 bytes;
+- one of a zip that will not unpack: an entry the read refuses, a zip in a
+  zip, or one that takes the drop past the 256 MB one drop unpacks;
 - one the yard refused when it was sent, with the yard's words.
 
-In a conversation with `<name>@<peer>` an image is attached and sent the
+In a conversation with `<name>@<peer>` a file is attached and sent the
 same way, and whether it crosses is the yard's to say: when the link does
 not carry files (`yardr peer allow <peer> --send file`), the linked yard's
-yardr is too old for them, or the image is over `peer_file_max_bytes`, the
+yardr is too old for them, or the file is over `peer_file_max_bytes`, the
 yard refuses the mail, and the line says its reason. Nothing is marked then,
-since no one image is at fault: the draft is back as it was. An image of
+since no one file is at fault: the draft is back as it was. A file of
 mail from a linked yard is shown like any other; one this yard did not take
 is a line with the yard's reason.
 
 While an attachment is marked, Enter sends nothing and says so: the mail
-that goes is the draft as it stands, never the draft less an image. Remove
+that goes is the draft as it stands, never the draft less a file. Remove
 the marked one and Enter sends the rest. A send that fails puts the text and
-the images back in the draft. An image the yard took before the send failed
+the files back in the draft. A file the yard took before the send failed
 stays in its store, named by no mail, until `yardr store prune`.
 
-**Sending pages.** Drop an HTML file on an open card: it is attached to
-the ask's note as a page and shown small under the line. Nothing is sent
-yet. Write what the page shows, and Enter sends one note with the words
-and every page attached, in the order they came; the ask stays open. The
-note is then like an agent's: its page opens in the browser from the note,
-and stands on the bead's board in the web view. A page belongs to its ask:
-open another card, and the words and the pages wait where they were. The
-`×` on an attachment removes it, and so does `backspace` in an empty line,
-the last one first.
+**Files on a note.** Drop files on an open card: each is attached to the
+ask's note, an image shown small under the line, anything else by its name.
+A note takes files as a conversation does, not pages alone. Nothing is sent
+yet. Write what they show, and Enter sends one note with the words and
+every file attached, in the order they came; the ask stays open. The note
+is then like an agent's: its page opens in the browser from the note, and
+stands on the bead's board in the web view. A file belongs to its ask: open
+another card, and the words and the files wait where they were. The `×` on
+an attachment removes it, and so does `backspace` in an empty line, the
+last one first.
 
 An attachment that cannot go is marked, pale in a frame of the warning
-colour, with the reason under the line:
-
-- one that is no HTML file, which is what a note carries. It is told by
-  its first bytes, not by its name, and a dropped file that is none is not
-  read further;
-- one over the yard's cap (`blob_max_bytes` of `yardr settings`, 8 MiB when
-  unset);
-- one the yard refused when it was sent, with the yard's words.
+colour, with the reason under the line, for the same reasons as on a draft.
 
 While an attachment is marked, Enter sends nothing and says so: the note
-that goes is the draft as it stands, never the draft less a page. Remove
-the marked one and Enter sends the rest. A note with a page needs words:
-without them Enter says so and sends nothing. An answer carries no page:
+that goes is the draft as it stands, never the draft less a file. Remove
+the marked one and Enter sends the rest. A note with a file needs words:
+without them Enter says so and sends nothing. An answer carries no file:
 with a pick or a recommendation Enter says so and sends nothing — remove
-the page, pick, and send the answer. A decline carries no page either, and
+the file, pick, and send the answer. A decline carries no file either, and
 a secret, a run, or a taken-back ask takes no note, so a file dropped on
-its card is not attached. A send that fails puts the words and the pages
-back with the ask. A page the yard took before the send failed stays in
+its card is not attached. A send that fails puts the words and the files
+back with the ask. A file the yard took before the send failed stays in
 its store, named by no note, until `yardr store prune`. A yard whose yardr
-is too old for a note with a page says so, and the note waits where it was.
+is too old for a note with files says so, and the note waits where it was.
 
 **No yard.** Where no yard was ever made at this run's place, the window
 says so in plain words — "No yard has been made here yet — set one up."
@@ -819,8 +819,8 @@ last; the recommended one with its why; a line for words; the keys. A number
 key or the arrows choose an option; Enter sends the pick with the line's
 words in the one answer, or the recommended option when none is chosen, as
 the keys say. Words with no option chosen and none recommended go as a plain
-note, and the ask stays open; an HTML file dropped on the card is attached
-to the note as a page, and goes with the words. An ask with no options
+note, and the ask stays open; a file dropped on the card is attached
+to the note, and goes with the words. An ask with no options
 says "words wanted", and Enter sends the words as the answer. `x` puts the
 ask aside, to come back as the yard says. `d` declines it with words,
 which is not a pick and not "you decide". `e` expands the card in place to
@@ -883,13 +883,13 @@ what it printed.
 
 | Key | Does |
 |---|---|
-| `enter` | sends the draft, the line and the images attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
+| `enter` | sends the draft, the line and the files attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
 | `shift+enter` | breaks the line where the cursor is; a text wider than the box goes on in the next row, and the box grows with its rows up to a third of the window, then scrolls |
 | `up`, `down` in a text of several rows | the row above, below, in the same column; `home` and `end` are the row's |
-| `cmd+v` (`ctrl+v` on Linux) | pastes text into the line, with its line breaks; an image is attached to the draft |
+| `cmd+v` (`ctrl+v` on Linux) | pastes text into the line, with its line breaks; a file is attached to the draft |
 | a drag over a message's text, a double click on a word | selects it; one selection at a time, within one message |
 | `cmd+c` (`ctrl+c` on Linux) | copies what is selected, as it was written: of a message, with the Markdown marks that are not drawn, or of the line while you type in it |
-| a file dropped on the window | is added to the draft; a non-PNG or non-JPEG is marked and refused |
+| a file dropped on the window | is added to the draft; a zip drops to its files, a folder to the files one level deep |
 | `backspace` in an empty line | removes the last attachment |
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |

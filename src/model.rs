@@ -143,7 +143,7 @@ pub struct Entry {
     pub at: String,
     pub from: String,
     pub text: String,
-    /// The images it carries, shown under its text.
+    /// The files it carries, shown under its text.
     pub files: Vec<BlobRef>,
     /// The user's own.
     pub mine: bool,
@@ -2941,8 +2941,9 @@ pub fn unsendable(text: &str) -> Option<String> {
     }
 }
 
-/// The type of an image the yard takes, read from its bytes as the yard
-/// reads it: `image/png` or `image/jpeg`, and nothing for anything else.
+/// The type of an image, read from its bytes as the yard reads it:
+/// `image/png` or `image/jpeg`, and nothing for anything else. The yard
+/// takes any bytes; an image is what the window draws.
 pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
@@ -2975,10 +2976,11 @@ const PAGE_TAGS: &[&[u8]] = &[
     b"<!--",
 ];
 
-/// The type of a page the yard takes, read from its bytes as the yard
-/// reads it: `text/html; charset=utf-8`, and nothing for anything else.
-/// Past the leading whitespace, one of the tags above, the case aside,
-/// ended by a space or `>`: what `http.DetectContentType` answers.
+/// The type of a page, read from its bytes as the yard reads it:
+/// `text/html; charset=utf-8`, and nothing for anything else. Past the
+/// leading whitespace, one of the tags above, the case aside, ended by a
+/// space or `>`: what `http.DetectContentType` answers. The yard takes
+/// any bytes; a page is what the browser opens from a row with run.
 pub fn page_type(bytes: &[u8]) -> Option<&'static str> {
     let start = bytes
         .iter()
@@ -3007,8 +3009,8 @@ pub fn page_over_cap(bytes: usize, cap: u64) -> Option<String> {
     over_cap_as("page", bytes, cap)
 }
 
-/// Why a file of `bytes` bytes, an image or a page, is not sent in a yard
-/// whose cap on one is `cap`, if it is not.
+/// Why a file of `bytes` bytes, an image, a page or any other, is not
+/// sent in a yard whose cap on one is `cap`, if it is not.
 fn over_cap_as(what: &str, bytes: usize, cap: u64) -> Option<String> {
     (bytes as u64 > cap).then(|| {
         format!(
@@ -3019,8 +3021,26 @@ fn over_cap_as(what: &str, bytes: usize, cap: u64) -> Option<String> {
     })
 }
 
-/// Whether `file` is a page, an HTML blob, and not an image: what its
-/// type says before any `;`.
+/// Why bytes with `head` of `size` bytes are not sent in a yard whose cap
+/// on one file is `cap`, if they are not: the refusal names what they
+/// are, an image, a page or a file, as the yard tells them apart.
+pub fn over_cap_for(head: &[u8], size: usize, cap: u64) -> Option<String> {
+    match (image_type(head), page_type(head)) {
+        (Some(_), _) => over_cap(size, cap),
+        (None, Some(_)) => page_over_cap(size, cap),
+        (None, None) => over_cap_as("file", size, cap),
+    }
+}
+
+/// Whether `file` is an image, a PNG or a JPEG: what its type says, as
+/// the yard told it apart. Anything else is a page or a file, which the
+/// window never asks the yard for.
+pub fn is_image(file: &BlobRef) -> bool {
+    matches!(file.kind.as_str(), "image/png" | "image/jpeg")
+}
+
+/// Whether `file` is a page, an HTML blob: what its type says before any
+/// `;`.
 pub fn is_page(file: &BlobRef) -> bool {
     file.kind
         .split(';')
@@ -3029,10 +3049,10 @@ pub fn is_page(file: &BlobRef) -> bool {
 }
 
 /// The hash of `file` among the images to ask for, once: one this yard
-/// did not take from a linked yard is none it has, and a page is opened
-/// in the browser, not asked for.
+/// did not take from a linked yard is none it has, and a page or a file
+/// is opened in the browser, not asked for.
 fn push_image<'a>(out: &mut Vec<&'a str>, file: &'a BlobRef) {
-    if !is_page(file) && file.not_taken.is_empty() && !out.contains(&file.hash.as_str()) {
+    if is_image(file) && file.not_taken.is_empty() && !out.contains(&file.hash.as_str()) {
         out.push(&file.hash);
     }
 }
@@ -3040,10 +3060,16 @@ fn push_image<'a>(out: &mut Vec<&'a str>, file: &'a BlobRef) {
 /// The line for a file of mail from a linked yard that this yard did not
 /// take, with the yard's reason.
 pub fn not_taken(file: &BlobRef) -> String {
-    match is_page(file) {
-        true => format!("page, {}, not taken: {}", size(file.bytes), file.not_taken),
-        false => format!("image, {}, not taken: {}", size(file.bytes), file.not_taken),
-    }
+    let what = match (is_page(file), is_image(file)) {
+        (true, _) => "page",
+        (false, true) => "image",
+        (false, false) => "file",
+    };
+    format!(
+        "{what}, {}, not taken: {}",
+        size(file.bytes),
+        file.not_taken
+    )
 }
 
 /// A number of bytes for a person: `70 bytes`, `812 KiB`, `8.5 MiB`.
@@ -3836,6 +3862,7 @@ mod tests {
         let picture = |seq: u64, from: &str, hash: &str| Letter {
             files: vec![BlobRef {
                 hash: hash.into(),
+                kind: "image/png".into(),
                 ..BlobRef::default()
             }],
             ..letter(seq, from, "jo", "see")
@@ -4822,6 +4849,47 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_no_image_to_ask_for() {
+        let file = |kind: &str| BlobRef {
+            kind: kind.into(),
+            ..BlobRef::default()
+        };
+        // An image is a PNG or a JPEG, as the yard told it apart;
+        // anything else is a page or a file.
+        assert!(is_image(&file("image/png")));
+        assert!(is_image(&file("image/jpeg")));
+        assert!(!is_image(&file("text/html; charset=utf-8")));
+        assert!(!is_image(&file("application/pdf")));
+        assert!(!is_image(&file("image/svg+xml")));
+        assert!(!is_image(&file("")));
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let files: Vec<BlobRef> = serde_json::from_value(json!([
+            {"hash": "ff", "type": "application/pdf", "bytes": 900, "name": "report.pdf"},
+            png("aa"),
+        ]))
+        .unwrap();
+        m.conversation(
+            "yardmaster",
+            vec![Letter {
+                files: files.clone(),
+                ..letter(12, "yardmaster", "jo", "Like this?")
+            }],
+        );
+        // The mail carries both, and only the image is asked for: the
+        // file opens in the browser, from the bytes the yard holds.
+        assert_eq!(m.entries()[0].files, files);
+        assert_eq!(m.images(), ["aa"]);
+        // One this yard did not take is a file's line.
+        let mut refused = json!({"hash": "rr", "type": "application/pdf", "bytes": 900});
+        refused["not_taken"] = json!("the link does not take files");
+        let file: BlobRef = serde_json::from_value(refused).unwrap();
+        assert_eq!(
+            not_taken(&file),
+            "file, 900 bytes, not taken: the link does not take files"
+        );
+    }
+
+    #[test]
     fn the_images_of_an_expanded_card_s_notes_are_asked_for() {
         let mut state = yard(&[]);
         state.asks.open = evening();
@@ -4839,10 +4907,12 @@ mod tests {
         bead.notes[0].files = vec![
             BlobRef {
                 hash: "aa".into(),
+                kind: "image/png".into(),
                 ..BlobRef::default()
             },
             BlobRef {
                 hash: "bb".into(),
+                kind: "image/jpeg".into(),
                 ..BlobRef::default()
             },
         ];
@@ -4954,6 +5024,30 @@ mod tests {
         );
         assert_eq!(size(70), "70 bytes");
         assert_eq!(size(2048), "2 KiB");
+    }
+
+    #[test]
+    fn over_the_cap_names_what_the_bytes_are() {
+        let page = b"<!DOCTYPE html><html><body>the mockup</body></html>";
+        assert_eq!(over_cap_for(PNG, 70, 8388608), None);
+        assert_eq!(
+            over_cap_for(PNG, 2048, 1024).as_deref(),
+            Some(
+                "the image is 2 KiB, and this yard takes one of 1 KiB at most (yardr settings: blob_max_bytes)"
+            )
+        );
+        assert_eq!(
+            over_cap_for(page, 2048, 1024).as_deref(),
+            Some(
+                "the page is 2 KiB, and this yard takes one of 1 KiB at most (yardr settings: blob_max_bytes)"
+            )
+        );
+        assert_eq!(
+            over_cap_for(b"%PDF-1.7", 2048, 1024).as_deref(),
+            Some(
+                "the file is 2 KiB, and this yard takes one of 1 KiB at most (yardr settings: blob_max_bytes)"
+            )
+        );
     }
 
     #[test]

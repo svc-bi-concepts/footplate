@@ -9,7 +9,7 @@
 # in the debug build alone, or with no yard where the state says none:
 # `yardmaster` (the conversation with the
 # yardmaster), `plain` (an open decision card of a plain ask), `page` (an
-# open card whose note carries a page and an image), `mail` (a mail with
+# open card whose note carries a page, an image and a file), `mail` (a mail with
 # a page and an image), `image` (that mail's image open full size over
 # the window), `run` (an
 # open card of a run ask), `stopped` (the head with a stopped yard), `far`

@@ -18,7 +18,7 @@ use crate::yard::Env;
 /// ask, an open card of a run ask, a yard that is stopped, a yard at an
 /// address, the settings with the start-at-login switch, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
-/// the composer, an open card whose note carries a page and an image, a
+/// the composer, an open card whose note carries a page, an image and a file, a
 /// mail with a page and an image, that mail's image open full size over
 /// the window, the first screen's way to a yard at an address, with a
 /// pairing's http address refused under its fields, the
@@ -73,6 +73,10 @@ pub(crate) const IMAGE_OPEN: (&str, u64) = (IMAGE_HASH, IMAGE.len() as u64);
 /// no run. Named, never served: the yard is asked for neither.
 const PAGE_HASH: &str = "abababababababababababababababababababababababababababababababab";
 const MAIL_PAGE_HASH: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+/// The file in the `page` state: the note's third row, under its name,
+/// which Open takes to the browser. Named, never served, as the pages.
+const FILE_HASH: &str = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
 
 /// The fake yard and its private socket directory, which go away with the
 /// screenshot run.
@@ -343,10 +347,11 @@ fn populate(yard: &Yard, state: &str) {
             );
         }
         "page" => {
-            // The plain ask above, whose note carries a page and an image:
-            // the yard holds the image, and the page is never asked for,
-            // since Open and run take it to the browser. The mail carries
-            // a page too, which Open takes to the browser, with no run.
+            // The plain ask above, whose note carries a page, an image and
+            // a file: the yard holds the image, and the page and the file
+            // are never asked for, since Open takes them to the browser,
+            // run beside Open for the page alone. The mail carries a page
+            // too, which Open takes to the browser, with no run.
             yard.blob(IMAGE_HASH, IMAGE);
             yard.answer(
                 "UserInbox",
@@ -389,6 +394,8 @@ fn populate(yard: &Yard, state: &str) {
                                     "bytes": 42000},
                                    {"hash": IMAGE_HASH, "type": "image/png",
                                     "bytes": IMAGE.len()},
+                                   {"hash": FILE_HASH, "type": "application/pdf",
+                                    "bytes": 900, "name": "figures.pdf"},
                                ]}],
                     "asks": [{
                         "ask": 3, "to": "jo", "asker": "yardmaster",
@@ -599,10 +606,14 @@ mod tests {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
                     let bead = yard.client().bead("bead-a").unwrap();
                     assert_eq!(bead.notes.len(), 1, "{state}");
-                    assert_eq!(bead.notes[0].files.len(), 2, "{state}");
+                    assert_eq!(bead.notes[0].files.len(), 3, "{state}");
                     assert!(crate::model::is_page(&bead.notes[0].files[0]), "{state}");
-                    assert!(!crate::model::is_page(&bead.notes[0].files[1]), "{state}");
-                    // The yard holds the image; the pages are named only.
+                    assert!(crate::model::is_image(&bead.notes[0].files[1]), "{state}");
+                    // The third row is a file, named; the yard holds the
+                    // image, and the page and the file are named only.
+                    assert!(!crate::model::is_page(&bead.notes[0].files[2]), "{state}");
+                    assert!(!crate::model::is_image(&bead.notes[0].files[2]), "{state}");
+                    assert_eq!(bead.notes[0].files[2].name, "figures.pdf", "{state}");
                     let image = yard.client().blob(IMAGE_HASH).unwrap().unwrap();
                     assert_eq!(image.len(), IMAGE.len(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();

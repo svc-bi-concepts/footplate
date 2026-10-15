@@ -23,7 +23,7 @@ use std::{env, fmt, thread};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 
 /// What footplate says it is to the yard. Nothing is decided by it today.
@@ -57,6 +57,10 @@ pub const NOT_FOUND: &str = "not-found";
 
 /// The most bytes `PutBlob` takes in a yard that has set no cap of its own.
 pub const BLOB_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The most files a mail or a note carries in a yard that answers no
+/// count of its own.
+pub const FILES_MAX: u64 = 64;
 
 /// Why a call or the stream did not answer.
 #[derive(Debug)]
@@ -127,8 +131,8 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
-/// The yard's settings, of which a client reads the operator and the cap on
-/// an image.
+/// The yard's settings, of which a client reads the operator, the cap on
+/// a file, and how many of them a mail or a note carries.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -136,6 +140,9 @@ pub struct Settings {
     /// A whole number in a string; absent when the yard has set none.
     #[serde(default)]
     pub blob_max_bytes: String,
+    /// A whole number in a string; absent when the yard answers none.
+    #[serde(default)]
+    pub files_max: String,
 }
 
 impl Settings {
@@ -143,24 +150,44 @@ impl Settings {
     pub fn blob_cap(&self) -> u64 {
         self.blob_max_bytes.parse().unwrap_or(BLOB_MAX_BYTES)
     }
+
+    /// The most files a mail or a note carries.
+    pub fn files_cap(&self) -> u64 {
+        self.files_max.parse().unwrap_or(FILES_MAX)
+    }
 }
 
-/// A file mail carries, or a note of a bead: an image, or a page. As
-/// a letter or a note names it.
+/// A file mail carries, or a note of a bead: an image, a page, or any
+/// other bytes under the cap, with its base name. As a letter or a note
+/// names it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct BlobRef {
     /// The SHA-256 of its bytes, in hex: `GET /blobs/<hash>` answers them.
     #[serde(default)]
     pub hash: String,
-    /// `image/png`, `image/jpeg`, or `text/html; charset=utf-8` for a page.
+    /// What the bytes are, as the yard read them: `image/png`,
+    /// `image/jpeg`, `text/html; charset=utf-8` for a page, anything else
+    /// for a file.
     #[serde(default, rename = "type")]
     pub kind: String,
     #[serde(default)]
     pub bytes: u64,
+    /// The file's base name, as the sender gave it; empty for what was
+    /// pasted, and for a letter from before files carried names.
+    #[serde(default)]
+    pub name: String,
     /// On mail from a linked yard only: why this yard did not take the
-    /// image, when it did not. There is none to ask for then.
+    /// file, when it did not. There is none to ask for then.
     #[serde(default)]
     pub not_taken: String,
+}
+
+/// A file `Mail`, `MailPeer` and `AddNote` carry, by the hash `PutBlob`
+/// answered and the base name the person gave it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BlobFile {
+    pub hash: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -899,6 +926,52 @@ impl Address {
         Some(format!("{}{}/blobs/{hash}", self.origin(), self.path))
     }
 
+    /// The browser's URL for the file `hash` under `name` at this base
+    /// address: the `/blobs/<hash>/<name>` route on the view, for Open,
+    /// which the browser saves under the name. The name is the sender's
+    /// word, so every byte outside the unreserved set goes percent-encoded,
+    /// and it stays one segment whatever it holds. An empty name opens the
+    /// bare route, as a page does. A hash that is no hex names no file,
+    /// and opens nothing.
+    pub fn file_url(&self, hash: &str, name: &str) -> Option<String> {
+        if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        match name.is_empty() {
+            true => Some(format!("{}{}/blobs/{hash}", self.origin(), self.path)),
+            false => Some(format!(
+                "{}{}/blobs/{hash}/{}",
+                self.origin(),
+                self.path,
+                encode_name(name)
+            )),
+        }
+    }
+}
+
+/// A file's name for the `/blobs/<hash>/<name>` route: one segment,
+/// whatever the sender gave. The unreserved bytes go as they are, every
+/// other byte percent-encoded, so no `/`, `?` or `%` of the name reaches
+/// the URL as anything but a byte of the name.
+fn encode_name(name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 15) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+impl Address {
     /// The sandbox origin's base address for the view at this base
     /// address: the view's host on the sandbox port, with no path. A
     /// proxied second name is set as the run base instead.
@@ -1624,12 +1697,12 @@ impl Client {
         .map(drop)
     }
 
-    /// Puts a plain note on the bead, with the pages `files` names by the
-    /// hash `PutBlob` answered. Words about a question with no option
-    /// chosen go here, and leave the ask open; a note with a page needs
-    /// its words. A yard from before notes carried files refuses the
-    /// argument, in its words.
-    pub fn add_note(&self, bead: &str, text: &str, actor: &str, files: &[String]) -> Result<()> {
+    /// Puts a plain note on the bead, with the files `files` names by the
+    /// hash `PutBlob` answered, each with its base name. Words about a
+    /// question with no option chosen go here, and leave the ask open; a
+    /// note with a file needs its words. A yard from before notes carried
+    /// files refuses the argument, in its words.
+    pub fn add_note(&self, bead: &str, text: &str, actor: &str, files: &[BlobFile]) -> Result<()> {
         let mut args = json!({ "bead": bead, "text": text, "actor": actor });
         if !files.is_empty() {
             args["files"] = json!(files);
@@ -1637,10 +1710,10 @@ impl Client {
         self.call("AddNote", args).map(drop)
     }
 
-    /// Sends mail to a crew member or a user of this yard, with the images
-    /// `files` names by the hash `PutBlob` answered. With one, the text may
-    /// be empty.
-    pub fn mail(&self, to: &str, text: &str, actor: &str, files: &[String]) -> Result<()> {
+    /// Sends mail to a crew member or a user of this yard, with the files
+    /// `files` names by the hash `PutBlob` answered, each with its base
+    /// name. With one, the text may be empty.
+    pub fn mail(&self, to: &str, text: &str, actor: &str, files: &[BlobFile]) -> Result<()> {
         let mut args = json!({ "to": to, "text": text, "actor": actor });
         if !files.is_empty() {
             args["files"] = json!(files);
@@ -1648,9 +1721,9 @@ impl Client {
         self.call("Mail", args).map(drop)
     }
 
-    /// Gives the yard a file: an image, a PNG or a JPEG, for mail to
-    /// carry, or a page, an HTML file, for a note. What it is the yard
-    /// reads from the bytes, and refuses what it takes none of.
+    /// Gives the yard a file: any bytes under the cap, for mail or a note
+    /// to carry. What it is the yard reads from the bytes; its name goes
+    /// on the mail or the note, not here.
     pub fn put_blob(&self, bytes: &[u8]) -> Result<BlobRef> {
         self.answer("PutBlob", json!({ "data": BASE64.encode(bytes) }))
     }
@@ -1683,7 +1756,7 @@ impl Client {
         }
     }
 
-    /// Queues mail to one of a linked yard, `<to>@<peer>`, with the images
+    /// Queues mail to one of a linked yard, `<to>@<peer>`, with the files
     /// `files` names as for [`Client::mail`]. The yard refuses mail with one
     /// when the link does not carry files, and says why.
     pub fn mail_peer(
@@ -1692,7 +1765,7 @@ impl Client {
         peer: &str,
         text: &str,
         actor: &str,
-        files: &[String],
+        files: &[BlobFile],
     ) -> Result<Queued> {
         let mut args = json!({ "to": to, "peer": peer, "text": text, "actor": actor });
         if !files.is_empty() {
@@ -2258,6 +2331,44 @@ mod tests {
             "ab cd",
         ] {
             assert_eq!(address.page_url(hash), None, "{hash:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_s_url_names_it_under_its_hash_encoded_as_one_segment() {
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        let hash = "ab".repeat(32);
+        assert_eq!(
+            address.file_url(&hash, "report.pdf"),
+            Some(format!("http://127.0.0.1:8791/blobs/{hash}/report.pdf"))
+        );
+        // The unreserved bytes go as they are; a space, a quote, a `%` and
+        // anything outside ASCII go percent-encoded, and no `/`, `?` or `#`
+        // of the name reaches the URL as anything but a byte of the name.
+        assert_eq!(
+            address.file_url(&hash, "a b/..?c#d%\"é.pdf"),
+            Some(format!(
+                "http://127.0.0.1:8791/blobs/{hash}/a%20b%2F..%3Fc%23d%25%22%C3%A9.pdf"
+            ))
+        );
+        // Under a proxy's path, alike.
+        let address = Address::parse_view("https://mac.example.net/yard/").unwrap();
+        assert_eq!(
+            address.file_url("cd", "report.pdf").as_deref(),
+            Some("https://mac.example.net/yard/blobs/cd/report.pdf")
+        );
+        // An empty name opens the bare route, as a page does.
+        assert_eq!(
+            address.file_url("cd", "").as_deref(),
+            Some("https://mac.example.net/yard/blobs/cd")
+        );
+    }
+
+    #[test]
+    fn a_file_whose_hash_is_no_hex_has_no_url() {
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        for hash in ["", "ab?x=1", "ab/../cd", "ab cd"] {
+            assert_eq!(address.file_url(hash, "report.pdf"), None, "{hash:?}");
         }
     }
 
@@ -3440,20 +3551,31 @@ mod tests {
             yard.asked("AddNote"),
             vec![json!({"bead": "yd-greet", "text": "the newcomer arrives Monday", "actor": "jo"})]
         );
-        // A note with pages names their hashes; without, no argument goes,
-        // and a yard from before takes the call as it always did.
+        // A note with files names each hash with its name; without, no
+        // argument goes, and a yard from before takes the call as it
+        // always did.
         client
             .add_note(
                 "yd-greet",
                 "the mockup, third pass",
                 "jo",
-                &["aa".into(), "bb".into()],
+                &[
+                    BlobFile {
+                        hash: "aa".into(),
+                        name: "mockup.html".into(),
+                    },
+                    BlobFile {
+                        hash: "bb".into(),
+                        name: "fence.png".into(),
+                    },
+                ],
             )
             .unwrap();
         assert_eq!(
             yard.asked("AddNote").last(),
             Some(
-                &json!({"bead": "yd-greet", "text": "the mockup, third pass", "actor": "jo", "files": ["aa", "bb"]})
+                &json!({"bead": "yd-greet", "text": "the mockup, third pass", "actor": "jo",
+                    "files": [{"hash": "aa", "name": "mockup.html"}, {"hash": "bb", "name": "fence.png"}]})
             )
         );
     }
@@ -3517,7 +3639,7 @@ mod tests {
     const HASH: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
 
     #[test]
-    fn the_cap_on_an_image_is_the_yard_s_or_8_mib() {
+    fn the_cap_on_a_file_is_the_yard_s_or_8_mib() {
         let yard = Yard::start();
         yard.answer(
             "Settings",
@@ -3528,6 +3650,20 @@ mod tests {
         assert_eq!(yard.client().settings().unwrap().blob_cap(), 8388608);
         yard.answer("Settings", r#"{"result": {"blob_max_bytes": "many"}}"#);
         assert_eq!(yard.client().settings().unwrap().blob_cap(), 8388608);
+    }
+
+    #[test]
+    fn the_count_on_a_letter_is_the_yard_s_or_64() {
+        let yard = Yard::start();
+        yard.answer(
+            "Settings",
+            r#"{"result": {"files_max": "32", "operator": "jo"}}"#,
+        );
+        assert_eq!(yard.client().settings().unwrap().files_cap(), 32);
+        yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
+        assert_eq!(yard.client().settings().unwrap().files_cap(), 64);
+        yard.answer("Settings", r#"{"result": {"files_max": "many"}}"#);
+        assert_eq!(yard.client().settings().unwrap().files_cap(), 64);
     }
 
     #[test]
@@ -3547,23 +3683,36 @@ mod tests {
                 hash: HASH.into(),
                 kind: "image/png".into(),
                 bytes: 70,
+                name: String::new(),
                 not_taken: String::new()
             }
         );
         yard.client()
-            .mail("yardmaster", "", "jo", &[blob.hash])
+            .mail(
+                "yardmaster",
+                "",
+                "jo",
+                &[BlobFile {
+                    hash: blob.hash,
+                    name: "fence.png".into(),
+                }],
+            )
             .unwrap();
         assert_eq!(
             yard.asked("Mail"),
-            vec![json!({"to": "yardmaster", "text": "", "actor": "jo", "files": [HASH]})]
+            vec![json!({"to": "yardmaster", "text": "", "actor": "jo",
+                "files": [{"hash": HASH, "name": "fence.png"}]})]
         );
 
         yard.answer(
             "PutBlob",
-            r#"{"error": {"code": "error", "message": "an image is a PNG or a JPEG"}}"#,
+            r#"{"error": {"code": "error", "message": "the file is 9437184 bytes, over the yard's limit of 8388608 (yardr settings set blob_max_bytes <bytes>)"}}"#,
         );
-        let err = yard.client().put_blob(b"GIF89a").unwrap_err();
-        assert_eq!(err.to_string(), "an image is a PNG or a JPEG");
+        let err = yard.client().put_blob(&[7u8; 9 * 1024 * 1024]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the file is 9437184 bytes, over the yard's limit of 8388608 (yardr settings set blob_max_bytes <bytes>)"
+        );
     }
 
     #[test]
@@ -3605,7 +3754,7 @@ mod tests {
             "Conversation",
             &json!({"result": [
                 {"seq": 12, "from": "jo", "to": "yardmaster", "text": "Paint the fence like this.", "read": false,
-                 "files": [{"hash": HASH, "type": "image/png", "bytes": 70}]},
+                 "files": [{"hash": HASH, "type": "image/png", "bytes": 70, "name": "fence.png"}]},
                 {"seq": 13, "from": "yardmaster", "to": "jo", "text": "Will do.", "files": null},
                 {"seq": 14, "from": "clerk@north", "to": "jo", "text": "The ledger.",
                  "files": [{"hash": HASH, "type": "image/png", "bytes": 70, "not_taken": "the link does not take files"}]}
@@ -3617,6 +3766,7 @@ mod tests {
             hash: HASH.into(),
             kind: "image/png".into(),
             bytes: 70,
+            name: "fence.png".into(),
             not_taken: String::new(),
         };
         assert_eq!(letters[0].files, vec![png.clone()]);
@@ -3629,7 +3779,7 @@ mod tests {
 
         let event: Event = serde_json::from_value(json!({"seq": 12, "kind": "mail", "actor": "jo",
             "data": {"to": "yardmaster", "text": "Paint the fence like this.",
-                     "files": [{"hash": HASH, "type": "image/png", "bytes": 70}]}}))
+                     "files": [{"hash": HASH, "type": "image/png", "bytes": 70, "name": "fence.png"}]}}))
         .unwrap();
         assert_eq!(event.files(), vec![png]);
         let plain: Event =
@@ -3664,13 +3814,24 @@ mod tests {
             }
         );
 
-        // With images the mail names them, and needs no text.
+        // With files the mail names each hash with its name, and needs no
+        // text.
         yard.client()
-            .mail_peer("clerk", "north", "", "jo", &[HASH.to_string()])
+            .mail_peer(
+                "clerk",
+                "north",
+                "",
+                "jo",
+                &[BlobFile {
+                    hash: HASH.to_string(),
+                    name: "ledger.csv".into(),
+                }],
+            )
             .unwrap();
         assert_eq!(
             yard.asked("MailPeer")[1],
-            json!({"to": "clerk", "peer": "north", "text": "", "actor": "jo", "files": [HASH]})
+            json!({"to": "clerk", "peer": "north", "text": "", "actor": "jo",
+                "files": [{"hash": HASH, "name": "ledger.csv"}]})
         );
     }
 
