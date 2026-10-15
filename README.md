@@ -82,9 +82,11 @@ would attach, or remove, another builder's picture.
 It draws footplate in a Debian container on this Mac: headless sway,
 Mesa's software Vulkan driver, grim, against a throwaway home. Each shot
 provisions a fresh container and removes it afterwards, so a shot leaves
-nothing behind but the picture; cargo's home and the build tree live in
-two volumes every shot shares, so the first build takes minutes and later
-ones only rebuild what changed.
+nothing behind but the picture; cargo's home lives in a volume every shot
+shares, and each checkout keeps its own build tree in another, so a
+checkout's first shot builds for minutes and its later ones only rebuild
+what changed. One shared build tree would shoot another checkout's
+binary: cargo takes a package as fresh from its sources' mtimes.
 
 A state opens the window against a fake yard serving it, instead of the
 first screen:

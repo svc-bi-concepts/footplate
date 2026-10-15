@@ -26,9 +26,11 @@
 # fresh directory of its own; its path is printed at the end either way.
 # Every run provisions a fresh container and builds footplate in it; the
 # container is removed when the shot ends, so a shot leaves nothing behind
-# but the picture. Cargo's home and the build tree live in two volumes
-# every shot shares, so the first build takes minutes and later ones only
-# rebuild what changed.
+# but the picture. Cargo's home lives in a volume every shot shares, and
+# each checkout keeps its own build tree in another, so a checkout's first
+# shot builds for minutes and its later ones only rebuild what changed. One
+# shared build tree would shoot another checkout's binary: cargo takes a
+# package as fresh from its sources' mtimes, not their contents.
 set -e
 
 caller=$PWD
@@ -93,14 +95,21 @@ fi
 # One container per checkout, from its directory's name: two builders' shots
 # never share one, and a container always looks at the checkout that made it.
 # SHOT_CONTAINER names another one. The container is removed when the shot
-# ends; cargo's home and the build tree live in two volumes every shot
-# shares instead, so each build warms from the last one. Two shots at once
-# share them safely: cargo locks the target dir.
+# ends; cargo's home lives in a volume every shot shares instead, so each
+# build warms from the last one's registry, and the build trees live in
+# another volume with one directory per checkout, so no shot builds or runs
+# another checkout's binary.
 suffix=$(basename "$root")
 suffix=$(printf '%s' "$suffix" | tr -c 'a-zA-Z0-9_.-' '-' | tr 'A-Z' 'a-z')
 name=${SHOT_CONTAINER:-footplate-shot-$suffix}
 cargo_vol=footplate-shot-cargo
 target_vol=footplate-shot-target
+# The checkout's own build tree under the shared target volume. The hash of
+# the checkout's path keeps two checkouts with the same directory name
+# apart; only the registry and git checkouts in cargo's home are still
+# shared, and cargo locks those.
+path_hash=$(printf '%s' "$root" | cksum | cut -d' ' -f1)
+target_dir=/target/$suffix-$path_hash
 
 # The shot leaves nothing behind: the container goes when the script ends,
 # however it ends.
@@ -120,13 +129,14 @@ docker run -d --name "$name" --init \
     -v "$root:/src:ro" \
     -v "$cargo_vol:/cargo" -v "$target_vol:/target" \
     -e CARGO_HOME=/cargo -e RUSTUP_HOME=/cargo/rustup \
-    -e CARGO_TARGET_DIR=/target \
+    -e CARGO_TARGET_DIR=$target_dir \
     -e PATH=/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     debian:13 sleep infinity >/dev/null
 echo "shot-linux.sh: container $name, volumes $cargo_vol $target_vol" >&2
 
 # The checkout is mounted read-only: cargo reads it and writes the build to
-# the target volume, so a shot never dirties the checkout it shoots.
+# the checkout's own directory in the target volume, so a shot never
+# dirties the checkout it shoots.
 # Missing tools are installed: the build's (cc, the libraries gpui builds
 # against), the compositor's (sway, grim, seatd), Vulkan's (the loader, the
 # software driver, vulkaninfo to say which driver answers) and a font, so
@@ -147,6 +157,11 @@ fi
 if ! have cargo; then
     docker exec "$name" sh -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable -q' >&2
 fi
+
+# Build trees of checkouts long gone are pruned before building: each costs
+# GBs no shot will warm from. Only trees with nothing written in the last
+# week go, never this shot's own, and the helper says what went.
+docker exec "$name" sh /src/scripts/shot-linux-prune.sh /target "$target_dir" >&2
 
 docker exec "$name" sh -c 'cd /src && /cargo/bin/cargo build --locked' >&2
 
@@ -195,7 +210,7 @@ docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY
     # A yard at an address opens from the settings: one far yard, open.
     if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"}" > "$scratch/config/footplate/settings.json"; fi
     chown -R shot:shot "$scratch"
-    su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json FOOTPLATE_SHOT='"$state"' dbus-run-session -- /target/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
+    su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 
 # The window is waited for, not slept for: sway's tree names it by app_id.
 # Three seconds past that, the first paint has settled and grim shoots.
