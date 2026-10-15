@@ -6884,7 +6884,7 @@ impl Footplate {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().w(rems(4.)).flex_none().child(name))
+                .child(div().w(rems(5.)).flex_none().child(name))
                 .child(
                     div()
                         .flex_1()
