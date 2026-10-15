@@ -2819,14 +2819,14 @@ impl Footplate {
             _ => {}
         }
         // The page shot shows the row with Open and run, and the mail
-        // shot the mail's row with Open and its image: the view is taken
-        // as answering at its address, so the shot is the row and not
-        // the probe. A debug build's alone; where the address reads as
-        // none, the probe below says so.
+        // and image shots the mail's row with Open and its image: the
+        // view is taken as answering at its address, so the shot is the
+        // row and not the probe. A debug build's alone; where the
+        // address reads as none, the probe below says so.
         #[cfg(debug_assertions)]
         if matches!(
             std::env::var("FOOTPLATE_SHOT").as_deref(),
-            Ok("page") | Ok("mail")
+            Ok("page") | Ok("mail") | Ok("image")
         ) && api::Address::parse_view(&base).is_ok()
         {
             self.view_up = ViewUp::Answered(base, true);
