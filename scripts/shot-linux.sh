@@ -14,8 +14,10 @@
 # start-at-login switch), `reconnecting` (a running yard whose server
 # is then stopped, with a draft in the composer), `refusal` (the
 # first screen's way to a yard at an address, with a pairing's http
-# address refused under its fields) and `undelivered` (the conversation
-# with one of a linked yard whose mail was refused over the hour).
+# address refused under its fields), `undelivered` (the conversation
+# with one of a linked yard whose mail was refused over the hour) and
+# `answered` (the first screen with a way's fields open after the yard
+# answered, with the line that esc opens it).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the head draws the same on
@@ -32,7 +34,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run stopped far settings reconnecting page refusal undelivered"
+states="yardmaster plain run stopped far settings reconnecting page refusal undelivered answered"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

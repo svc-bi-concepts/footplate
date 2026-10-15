@@ -100,9 +100,11 @@ yard), `far` (a yard at an address, away), `settings` (the settings
 with the start-at-login switch), `reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
 first screen's way to a yard at an address, with a pairing's http address
-refused under its fields) and `undelivered` (the conversation with one of
-a linked yard whose mail was refused over the hour). With no state the
-first screen is shot, as above. A state is a debug build's alone: the
+refused under its fields), `undelivered` (the conversation with one of
+a linked yard whose mail was refused over the hour) and `answered` (the
+first screen with a way's fields open after the yard answered, with the
+line that esc opens it). With no state the first screen is shot, as
+above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
 that variable.
 
@@ -300,7 +302,10 @@ button adds the yard to the settings' list and opens it, what keeps it out
 of the list is said under the fields, and Esc leaves them. The ways stand
 under any yard that is away, also one that no longer lets this device in,
 but not in a window of the one yard `FOOTPLATE_YARD` names, which has no
-list to add to. Neither of these two creates a yard or starts one.
+list to add to. Neither of these two creates a yard or starts one. Where
+the yard that is away answers while a way's fields are open, the fields
+and the screen stand until `esc` leaves them, and the screen says the
+yard answers again: what is typed stays in the field.
 
 ## A yard at an address
 

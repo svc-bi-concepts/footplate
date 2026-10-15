@@ -20,15 +20,19 @@ use crate::yard::Env;
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page and an image, the
 /// first screen's way to a yard at an address, with a pairing's http
-/// address refused under its fields, and the conversation with one of a
-/// linked yard whose mail was refused over the hour.
+/// address refused under its fields, the conversation with one of a
+/// linked yard whose mail was refused over the hour, and the first screen
+/// with a way's fields open after the yard answered, with the line that
+/// esc opens it.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down. The yard at an address is opened
 /// from the settings the shot script writes; the settings open over a
 /// running yard; the page's card stands expanded at its end, with the
 /// web view taken as answering, so the row carries Open and run. The undelivered
 /// conversation opens on the row the shot names, with the hour's line under
-/// the mail. The script answers the switch's
+/// the mail. The answered yard serves the yardmaster's conversation, as
+/// the running ones do; the window opens with the way's fields standing,
+/// so the yard answers under them. The script answers the switch's
 /// yardr for every state, so the head draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
@@ -41,6 +45,7 @@ pub const STATES: &[&str] = &[
     "page",
     "refusal",
     "undelivered",
+    "answered",
 ];
 
 /// The note's image in the `page` state, and its hash: the yard serves
@@ -221,8 +226,9 @@ fn populate(yard: &Yard, state: &str) {
         // The yard at an address is opened from the settings, not from
         // this yard, and the settings open over a running one: both
         // serve the yardmaster's conversation, as does the yard that is
-        // stopped once it is read.
-        "yardmaster" | "far" | "settings" | "reconnecting" => {
+        // stopped once it is read, and the one that answers under the
+        // first screen's open fields.
+        "yardmaster" | "far" | "settings" | "reconnecting" | "answered" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -474,7 +480,7 @@ mod tests {
             assert_eq!(loaded.me, "jo", "{state}");
             assert_eq!(loaded.asks.decided.len(), 0, "{state}");
             match *state {
-                "yardmaster" | "far" | "settings" | "reconnecting" => {
+                "yardmaster" | "far" | "settings" | "reconnecting" | "answered" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");

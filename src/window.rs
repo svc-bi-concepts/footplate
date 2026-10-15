@@ -950,6 +950,11 @@ pub struct Footplate {
     /// The away screen's details are open: the socket, the error and the
     /// hint at yardr status, where no yard was ever made. Closed at first.
     away_details: bool,
+    /// The yard answered while a way's fields stood open on the away
+    /// screen: the screen and the fields stand until the person leaves
+    /// them, though the yard may be away again since. While it answers
+    /// under them, the screen says so, and leaving them opens it.
+    answered_while_adding: bool,
     /// Of a yard at an address: who it says this device is.
     said: Option<api::Me>,
     line: Entity<Line>,
@@ -1200,6 +1205,18 @@ impl Footplate {
                 .update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
             this.pair(cx);
         }
+        // The answered shot is the first screen with a way's fields open
+        // when the yard answers: the fields stand, and the screen says
+        // the yard answers again. A debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("answered") {
+            this.adding = Some(Adding::Near);
+            this.yard_name
+                .update(cx, |line, cx| line.set_text("second home", cx));
+            let socket = this.env.socket.to_string_lossy().into_owned();
+            this.socket
+                .update(cx, |line, cx| line.set_text(&socket, cx));
+        }
         this
     }
 
@@ -1359,6 +1376,7 @@ impl Footplate {
             down: None,
             away: Away::Stopped,
             away_details: false,
+            answered_while_adding: false,
             said: None,
             line,
             conversation: ScrollHandle::new(),
@@ -1811,6 +1829,14 @@ impl Footplate {
         }
         self.note_pages = self.kept_note_pages.remove(to).unwrap_or_default();
         self.drafts.turn_to(to);
+        // A yard that answered under a way's fields is held as up: it
+        // answered, and goes on being followed.
+        if self.answered_while_adding {
+            self.answered_while_adding = false;
+            if self.unreached.get(&self.yard).is_none() {
+                self.down = None;
+            }
+        }
         let mut was = Held {
             session: self.session,
             entry: self.entry.take(),
@@ -2106,11 +2132,20 @@ impl Footplate {
                 // The yard answers: the away screen's details are shut,
                 // for the next time it is away.
                 self.away_details = false;
-                // The fields of a way to a yard stood where this yard is
-                // drawn now: they are asked for no longer, and the line
-                // has the keys, not a field that is not in view.
-                if self.down.take().is_some() && self.adding.is_some() && !self.settings_open {
-                    self.shut_adding(cx);
+                // Where a way's fields stand open on the away screen, they
+                // and the screen stand: what is typed stays in the field,
+                // and the screen says the yard answers again. Shutting
+                // them would give the keys to the line, and the rest of a
+                // pairing's code to the yard that came back.
+                if self.down.is_some() && self.adding.is_some() && !self.settings_open {
+                    self.answered_while_adding = true;
+                } else {
+                    // The fields of a way to a yard stood where this yard is
+                    // drawn now: they are asked for no longer, and the line
+                    // has the keys, not a field that is not in view.
+                    if self.down.take().is_some() && self.adding.is_some() && !self.settings_open {
+                        self.shut_adding(cx);
+                    }
                 }
                 self.unreached.remove(&self.yard);
                 if fresh {
@@ -4229,11 +4264,21 @@ impl Footplate {
         if let Some(first_run) = self.first_run.clone() {
             return first_run.update(cx, |first_run, cx| first_run.leave(cx));
         }
-        // The fields of a way to a yard, where there is none.
+        // The fields of a way to a yard, where there is none. Where
+        // the yard answers under them, it opens, and the line has the
+        // keys, as when a yard is switched to.
         if self.down.is_some() && self.adding.is_some() {
             self.yard_said = None;
             self.adding = None;
-            window.focus(&self.focus.clone());
+            let answers = self.answers_under_adding();
+            self.answered_while_adding = false;
+            if answers {
+                self.down = None;
+                self.refresh_switch(cx);
+                window.focus(&self.line.focus_handle(cx));
+            } else {
+                window.focus(&self.focus.clone());
+            }
             cx.notify();
             return;
         }
@@ -4588,6 +4633,15 @@ impl Footplate {
         if self.pairing || self.first_run.is_some() || !self.sets_up_here() {
             return;
         }
+        // A yard that answered under the fields is left with them: where
+        // it answers, it opens under the first run.
+        if self.answered_while_adding {
+            self.answered_while_adding = false;
+            if self.unreached.get(&self.yard).is_none() {
+                self.down = None;
+                self.refresh_switch(cx);
+            }
+        }
         self.adding = None;
         self.yard_said = None;
         let (means, socket, name) = (
@@ -4814,9 +4868,21 @@ impl Footplate {
     /// as last seen, marked stale by the one quiet line, and its sends
     /// are held until it answers. A yard never reached, one that no
     /// longer lets this device in, and one that could not be opened keep
-    /// the away screen, which says what to do.
+    /// the away screen, which says what to do. So does one that answered
+    /// while a way's fields stood open: it is not away, but its screen
+    /// stands until the person leaves the fields.
     fn reconnecting(&self) -> bool {
-        self.down.is_some() && self.model.is_some() && self.away == Away::Trying
+        self.down.is_some()
+            && self.model.is_some()
+            && self.away == Away::Trying
+            && !self.answered_while_adding
+    }
+
+    /// Whether the yard answers under a way's open fields: it answered
+    /// while they stood open, and is not away again since. The screen
+    /// says so, and leaving the fields opens it.
+    fn answers_under_adding(&self) -> bool {
+        self.answered_while_adding && self.unreached.get(&self.yard).is_none()
     }
 
     /// The quiet line where the head has no status row for it: a yard at
@@ -6489,6 +6555,8 @@ impl Footplate {
     /// words. Under the words are the ways to a yard from here, which are
     /// the settings' own: each asks for what the settings ask for a yard
     /// that is added, in the same fields, and opens the yard it adds.
+    /// Where the yard answers under a way's open fields, one line says so
+    /// in place of whether it is tried again, with the key that opens it.
     fn away(&self, why: &str, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let place = self.client.as_ref().map(Client::place);
         let alone = self.env.yard.is_some();
@@ -6511,6 +6579,7 @@ impl Footplate {
                     .to_string()
             }
         };
+        let answers = self.answers_under_adding();
         div()
             .flex_1()
             .min_w_0()
@@ -6553,7 +6622,16 @@ impl Footplate {
                             .flatten()
                             .map(|place| div().text_color(palette.faint).child(place)),
                     )
-                    .child(div().text_color(palette.faint).child(again)),
+                    // Where the yard answers under a way's open fields,
+                    // one line says so, with the key that opens it, in
+                    // place of whether it is tried again.
+                    .children(answers.then(|| {
+                        div()
+                            .debug_selector(|| "away answers".to_string())
+                            .text_color(palette.faint)
+                            .child("This yard answers again: esc opens it.")
+                    }))
+                    .children((!answers).then(|| div().text_color(palette.faint).child(again))),
             )
             // The ways to a yard: one entry each, and a further way is one
             // more. The environment's yard is the one there is, and has
@@ -17403,7 +17481,10 @@ mod tests {
     }
 
     /// The window goes on asking for the yard that is away while a way's
-    /// fields are open: started, it is opened by itself.
+    /// fields are open: started, it answers under them. The fields and
+    /// the screen stand until esc leaves them, and the screen says the
+    /// yard answers again. What is typed stays in the field; esc opens
+    /// the yard, and the line has the keys.
     #[gpui::test]
     fn no_yard_is_tried_again_while_a_way_is_open(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17412,16 +17493,78 @@ mod tests {
         cx.simulate_input("second home");
         let near = Yard::start_at(&dir.path().join("yard.sock"));
         a_yard_of_jo(&near);
-        wait(cx, "this machine's yard by itself", |cx| {
-            texts(&view, cx) == ["Shall I land it?"]
+        wait(cx, "that the yard answers again", |cx| {
+            drawn(cx, "away answers")
         });
+        // The fields and the screen stand: the yard is not opened by
+        // itself under the fingers.
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Near)
+        );
+        assert!(view.read_with(cx, |v, _| v.down.is_some()));
+        assert!(drawn(cx, "away lead") && drawn(cx, "yard name"));
+        assert!(!drawn(cx, "rows"));
+        // What is typed now is the field's, not the line's, and the
+        // yard that came back has no mail.
+        cx.simulate_input("hello");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.yard_name.read(cx).text().to_string(), "second homehello");
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(near.asked("Mail"), Vec::<Value>::new());
+        // Esc leaves the fields, and the yard that answered opens: the
+        // line has the keys.
+        cx.simulate_keystrokes("escape");
         assert_eq!(view.read_with(cx, |v, _| v.down.clone()), None);
         assert_eq!(open_yard(&view, cx), "this machine");
-        // The fields went with the screen they stood on, and what is
-        // typed now is the line's.
-        assert_eq!(view.read_with(cx, |v, _| v.adding.clone()), None);
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
         cx.simulate_input("hello");
         assert_eq!(typed(&view, cx), "hello");
+        assert_eq!(near.asked("Mail"), Vec::<Value>::new());
+    }
+
+    /// A pairing's code typed while the yard is away stays the field's
+    /// when the yard answers: its tail lands in no line, and the enter
+    /// meant for pair sends no mail. The fields stay filled for the fix.
+    #[gpui::test]
+    fn no_yard_keeps_a_pairing_s_code_while_the_yard_answers(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        // A loopback address nothing answers at: plain http is allowed on
+        // this machine, so the code goes, and the connection says no.
+        let far = Yard::start_tcp();
+        let address = far.address().to_string();
+        far.stop();
+        let (view, cx) = no_yard(dir.path(), cx);
+        click_on(cx, "way far");
+        type_in(&view, cx, "droplet", &address, "");
+        click_on(cx, "yard code");
+        cx.simulate_input("K7QM-");
+        let near = Yard::start_at(&dir.path().join("yard.sock"));
+        a_yard_of_jo(&near);
+        wait(cx, "that the yard answers again", |cx| {
+            drawn(cx, "away answers")
+        });
+        // The tail of the code is the field's, and enter is the field's:
+        // the code goes to the yard at the address, which says no, and
+        // the yard that came back has neither mail nor an answer.
+        cx.simulate_input("2XPD");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.code.read(cx).text().to_string(), "K7QM-2XPD");
+        });
+        assert_eq!(typed(&view, cx), "");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "that the yard does not answer", |cx| {
+            yard_said(&view, cx).starts_with("the yard does not answer")
+        });
+        assert!(drawn(cx, "yard said"));
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.code.read(cx).text().to_string(), "K7QM-2XPD");
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(near.asked("Mail"), Vec::<Value>::new());
+        assert_eq!(near.asked("AnswerAsk"), Vec::<Value>::new());
+        assert_eq!(near.asked("AddNote"), Vec::<Value>::new());
     }
 
     /// What the yard says a secret ask asks for.
