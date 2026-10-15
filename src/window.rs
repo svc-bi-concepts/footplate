@@ -16664,6 +16664,58 @@ mod tests {
         })
     }
 
+    /// The first run's provider buttons: each installed harness's kind
+    /// with its button's text.
+    fn setup_providers(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, String)> {
+        view.read_with(cx, |v, cx| {
+            v.first_run.as_ref().unwrap().read(cx).provider_buttons()
+        })
+    }
+
+    /// The first run's model pick: each button's picked id (None is the
+    /// harness's own choice) with its text.
+    fn setup_models(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(Option<String>, String)> {
+        view.read_with(cx, |v, cx| {
+            v.first_run.as_ref().unwrap().read(cx).model_buttons()
+        })
+    }
+
+    /// The first run's picked model id: None is the harness's own choice.
+    fn setup_picked(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
+        view.read_with(cx, |v, cx| {
+            v.first_run.as_ref().unwrap().read(cx).picked_model()
+        })
+    }
+
+    /// The first run at its second step, with the stand-in answering
+    /// `doctor`: the window with no yard, "way here", and "go on" once
+    /// the machine is ready. The stand-in's path, for its answers and
+    /// its calls.
+    fn at_yard<'a>(
+        dir: &tempfile::TempDir,
+        doctor: &serde_json::Value,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext, PathBuf) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        standin::answers(&program, "doctor", 0, doctor);
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+        click_on(cx, "way here");
+        at_step(&view, cx, Step::Needs);
+        click_on(cx, "setup go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        (view, cx, program)
+    }
+
     /// A fetch is a Mac road from yardr's data. Even if a doctor answer
     /// includes one on Linux, the row stays a list with the vendor's page.
     #[gpui::test]
@@ -16747,9 +16799,9 @@ mod tests {
         assert_eq!(step_of(&view, cx), Some(Step::Yard));
 
         // Your yard: the login name stands in the field, the first
-        // harness is chosen, and one with no login recipe says so.
+        // provider is chosen, and one with no login recipe says so.
         assert_eq!(setup_typed(&view, cx, "your name"), "jo");
-        assert!(drawn(cx, "setup harness claude") && drawn(cx, "setup harness codex"));
+        assert!(drawn(cx, "setup provider claude") && drawn(cx, "setup provider codex"));
         assert!(drawn(cx, "setup style guide") && drawn(cx, "setup style report"));
         // The row is the scale it is: the question, the four numbered in
         // order, and the line that they change later.
@@ -16932,6 +16984,154 @@ mod tests {
         // The line has the keys, in the yardmaster's conversation.
         cx.simulate_input("hello");
         assert_eq!(typed(&view, cx), "hello");
+    }
+
+    /// The second step names the providers and picks the yardmaster's
+    /// model from the chosen one's offers: the recommended one stands
+    /// picked, and creating the yard sends its id.
+    #[gpui::test]
+    fn the_second_step_picks_the_yardmaster_s_model_from_the_provider_s_offers(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx, program) = at_yard(&dir, &standin::doctor_ready_with_offers(), cx);
+
+        // The providers by their labels, the one with no login recipe
+        // saying it needs a terminal once.
+        assert!(drawn(cx, "setup provider claude") && drawn(cx, "setup provider codex"));
+        assert_eq!(
+            setup_providers(&view, cx),
+            [
+                ("claude".to_string(), "Anthropic · Claude Code".to_string()),
+                (
+                    "codex".to_string(),
+                    "OpenAI · Codex (needs a terminal once to log in)".to_string()
+                ),
+            ]
+        );
+        // The model pick: the recommended offer stands picked and marked,
+        // beside the harness's own choice.
+        assert!(
+            drawn(cx, "setup model opus")
+                && drawn(cx, "setup model fable")
+                && drawn(cx, "setup model sonnet")
+                && drawn(cx, "setup model own")
+        );
+        assert_eq!(
+            setup_models(&view, cx),
+            [
+                (
+                    Some("opus".to_string()),
+                    "Opus 5.5 (recommended)".to_string()
+                ),
+                (Some("fable".to_string()), "Fable 5.1".to_string()),
+                (Some("sonnet".to_string()), "Sonnet 5".to_string()),
+                (None, "the harness's own choice".to_string()),
+            ]
+        );
+        assert_eq!(setup_picked(&view, cx), Some("opus".to_string()));
+
+        // Creating the yard sends the picked id.
+        standin::answers(&program, "init", 0, &json!({"harness": "claude"}));
+        click_on(cx, "setup create");
+        at_step(&view, cx, Step::Login);
+        let yard = dir.path().display().to_string();
+        assert_eq!(
+            standin::calls(&program).last().unwrap(),
+            &format!(
+                "[init] [--harness=claude] [--operator=jo] [--yardmaster=yardmaster] [--style=guide] [--model=opus] [--json] [--home] [{yard}] [--actor=jo]"
+            )
+        );
+    }
+
+    /// Choosing another provider moves the model pick to its recommended
+    /// entry, and creating the yard sends that id.
+    #[gpui::test]
+    fn choosing_another_provider_moves_the_model_pick(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx, program) = at_yard(&dir, &standin::doctor_ready_with_offers(), cx);
+
+        // A picked offer stands until another provider is chosen.
+        click_on(cx, "setup model fable");
+        assert_eq!(setup_picked(&view, cx), Some("fable".to_string()));
+        click_on(cx, "setup provider codex");
+        assert_eq!(setup_picked(&view, cx), Some("gpt-6-luna".to_string()));
+        assert!(drawn(cx, "setup model gpt-6-luna") && drawn(cx, "setup model gpt-6-astra"));
+        assert_eq!(
+            setup_models(&view, cx),
+            [
+                (
+                    Some("gpt-6-luna".to_string()),
+                    "GPT-6 Luna (recommended)".to_string()
+                ),
+                (Some("gpt-6-astra".to_string()), "GPT-6 Astra".to_string()),
+                (None, "the harness's own choice".to_string()),
+            ]
+        );
+
+        standin::answers(&program, "init", 0, &json!({"harness": "codex"}));
+        click_on(cx, "setup create");
+        at_step(&view, cx, Step::Login);
+        let yard = dir.path().display().to_string();
+        assert_eq!(
+            standin::calls(&program).last().unwrap(),
+            &format!(
+                "[init] [--harness=codex] [--operator=jo] [--yardmaster=yardmaster] [--style=guide] [--model=gpt-6-luna] [--json] [--home] [{yard}] [--actor=jo]"
+            )
+        );
+    }
+
+    /// A typed model id wins over the pick: creating the yard sends it.
+    #[gpui::test]
+    fn a_typed_model_id_wins_over_the_pick(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx, program) = at_yard(&dir, &standin::doctor_ready_with_offers(), cx);
+        type_setup(&view, cx, "another model id", "opus-tuned");
+        assert_eq!(setup_picked(&view, cx), Some("opus".to_string()));
+
+        standin::answers(&program, "init", 0, &json!({"harness": "claude"}));
+        click_on(cx, "setup create");
+        at_step(&view, cx, Step::Login);
+        let yard = dir.path().display().to_string();
+        assert_eq!(
+            standin::calls(&program).last().unwrap(),
+            &format!(
+                "[init] [--harness=claude] [--operator=jo] [--yardmaster=yardmaster] [--style=guide] [--model=opus-tuned] [--json] [--home] [{yard}] [--actor=jo]"
+            )
+        );
+    }
+
+    /// The harness's own choice sends no model: creating the yard has no
+    /// --model.
+    #[gpui::test]
+    fn the_harness_s_own_choice_sends_no_model(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx, program) = at_yard(&dir, &standin::doctor_ready_with_offers(), cx);
+        click_on(cx, "setup model own");
+        assert_eq!(setup_picked(&view, cx), None);
+
+        standin::answers(&program, "init", 0, &json!({"harness": "claude"}));
+        click_on(cx, "setup create");
+        at_step(&view, cx, Step::Login);
+        let yard = dir.path().display().to_string();
+        assert_eq!(
+            standin::calls(&program).last().unwrap(),
+            &format!(
+                "[init] [--harness=claude] [--operator=jo] [--yardmaster=yardmaster] [--style=guide] [--json] [--home] [{yard}] [--actor=jo]"
+            )
+        );
     }
 
     /// A home that has a yard already, which does not run: the first run

@@ -6,7 +6,8 @@
 # Mesa's software driver (lavapipe) alone: the picture proves that is enough.
 # Run it on the Mac, from anywhere: `scripts/shot-linux.sh [<state>] [output.png]`.
 # A state opens the window against a fake yard serving it (src/shot.rs),
-# in the debug build alone: `yardmaster` (the conversation with the
+# in the debug build alone, or with no yard where the state says none:
+# `yardmaster` (the conversation with the
 # yardmaster), `plain` (an open decision card of a plain ask), `page` (an
 # open card whose note carries a page and an image), `run` (an
 # open card of a run ask), `stopped` (the head with a stopped yard), `far`
@@ -18,7 +19,8 @@
 # with one of a linked yard whose mail was refused over the hour),
 # `answered` (the first screen with a way's fields open after the yard
 # answered, with the line that esc opens it) and `setup` (step 2 of
-# setting up a yard here, posed: the working styles as a numbered scale).
+# setting up a yard here, posed: a canned doctor of two providers and
+# their model offers, and the working styles as a numbered scale).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the head draws the same on

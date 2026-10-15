@@ -24,7 +24,7 @@ use gpui::{
 use super::small_button;
 use crate::fetch;
 use crate::input::{Line, Submitted};
-use crate::setup::{self, Doctor, Form, Item, Login, Need, Yardr};
+use crate::setup::{self, Doctor, Form, Item, Login, Need, Offer, Yardr};
 use crate::theme::Palette;
 
 /// Gives the yardr to run: where it is kept, and what there is to say of
@@ -156,6 +156,10 @@ pub struct FirstRun {
     about: Entity<Line>,
     /// The harness and the style chosen in the form.
     harness: Option<String>,
+    /// The model picked from the chosen harness's offers: None is the
+    /// harness's own choice. Choosing a harness resets it to that
+    /// harness's recommended offer, and a typed model id wins over it.
+    model_pick: Option<String>,
     style: usize,
     /// The login that is underway, what it needs now, and the page it
     /// named. The field's text is what the page gave: it goes to yardr and
@@ -203,9 +207,9 @@ impl FirstRun {
         this
     }
 
-    /// Step 2 posed for a screenshot: the yard's form with a harness
-    /// chosen and the scale to pick from. A debug build's alone: nothing
-    /// is fetched, and no command runs.
+    /// Step 2 posed for a screenshot: the yard's form with a provider
+    /// chosen, its model offers to pick from, and the scale to pick from.
+    /// A debug build's alone: nothing is fetched, and no command runs.
     #[cfg(debug_assertions)]
     pub fn shot_step2(
         means: Means,
@@ -215,21 +219,16 @@ impl FirstRun {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::build(means, socket, name, handle, cx);
+        this.doctor = Some(crate::shot::setup_doctor());
+        let harness = this.doctor.as_ref().and_then(|doctor| {
+            doctor
+                .installed()
+                .first()
+                .and_then(|item| item.harness.clone())
+        });
+        this.model_pick = harness.as_deref().and_then(|kind| this.recommended(kind));
+        this.harness = harness;
         this.step = Step::Yard;
-        this.doctor = serde_json::from_value(serde_json::json!({
-            "yard": false,
-            "machine": [
-                {"program": "herdr", "for": "it starts every agent in a pane of its own",
-                 "found": true, "server": {"state": "not_running"}},
-                {"program": "git", "for": "a depot is a git repository", "found": true},
-                {"program": "claude", "for": "a harness a yard can be created on",
-                 "found": true, "harness": "claude", "harness_login": true},
-                {"program": "codex", "for": "a harness a yard can be created on",
-                 "found": true, "harness": "codex"},
-            ],
-        }))
-        .ok();
-        this.harness = Some("claude".to_string());
         this
     }
 
@@ -269,9 +268,10 @@ impl FirstRun {
             form: Form::default(),
             operator: field("Jo", name, cx),
             yardmaster: field("yardmaster", "yardmaster", cx),
-            model: field("the harness's own choice", "", cx),
+            model: field("the pick above stands", "", cx),
             about: field("I teach history and do not read code", "", cx),
             harness: None,
+            model_pick: None,
             style: 0,
             login: None,
             need: None,
@@ -462,10 +462,12 @@ impl FirstRun {
             cx.notify();
             return;
         }
-        self.harness = doctor
+        let harness = doctor
             .installed()
             .first()
             .and_then(|item| item.harness.clone());
+        self.model_pick = harness.as_deref().and_then(|kind| self.recommended(kind));
+        self.harness = harness;
         self.step = Step::Yard;
         self.said = None;
         window.focus(&self.operator.focus_handle(cx));
@@ -495,7 +497,10 @@ impl FirstRun {
                 "" => "yardmaster".to_string(),
                 name => name.to_string(),
             },
-            model: typed(&self.model),
+            model: match typed(&self.model) {
+                overrode if !overrode.is_empty() => overrode,
+                _ => self.model_pick.clone().unwrap_or_default(),
+            },
             style: setup::STYLES[self.style].0.to_string(),
             about: typed(&self.about),
         };
@@ -521,6 +526,51 @@ impl FirstRun {
             },
             cx,
         );
+    }
+
+    /// The installed harness of `kind`, as doctor spoke of it.
+    fn installed_item(&self, kind: &str) -> Option<&Item> {
+        self.doctor
+            .as_ref()?
+            .installed()
+            .into_iter()
+            .find(|item| item.harness.as_deref() == Some(kind))
+    }
+
+    /// The model id the pick resets to for `kind`: its offer recommended
+    /// for a yardmaster, else the harness's own choice.
+    fn recommended(&self, kind: &str) -> Option<String> {
+        self.installed_item(kind)?
+            .recommended_offer()
+            .map(|offer| offer.model.clone())
+    }
+
+    /// The text of a provider's button: the harness's label where doctor
+    /// carries one, else the kind. One with no login recipe says it needs
+    /// a terminal once.
+    fn provider_text(item: &Item) -> String {
+        let name = item
+            .label
+            .as_deref()
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| item.harness.as_deref().unwrap_or_default());
+        match item.harness_login {
+            true => name.to_string(),
+            false => format!("{name} (needs a terminal once to log in)"),
+        }
+    }
+
+    /// The text of an offer's button: its label, the yardmaster's pick
+    /// marked.
+    fn offer_text(offer: &Offer) -> String {
+        let name = match offer.label.is_empty() {
+            true => offer.model.as_str(),
+            false => offer.label.as_str(),
+        };
+        match offer.for_yardmaster() {
+            true => format!("{name} (recommended)"),
+            false => name.to_string(),
+        }
     }
 
     /// Whether yardr can lead the login of the yard's harness.
@@ -1010,14 +1060,14 @@ impl FirstRun {
                 let installed = self.doctor.iter().flat_map(|doctor| doctor.installed());
                 let kinds = installed.map(|item| {
                     let kind = item.harness.clone().unwrap_or_default();
-                    let text = match item.harness_login {
-                        true => kind.clone(),
-                        false => format!("{kind} (needs a terminal once to log in)"),
-                    };
+                    let text = Self::provider_text(item);
                     let chosen = self.harness.as_deref() == Some(kind.as_str());
-                    self.button(format!("setup harness {kind}"), &text, palette)
+                    self.button(format!("setup provider {kind}"), &text, palette)
                         .when(chosen, |el| el.bg(palette.open).text_color(palette.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            // Choosing a provider resets the pick to its
+                            // recommended entry.
+                            this.model_pick = this.recommended(&kind);
                             this.harness = Some(kind.clone());
                             cx.notify();
                         }))
@@ -1028,12 +1078,53 @@ impl FirstRun {
                         .flex_wrap()
                         .items_center()
                         .gap_2()
-                        .child(div().w(rems(6.)).flex_none().child("harness"))
+                        .child(div().w(rems(6.)).flex_none().child("provider"))
                         .children(kinds)
                         .into_any_element(),
                 );
                 body.push(self.typed("yardmaster", &self.yardmaster, palette, cx));
-                body.push(self.typed("model", &self.model, palette, cx));
+                let offers = self
+                    .harness
+                    .as_deref()
+                    .and_then(|kind| self.installed_item(kind))
+                    .map(|item| item.offers.clone())
+                    .unwrap_or_default();
+                let picks = offers.iter().map(|offer| {
+                    let id = offer.model.clone();
+                    let text = Self::offer_text(offer);
+                    let chosen = self.model_pick.as_deref() == Some(id.as_str());
+                    self.button(format!("setup model {id}"), &text, palette)
+                        .when(chosen, |el| el.bg(palette.open).text_color(palette.text))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.model_pick = Some(id.clone());
+                            cx.notify();
+                        }))
+                });
+                body.push(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(rems(6.)).flex_none().child("model"))
+                        .children(picks)
+                        .child(
+                            self.button(
+                                "setup model own".to_string(),
+                                "the harness's own choice",
+                                palette,
+                            )
+                            .when(self.model_pick.is_none(), |el| {
+                                el.bg(palette.open).text_color(palette.text)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model_pick = None;
+                                cx.notify();
+                            })),
+                        )
+                        .into_any_element(),
+                );
+                body.push(self.typed("another model id", &self.model, palette, cx));
                 body.push(
                     div()
                         .debug_selector(|| "setup savvy".to_string())
@@ -1070,7 +1161,7 @@ impl FirstRun {
                         .into_any_element(),
                 );
                 body.push(faint(
-                    "The yardmaster is the agent you talk with: it keeps the work moving and comes to you with decisions. The model and the line about you may stay empty.",
+                    "The yardmaster is the agent you talk with: it should run on the strongest model you have. The override and the line about you may stay empty.",
                 ));
                 body.push(
                     div()
@@ -1415,12 +1506,49 @@ impl Render for FirstRun {
 
 #[cfg(test)]
 impl FirstRun {
+    /// The provider row as drawn: each installed harness's kind with
+    /// its button's text.
+    pub fn provider_buttons(&self) -> Vec<(String, String)> {
+        self.doctor
+            .iter()
+            .flat_map(|doctor| doctor.installed())
+            .map(|item| {
+                (
+                    item.harness.clone().unwrap_or_default(),
+                    Self::provider_text(item),
+                )
+            })
+            .collect()
+    }
+
+    /// The model pick as drawn: each button's picked id (None is the
+    /// harness's own choice) with its text.
+    pub fn model_buttons(&self) -> Vec<(Option<String>, String)> {
+        let mut buttons: Vec<(Option<String>, String)> = self
+            .harness
+            .as_deref()
+            .and_then(|kind| self.installed_item(kind))
+            .map(|item| item.offers.clone())
+            .unwrap_or_default()
+            .iter()
+            .map(|offer| (Some(offer.model.clone()), Self::offer_text(offer)))
+            .collect();
+        buttons.push((None, "the harness's own choice".to_string()));
+        buttons
+    }
+
+    /// The picked model id: None is the harness's own choice, which a
+    /// typed model id still wins over.
+    pub fn picked_model(&self) -> Option<String> {
+        self.model_pick.clone()
+    }
+
     /// What a test types in the field `name`.
     pub fn type_in(&mut self, name: &str, text: &str, cx: &mut Context<Self>) {
         let field = match name {
             "your name" => &self.operator,
             "yardmaster" => &self.yardmaster,
-            "model" => &self.model,
+            "another model id" => &self.model,
             "about you" => &self.about,
             "code" => &self.code,
             "folder" => &self.folder,

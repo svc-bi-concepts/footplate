@@ -102,7 +102,7 @@ what changed. One shared build tree would shoot another checkout's
 binary: cargo takes a package as fresh from its sources' mtimes.
 
 A state opens the window against a fake yard serving it, instead of the
-first screen:
+first screen, or with no yard where the state says none:
 
     scripts/shot-linux.sh <state> "$shot"
 
@@ -119,13 +119,15 @@ refused under its fields), `undelivered` (the conversation with one of
 a linked yard whose mail was refused over the hour), `answered` (the
 first screen with a way's fields open after the yard answered, with the
 line that esc opens it) and `setup` (step 2 of setting up a yard here,
-posed: the working styles as a numbered scale). With no state the first
+posed: a canned doctor of two providers and their model offers, and the
+working styles as a numbered scale). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
 that variable.
 
-To add one, serve it in `src/shot.rs` (`STATES` and `populate`), cover it
+To add one, serve it in `src/shot.rs` (`STATES` and `populate`, or a
+canned answer where no yard listens), cover it
 in that file's test, add its name to the script's list beside this one,
 and shoot it: the picture is the proof.
 

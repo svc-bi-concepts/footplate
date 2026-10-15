@@ -23,7 +23,8 @@ use crate::yard::Env;
 /// address refused under its fields, the conversation with one of a
 /// linked yard whose mail was refused over the hour, the first screen
 /// with a way's fields open after the yard answered, with the line that
-/// esc opens it, and step 2 of setting up a yard here, posed.
+/// esc opens it, and step 2 of setting up a yard here, posed with a
+/// canned doctor of two providers and their model offers.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -176,6 +177,36 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     let mut env = env;
     env.socket = socket;
     (env, Some(shot))
+}
+
+/// Doctor's answer for the `setup` shot: git and herdr installed, and
+/// two installed providers with the labels and the model offers the
+/// second step shows. The first run stands at that step with it, having
+/// fetched and run nothing.
+pub(crate) fn setup_doctor() -> crate::setup::Doctor {
+    serde_json::from_value(json!({
+        "yard": false,
+        "machine": [
+            {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": true,
+             "path": "/usr/bin/herdr", "server": {"state": "not_running", "output": "no server"}},
+            {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+            {"program": "claude", "for": "a harness a yard can be created on", "found": true,
+             "path": "/usr/bin/claude", "harness": "claude", "harness_login": true,
+             "label": "Anthropic · Claude Code",
+             "offers": [
+                 {"model": "opus", "label": "Opus 5.5", "recommended": "yardmaster"},
+                 {"model": "fable", "label": "Fable 5.1"},
+                 {"model": "sonnet", "label": "Sonnet 5"}]},
+            {"program": "codex", "for": "a harness a yard can be created on", "found": true,
+             "path": "/usr/bin/codex", "harness": "codex",
+             "label": "OpenAI · Codex",
+             "offers": [
+                 {"model": "gpt-6-luna", "label": "GPT-6 Luna", "recommended": "yardmaster"},
+                 {"model": "gpt-6-astra", "label": "GPT-6 Astra"}]}
+        ],
+        "faults": []
+    }))
+    .expect("the setup shot's doctor")
 }
 
 /// Serves `state` from `yard`: the yard of the window's tests, with the
@@ -476,6 +507,23 @@ mod tests {
                 let (env, shot) = start_for_state(env, state);
                 assert!(shot.is_none(), "{state}");
                 assert!(!env.socket.exists(), "{state}");
+                if *state == "setup" {
+                    // The canned doctor the second step stands with: two
+                    // installed providers with labels and offers, one
+                    // recommended each.
+                    let doctor = setup_doctor();
+                    assert!(doctor.ready(), "{state}");
+                    let kinds: Vec<_> = doctor
+                        .installed()
+                        .iter()
+                        .map(|item| item.harness.clone().unwrap())
+                        .collect();
+                    assert_eq!(kinds, ["claude", "codex"], "{state}");
+                    for item in doctor.installed() {
+                        assert!(item.label.is_some(), "{state}");
+                        assert!(item.recommended_offer().is_some(), "{state}");
+                    }
+                }
                 continue;
             }
             let yard = Yard::start();

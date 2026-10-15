@@ -430,6 +430,13 @@ pub struct Item {
     /// The kind, of a harness.
     #[serde(default)]
     pub harness: Option<String>,
+    /// The harness's name as people write it, where doctor carries it.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The models the kind's file suggests a person pick, where it names
+    /// any.
+    #[serde(default)]
+    pub offers: Vec<Offer>,
     /// A program can lead this kind's login.
     #[serde(default)]
     pub harness_login: bool,
@@ -442,6 +449,19 @@ pub struct Item {
 pub struct Server {
     #[serde(default)]
     pub state: String,
+}
+
+/// A model a harness's file suggests a person pick: the id its --model
+/// flag takes, the label a person reads, and what it is recommended for,
+/// where it is recommended for anything.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Offer {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub recommended: Option<String>,
 }
 
 impl Doctor {
@@ -508,7 +528,21 @@ impl Doctor {
     }
 }
 
+impl Offer {
+    /// Whether the offer is recommended for a yardmaster: the mark can
+    /// name other roles later, so only that one counts.
+    pub fn for_yardmaster(&self) -> bool {
+        self.recommended.as_deref() == Some("yardmaster")
+    }
+}
+
 impl Item {
+    /// The offer recommended for a yardmaster, where the harness's file
+    /// names one.
+    pub fn recommended_offer(&self) -> Option<&Offer> {
+        self.offers.iter().find(|offer| offer.for_yardmaster())
+    }
+
     /// The page its maker has for it, where doctor's hint names one: the
     /// first `https://` address of it.
     pub fn page(&self) -> Option<&str> {
@@ -1331,6 +1365,33 @@ exit 0
             "faults": []
         })
     }
+
+    /// Doctor's answer where the harnesses name their labels and the
+    /// models they offer, one recommended for a yardmaster each.
+    pub fn doctor_ready_with_offers() -> serde_json::Value {
+        serde_json::json!({
+            "yard": false,
+            "machine": [
+                {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": true,
+                 "path": "/opt/stand-in/bin/herdr", "server": {"state": "not_running", "output": "no server"}},
+                {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+                {"program": "claude", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/claude", "harness": "claude", "harness_login": true,
+                 "label": "Anthropic · Claude Code",
+                 "offers": [
+                     {"model": "opus", "label": "Opus 5.5", "recommended": "yardmaster"},
+                     {"model": "fable", "label": "Fable 5.1"},
+                     {"model": "sonnet", "label": "Sonnet 5"}]},
+                {"program": "codex", "for": "a harness a yard can be created on", "found": true,
+                 "path": "/opt/stand-in/bin/codex", "harness": "codex",
+                 "label": "OpenAI · Codex",
+                 "offers": [
+                     {"model": "gpt-6-luna", "label": "GPT-6 Luna", "recommended": "yardmaster"},
+                     {"model": "gpt-6-astra", "label": "GPT-6 Astra"}]}
+            ],
+            "faults": []
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1430,6 +1491,44 @@ mod tests {
             widened(OsStr::new("/bin"), &some),
             OsString::from("/bin:/home/jo/.local/bin")
         );
+    }
+
+    /// A harness names its label and the models it offers, one
+    /// recommended for a yardmaster; one that names neither has none,
+    /// and only the yardmaster's mark counts.
+    #[test]
+    fn a_harness_names_its_label_and_the_models_it_offers() {
+        let doctor: Doctor = serde_json::from_value(standin::doctor_ready_with_offers()).unwrap();
+        assert!(doctor.ready());
+        let claude = doctor.item("claude").unwrap();
+        assert_eq!(claude.label.as_deref(), Some("Anthropic · Claude Code"));
+        assert_eq!(claude.offers.len(), 3);
+        assert_eq!(
+            claude.recommended_offer().unwrap().model,
+            "opus".to_string()
+        );
+        let codex = doctor.item("codex").unwrap();
+        assert_eq!(codex.label.as_deref(), Some("OpenAI · Codex"));
+        assert_eq!(
+            codex.recommended_offer().unwrap().model,
+            "gpt-6-luna".to_string()
+        );
+
+        // Without either, there is nothing to pick: the kind stands for
+        // the name, and the harness's own choice for the model.
+        let bare: Doctor = serde_json::from_value(standin::doctor_ready()).unwrap();
+        let claude = bare.item("claude").unwrap();
+        assert_eq!(claude.label, None);
+        assert!(claude.offers.is_empty());
+        assert_eq!(claude.recommended_offer(), None);
+
+        // A mark for another role is not the yardmaster's.
+        let other: Item = serde_json::from_value(json!({
+            "program": "hal", "harness": "hal",
+            "offers": [{"model": "hal-1", "label": "Hal 1", "recommended": "builder"}]
+        }))
+        .unwrap();
+        assert_eq!(other.recommended_offer(), None);
     }
 
     /// The commands of the first run, as yardr's documentation lists them
