@@ -7544,10 +7544,15 @@ impl Footplate {
                         .flex_col()
                         .gap_1()
                         .child(
+                            // The ways stand one to a line, not beside
+                            // each other: a wrapping row under the
+                            // column's width keeps the height of one line
+                            // and spills the rest over whatever stands
+                            // under it.
                             div()
                                 .flex()
-                                .flex_wrap()
-                                .items_center()
+                                .flex_col()
+                                .items_start()
                                 .gap_2()
                                 // The first way makes the yard that is
                                 // not there: this run's, and no other. It
@@ -7580,18 +7585,26 @@ impl Footplate {
             // A yard at an address that is away for whatever reason: the
             // device can be paired again, which is what helps when the yard
             // no longer knows it. Where the session is what is out, pairing
-            // again helps nothing, so it is not offered.
+            // again helps nothing, so it is not offered. The actions stand
+            // in their own row under the ways, in the ways' own column, so
+            // no button ever stands on a way's lines.
             .when(
                 self.client.as_ref().is_some_and(Client::is_remote) && self.away != Away::SignedOut,
                 |el| {
                     el.child(
-                        small_button("pair again".to_string(), palette)
-                            .id("pair again")
-                            .debug_selector(|| "pair again".to_string())
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.pair_again(None, window, cx)
-                                }),
+                        div()
+                            .w_full()
+                            .max_w(rems(32.5))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                small_button("pair again".to_string(), palette)
+                                    .id("pair again")
+                                    .debug_selector(|| "pair again".to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pair_again(None, window, cx)
+                                    })),
                             ),
                     )
                 },
@@ -17821,9 +17834,17 @@ mod tests {
         wait(cx, "that the device is not let in", |cx| {
             view.read_with(cx, |v, _| v.away == Away::Out)
         });
-        cx.simulate_keystrokes("secondary-,");
-        click_on(cx, "yard again south");
+        // The away screen's own button stands clear of the ways, and its
+        // centre pairs this yard again: not a way, and no settings first.
+        let (way, again) = (bounds_of(cx, "way far"), bounds_of(cx, "pair again"));
+        assert!(again.top() >= way.bottom(), "{again:?} {way:?}");
+        click_on(cx, "pair again");
+        assert!(settings_open(&view, cx));
         assert!(drawn(cx, "yard pair"));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Again("south".into()))
+        );
         far.pair("ABCD-EFGH");
         cx.simulate_input("abcd efgh");
         cx.simulate_keystrokes("enter");
