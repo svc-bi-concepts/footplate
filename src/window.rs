@@ -11325,9 +11325,10 @@ impl Footplate {
                     .child(
                         div()
                             .debug_selector(|| format!("run text {bead} {ask} {ix}"))
-                            .child(select::text(
+                            .child(select::text_with_code_copy(
                                 expanded_text_key(card_key, text.section, ix, &text.text),
                                 fenced(&model::plain(&text.text)),
+                                text.text.clone(),
                                 &self.selection,
                             )),
                     );
@@ -24227,7 +24228,7 @@ mod tests {
     ];
     const PACK_BACK: &str = "yardr source rm telegram";
     const PACK_DECLARATION: &str = "name: telegram\nbase: https://api.telegram.org\ncredential: TELEGRAM_BOT_TOKEN\nin_path: true\ncalls:\n  message:\n    kind: update\n    request: POST /bot{credential}/sendMessage\n";
-    const PACK_FILE: &str = "#!/bin/sh\n# normalize a delivery: `jq` reads the body, and ``` marks nothing here\n exec jq -c '{chat: .message.chat.id}'\n";
+    const PACK_FILE: &str = "#!/bin/sh\n# normalize a delivery: `jq` reads the body, and ``` marks nothing here\n# a carried control: \u{001b}\n exec jq -c '{chat: .message.chat.id}'\n";
     const PACK_DIFF: &str = "--- was\n+++ is\n@@ -1,2 +1,2 @@\n-reply old\n+reply new\n";
     const PACK_REMOVED: &str = "old bytes\nsecond line\n";
     const PACK_SHA_NEW: &str = "70e39176f93f2756b16176ea3e46a26b9b523fd0d2febb03a82bcf1d721a457e";

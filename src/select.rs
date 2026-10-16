@@ -305,15 +305,43 @@ struct Shown {
     /// The block's text, as gpui takes it, and the links in it.
     text: SharedString,
     links: Vec<Range<usize>>,
+    /// An exact copy payload for a code block whose displayed form was
+    /// sanitized before it reached the markdown reader.
+    copy_override: Option<SharedString>,
 }
 
 /// The text `text` of the talk, which `selection` may be in. `key` tells it
 /// from the other texts.
 pub fn text(key: u64, text: impl Into<SharedString>, selection: &Entity<Selection>) -> Text {
-    let text = text.into();
+    text_inner(key, text.into(), None, selection)
+}
+
+/// Like [`text`], but the first code block copies `copy_text` exactly. The
+/// displayed text may have had control characters removed before it was
+/// fenced; copying still returns the bytes the caller was asked to show.
+pub fn text_with_code_copy(
+    key: u64,
+    text: impl Into<SharedString>,
+    copy_text: impl Into<SharedString>,
+    selection: &Entity<Selection>,
+) -> Text {
+    text_inner(key, text.into(), Some(copy_text.into()), selection)
+}
+
+fn text_inner(
+    key: u64,
+    text: SharedString,
+    mut code_copy: Option<SharedString>,
+    selection: &Entity<Selection>,
+) -> Text {
     let blocks = markdown::blocks(&text)
         .into_iter()
         .map(|block| Shown {
+            copy_override: if block.kind == Kind::Code {
+                code_copy.take()
+            } else {
+                None
+            },
             text: block.text.clone().into(),
             links: links(&block.text),
             block,
@@ -832,8 +860,14 @@ impl Element for Text {
                     // A click on a copy control copies the block exactly
                     // as it was written, and starts no selection.
                     if let Some(block) = drawn.copy_at(event.position) {
-                        if let Some(text) = drawn.blocks[block].block.copy_text() {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                        let shown = &drawn.blocks[block];
+                        let copy = shown
+                            .copy_override
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .or_else(|| shown.block.copy_text().map(str::to_string));
+                        if let Some(text) = copy {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
                             selection
                                 .update(cx, |selection, cx| selection.copied_block(key, block, cx));
                         }
