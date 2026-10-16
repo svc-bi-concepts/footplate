@@ -109,7 +109,8 @@ fn main() {
                 title: Some(NAME.into()),
                 ..Default::default()
             }),
-            window_min_size: Some(size(px(560.), px(360.))),
+            // 560 plus the rail's 56: every pane keeps its size.
+            window_min_size: Some(size(px(616.), px(360.))),
             // On Linux the taskbar's icon and name are those of the desktop
             // entry with this id, which dock_icon puts there.
             app_id: Some(NAME.into()),

@@ -45,8 +45,8 @@ use crate::yard::Env;
 /// with the hour's line under the mail. The answered yard serves the
 /// yardmaster's conversation, as the running ones do; the window opens
 /// with the way's fields standing, so the yard answers under them. The
-/// script answers the switch's yardr for every state, so the head draws
-/// the same on every shot.
+/// script answers the switch's yardr for every state, so the status row
+/// draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
     "plain",

@@ -6,6 +6,7 @@
 //! (`~/.config` when that is not set). It is footplate's to write, on every
 //! change; a file that is missing or that it cannot read is today's look.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -15,7 +16,7 @@ use gpui::{Pixels, px};
 use serde::{Deserialize, Serialize};
 
 use crate::api::Address;
-use crate::model::Kind;
+use crate::model::{Kind, Mode};
 use crate::theme::Look;
 use crate::yard;
 
@@ -225,6 +226,12 @@ pub struct Settings {
     /// opens. Empty, or the name of none, is the first of the list.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub open: String,
+    /// The rail's mode in each yard that is not chat, by yard: the mode
+    /// remembered per yard. A yard not named opens chat, and stepping
+    /// back to chat unnames it. Left out of the file while none is
+    /// named, as the yards are.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, Mode>,
     /// What the system tells of. Left out of the file while nothing was
     /// chosen, as the yards are.
     #[serde(skip_serializing_if = "Notify::is_usual")]
@@ -256,6 +263,7 @@ struct Kept {
     look: Look,
     yards: Vec<Yard>,
     open: String,
+    modes: BTreeMap<String, Mode>,
     remote: bool,
     address: String,
     notifications: Notify,
@@ -271,6 +279,7 @@ impl Default for Kept {
             look: Look::Auto,
             yards: Vec::new(),
             open: String::new(),
+            modes: BTreeMap::new(),
             remote: false,
             address: String::new(),
             notifications: Notify::default(),
@@ -344,6 +353,7 @@ impl From<Kept> for Settings {
             text: kept.text,
             look: kept.look,
             open,
+            modes: kept.modes,
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
         }
@@ -437,6 +447,7 @@ impl Default for Settings {
             look: Look::Auto,
             yards: vec![Yard::near(HERE, "")],
             open: String::new(),
+            modes: BTreeMap::new(),
             notifications: Notify::default(),
             menu_bar: true,
         }
@@ -498,6 +509,22 @@ impl Settings {
         }
     }
 
+    /// The rail's mode in the yard: the remembered one, chat where none
+    /// was.
+    pub fn mode_of(&self, yard: &str) -> Mode {
+        self.modes.get(yard).copied().unwrap_or_default()
+    }
+
+    /// With the rail's mode in the yard called `name` the one given. Chat
+    /// unnames the yard, and is what a yard not named opens.
+    pub fn with_mode(mut self, name: &str, mode: Mode) -> Settings {
+        match mode {
+            Mode::Chat => self.modes.remove(name),
+            _ => self.modes.insert(name.to_string(), mode),
+        };
+        self
+    }
+
     /// The far yard other than `name` whose token is in the same file as
     /// that one's, and the file: only a list edited by hand has such a
     /// pair, and neither of them is opened or paired until their files
@@ -541,9 +568,8 @@ impl Settings {
     /// list is refused with its reason before anything is paired or
     /// written: a name another yard has, an address, a token file or a
     /// session file that is none, and a file another yard's token or
-    /// session is in. A yard that is renamed keeps its files and the
-    /// switch's choice under its new name, and stays the open one if it
-    /// was.
+    /// session is in. A yard that is renamed keeps its files and its mode
+    /// under its new name, and stays the open one if it was.
     pub fn with_yard(
         mut self,
         at: Option<&str>,
@@ -627,6 +653,14 @@ impl Settings {
             Some(place) => {
                 if self.open == self.yards[place].name {
                     self.open = name.clone();
+                }
+                // A yard that is renamed keeps its mode under its new
+                // name; a yard added or edited keeps what its name says.
+                if let Some(from) = at
+                    && from != name
+                    && let Some(mode) = self.modes.remove(from)
+                {
+                    self.modes.insert(name.clone(), mode);
                 }
                 self.yards[place] = yard;
             }
@@ -754,6 +788,7 @@ impl Settings {
         if self.open == name {
             self.open.clear();
         }
+        self.modes.remove(name);
         (self, token, session)
     }
 
@@ -1217,6 +1252,44 @@ mod tests {
         );
         assert_eq!(less.yard("mac"), set.yard("mac"));
         assert!(dir.path().join("yard.token").exists());
+    }
+
+    #[test]
+    fn each_yard_s_mode_is_chat_until_stepped_kept_over_a_rename_and_gone_with_the_yard() {
+        let set = Settings::default();
+        assert_eq!(set.mode_of("mac"), Mode::Chat);
+        let set = set.with_mode("mac", Mode::Timetable);
+        assert_eq!(set.mode_of("mac"), Mode::Timetable);
+        assert_eq!(set.mode_of("shop"), Mode::Chat);
+        // Stepping back to chat unnames the yard.
+        let set = set.with_mode("mac", Mode::Chat);
+        assert_eq!(set.mode_of("mac"), Mode::Chat);
+        assert!(set.modes.is_empty());
+
+        // A yard that is renamed keeps its mode under its new name.
+        let set = Settings::default()
+            .with_yard(None, Yard::near("mac", ""), None)
+            .unwrap()
+            .with_mode("mac", Mode::Decisions);
+        let set = set
+            .with_yard(Some("mac"), Yard::near("shop", ""), None)
+            .unwrap();
+        assert_eq!(set.mode_of("shop"), Mode::Decisions);
+        assert_eq!(set.mode_of("mac"), Mode::Chat);
+        // The file keeps what is named, and leaves the map out while
+        // none is.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        set.clone().write(&file).unwrap();
+        assert_eq!(Settings::read(&file).mode_of("shop"), Mode::Decisions);
+        set.clone()
+            .with_mode("shop", Mode::Chat)
+            .write(&file)
+            .unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("modes"));
+        // Removing a yard drops its mode.
+        let (less, _, _) = set.without("shop", Some(&file));
+        assert_eq!(less.mode_of("shop"), Mode::Chat);
     }
 
     fn two_far(file: &Path) -> Settings {

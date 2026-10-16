@@ -12,7 +12,7 @@
 # open card whose note carries a page, an image and a file), `mail` (a mail with
 # a page and an image), `image` (that mail's image open full size over
 # the window), `run` (an
-# open card of a run ask), `stopped` (the head with a stopped yard), `far`
+# open card of a run ask), `stopped` (a stopped yard), `far`
 # (a yard at an address, away), `settings` (the settings with the
 # start-at-login switch), `reconnecting` (a running yard whose server
 # is then stopped, with a draft in the composer), `refusal` (the
@@ -29,8 +29,8 @@
 # row) and `arrival` (one arrival's bead open from the board).
 # With no state the first
 # screen is shot, as ever.
-# The switch's yardr answers canned JSON, so the head draws the same on
-# every shot.
+# The switch's yardr answers canned JSON, so the status row draws the
+# same on every shot.
 # The picture goes to the file named, else to footplate-shot.png under a
 # fresh directory of its own; its path is printed at the end either way.
 # Every run provisions a fresh container and builds footplate in it; the
@@ -96,6 +96,16 @@ case "$height" in *[1-9]*) ;; *)
     exit 2
     ;;
 esac
+# SHOT_LOOK draws the window in that look instead of the desktop's: light
+# or dark, as the settings name them. Empty is the desktop's, as ever.
+look=${SHOT_LOOK:-}
+case "$look" in ""|light|dark) ;; *)
+    echo "shot-linux.sh: SHOT_LOOK must be light or dark" >&2
+    exit 2
+    ;;
+esac
+look_json=""
+if [ -n "$look" ]; then look_json=', \"look\": \"'"$look"'\"'; fi
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "shot-linux.sh: docker is not on PATH" >&2
@@ -180,8 +190,9 @@ docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY
     chown -R shot:shot "$scratch"
     echo "$scratch" > /tmp/shots/last-scratch
     # The yardr of the shot, kept beside the settings: doctor and
-    # status answer canned JSON, so the head draws the same on every
-    # shot. Kept as version 99, the fetch keeps it: the site is asked for
+    # status answer canned JSON, so the status row draws the same on
+    # every shot. Kept as version 99, the fetch keeps it: the site is
+    # asked for
     # the number of the latest alone, and where even that fails the kept
     # one is still the answer. Stopped says nothing runs; every other
     # state says the yard runs, and none starts at login.
@@ -195,7 +206,9 @@ docker exec "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY
     case "'"$state"'" in stopped|setup) up=false ;; *) up=true ;; esac
     printf "%s\n" "{\"home\": \"/tmp/shot-yard\", \"name\": \"shot\", \"operator\": \"Jo\", \"server\": {\"running\": $up, \"cli_build\": \"shot\"}, \"daemon\": {\"running\": $up, \"pid\": 0, \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot\", \"file\": \"/tmp/shot.service\", \"installed\": false, \"loaded\": false}}, \"herdr_login_service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.herdr.shot\", \"file\": \"/tmp/shot-herdr.service\", \"installed\": false, \"loaded\": false}, \"web\": {\"views\": [], \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot-web\", \"file\": \"/tmp/shot-web.service\", \"installed\": false, \"loaded\": false}}}" > "$bin/status.json"
     # A yard at an address opens from the settings: one far yard, open.
-    if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"}" > "$scratch/config/footplate/settings.json"; fi
+    # A look for the shot rides in the same file where one is asked for.
+    if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\""$look_json"}" > "$scratch/config/footplate/settings.json"; fi
+    if [ -n "'"$look"'" ] && [ "'"$state"'" != far ]; then printf "%s\n" "{\"look\": \"'"$look"'\"}" > "$scratch/config/footplate/settings.json"; fi
     chown -R shot:shot "$scratch"
     su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 

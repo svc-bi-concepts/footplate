@@ -67,7 +67,7 @@ pub struct Palette {
     pub accent: Rgba,
     pub on_accent: Rgba,
     pub warn: Rgba,
-    /// The head's dot where the yard runs.
+    /// The status row's dot where the yard runs.
     pub ok: Rgba,
     pub selection: Rgba,
     /// The ground under code, over whatever the text stands on.

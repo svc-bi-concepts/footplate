@@ -12,8 +12,8 @@ use std::time::Duration;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton,
-    ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Size, Task, Window, actions, div, img,
-    prelude::*, px, relative, rems, rgba, white,
+    ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Size, Stateful, Task, Window, actions,
+    div, img, prelude::*, px, relative, rems, rgba, white,
 };
 
 use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
@@ -21,7 +21,8 @@ use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedRow, DecisionAsk,
-    DecisionDetail, DecisionRow, Effect, Entry, Kind, Model, News, Row, Selected, Target, Top,
+    DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model, News, Row,
+    Selected, Target, Top,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -43,6 +44,8 @@ actions!(
     [
         Next,
         Previous,
+        NextMode,
+        PreviousMode,
         Dismiss,
         DismissAll,
         Pick1,
@@ -109,6 +112,10 @@ const IMAGE_MARGIN: f32 = 2.;
 /// name stands in it where it is no image, so it goes with the text size.
 const ATTACHMENT: f32 = 3.5;
 
+/// The rail's width in pixels, fixed: the kit's minimum target with its
+/// sidebar padding on both sides, 12 + 32 + 12.
+const RAIL: f32 = 56.;
+
 /// The key that is cmd on macOS and ctrl elsewhere, as the hints name it.
 const SECONDARY: &str = if cfg!(target_os = "macos") {
     "cmd"
@@ -169,6 +176,25 @@ impl Render for OpenTip {
             .text_sm()
             .text_color(palette.text)
             .child("Open")
+    }
+}
+
+/// A rail icon's tooltip: its name, and what answers it.
+struct RailTip(String);
+
+impl Render for RailTip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::now(window, cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.ground)
+            .text_sm()
+            .text_color(palette.text)
+            .child(self.0.clone())
     }
 }
 
@@ -349,12 +375,29 @@ fn divider(palette: Palette) -> impl IntoElement {
     div().mx_3().my_1().h(px(1.)).bg(palette.line)
 }
 
-/// What a section's head says waits in it: the number, or that none
-/// does.
+/// What the Decisions head says waits in it: the number with "waiting",
+/// or that none does.
 fn waiting_words(waiting: usize) -> String {
     match waiting {
         0 => "none waiting".to_string(),
-        waiting => waiting.to_string(),
+        waiting => format!("{waiting} waiting"),
+    }
+}
+
+/// What a platform's head says stands at it: the number with "arriving".
+fn arriving_words(arriving: usize) -> String {
+    match arriving {
+        1 => "1 arriving".to_string(),
+        arriving => format!("{arriving} arriving"),
+    }
+}
+
+/// What the folded Decided says was dealt with: the number with
+/// "decided".
+fn decided_words(decided: usize) -> String {
+    match decided {
+        1 => "1 decided".to_string(),
+        decided => format!("{decided} decided"),
     }
 }
 
@@ -626,31 +669,125 @@ fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
 /// The switcher's mark beside the yard's line: a chevron drawn with two
 /// strokes, in the line's own colour. A character would draw on one
 /// desktop and stand in for a missing glyph on the next.
-fn chevron(color: Rgba) -> impl IntoElement {
+/// A rail glyph's canvas: 16 pixels, drawn from the mock's geometry
+/// (docs/design/2026-10-16-footplate-zj5f-rail-mock.html), a 24-grid with
+/// its strokes. Fixed pixels, not rems: the rail carries no reading text.
+fn glyph_canvas(
+    paint: impl Fn(gpui::Point<Pixels>, f32, &mut Window) + 'static,
+) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let top = bounds.origin.y + bounds.size.height * 0.3;
-            let bottom = bounds.origin.y + bounds.size.height * 0.7;
-            let left = bounds.origin.x + bounds.size.width * 0.15;
-            let middle = bounds.origin.x + bounds.size.width * 0.5;
-            let right = bounds.origin.x + bounds.size.width * 0.85;
-            let mut path = gpui::PathBuilder::stroke(bounds.size.height * 0.18);
-            path.move_to(gpui::point(left, top));
-            path.line_to(gpui::point(middle, bottom));
-            path.line_to(gpui::point(right, top));
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
-            }
+            paint(bounds.origin, f32::from(bounds.size.width) / 24., window);
         },
     )
-    .w(rems(0.625))
-    .h(rems(0.5))
+    .size(px(16.))
     .flex_none()
 }
 
-/// Words that take a click, without the border: the head's status row
-/// ends in one. The hover's ground is what says so.
+/// A straight line on `path`, in the mock's grid: `o` is the glyph's
+/// origin, `s` the grid's scale into it.
+fn glyph_line(
+    path: &mut gpui::PathBuilder,
+    o: gpui::Point<Pixels>,
+    s: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+) {
+    let at = |x: f32, y: f32| gpui::point(o.x + px(x * s), o.y + px(y * s));
+    path.move_to(at(x1, y1));
+    path.line_to(at(x2, y2));
+}
+
+/// A circle on `path`, stroked or filled as the path is: two half arcs.
+fn glyph_circle(
+    path: &mut gpui::PathBuilder,
+    o: gpui::Point<Pixels>,
+    s: f32,
+    cx: f32,
+    cy: f32,
+    r: f32,
+) {
+    let at = |x: f32, y: f32| gpui::point(o.x + px(x * s), o.y + px(y * s));
+    let radii = gpui::point(px(r * s), px(r * s));
+    path.move_to(at(cx - r, cy));
+    path.arc_to(radii, px(0.), false, true, at(cx + r, cy));
+    path.arc_to(radii, px(0.), false, true, at(cx - r, cy));
+}
+
+/// The kit's track glyph: two rails with three sleepers, the mark's and
+/// the timetable's. Its strokes are the track-icon asset's (two rails 10
+/// apart, three sleepers, 24 by 24).
+fn track_glyph(color: Rgba) -> impl IntoElement {
+    glyph_canvas(move |o, s, window| {
+        let mut rails = gpui::PathBuilder::stroke(px(2. * s));
+        glyph_line(&mut rails, o, s, 7., 1.5, 7., 22.5);
+        glyph_line(&mut rails, o, s, 17., 1.5, 17., 22.5);
+        if let Ok(path) = rails.build() {
+            window.paint_path(path, color);
+        }
+        let mut sleepers = gpui::PathBuilder::stroke(px(3. * s));
+        for y in [5.5, 12., 18.5] {
+            glyph_line(&mut sleepers, o, s, 4.5, y, 19.5, y);
+        }
+        if let Ok(path) = sleepers.build() {
+            window.paint_path(path, color);
+        }
+    })
+}
+
+/// A signal lamp on its post: chat's glyph, the signal that talks.
+fn lamp_glyph(color: Rgba) -> impl IntoElement {
+    glyph_canvas(move |o, s, window| {
+        let mut path = gpui::PathBuilder::stroke(px(2. * s));
+        glyph_line(&mut path, o, s, 12., 21., 12., 13.);
+        glyph_circle(&mut path, o, s, 12., 7., 4.);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    })
+}
+
+/// A semaphore arm, diagonal on its post: decisions' glyph, stop or go.
+fn semaphore_glyph(color: Rgba) -> impl IntoElement {
+    glyph_canvas(move |o, s, window| {
+        let mut path = gpui::PathBuilder::stroke(px(2. * s));
+        glyph_line(&mut path, o, s, 6., 21., 6., 4.);
+        glyph_line(&mut path, o, s, 6., 5., 17., 11.);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+        let mut pivot = gpui::PathBuilder::fill();
+        glyph_circle(&mut pivot, o, s, 6., 4., 1.4);
+        pivot.close();
+        if let Ok(path) = pivot.build() {
+            window.paint_path(path, color);
+        }
+    })
+}
+
+/// The settings' gear: a hub with a dashed ring for teeth, in the mock's
+/// stroke.
+fn gear_glyph(color: Rgba) -> impl IntoElement {
+    glyph_canvas(move |o, s, window| {
+        let mut hub = gpui::PathBuilder::stroke(px(2. * s));
+        glyph_circle(&mut hub, o, s, 12., 12., 3.2);
+        if let Ok(path) = hub.build() {
+            window.paint_path(path, color);
+        }
+        let dashes = [px(3.2 * s), px(2.6 * s)];
+        let mut teeth = gpui::PathBuilder::stroke(px(2. * s)).dash_array(&dashes);
+        glyph_circle(&mut teeth, o, s, 12., 12., 7.);
+        if let Ok(path) = teeth.build() {
+            window.paint_path(path, color);
+        }
+    })
+}
+
+/// Words that take a click, without the border: the status row at the
+/// list's head ends in one. The hover's ground is what says so.
 fn quiet_button(text: String, palette: Palette) -> Div {
     div()
         .px_1()
@@ -758,6 +895,13 @@ pub fn bind_keys(cx: &mut App) {
     // themselves; the handler takes it only where no yard was made and no
     // way's fields are open, and never stops it.
     cx.bind_keys([KeyBinding::new("enter", AwayDetails, None)]);
+    // The modes step with the brackets from anywhere, as the yards do
+    // with digits: with the modifier, and with no context, so they
+    // answer with the focus in the line too.
+    cx.bind_keys([
+        KeyBinding::new("secondary-[", PreviousMode, None),
+        KeyBinding::new("secondary-]", NextMode, None),
+    ]);
     // The switcher and a yard by its place in the list, from anywhere:
     // with the modifier, since a plain digit is a card's pick.
     cx.bind_keys([
@@ -803,18 +947,34 @@ struct Anchor {
     off: Pixels,
 }
 
-/// Where a yard stood when it was left for another: the row that was open
-/// and the scroll of what it showed. Of a conversation and the yard row
-/// that is how far above its newest the view stood, since a yard opened
-/// again has the newest of a conversation first and the older above it;
-/// of a card, how far below its top, with the cards that stood expanded:
-/// folded again, a card is shorter than where it stood.
-#[derive(Clone, Debug, PartialEq)]
+/// Where a yard stood when it was left for another: each mode's open row
+/// and its list's scroll, and the scroll of what the open row showed. Of
+/// a conversation and the yard row that is how far above its newest the
+/// view stood, since a yard opened again has the newest of a
+/// conversation first and the older above it; of a card, how far below
+/// its top, with the cards that stood expanded: folded again, a card is
+/// shorter than where it stood.
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Place {
-    row: Selected,
+    /// The open row of each mode, by mode: what each mode reopens on.
+    rows: [Option<Selected>; 3],
+    /// The list's scroll in each mode, by mode: how far below its top.
+    lists: [Pixels; 3],
     off: Pixels,
     expanded: HashSet<(String, u64)>,
     decided_expanded: bool,
+}
+
+impl Place {
+    /// The row the mode was left on, if any.
+    fn row(&self, mode: Mode) -> Option<Selected> {
+        self.rows[mode.index()].clone()
+    }
+
+    /// How far below its top the mode's list stood.
+    fn list(&self, mode: Mode) -> Pixels {
+        self.lists[mode.index()]
+    }
 }
 
 /// Why a yard that could not be opened is not reached, in a word or two:
@@ -898,7 +1058,7 @@ enum AgentsBusy {
     Saving,
 }
 
-/// What the status row in the head is for the open yard.
+/// What the status row at the list's head is for the open yard.
 enum SwitchFor {
     /// A yard of this machine: its home, or none for this run's, which
     /// takes no `--home` flag.
@@ -1169,17 +1329,20 @@ pub struct Footplate {
     unreached: HashMap<String, &'static str>,
     /// Where each yard stood when it was last left, by yard.
     places: HashMap<String, Place>,
-    /// The place the open yard is to be put back to, which it is not
-    /// yet: the yard has not answered for what the row shows, or the
-    /// layout has not had it. Whether it was laid out as long as it now
-    /// is. See [`Footplate::come_back`].
-    returning: Option<(Place, bool)>,
+    /// The row the open yard is to be put back to and its scroll, which
+    /// it is not yet: the yard has not answered for what the row shows,
+    /// or the layout has not had it. Whether it was laid out as long as
+    /// it now is. See [`Footplate::come_back`].
+    returning: Option<((Selected, Pixels), bool)>,
     /// What there was to say while a yard was being opened and nothing
     /// showed to say it in: it is said when the yard shows.
     late: Option<String>,
-    /// The switcher's list is shown under the head: the row of it the
-    /// keys are on.
+    /// The switcher's list is shown as a popover at the rail's foot: the
+    /// row of it the keys are on.
     switching: Option<usize>,
+    /// The rail's mode icon the pointer stands on, if any: its glyph
+    /// brightens, as quiet text does.
+    rail_hover: Option<Mode>,
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
@@ -1247,8 +1410,8 @@ pub struct Footplate {
     /// What the first run reaches outside the window with. The switch
     /// reaches out with the same.
     means: Means,
-    /// The status row in the head: the yardr it runs, ensured once, and
-    /// the PATH widened by doctor, once, which only grows.
+    /// The status row at the list's head: the yardr it runs, ensured
+    /// once, and the PATH widened by doctor, once, which only grows.
     switch_program: Option<PathBuf>,
     switch_path: Option<std::ffi::OsString>,
     /// What `status` last said of the open yard, or that its home holds
@@ -1261,7 +1424,7 @@ pub struct Footplate {
     /// What the switch is doing, if anything.
     switch_busy: Option<SwitchBusy>,
     /// What the last start could not start, in yardr's words, while the
-    /// yard is down still: what the head says the yard lacks.
+    /// yard is down still: what the status row says the yard lacks.
     switch_troubles: Vec<String>,
     /// One faint line under the switch: why yardr is not there to run,
     /// or what there is to know of the one there is. A reading that went
@@ -1309,15 +1472,18 @@ pub struct Footplate {
 }
 
 /// The row a screenshot state opens on instead of the yard's own: the
-/// refused mail's conversation for the undelivered shot, else none. A
-/// debug build's alone.
+/// refused mail's conversation for the undelivered shot, the open card
+/// for the plain, page and run shots, the board for the arrivals shot
+/// and one arrival's bead for the arrival shot, else none. A debug
+/// build's alone.
 fn shot_selected() -> Option<Selected> {
-    // The arrivals shot opens the board, and the arrival shot one
-    // arrival's bead: a debug build's alone, as the settings and the
-    // draft of Footplate::opened.
+    // The card shots open their cards, in decisions: a debug build's
+    // alone, as the settings and the draft of Footplate::opened.
     #[cfg(debug_assertions)]
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
+        Ok("plain") | Ok("page") => return Some(Selected::Decision("bead-a".into())),
+        Ok("run") => return Some(Selected::Decision("bead-s".into())),
         Ok("arrivals") => return Some(Selected::Arrivals),
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
         _ => {}
@@ -1629,6 +1795,7 @@ impl Footplate {
             returning: None,
             late: None,
             switching: None,
+            rail_hover: None,
             declining: None,
             secret,
             secret_typed: Vec::new(),
@@ -2079,7 +2246,9 @@ impl Footplate {
             // nothing newer to say of that: its place stays the kept
             // one.
             if self.returning.is_none() {
-                let place = self.place(from.clone());
+                let mode = self.mode();
+                let kept = self.places.get(&self.yard).cloned().unwrap_or_default();
+                let place = self.place(mode, from.clone(), kept);
                 self.places.insert(self.yard.clone(), place);
             }
             self.keep_typed(&from, cx);
@@ -2158,29 +2327,30 @@ impl Footplate {
         self.returns_read = held.returns_read.take();
     }
 
-    /// The yard that was held is shown: the model it had all along opens
-    /// the row the yard was left on, where that is still there, and the
-    /// line has what was typed in it. A yard that has not answered yet has
+    /// The yard that was held is shown: in its remembered mode, on the
+    /// row that mode was left on, where that is still there, and the line
+    /// has what was typed in it. A yard that has not answered yet has
     /// none, and is shown when it does ([`Footplate::told`]).
     fn arrive(&mut self, cx: &mut Context<Self>) {
-        let kept = self.places.get(&self.yard).cloned();
+        let mode = self.mode();
+        let kept = self.places.get(&self.yard).cloned().unwrap_or_default();
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let effects = model.back_to(
-            kept.as_ref().map(|place| place.row.clone()),
-            kept.as_ref().is_some_and(|place| place.decided_expanded),
-        );
-        if let Some(place) = &kept {
-            model.expand(&place.expanded);
-        }
+        let effects = model.back_to(mode, kept.row(mode), kept.decided_expanded);
+        model.expand(&kept.expanded);
         if let Some(late) = self.late.take() {
             model.notice = late;
         }
         let to = model.selected().cloned();
         self.returning = kept
-            .filter(|place| to.as_ref() == Some(&place.row))
-            .map(|place| (place, false));
+            .row(mode)
+            .filter(|row| to.as_ref() == Some(row))
+            .map(|row| ((row, kept.off), false));
+        // The mode's list stands where it stood.
+        let mut at = self.rows.offset();
+        at.y = px(0.) - kept.list(mode);
+        self.rows.set_offset(at);
         let typed = self.typed_for(to.as_ref());
         self.line.update(cx, |line, cx| line.set_text(&typed, cx));
         self.new_below = 0;
@@ -2260,8 +2430,14 @@ impl Footplate {
         self
     }
 
+    /// The rail's mode in the open yard: the remembered one, chat where
+    /// none was.
+    fn mode(&self) -> Mode {
+        self.settings.mode_of(&self.yard)
+    }
+
     /// Which yard the window shows, in words: the whole telling, as the
-    /// settings say it. The head's line has its name.
+    /// settings say it. The rail's tile has its name.
     fn which_yard(&self) -> String {
         let opened = self.settings.opened();
         match (self.env.address(&self.settings), &self.said) {
@@ -2281,45 +2457,9 @@ impl Footplate {
         }
     }
 
-    /// The head's line: who the window is for, where the yard said, the
-    /// open yard, the Kratos account a hosted yard is signed in as, and
-    /// why it is not reached while it is not. The switcher's chevron
-    /// stands beside it where there are yards to switch between.
-    fn head_line(&self, me: Option<&str>) -> String {
-        let yard = self.which_yard_short();
-        // Where no yard was ever made, and where the yard is only
-        // stopped, the line names the yard alone: the telling is the
-        // screen's and the status row's, and the short why would run
-        // past the pane's edge.
-        let why = match self.sets_up_here() || self.yard_is_stopped() {
-            true => None,
-            false => self.unreached.get(&self.yard).copied(),
-        };
-        let signed = self.signed_in_as();
-        [me, Some(yard.as_str()), signed.as_deref(), why]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
-
-    /// The Kratos account the open yard is signed in as, where it is a
-    /// hosted one that names it: the head's line names it with the yard.
-    fn signed_in_as(&self) -> Option<String> {
-        if self.env.yard.is_some() {
-            return None;
-        }
-        let yard = self.settings.yard(&self.yard)?;
-        match yard.is_hosted() && !yard.account.is_empty() {
-            true => Some(format!("signed in as {}", yard.account)),
-            false => None,
-        }
-    }
-
-    /// Which yard the head's line names, short: the open one by the name
+    /// Which yard the away screen names, short: the open one by the name
     /// the switcher lists it under, or the whole telling of the one yard
-    /// the environment names. The line has the column's width beside the
-    /// logo, and the whole telling stands in the settings.
+    /// the environment names. The whole telling stands in the settings.
     fn which_yard_short(&self) -> String {
         match self.env.yard {
             Some(_) => self.which_yard(),
@@ -2350,7 +2490,7 @@ impl Footplate {
                 held.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
                 let (mut model, effects) = match held.model.as_ref() {
-                    Some(before) => before.resumed(state),
+                    Some(before) => before.resumed(state, self.settings.mode_of(&yard)),
                     None => (Model::new_aside(state), Vec::new()),
                 };
                 if let Some(notice) = arrivals_notice {
@@ -2395,26 +2535,38 @@ impl Footplate {
                 let arrivals_notice = state.arrivals_notice.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
-                // The yard was opened: on the row it was left on, where
-                // that is still there.
-                let kept = self.places.get(&self.yard).filter(|_| fresh).cloned();
+                // The yard was opened: in its remembered mode, on the row
+                // that mode was left on, where that is still there. A
+                // screenshot state opens its own row's mode instead.
+                let shot = fresh.then(shot_selected).flatten();
+                let mode = shot
+                    .as_ref()
+                    .map(Selected::mode)
+                    .unwrap_or_else(|| self.mode());
+                if fresh && mode != self.mode() {
+                    let yard = self.yard.clone();
+                    self.set(self.settings.clone().with_mode(&yard, mode), cx);
+                }
+                let kept = self
+                    .places
+                    .get(&self.yard)
+                    .filter(|_| fresh)
+                    .cloned()
+                    .unwrap_or_default();
                 let (mut model, effects) = match self.model.as_ref() {
-                    Some(before) => before.resumed(state),
+                    Some(before) => before.resumed(state, mode),
                     None => Model::new_returning(
                         state,
-                        kept.as_ref()
-                            .map(|place| place.row.clone())
-                            .or_else(shot_selected),
-                        kept.as_ref().is_some_and(|place| place.decided_expanded),
+                        mode,
+                        kept.row(mode).or(shot),
+                        kept.decided_expanded,
                     ),
                 };
                 if let Some(notice) = arrivals_notice {
                     model.notice = notice;
                 }
                 if fresh {
-                    if let Some(place) = &kept {
-                        model.expand(&place.expanded);
-                    }
+                    model.expand(&kept.expanded);
                     // The page shot opens the card, so the note's page row
                     // and image show: a debug build's alone, as the settings
                     // and the draft of Footplate::opened.
@@ -2425,8 +2577,13 @@ impl Footplate {
                         model.toggle_expand(&bead, ask);
                     }
                     self.returning = kept
-                        .filter(|place| model.selected() == Some(&place.row))
-                        .map(|place| (place, false));
+                        .row(mode)
+                        .filter(|row| model.selected() == Some(row))
+                        .map(|row| ((row, kept.off), false));
+                    // The mode's list stands where it stood.
+                    let mut at = self.rows.offset();
+                    at.y = px(0.) - kept.list(mode);
+                    self.rows.set_offset(at);
                     // The page shot stands at the card's end, so the note's
                     // page row and image show: past its end, where the
                     // layout stops, as with a yard returned to. A debug
@@ -2435,15 +2592,8 @@ impl Footplate {
                     if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("page")
                         && let Some(Selected::Decision(bead)) = model.selected()
                     {
-                        self.returning = Some((
-                            Place {
-                                row: Selected::Decision(bead.clone()),
-                                off: px(1_000_000.),
-                                expanded: model.expanded().clone(),
-                                decided_expanded: model.decided_expanded(),
-                            },
-                            false,
-                        ));
+                        self.returning =
+                            Some(((Selected::Decision(bead.clone()), px(1_000_000.)), false));
                     }
                     // The image shot opens the mail's image over the
                     // window, as a click on its thumbnail does: the yard
@@ -2692,7 +2842,23 @@ impl Footplate {
                 let _ = handle.update(cx, |_, window, _| window.focus(&focus));
             });
         }
-        self.turned(before_sel, cx);
+        self.turned(before_sel.clone(), cx);
+        // The selection leads and the mode follows: a row of another mode
+        // opens its mode, and the yard remembers it. The row left is the
+        // old mode's again when the person steps back.
+        if let (Some(before), Some(after)) = (&before_sel, &after_sel) {
+            let (from, to) = (before.mode(), after.mode());
+            if from != to {
+                let mut kept = self.places.get(&self.yard).cloned().unwrap_or_default();
+                kept.rows[from.index()] = Some(before.clone());
+                kept.lists[from.index()] = (px(0.) - self.rows.offset().y).max(px(0.));
+                self.places.insert(self.yard.clone(), kept);
+                if to != self.mode() {
+                    let yard = self.yard.clone();
+                    self.set(self.settings.clone().with_mode(&yard, to), cx);
+                }
+            }
+        }
         self.shown(cx);
         self.pictures(cx);
         self.run(effects, cx);
@@ -2828,7 +2994,11 @@ impl Footplate {
 
     /// Where the open yard stands, on `row`: what is kept of it when
     /// another yard is opened.
-    fn place(&self, row: Selected) -> Place {
+    /// Where the open yard stands, on `row` in `mode`: what is kept of it
+    /// when another yard is opened. The row and the list's scroll are the
+    /// mode's own; the pane's scroll and the expanded cards are the yard's,
+    /// for the row that was open. What other modes kept stands.
+    fn place(&self, mode: Mode, row: Selected, mut kept: Place) -> Place {
         let off = match &row {
             // A jump to the newest that the layout has not applied yet
             // is where it stands all the same.
@@ -2843,12 +3013,12 @@ impl Footplate {
             | Selected::Bead(_) => px(0.) - self.decision.offset().y,
         };
         let model = self.model.as_ref();
-        Place {
-            row,
-            off: off.max(px(0.)),
-            expanded: model.map(|m| m.expanded().clone()).unwrap_or_default(),
-            decided_expanded: model.is_some_and(Model::decided_expanded),
-        }
+        kept.rows[mode.index()] = Some(row);
+        kept.lists[mode.index()] = (px(0.) - self.rows.offset().y).max(px(0.));
+        kept.off = off.max(px(0.));
+        kept.expanded = model.map(|m| m.expanded().clone()).unwrap_or_default();
+        kept.decided_expanded = model.is_some_and(Model::decided_expanded);
+        kept
     }
 
     /// Puts what is shown where it stood when its yard was left for
@@ -2858,13 +3028,13 @@ impl Footplate {
     /// its newest, and how long it is the layout says: so the frame that
     /// first has it whole lays it out, and the one after moves the view.
     fn come_back(&mut self, window: &mut Window) {
-        let Some((place, laid)) = self.returning.take() else {
+        let Some(((row, off), laid)) = self.returning.take() else {
             return;
         };
         let Some(model) = self.model.as_ref() else {
             return;
         };
-        let here = match &place.row {
+        let here = match &row {
             Selected::Conversation(_) | Selected::Yard => model.answered(),
             Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead) => {
                 model.has_bead(bead)
@@ -2874,18 +3044,18 @@ impl Footplate {
         };
         // Under the settings nothing of the row is laid out.
         if !here || self.settings_open {
-            self.returning = Some((place, false));
+            self.returning = Some(((row, off), false));
             return;
         }
         // A jump to the newest asked for since is applied by this frame's
         // layout, over any offset set here: the next one has the place.
         if !laid || self.bottom_pending {
-            self.returning = Some((place, true));
+            self.returning = Some(((row, off), true));
             window.request_animation_frame();
             return;
         }
-        if matches!(&place.row, Selected::Conversation(_))
-            && place.off > self.conversation.max_offset().height
+        if matches!(&row, Selected::Conversation(_))
+            && off > self.conversation.max_offset().height
             && model.top() == Top::Older
         {
             // The saved position is beyond the newest page. Reach the
@@ -2894,13 +3064,13 @@ impl Footplate {
             let mut at = self.conversation.offset();
             at.y = px(0.);
             self.conversation.set_offset(at);
-            self.returning = Some((place, true));
+            self.returning = Some(((row, off), true));
             return;
         }
-        match place.row {
+        match row {
             Selected::Conversation(_) | Selected::Yard => {
                 let mut at = self.conversation.offset();
-                at.y = (place.off - self.conversation.max_offset().height).min(px(0.));
+                at.y = (off - self.conversation.max_offset().height).min(px(0.));
                 self.conversation.set_offset(at);
             }
             // Where the card is shorter now, the layout stops at its end.
@@ -2909,7 +3079,7 @@ impl Footplate {
             | Selected::Arrivals
             | Selected::Bead(_) => {
                 let mut at = self.decision.offset();
-                at.y = px(0.) - place.off;
+                at.y = px(0.) - off;
                 self.decision.set_offset(at);
             }
         }
@@ -4628,7 +4798,50 @@ impl Footplate {
 
     fn step(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
-        self.change(cx, |m| m.step(by));
+        let mode = self.mode();
+        self.change(cx, |m| m.step_in(mode, by));
+        let focus = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
+            Some(_) => self.line.focus_handle(cx),
+            None => self.focus.clone(),
+        };
+        window.focus(&focus);
+    }
+
+    /// Steps the rail to the mode `by` on from the open one, around the
+    /// ends: the brackets, from anywhere.
+    fn step_mode(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.mode().step(by);
+        self.set_mode(mode, window, cx);
+    }
+
+    /// Opens `mode`: the row it was left on, where that is still there,
+    /// else its own default. The open row and the list's scroll stay the
+    /// old mode's. Without a model there is no list to show, and its icons
+    /// are inert.
+    fn set_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        let from = self.mode();
+        if from == mode || self.model.is_none() {
+            return;
+        }
+        if let Some(open) = self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            let mut kept = self.places.get(&self.yard).cloned().unwrap_or_default();
+            kept.rows[from.index()] = Some(open);
+            kept.lists[from.index()] = (px(0.) - self.rows.offset().y).max(px(0.));
+            self.places.insert(self.yard.clone(), kept);
+        }
+        let yard = self.yard.clone();
+        self.set(self.settings.clone().with_mode(&yard, mode), cx);
+        let row = self.places.get(&yard).and_then(|kept| kept.row(mode));
+        self.settings_open = false;
+        self.change(cx, |m| m.show(mode, row));
+        let mut at = self.rows.offset();
+        at.y = px(0.)
+            - self
+                .places
+                .get(&yard)
+                .map(|kept| kept.list(mode))
+                .unwrap_or(px(0.));
+        self.rows.set_offset(at);
         let focus = match self.model.as_ref().and_then(|m| m.selected_conversation()) {
             Some(_) => self.line.focus_handle(cx),
             None => self.focus.clone(),
@@ -5148,11 +5361,12 @@ impl Footplate {
         cx.notify();
     }
 
-    /// The switcher's list under the head, or no longer: the yards the
-    /// settings list, to open one of. While it shows, the window holds the
-    /// keys, on the row of the open yard first. With one yard named by the
-    /// environment there is nothing to switch between. A yard that is away
-    /// has the list as any other: it is how the person leaves it.
+    /// The switcher's list at the rail's foot, or no longer: the yards
+    /// the settings list, to open one of. While it shows, the window
+    /// holds the keys, on the row of the open yard first. With one yard
+    /// named by the environment there is nothing to switch between. A
+    /// yard that is away has the list as any other: it is how the person
+    /// leaves it.
     fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
         if self.switching.take().is_some() {
@@ -5281,8 +5495,8 @@ impl Footplate {
         self.change(cx, |m| m.select(row));
     }
 
-    /// What the status row in the head is for the open yard: its state
-    /// with Start/Stop, or none.
+    /// What the status row at the list's head is for the open yard: its
+    /// state with Start/Stop, or none.
     fn switch_for(&self) -> SwitchFor {
         if self.env.yard.is_some() {
             return SwitchFor::Far;
@@ -5396,7 +5610,8 @@ impl Footplate {
         .detach();
     }
 
-    /// What a reading of the switch came to is the head's from here on.
+    /// What a reading of the switch came to is the status row's from
+    /// here on.
     fn read_switch(&mut self, read: SwitchRead, cx: &mut Context<Self>) {
         match read {
             SwitchRead::NoYardr(why) => {
@@ -5482,7 +5697,7 @@ impl Footplate {
         self.answered_while_adding && !self.unreached.contains_key(&self.yard)
     }
 
-    /// The quiet line where the head has no status row for it: a yard at
+    /// The quiet line where the list has no status row for it: a yard at
     /// an address, while it is reconnecting. A yard of this machine says
     /// it in the status row instead. A small strip at the top of the
     /// conversation; after the reconnect it goes away with the state.
@@ -5501,8 +5716,8 @@ impl Footplate {
         })
     }
 
-    /// Start in the head: `yardr up`. Safe to repeat, so starting a yard
-    /// that runs, or twice, changes nothing.
+    /// Start in the status row: `yardr up`. Safe to repeat, so starting
+    /// a yard that runs, or twice, changes nothing.
     fn start_yard(&mut self, cx: &mut Context<Self>) {
         let Some(yardr) = self.switch_yardr() else {
             return;
@@ -5545,9 +5760,9 @@ impl Footplate {
         .detach();
     }
 
-    /// Stop in the head: `down` without the flag first, which on a yard
-    /// with agents stops nothing and asks what it would stop. With no
-    /// agent it stops the yard at once, and asks nothing.
+    /// Stop in the status row: `down` without the flag first, which on a
+    /// yard with agents stops nothing and asks what it would stop. With
+    /// no agent it stops the yard at once, and asks nothing.
     fn stop_yard(&mut self, cx: &mut Context<Self>) {
         let Some(yardr) = self.switch_yardr() else {
             return;
@@ -6388,20 +6603,6 @@ impl Footplate {
 
     /// The control that opens the settings, and shuts them: at the foot
     /// of the left column, and under the words when the yard is away.
-    fn settings_control(
-        &self,
-        text: String,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        small_button(text, palette)
-            .id("settings")
-            .debug_selector(|| "settings".to_string())
-            .flex_none()
-            .when(self.settings_open, |el| el.bg(palette.open))
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
-    }
-
     /// The settings: the text size, the look, the yard and what the system
     /// tells of, each with its buttons and its keys, and where they are
     /// kept.
@@ -7406,10 +7607,10 @@ impl Footplate {
         asked
     }
 
-    /// The status row in the head, under the yard's line. A yard at an
-    /// address has none: its processes are elsewhere. "Start at login" is
-    /// a switch of the settings, with the faint line for what came of a
-    /// switch beside it there.
+    /// The status row at each mode's list head. A yard at an address has
+    /// none: its processes are elsewhere. "Start at login" is a switch of
+    /// the settings, with the faint line for what came of a switch beside
+    /// it there.
     fn switch_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if self.first_run.is_some() {
             return Vec::new();
@@ -7609,19 +7810,13 @@ impl Footplate {
             )
     }
 
-    /// The switcher's list, under the head of the left column: a row for
-    /// each yard of the settings, with its kind and its state, which of
-    /// one that is not open is what waits in it now, the open one marked. A click opens a yard, as Enter does on the row the
-    /// arrows are on.
+    /// The switcher's list as a popover to the right of the rail's foot:
+    /// a row for each yard of the settings, with its kind and its state,
+    /// which of one that is not open is what waits in it now, the open
+    /// one marked. A click opens a yard, as Enter does on the row the
+    /// arrows are on. It stands over whatever the window shows.
     fn switcher(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div()
-            .debug_selector(|| "switcher".to_string())
-            .flex()
-            .flex_col()
-            .flex_none()
-            .py_1()
-            .border_b_1()
-            .border_color(palette.line);
+        let mut list = div().flex().flex_col().flex_none().py_1();
         for (place, yard) in self.settings.yards.iter().enumerate() {
             let name = yard.name.clone();
             let open = name == self.yard;
@@ -7639,6 +7834,7 @@ impl Footplate {
                     .rounded_md()
                     .cursor_pointer()
                     .text_sm()
+                    .truncate()
                     .when(place == at, |el| el.bg(palette.open))
                     // A yard that is not reached has nothing to open
                     // it for, and is drawn so.
@@ -7657,16 +7853,29 @@ impl Footplate {
                     )),
             );
         }
-        list.child(
+        list = list.child(
             div()
                 .px_3()
                 .py_1()
                 .text_xs()
                 .text_color(palette.faint)
+                .truncate()
                 .child(format!(
                     "↑↓ enter opens · esc leaves · {SECONDARY}+1 to 9 from anywhere"
                 )),
-        )
+        );
+        div()
+            .absolute()
+            .left(px(RAIL + 8.))
+            .bottom(px(8.))
+            .min_w(px(200.))
+            .max_w(px(320.))
+            .debug_selector(|| "switcher".to_string())
+            .rounded_lg()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.ground)
+            .child(list)
     }
 
     fn toggle_decided(&mut self, cx: &mut Context<Self>) {
@@ -7676,13 +7885,21 @@ impl Footplate {
         });
     }
 
+    /// The away screen's first line where the yard was reached before and
+    /// is not now: which yard, and why in a word or two.
+    fn away_why(&self) -> Option<String> {
+        let short = self.unreached.get(&self.yard).copied()?;
+        Some(format!("{} · {short}", self.which_yard_short()))
+    }
+
     /// The away screen's first words: a yard that is only stopped says
     /// that, with where to start it; where no yard was ever made, one
     /// plain sentence says so and what to do, with no socket, no error
     /// and no yardr command in it; anywhere else the telling stands.
     fn away_lead(&self, why: &str) -> String {
         if self.yard_is_stopped() {
-            return "This yard is stopped. Start it with Start, in the head.".to_string();
+            return "This yard is stopped. Start it with Start, at the top of the list."
+                .to_string();
         }
         if self.sets_up_here() {
             return "No yard has been made here yet — set one up.".to_string();
@@ -7761,11 +7978,10 @@ impl Footplate {
     /// A yard that no longer lets this device in is not: the device is
     /// paired again from here. One whose session the edge no longer lets
     /// in says to sign in again, and pairing is not offered. A yard that
-    /// is only stopped says that, and points at Start in the head. It
-    /// stands beside the head of the
-    /// left column, which opens another yard; the one yard the environment
-    /// names has no other, and its settings are reached from under the
-    /// words. Under the words are the ways to a yard from here, which are
+    /// is only stopped says that, and points at Start at the top of the
+    /// list. It stands beside the rail, whose foot opens another yard;
+    /// the one yard the environment names has no other. Under the words
+    /// are the ways to a yard from here, which are
     /// the settings' own: each asks for what the settings ask for a yard
     /// that is added, in the same fields, and opens the yard it adds.
     /// Where the yard answers under a way's open fields, one line says so
@@ -7773,7 +7989,6 @@ impl Footplate {
     fn away(&self, why: &str, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let place = self.client.as_ref().map(Client::place);
         let alone = self.env.yard.is_some();
-        let short = self.unreached.get(&self.yard).copied();
         let setup_here = self.sets_up_here();
         let again = match self.away {
             Away::Trying => format!(
@@ -7791,7 +8006,7 @@ impl Footplate {
                     .to_string()
             }
             Away::Stopped => {
-                "footplate does not try again: the head opens another yard, and so do the settings."
+                "footplate does not try again: the switcher opens another yard, and so do the settings."
                     .to_string()
             }
         };
@@ -7820,11 +8035,11 @@ impl Footplate {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .children(short.map(|short| {
+                    .children(self.away_why().map(|told| {
                         div()
                             .debug_selector(|| "away why".to_string())
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{} · {short}", self.which_yard_short()))
+                            .child(told)
                     }))
                     .children((!answers).then(|| {
                         div()
@@ -7948,99 +8163,158 @@ impl Footplate {
                         })),
                 )
             })
-            // The column's foot has the control where there is a column.
-            .when(alone, |el| {
-                el.child(self.settings_control(format!("settings ({SECONDARY}+,)"), palette, cx))
-            })
     }
 
-    /// The left column: the head, which names the open yard and is the
-    /// switcher, the switcher's list while it is open, `body`, and the
-    /// column's own controls at its foot. It stands the same beside a yard
-    /// that is away, with nothing of that yard in `body`: the person goes
-    /// to another from where they always do.
-    fn column(
-        &self,
-        me: Option<&str>,
-        body: impl IntoElement,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let head = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .p_3()
-            .border_b_1()
-            .border_color(palette.line)
-            // As high as the two lines beside it, nearly: 40 pixels at the
-            // usual text size, and with the text when that is set.
-            .child(
-                img(self.icon.clone())
-                    .size(rems(2.5))
-                    .flex_none()
-                    .debug_selector(|| "logo".to_string()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    // Resolve the available row width before measuring the
-                    // name, so truncate() can draw its ellipsis.
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("footplate"))
-                    .child(
-                        div()
-                            .id("which yard")
-                            // Leave enough room for the operator and the
-                            // local yard name at the narrowest window.
-                            .text_size(rems(0.8))
-                            .text_color(palette.accent)
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded_md()
-                            .debug_selector(|| "which yard".to_string())
-                            // The line is the switcher: it names the open
-                            // yard and opens the list of them. The one
-                            // yard the environment names has none.
-                            .when(self.env.yard.is_none(), |el| {
-                                el.cursor_pointer()
-                                    .hover(|style| style.bg(palette.hover))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_switcher(window, cx)
-                                    }))
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(self.head_line(me)),
-                            )
-                            .children(self.env.yard.is_none().then(|| chevron(palette.accent))),
-                    )
-                    .children(self.switch_rows(palette, cx)),
-            );
-        // A quiet row for the column's own controls, under the rows and
-        // outside what scrolls, so it stays in place.
-        let foot = div()
-            .flex()
+    /// The rail on the window's far left: the footplate mark on top, the
+    /// three mode icons, and at the foot the switcher's tile with the
+    /// open yard's first two letters and the settings' gear. The open
+    /// mode's icon stands in the accent on the open ground, as the open
+    /// row does; the others stand quiet and brighten on hover, as quiet
+    /// text does. While the yard is away the modes stand dimmed and
+    /// inert, and the foot stays alive, because leaving is its job.
+    fn rail(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let mode = self.mode();
+        // The modes answer where a yard's rows are there to show.
+        let live = self.model.is_some();
+        let mut rail = div()
+            .debug_selector(|| "rail".to_string())
+            .w(px(RAIL))
             .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
             .items_center()
-            .gap_2()
-            .px_3()
             .py_2()
-            .border_t_1()
-            .border_color(palette.line)
-            .child(self.settings_control("settings".to_string(), palette, cx));
+            .bg(palette.side)
+            .border_r_1()
+            .border_color(palette.line);
+        // The footplate mark, doing nothing: orientation, as the logo was.
+        rail = rail.child(
+            div()
+                .id("rail mark")
+                .debug_selector(|| "rail mark".to_string())
+                .size(px(32.))
+                .rounded_lg()
+                // The kit's graphite tile with the track glyph's light
+                // stroke, as the small app icon: dark in both themes.
+                .bg(rgba(0x101112ff))
+                .border_1()
+                .border_color(palette.line)
+                .flex()
+                .items_center()
+                .justify_center()
+                .tooltip(|_, cx| cx.new(|_| RailTip("footplate".to_string())).into())
+                .child(track_glyph(rgba(0xf5f5f5ff))),
+        );
+        for (n, m) in Mode::ALL.into_iter().enumerate() {
+            let open = live && m == mode;
+            let color = match (open, live && self.rail_hover == Some(m), live) {
+                (true, _, _) => palette.accent,
+                (_, _, false) => palette.faint,
+                (_, true, _) => palette.text,
+                _ => palette.faint,
+            };
+            let glyph: AnyElement = match m {
+                Mode::Chat => lamp_glyph(color).into_any_element(),
+                Mode::Decisions => semaphore_glyph(color).into_any_element(),
+                Mode::Timetable => track_glyph(color).into_any_element(),
+            };
+            let tip = match live {
+                true => format!("{} ({}+[ {}+])", m.name(), SECONDARY, SECONDARY),
+                false => "the yard is away".to_string(),
+            };
+            let id = format!("rail {}", m.name());
+            rail =
+                rail.child(
+                    div()
+                        .id(SharedString::from(id.clone()))
+                        .debug_selector(move || id.clone())
+                        .size(px(32.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(n == 0, |el| el.mt_2())
+                        .when(n > 0, |el| el.mt_1())
+                        .when(open, |el| el.bg(palette.open))
+                        .when(live, |el| {
+                            let entity = cx.entity();
+                            el.cursor_pointer()
+                                .on_hover(move |hovered, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.rail_hover = match hovered {
+                                            true => Some(m),
+                                            false => None,
+                                        };
+                                        cx.notify();
+                                    });
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.set_mode(m, window, cx)
+                                }))
+                        })
+                        .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+                        .child(glyph),
+                );
+        }
+        rail = rail.child(div().flex_1().min_h_0());
+        // The foot: the switcher's tile with the open yard's first two
+        // letters, and the settings' gear. The one yard the environment
+        // names has no tile, as it had no switcher.
+        if self.env.yard.is_none() {
+            let letters: String = self.yard.chars().take(2).collect();
+            let tip = format!("{} — switch yards ({}+y)", self.yard, SECONDARY);
+            rail = rail.child(
+                div()
+                    .id("switch tile")
+                    .debug_selector(|| "switch tile".to_string())
+                    .size(px(32.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.line)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(palette.hover))
+                    .when(self.switching.is_some(), |el| el.bg(palette.open))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
+                    .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+                    .child(letters),
+            );
+        }
+        rail.child(
+            div()
+                .id("settings")
+                .debug_selector(|| "settings".to_string())
+                .size(px(32.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .mt_1()
+                .cursor_pointer()
+                .hover(|style| style.bg(palette.hover))
+                .when(self.settings_open, |el| el.bg(palette.open))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
+                .tooltip(|_, cx| {
+                    cx.new(|_| RailTip(format!("settings ({SECONDARY}+,)")))
+                        .into()
+                })
+                .child(gear_glyph(palette.faint)),
+        )
+    }
+
+    /// The left column: the status row at its head, outside what scrolls
+    /// so it stays in place, and `body` beneath it.
+    fn column(&self, body: impl IntoElement, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let status = self.switch_rows(palette, cx);
         div()
-            // 270 pixels at the usual text size, so the head's line holds a
-            // name of up to eight letters beside this machine's. Its rows
-            // are cut to it, so it grows with the text, but never over the
-            // conversation: the smallest window still has the larger part
-            // for that.
+            // 270 pixels at the usual text size. Its rows are cut to it,
+            // so it grows with the text, but never over the conversation:
+            // the smallest window still has the larger part for that.
             .w(rems(16.875))
             .max_w(relative(0.48))
             .flex_none()
@@ -8050,67 +8324,53 @@ impl Footplate {
             .bg(palette.side)
             .border_r_1()
             .border_color(palette.line)
-            .child(head)
-            .children(self.switching.map(|at| self.switcher(at, palette, cx)))
+            .children((!status.is_empty()).then(|| {
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_2p5()
+                    .border_b_1()
+                    .border_color(palette.line)
+                    .children(status)
+            }))
             .child(body)
-            .child(foot)
     }
 
-    fn list(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = model.rows();
-        let now = chrono::Utc::now();
-        let mut body = div()
+    /// The open mode's list: chat's crew with the yard row, decisions'
+    /// expanded rows, or the timetable's arrivals row.
+    fn list(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        match self.mode() {
+            Mode::Chat => self.list_chat(model, palette, cx).into_any_element(),
+            Mode::Decisions => self.list_decisions(model, palette, cx).into_any_element(),
+            Mode::Timetable => self.list_timetable(model, palette, cx).into_any_element(),
+        }
+    }
+
+    /// What the mode's rows scroll in: the window never moves it, but each
+    /// mode stands where it stood.
+    fn list_body(&self) -> Stateful<Div> {
+        div()
             .id("rows")
             .debug_selector(|| "rows".to_string())
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.rows)
-            .py_1();
-        // The open questions above the conversations, grouped by topic.
-        let decisions = model.decisions_count();
-        let decided = model.decided_count();
-        if decisions > 0 || decided > 0 {
-            body = body.child(section_head("Decisions", waiting_words(decisions), palette));
-            for group in model.decision_groups(&now) {
-                body = body.child(
-                    div()
-                        .px_3()
-                        .pt_1()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(palette.faint)
-                        .child(group.topic),
-                );
-                for row in group.rows {
-                    body = body.child(self.decision_row(row, palette, cx));
-                }
-            }
-            if decided > 0 {
-                let open = model.decided_expanded();
-                body = body.child(
-                    div()
-                        .id("decided")
-                        .mx_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(palette.hover))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_decided(cx)))
-                        .child(div().text_sm().text_color(palette.faint).child(format!(
-                            "{} Decided ({decided})",
-                            if open { "▾" } else { "▸" }
-                        ))),
-                );
-                if open {
-                    for row in model.decided_rows() {
-                        body = body.child(self.decided_row(row, palette, cx));
-                    }
-                }
-            }
-            body = body.child(divider(palette));
-        }
+            .py_1()
+    }
+
+    /// Chat's list: the crew rows, then the yard row below them. The
+    /// yard's notifications row lives here because notifications are mail
+    /// the yard wrote to the person, and chat is where the person reads
+    /// mail.
+    fn list_chat(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = model.rows();
+        let mut body = self.list_body();
         let unread: usize = rows.iter().map(|row| row.unread).sum();
         body = body.child(section_head("Crew", unread_words(unread), palette));
         if rows.is_empty() {
@@ -8129,9 +8389,90 @@ impl Footplate {
         body = body.child(divider(palette));
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
+        self.column(body, palette, cx)
+    }
+
+    /// Decisions' list: the open questions already expanded, grouped by
+    /// topic, with the Decided toggle at the list's end: decided asks are
+    /// unbounded history, and without the toggle they would push open
+    /// decisions off a short list.
+    fn list_decisions(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let now = chrono::Utc::now();
+        let mut body = self.list_body();
+        let decisions = model.decisions_count();
+        let decided = model.decided_count();
+        body = body.child(section_head("Decisions", waiting_words(decisions), palette));
+        for group in model.decision_groups(&now) {
+            body = body.child(
+                div()
+                    .px_3()
+                    .pt_1()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette.faint)
+                    .child(group.topic),
+            );
+            for row in group.rows {
+                body = body.child(self.decision_row(row, palette, cx));
+            }
+        }
+        if decided > 0 {
+            let open = model.decided_expanded();
+            body = body.child(
+                div()
+                    .id("decided")
+                    .mx_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .hover(|style| style.bg(palette.hover))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_decided(cx)))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(format!("{} Decided", if open { "▾" } else { "▸" })),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(decided_words(decided)),
+                    ),
+            );
+            if open {
+                for row in model.decided_rows() {
+                    body = body.child(self.decided_row(row, palette, cx));
+                }
+            }
+        }
+        self.column(body, palette, cx)
+    }
+
+    /// The timetable's list: the arrivals row, with how many beads are in
+    /// transit. The lines list stands here once the yard serves it.
+    fn list_timetable(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut body = self.list_body();
         let arrivals = model.arrivals_row();
+        body = body.child(section_head("Timetable", arrivals.line.clone(), palette));
         body = body.child(self.row(arrivals, Selected::Arrivals, palette, cx));
-        self.column(Some(model.me()), body, palette, cx)
+        self.column(body, palette, cx)
     }
 
     /// One arrival of the board: the title, the expected arrival in mono
@@ -8292,25 +8633,28 @@ impl Footplate {
                             .child(row.line),
                     ),
             )
+            // Every count is quiet words at the right, never a numeral
+            // badge.
             .when(row.unread > 0, |el| {
                 el.child(
                     div()
                         .flex_none()
                         .debug_selector(|| format!("row unread {}", name))
-                        .px_2()
-                        .rounded_full()
-                        .bg(palette.accent)
-                        .text_color(palette.on_accent)
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(row.unread.to_string()),
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child(unread_words(row.unread)),
                 )
             })
     }
 
-    /// A bead with open asks: the question's first line in plain words,
+    /// A bead with open asks, already expanded: the question's first line
+    /// in plain words, or the bead's title with how many it asks, then
+    /// every ask with its question's first line and its numbered options,
     /// then whose it is and how long it waits, the bead's id small at the
-    /// row's end.
+    /// row's end. A bead with one ask shows its options under its head,
+    /// which already says its question. The options take no clicks and no
+    /// keys: the list is for triage, and answering stays in the card on
+    /// the right.
     fn decision_row(
         &self,
         row: DecisionRow,
@@ -8318,6 +8662,39 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let sel = Selected::Decision(row.bead.clone());
+        let mut col = div()
+            .flex()
+            .flex_col()
+            // Resolve the available row width before measuring the
+            // head, so truncate() can draw its ellipsis.
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .truncate()
+                    .debug_selector(|| format!("decision head {}", row.bead))
+                    .child(row.head),
+            );
+        let several = row.asks.len() > 1;
+        for ask in &row.asks {
+            if several {
+                let seq = ask.ask;
+                col = col.child(
+                    div()
+                        .truncate()
+                        .debug_selector(|| format!("decision ask {seq} {}", row.bead))
+                        .child(ask.head.clone()),
+                );
+            }
+            col = col.children(Self::decision_ask_rows(&row.bead, ask, palette));
+        }
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(palette.faint)
+                .truncate()
+                .child(row.sub),
+        );
         div()
             .id(SharedString::from(format!("decision {}", row.bead)))
             .debug_selector(|| format!("decision row {}", row.bead))
@@ -8335,28 +8712,7 @@ impl Footplate {
                 el.hover(|style| style.bg(palette.hover))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    // Resolve the available row width before measuring the
-                    // head, so truncate() can draw its ellipsis.
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .truncate()
-                            .debug_selector(|| format!("decision head {}", row.bead))
-                            .child(row.head),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(palette.faint)
-                            .truncate()
-                            .child(row.sub),
-                    ),
-            )
+            .child(col)
             .child(
                 div()
                     .flex_none()
@@ -8365,6 +8721,46 @@ impl Footplate {
                     .debug_selector(|| format!("decision id {}", row.bead))
                     .child(row.short),
             )
+    }
+
+    /// One ask expanded in its bead's row: its numbered options with their
+    /// words, or what its card shows where it has none: a secret ask the
+    /// yard's line, a run ask its command, any other that words are
+    /// wanted.
+    fn decision_ask_rows(bead: &str, ask: &DecisionRowAsk, palette: Palette) -> Vec<AnyElement> {
+        let line = |text: String| {
+            div()
+                .text_xs()
+                .text_color(palette.faint)
+                .truncate()
+                .child(text)
+                .into_any_element()
+        };
+        if !ask.options.is_empty() {
+            return ask
+                .options
+                .iter()
+                .map(|(n, label)| {
+                    div()
+                        .debug_selector({
+                            let bead = bead.to_string();
+                            move || format!("decision option {bead} {n}")
+                        })
+                        .text_xs()
+                        .text_color(palette.faint)
+                        .truncate()
+                        .child(format!("{n} {label}"))
+                        .into_any_element()
+                })
+                .collect();
+        }
+        if let Some(secret) = &ask.secret {
+            return vec![line(secret.clone())];
+        }
+        if let Some(run) = &ask.run {
+            return vec![line(run.clone())];
+        }
+        vec![line("words wanted".to_string())]
     }
 
     /// One dealt with, with its pick.
@@ -9021,6 +9417,8 @@ impl Footplate {
             Some(Selected::Decided(bead, ask)) => self
                 .talk_decided(model, bead, *ask, palette, cx)
                 .into_any_element(),
+            // A mode with no row open: decisions with nothing to decide.
+            // Chat always has the yard row, and timetable the arrivals.
             None => div()
                 .flex_1()
                 .min_w_0()
@@ -9030,14 +9428,18 @@ impl Footplate {
                 .items_center()
                 .justify_center()
                 .text_color(palette.faint)
-                .child("Nobody to write to yet.")
+                .child(match self.mode() {
+                    Mode::Chat => "Nobody to write to yet.",
+                    Mode::Decisions => "Nothing to decide.",
+                    Mode::Timetable => "None in transit.",
+                })
                 .into_any_element(),
         }
     }
 
     /// The control that jumps to the newest message: an arrow over the
     /// mail, with how many mails arrived below while the view stood
-    /// scrolled up, in the unread count's colours when there are any.
+    /// scrolled up, marked in the accent when there are any.
     fn jump_button(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let marked = self.new_below > 0;
         let label = match marked {
@@ -9223,7 +9625,7 @@ impl Footplate {
 
     /// The yard row open: the notices, oldest first, and no line to type
     /// in. One key marks one read, and with shift every one, as the button
-    /// in the head does while a notice is unread.
+    /// in the row's head does while a notice is unread.
     fn talk_yard(
         &self,
         model: &Model,
@@ -9451,7 +9853,7 @@ impl Footplate {
                             .text_sm()
                             .text_color(palette.faint)
                             .flex_none()
-                            .child(group.rows.len().to_string()),
+                            .child(arriving_words(group.rows.len())),
                     ),
             )
             .children(
@@ -10722,6 +11124,10 @@ impl Render for Footplate {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Next, window, cx| this.step(1, window, cx)))
             .on_action(cx.listener(|this, _: &Previous, window, cx| this.step(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &NextMode, window, cx| this.step_mode(1, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousMode, window, cx| this.step_mode(-1, window, cx)),
+            )
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(|this, _: &DismissAll, _, cx| this.dismiss_all(cx)))
@@ -10763,15 +11169,21 @@ impl Render for Footplate {
             .bg(palette.ground)
             .text_color(palette.text)
             .text_size(rems(0.875));
-        // A yard that is away keeps the column with its head, and none of
-        // its rows: what they open is not there. The one yard the
-        // environment names has no other to go to, and no column. One
-        // that is reconnecting keeps its rows with it, below.
+        // The rail stands on the window's far left whatever shows: the
+        // modes answer where a yard's rows are there, and the foot's
+        // switcher and settings stay alive while the yard is away.
+        let root = root.child(self.rail(palette, cx));
+        // A yard that is away keeps the status row beside the screen,
+        // with none of its rows: what they open is not there. Only a
+        // yard of this machine has one; one at an address, the one yard
+        // the environment names, and one being set up here have none.
+        // One that is reconnecting keeps its rows with it, below.
         let beside = match (&self.down, &self.model) {
             (Some(_), _) if self.reconnecting() => None,
-            (Some(_), model) if self.env.yard.is_none() => {
-                let me = model.as_ref().map(Model::me);
-                Some(self.column(me, div().flex_1(), palette, cx))
+            (Some(_), _)
+                if !matches!(self.switch_for(), SwitchFor::Far) && self.first_run.is_none() =>
+            {
+                Some(self.column(div().flex_1(), palette, cx))
             }
             _ => None,
         };
@@ -10821,8 +11233,11 @@ impl Render for Footplate {
                 .child(self.talk(model, palette, cx)),
             (None, None) => root,
         };
-        // The image open over the window, where one is: over whatever
-        // shows, the settings and the first run with it.
+        // The switcher's list stands over whatever shows, to the right
+        // of the rail's foot; the image open over the window, where one
+        // is, over that: over whatever shows, the settings and the first
+        // run with it.
+        let shown = shown.children(self.switching.map(|at| self.switcher(at, palette, cx)));
         match &self.image_open {
             Some(open) => shown
                 .child(self.image_layer(open, window, cx))
@@ -12284,7 +12699,8 @@ mod tests {
         drag(cx, from, to);
         assert!(selected(&view, cx).is_some());
         yard.answer("Conversation", r#"{"result": []}"#);
-        view.update(cx, |v, cx| v.change(cx, |m| m.step(1)));
+        let mode = view.read_with(cx, |v, _| v.mode());
+        view.update(cx, |v, cx| v.change(cx, |m| m.step_in(mode, 1)));
         assert_eq!(selected(&view, cx), None);
     }
 
@@ -12941,6 +13357,7 @@ mod tests {
         });
         // The bead opens on its oldest ask, and the bead is read.
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -13079,6 +13496,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -13126,6 +13544,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -13173,6 +13592,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -13803,6 +14223,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -13932,6 +14353,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14054,6 +14476,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14154,6 +14577,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14255,6 +14679,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14298,6 +14723,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14419,6 +14845,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14471,6 +14898,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14572,6 +15000,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14997,6 +15426,8 @@ mod tests {
                 v.model.as_ref().is_some_and(|m| m.decisions_count() == 2)
             })
         });
+        // The yard opens in chat; the rows are read in decisions.
+        to_decisions(&view, cx);
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
 
         let long = bounds_of(cx, "decision head bead-a");
@@ -15138,6 +15569,12 @@ mod tests {
         );
         yard.answer("Bead", &bead_three());
         yard.answer("AnswerAsk", "{}");
+        // The conversation's mails before the window opens: the yard opens
+        // in chat and reads the yardmaster's at once.
+        mails(
+            &yard,
+            &["A long enough letter to make the conversation scroll."; 12],
+        );
         cx.update(|cx| {
             input::bind_keys(cx);
             bind_keys(cx);
@@ -15153,6 +15590,7 @@ mod tests {
             })
         };
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             open(&view, cx) == Some(Selected::Decision("bead-a".into()))
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
@@ -15161,10 +15599,6 @@ mod tests {
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Conversation("yardmaster".into()), window, cx)
         });
-        mails(
-            &yard,
-            &["A long enough letter to make the conversation scroll."; 12],
-        );
         wait(cx, "the full conversation", |cx| {
             texts(&view, cx).len() == 12
         });
@@ -15225,6 +15659,7 @@ mod tests {
             })
         };
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             open(&view, cx) == Some(Selected::Decision("bead-a".into()))
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
@@ -15329,6 +15764,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             open_of(&view, cx) == Some(Selected::Decision("bead-a".into()))
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
@@ -15415,6 +15851,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             open_of(&view, cx) == Some(Selected::Decision("bead-f@north".into()))
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-f@north"));
@@ -15505,6 +15942,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             open_of(&view, cx) == Some(Selected::Decision("bead-u".into()))
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-u"));
@@ -15610,6 +16048,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -15744,6 +16183,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -15824,6 +16264,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -15931,7 +16372,9 @@ mod tests {
 
         // The switch is there on every system, for the menu bar's item
         // or the tray's. Switched off, it is kept, and closing closes: the
-        // application then quits with its one window.
+        // application then quits with its one window. A tall window, so
+        // the switch at the pane's end is above the fold.
+        cx.simulate_resize(gpui::size(px(1600.), px(1400.)));
         cx.simulate_keystrokes("secondary-,");
         click_on(cx, "menu bar off");
         assert!(!settings_of(&view, cx).menu_bar);
@@ -16097,7 +16540,7 @@ mod tests {
         assert!(!settings_open(&view, cx));
         cx.simulate_input("t");
         assert_eq!(typed(&view, cx), "halt");
-        // The control in the head opens them and shuts them; so does the
+        // The rail's gear opens them and shuts them; so does the
         // back button, and a row that is opened.
         click_on(cx, "settings");
         assert!(settings_open(&view, cx));
@@ -16480,7 +16923,8 @@ mod tests {
     /// The layout at the smallest and the largest text: the rows of the
     /// left column stand under one another, a long head still ends before
     /// the bead's id (which is why it ends in an ellipsis, footplate-eryf),
-    /// and the column, its rows and the logo go with the text.
+    /// the column and its rows go with the text, and the rail stays 56
+    /// pixels wide with its 32-pixel targets.
     #[gpui::test]
     fn the_layout_holds_at_the_smallest_and_the_largest_text(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -16508,6 +16952,7 @@ mod tests {
             view
         });
         wait(cx, "the decisions", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model.as_ref().is_some_and(|m| m.decisions_count() == 2)
             })
@@ -16545,22 +16990,28 @@ mod tests {
                 short.size.width, long.size.width,
                 "at {text} px the head's column hugs its content"
             );
-            // The logo is two and a half rems a side: 40 pixels as a rule.
-            let logo = bounds_of(cx, "logo");
-            let side = rem * 2.5;
+            // The rail stays 56 pixels wide with its 32-pixel targets,
+            // whatever the text.
+            let rail = bounds_of(cx, "rail");
             assert!(
-                (logo.size.width - side).abs() < px(1.) && (logo.size.height - side).abs() < px(1.),
-                "at {text} px the logo is {logo:?}, not {side:?} a side"
+                (rail.size.width - px(56.)).abs() < px(1.),
+                "at {text} px the rail is {rail:?}, not 56 wide"
             );
-            let yard = bounds_of(cx, "which yard");
+            for target in ["rail mark", "rail chat", "switch tile", "settings"] {
+                let at = bounds_of(cx, target);
+                assert!(
+                    (at.size.width - px(32.)).abs() < px(1.)
+                        && (at.size.height - px(32.)).abs() < px(1.),
+                    "at {text} px {target} is {at:?}, not 32 a side"
+                );
+                assert!(
+                    rail.left() <= at.left() && at.right() <= rail.right() + px(1.),
+                    "at {text} px {target} leaves the rail: {at:?} {rail:?}"
+                );
+            }
             assert!(
-                logo.right() < yard.left() && yard.right() <= first.right() + rem,
-                "at {text} px the head of the column does not hold: {logo:?} {yard:?}"
-            );
-            let control = bounds_of(cx, "settings");
-            assert!(
-                yard.bottom() <= control.top(),
-                "at {text} px the button shares the head's row: {yard:?} {control:?}"
+                rail.right() <= first.left() + rem,
+                "at {text} px the column leaves the rail: {rail:?} {first:?}"
             );
             rows.push((first.size.width, first.size.height, long.size.height));
         }
@@ -16568,26 +17019,34 @@ mod tests {
         assert!(rows[0].0 < rows[1].0 && rows[1].0 < rows[2].0, "{rows:?}");
         assert!(rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1, "{rows:?}");
         assert!(rows[0].2 < rows[1].2 && rows[1].2 < rows[2].2, "{rows:?}");
-        let logo = bounds_of(cx, "logo");
-        assert!(logo.size.width > px(40.));
+        let rail = bounds_of(cx, "rail");
+        assert!((rail.size.width - px(56.)).abs() < px(1.));
     }
 
-    /// A section's head says what waits in it: the number, or that none
-    /// does. The Crew head says unread instead of waiting.
+    /// A section's head says what waits in it: the number with its
+    /// words, or that none does. The Crew head says unread, a platform
+    /// arriving, the folded Decided decided.
     #[test]
     fn a_section_s_head_counts_what_waits_in_it() {
         assert_eq!(waiting_words(0), "none waiting");
-        assert_eq!(waiting_words(1), "1");
-        assert_eq!(waiting_words(12), "12");
+        assert_eq!(waiting_words(1), "1 waiting");
+        assert_eq!(waiting_words(12), "12 waiting");
         assert_eq!(unread_words(0), "none unread");
         assert_eq!(unread_words(1), "1 unread");
         assert_eq!(unread_words(12), "12 unread");
+        assert_eq!(arriving_words(1), "1 arriving");
+        assert_eq!(arriving_words(3), "3 arriving");
+        assert_eq!(decided_words(1), "1 decided");
+        assert_eq!(decided_words(3), "3 decided");
     }
 
-    /// The left list's sections stand under their titles, each with its
-    /// count at the right: "Decisions" over the open questions, "Crew"
-    /// over the conversations. With nothing to decide the Decisions head
-    /// is gone; the Crew head stands whatever the yard holds.
+    /// Each mode's list stands under its title with its count at the
+    /// right: "Decisions" over the open questions, "Crew" over the
+    /// conversations, "Timetable" over the arrivals row. Each head stands
+    /// whatever the yard holds, in its own mode alone. What was drawn
+    /// stays drawn to the tests, so a head's absence is said only where
+    /// it was never drawn: the window opens in decisions, and the other
+    /// heads are said away there.
     #[gpui::test]
     fn the_sections_stand_under_their_titles_with_their_counts(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -16611,25 +17070,40 @@ mod tests {
             window.focus(&view.line.focus_handle(cx));
             view
         });
+        // The remembered mode, before the yard answers: the window opens
+        // in decisions, and no other head is ever drawn.
+        view.update(cx, |v, cx| {
+            v.set(
+                v.settings
+                    .clone()
+                    .with_mode(settings::HERE, Mode::Decisions),
+                cx,
+            );
+        });
         wait(cx, "the decision", |cx| {
             view.read_with(cx, |v, _| {
                 v.model.as_ref().is_some_and(|m| m.decisions_count() == 1)
             })
         });
+        assert_eq!(rail_mode(&view, cx), Mode::Decisions);
         assert!(drawn(cx, "section Decisions"));
         assert!(drawn(cx, "section Decisions count"));
-        assert!(drawn(cx, "section Crew"));
-        assert!(drawn(cx, "section Crew count"));
-        let decisions = bounds_of(cx, "section Decisions");
-        let decision_count = bounds_of(cx, "section Decisions count");
-        let crew = bounds_of(cx, "section Crew");
-        let crew_count = bounds_of(cx, "section Crew count");
-        let rows = bounds_of(cx, "rows");
-        assert!(
-            decisions.bottom() <= crew.top(),
-            "the Crew head stands above the Decisions head: {crew:?} {decisions:?}"
-        );
-        for (head, count) in [(&decisions, &decision_count), (&crew, &crew_count)] {
+        assert!(!drawn(cx, "section Crew"));
+        assert!(!drawn(cx, "section Timetable"));
+        for title in ["Decisions", "Crew", "Timetable"] {
+            match title {
+                "Decisions" => to_decisions(&view, cx),
+                "Crew" => to_chat(&view, cx),
+                _ => to_timetable(&view, cx),
+            }
+            cx.run_until_parked();
+            let head_name = format!("section {title}");
+            let count_name = format!("section {title} count");
+            assert!(drawn(cx, &head_name), "no {title} head in its mode");
+            assert!(drawn(cx, &count_name), "no {title} count in its mode");
+            let head = bounds_of(cx, &head_name);
+            let count = bounds_of(cx, &count_name);
+            let rows = bounds_of(cx, "rows");
             assert!(
                 head.right() <= count.left() && count.right() <= rows.right() + px(1.),
                 "the count is not at its head's right end: {head:?} {count:?} {rows:?}"
@@ -16641,9 +17115,10 @@ mod tests {
         }
     }
 
-    /// With nothing to decide there is no Decisions head; the Crew head
-    /// stands alone over the conversations, and the yard and arrivals
-    /// rows below them.
+    /// With nothing to decide the Decisions head still stands, in
+    /// decisions alone; in chat the Crew head stands over the
+    /// conversations with the yard row below them, and the arrivals row
+    /// in timetable.
     #[gpui::test]
     fn without_decisions_the_crew_head_stands_alone(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -16658,15 +17133,19 @@ mod tests {
         assert!(drawn(cx, "section Crew count"));
         assert!(drawn(cx, "row name yardmaster"));
         assert!(drawn(cx, "row yard"));
+        assert!(!drawn(cx, "row arrivals"));
+        // The Decisions head stands in decisions, over no rows. (What
+        // was drawn stays drawn to the tests, so the Crew head gone from
+        // the list is not said here; the sections test opens in
+        // decisions, where no Crew head is ever drawn.)
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "section Decisions"));
+        assert!(drawn(cx, "section Decisions count"));
+        // Nothing in transit: the row says so, in timetable.
+        to_timetable(&view, cx);
+        cx.run_until_parked();
         assert!(drawn(cx, "row arrivals"));
-        // The arrivals row stands under the yard row, at the list's end.
-        let yard_row = bounds_of(cx, "row yard");
-        let arrivals = bounds_of(cx, "row arrivals");
-        assert!(
-            yard_row.bottom() <= arrivals.top(),
-            "the arrivals row stands above the yard row: {arrivals:?} {yard_row:?}"
-        );
-        // Nothing in transit: the row says so.
         view.read_with(cx, |v, _| {
             assert_eq!(
                 v.model.as_ref().unwrap().arrivals_row().line,
@@ -16675,21 +17154,23 @@ mod tests {
         });
     }
 
-    /// The crew list is one list again, with the arrivals row under the
-    /// yard row counting what is in transit. A click on it opens the
-    /// board: the served rows grouped by platform, the platforms in the
-    /// served travel order, each with its rows in the served order and
-    /// remarked as served.
+    /// The timetable's list holds the arrivals row, counting what is in
+    /// transit. A click on it opens the board: the served rows grouped by
+    /// platform, the platforms in the served travel order, each with its
+    /// rows in the served order and remarked as served.
     #[gpui::test]
     fn the_arrivals_row_opens_the_board_grouped_by_platform(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        // The crew stands, and the arrivals row counts the board.
+        // The crew stands in chat, and the arrivals row in timetable.
         assert!(drawn(cx, "row name yardmaster"));
-        assert!(drawn(cx, "row arrivals"));
+        assert!(!drawn(cx, "row arrivals"));
         assert!(!drawn(cx, "arrival yd-zulu"));
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row arrivals"));
         view.read_with(cx, |v, _| {
             assert_eq!(
                 v.model.as_ref().unwrap().arrivals_row().line,
@@ -16771,6 +17252,7 @@ mod tests {
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board_no_list());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         assert!(drawn(cx, "arrival group draft"));
@@ -16806,6 +17288,7 @@ mod tests {
         yard.answer("Arrivals", &arrivals_board());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         // The bead from the Bead call, through a row's click.
@@ -16882,6 +17365,7 @@ mod tests {
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
+        to_timetable(&view, cx);
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         click_on(cx, "arrival yd-zulu");
@@ -16913,6 +17397,7 @@ mod tests {
         wait(cx, "the web view down", |cx| {
             view_answered(&view, cx) == Some(false)
         });
+        to_timetable(&view, cx);
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         click_on(cx, "arrival yd-zulu");
@@ -16936,16 +17421,17 @@ mod tests {
         yard.answer("Arrivals", &arrivals_board());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(560.), px(360.)));
-        // The yard's line ends at the column's edge, short of the head's
-        // own padding only: a row past that runs past the column.
-        let yard_line = bounds_of(cx, "which yard");
-        let edge = yard_line.right() + settings_of(&view, cx).rem() * 0.75 + px(1.);
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        // The list's edge: a row past that runs past the column.
+        let rows = bounds_of(cx, "rows");
+        let edge = rows.right() + px(1.);
         let row = bounds_of(cx, "row arrivals");
         assert!(
             row.right() <= edge,
-            "the arrivals row runs past the column: {row:?} past {yard_line:?}"
+            "the arrivals row runs past the column: {row:?} past {rows:?}"
         );
         // The board: the groups over their rows, each row two lines high
         // with time and title on the first and the faint line on the
@@ -16954,7 +17440,7 @@ mod tests {
         // it, and the click itself is the wider window's test.
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
-        let right = px(560.);
+        let right = px(616.);
         for group in ["draft", "review"] {
             let head = bounds_of(cx, &format!("arrival group {group}"));
             let count = bounds_of(cx, &format!("arrival group {group} count"));
@@ -17029,12 +17515,13 @@ mod tests {
         }
     }
 
-    /// The head keeps its line and the button has the foot of the list: at
-    /// the narrowest window and a wide one the name and this machine's are
-    /// whole, the line ends at the column's edge, and the button is under
-    /// the rows and opens the settings by a click and by its key.
+    /// The rail stands 56 pixels wide on the window's far left: the
+    /// inert mark on top, the three modes under it in order, the
+    /// switcher's tile and the settings' gear at the foot. A click on a
+    /// mode opens it, on the tile the switcher, on the gear the settings;
+    /// on the mark nothing.
     #[gpui::test]
-    fn the_button_has_the_foot_and_the_head_its_line(cx: &mut TestAppContext) {
+    fn the_rail_holds_the_modes_with_the_mark_and_the_foot(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         cx.update(|cx| {
@@ -17050,72 +17537,153 @@ mod tests {
             view.read_with(cx, |v, _| v.model.is_some())
         });
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(560.), px(360.)));
-        let head = bounds_of(cx, "which yard");
-        let rows = bounds_of(cx, "rows");
-        let control = bounds_of(cx, "settings");
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        let rail = bounds_of(cx, "rail");
         assert!(
-            head.bottom() <= control.top(),
-            "the head's line shares a row with the button: {head:?} {control:?}"
+            (rail.size.width - px(56.)).abs() < px(1.),
+            "the rail is {rail:?}, not 56 wide"
         );
-        assert!(
-            rows.bottom() <= control.top()
-                && rows.left() <= control.left()
-                && control.right() <= rows.right(),
-            "the button is not at the foot of the column: {rows:?} {control:?}"
-        );
-        // The line has the column's width: it ends at the column's edge,
-        // short of the head's own padding only.
-        let rem = settings_of(&view, cx).rem();
-        assert!(
-            (head.right() - (rows.right() - rem * 0.75)).abs() < px(1.),
-            "the head's line ends before the column's edge: {head:?} {rows:?}"
-        );
-        // Whole: the line as shaped fits where it is drawn. Shaped as the
-        // window shapes it (place()).
-        // The fixture's short login would not catch the real operator name
-        // that exposed this line's last-glyph truncation. Both the head's
-        // own words and the longer telling they stand for are whole: the
-        // short form is what the window shows, the long one what an
-        // eight-letter name reaches with it.
-        let short = view.read_with(cx, |v, _| v.which_yard_short());
-        let lines = [
-            format!("mckean · {short}"),
-            "mckean · this machine's".to_string(),
-            format!("jo · {short}"),
-            "jo · this machine's".to_string(),
-            format!("abcdefgh · {short}"),
-            "abcdefgh · this machine's".to_string(),
-        ];
-        for width_px in [560., 960.] {
-            cx.simulate_resize(gpui::size(px(width_px), px(640.)));
-            let head = bounds_of(cx, "which yard");
-            for line in &lines {
-                let shaped = cx.update(|window, _| {
-                    let run = gpui::TextRun {
-                        len: line.len(),
-                        font: window.text_style().font(),
-                        color: gpui::black(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    window
-                        .text_system()
-                        .shape_line(line.clone().into(), rem * 0.8, &[run], None)
-                        .width
-                });
-                assert!(
-                    shaped <= head.size.width,
-                    "at a {width_px}px window the head's line is cut: {line:?} is {shaped:?} in {head:?}"
-                );
-            }
+        // The mark, the modes in order, the foot's tile and gear: each
+        // under the last, each within the rail.
+        let mut tops = Vec::new();
+        for target in [
+            "rail mark",
+            "rail chat",
+            "rail decisions",
+            "rail timetable",
+            "switch tile",
+            "settings",
+        ] {
+            let at = bounds_of(cx, target);
+            assert!(
+                (at.size.width - px(32.)).abs() < px(1.)
+                    && (at.size.height - px(32.)).abs() < px(1.),
+                "{target} is {at:?}, not 32 a side"
+            );
+            assert!(
+                rail.left() <= at.left() && at.right() <= rail.right() + px(1.),
+                "{target} leaves the rail: {at:?} {rail:?}"
+            );
+            tops.push(at.top());
         }
-        // The button opens the settings, and its key shuts them again.
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "the rail's targets stand out of order: {tops:?}"
+        );
+        // The foot stands at the rail's foot, and the modes at its top.
+        let gear = bounds_of(cx, "settings");
+        assert!(
+            rail.bottom() - gear.bottom() < px(16.),
+            "the gear stands off the rail's foot: {gear:?} {rail:?}"
+        );
+        let mark = bounds_of(cx, "rail mark");
+        assert!(
+            mark.top() - rail.top() < px(16.),
+            "the mark stands off the rail's top: {mark:?} {rail:?}"
+        );
+        // A click on a mode opens it; on the mark nothing.
+        assert_eq!(rail_mode(&view, cx), Mode::Chat);
+        click_on(cx, "rail timetable");
+        assert_eq!(rail_mode(&view, cx), Mode::Timetable);
+        click_on(cx, "rail decisions");
+        assert_eq!(rail_mode(&view, cx), Mode::Decisions);
+        click_on(cx, "rail mark");
+        assert_eq!(rail_mode(&view, cx), Mode::Decisions);
+        // The tile opens the switcher.
+        click_on(cx, "switch tile");
+        assert!(switching(&view, cx).is_some());
+        assert!(drawn(cx, "switcher"));
+        cx.simulate_keystrokes("escape");
+        assert!(switching(&view, cx).is_none());
+        // The gear opens the settings, and its key shuts them again.
         click_on(cx, "settings");
         assert!(settings_open(&view, cx));
         cx.simulate_keystrokes("secondary-,");
         assert!(!settings_open(&view, cx));
+    }
+
+    /// Each yard reopens in its remembered mode, and each mode on the row
+    /// it was left on: stepping modes keeps each mode's row, switching
+    /// yards keeps each yard's mode, and the settings keep both.
+    #[gpui::test]
+    fn each_yard_reopens_in_its_mode_and_each_mode_on_its_row(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        near.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"},
+            ], "decided": []}})
+            .to_string(),
+        );
+        near.answer("Bead", &bead_three());
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::near("second home", second.socket().to_str().unwrap()),
+                None,
+            )
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        // Into decisions, on the card; back to chat, on the
+        // conversation; into decisions again, on the card still.
+        to_decisions(&view, cx);
+        wait(cx, "the card", |cx| {
+            open_row(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        to_chat(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Decision("bead-a".into()))
+        );
+        // The second yard opens in chat, as never stepped; stepped to
+        // the timetable, it stays there.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(rail_mode(&view, cx), Mode::Chat);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Arrivals));
+        // Back to the first: decisions, on the card. And back to the
+        // second: the timetable, on the arrivals row.
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "this machine's yard in decisions", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
+                && open_row(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard in the timetable", |cx| {
+            rail_mode(&view, cx) == Mode::Timetable
+                && open_row(&view, cx) == Some(Selected::Arrivals)
+        });
+        // The settings keep each yard's mode.
+        let kept = Settings::read(&file);
+        assert_eq!(kept.mode_of("this machine"), Mode::Decisions);
+        assert_eq!(kept.mode_of("second home"), Mode::Timetable);
     }
 
     /// A yard at its listener, told from `a_yard_of_jo` by its mail.
@@ -17341,6 +17909,7 @@ mod tests {
         );
         yard.emit(r#"{"seq": 31, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 3}, "at": "2026-10-08T09:31:00Z"}"#);
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| v.model.as_ref().unwrap().decisions_count() == 1)
         });
         assert_eq!(
@@ -17943,7 +18512,7 @@ mod tests {
         view.read_with(cx, |v, _| v.which_yard())
     }
 
-    /// The name of the yard that is open, as the head has it.
+    /// The name of the yard that is open, as the rail's tile names it.
     fn open_yard(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.which_yard_short())
     }
@@ -17960,6 +18529,39 @@ mod tests {
 
     fn switching(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<usize> {
         view.read_with(cx, |v, _| v.switching)
+    }
+
+    /// The rail's mode in the open yard.
+    fn rail_mode(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Mode {
+        view.read_with(cx, |v, _| v.mode())
+    }
+
+    /// Steps the rail to decisions, from any mode, as the brackets do.
+    /// Idempotent: in decisions already, it changes nothing.
+    fn to_decisions(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        match rail_mode(view, cx) {
+            Mode::Chat => cx.simulate_keystrokes("secondary-]"),
+            Mode::Timetable => cx.simulate_keystrokes("secondary-["),
+            Mode::Decisions => (),
+        }
+    }
+
+    /// Steps the rail to the timetable, from any mode.
+    fn to_timetable(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        match rail_mode(view, cx) {
+            Mode::Chat => cx.simulate_keystrokes("secondary-] secondary-]"),
+            Mode::Decisions => cx.simulate_keystrokes("secondary-]"),
+            Mode::Timetable => (),
+        }
+    }
+
+    /// Steps the rail to chat, from any mode.
+    fn to_chat(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        match rail_mode(view, cx) {
+            Mode::Decisions => cx.simulate_keystrokes("secondary-["),
+            Mode::Timetable => cx.simulate_keystrokes("secondary-[ secondary-["),
+            Mode::Chat => (),
+        }
     }
 
     fn mode_of(file: &std::path::Path) -> u32 {
@@ -18045,7 +18647,7 @@ mod tests {
         });
         assert_eq!(which_yard(&view, cx), "this machine's yard");
         assert_eq!(open_yard(&view, cx), "this machine");
-        assert!(drawn(cx, "which yard"));
+        assert!(drawn(cx, "switch tile"));
         assert_eq!(far.requests(), 0);
 
         // The settings list it, say what a pairing gives over a peer link,
@@ -18310,13 +18912,14 @@ mod tests {
         file
     }
 
-    /// The head of the left column names the open yard and switches: a
-    /// click or its key opens the list of the yards, each with its kind
-    /// and what waits in it now; a click on a row, Enter on the row the
-    /// arrows are on, or a yard's own key from anywhere opens it, as it
-    /// stands: every yard is followed from the start.
+    /// The tile at the rail's foot names the open yard and switches: a
+    /// click or its key opens the list of the yards to the right of the
+    /// rail, each with its kind and what waits in it now; a click on a
+    /// row, Enter on the row the arrows are on, or a yard's own key from
+    /// anywhere opens it, as it stands: every yard is followed from the
+    /// start.
     #[gpui::test]
-    fn the_head_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
+    fn the_tile_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let near = Yard::start();
         a_yard_of_jo(&near);
@@ -18341,12 +18944,23 @@ mod tests {
         });
         assert!(!drawn(cx, "switcher"));
 
-        // A click on the head opens the list: each yard, its kind, and
-        // its state.
-        click_on(cx, "which yard");
+        // A click on the tile opens the list: each yard, its kind, and
+        // its state, in a popover to the right of the rail's foot.
+        click_on(cx, "switch tile");
         assert_eq!(switching(&view, cx), Some(0));
         assert!(drawn(cx, "switcher"));
         assert!(drawn(cx, "switch this machine") && drawn(cx, "switch far"));
+        let rail = bounds_of(cx, "rail");
+        let tile = bounds_of(cx, "switch tile");
+        let popover = bounds_of(cx, "switcher");
+        assert!(
+            rail.right() < popover.left() && popover.left() - rail.right() < px(16.),
+            "the list stands off the rail: {popover:?} {rail:?}"
+        );
+        assert!(
+            rail.bottom() - popover.bottom() < px(16.) && tile.top() < popover.bottom(),
+            "the list stands off the rail's foot: {popover:?} {tile:?} {rail:?}"
+        );
         assert_eq!(state_of(&view, cx, "this machine"), "open");
         let kinds: Vec<&str> = view.read_with(cx, |v, _| {
             v.settings.yards.iter().map(|y| y.kind()).collect()
@@ -18667,6 +19281,7 @@ mod tests {
         };
         let (view, cx) = opened_at(env, &file, cx);
         let on_the_card = |cx: &mut VisualTestContext| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -19064,8 +19679,8 @@ mod tests {
         });
         assert_eq!(near.requests(), 0);
         assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
-        // No switcher: neither the head nor a key opens another yard.
-        click_on(cx, "which yard");
+        // No switcher: no tile, and no key opens another yard.
+        assert!(!drawn(cx, "switch tile"));
         assert_eq!(switching(&view, cx), None);
         cx.simulate_keystrokes("secondary-y secondary-1 secondary-2");
         cx.run_until_parked();
@@ -19264,20 +19879,19 @@ mod tests {
         assert_eq!(open_yard(&view, cx), "far");
     }
 
-    /// The head's line, as it is drawn.
-    fn head_line(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
-        view.read_with(cx, |v, _| v.head_line(v.model.as_ref().map(Model::me)))
+    /// The away screen's first line, as it is drawn.
+    fn away_why(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.away_why().unwrap_or_default())
     }
 
     /// A yard that is not reached says so with its short why, in the
     /// switcher's row and where it is open: one that is stopped and one
     /// away from the network, "nothing answers"; one that no longer lets
     /// the device in, "pair again". One that was read before it went away
-    /// stays as last seen, with the quiet line in the head's status row;
-    /// the away screen is for yards never reached. The head stays with
-    /// the switcher, so another yard is opened from there and never
-    /// through the settings, and the yard that answers has all that was
-    /// its.
+    /// stays as last seen, with the quiet line in the status row; the
+    /// away screen is for yards never reached. The rail stays with the
+    /// switcher, so another yard is opened from there and never through
+    /// the settings, and the yard that answers has all that was its.
     #[gpui::test]
     fn a_yard_that_is_not_reached_says_why_and_the_switcher_leaves_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -19311,7 +19925,7 @@ mod tests {
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
-        assert_eq!(head_line(&view, cx), "jo · this machine");
+        assert_eq!(open_yard(&view, cx), "this machine");
         cx.simulate_input("kept");
         // The others are followed too, and the two that answer were read.
         wait(cx, "what waits in the yards that answer", |cx| {
@@ -19333,36 +19947,34 @@ mod tests {
         };
 
         // The stopped yard was read before it stopped, so it stays as
-        // last seen: its rows, its short why in the head and its row,
-        // and the quiet line in the head's status row. No away screen:
-        // that is for a yard never reached.
+        // last seen: its rows, its short why in the switcher's row, and
+        // the quiet line in the status row. No away screen: that is for
+        // a yard never reached.
         cx.simulate_keystrokes("secondary-2");
         wait(cx, "that the second home's yard is stopped", |cx| {
             down(&view, cx, "No yard: nothing answers at the yard's socket")
         });
-        // Who the window is for there is known of a yard that was read.
-        assert_eq!(head_line(&view, cx), "jo · second home · nothing answers");
         assert_eq!(
             state_of(&view, cx, "second home"),
             "not reached: nothing answers"
         );
         assert!(view.read_with(cx, |v, _| v.reconnecting()));
-        assert!(drawn(cx, "which yard") && drawn(cx, "rows"));
+        assert!(drawn(cx, "switch tile") && drawn(cx, "rows"));
         assert!(drawn(cx, "reconnecting"));
         assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
         // What the yard that answers has is as it was left.
         assert_eq!(state_of(&view, cx, "this machine"), "nothing waiting");
 
-        // The head is the switcher there too: a click lists the yards, the
-        // arrows move, and Enter opens the one away from the network.
-        click_on(cx, "which yard");
+        // The tile is the switcher there too: a click lists the yards,
+        // the arrows move, and Enter opens the one away from the network.
+        click_on(cx, "switch tile");
         assert_eq!(switching(&view, cx), Some(1));
         assert!(drawn(cx, "switcher") && drawn(cx, "switch this machine"));
         cx.simulate_keystrokes("down down enter");
         wait(cx, "that nothing answers at the shop", |cx| {
             down(&view, cx, "No yard: nothing answers at the yard's address")
         });
-        assert_eq!(head_line(&view, cx), "shop · nothing answers");
+        assert_eq!(away_why(&view, cx), "shop · nothing answers");
         assert_eq!(state_of(&view, cx, "shop"), "not reached: nothing answers");
         // The one that was left is said as it was left.
         assert_eq!(
@@ -19378,7 +19990,7 @@ mod tests {
         wait(cx, "that the device is not let in", |cx| {
             view.read_with(cx, |v, _| v.away == Away::Out)
         });
-        assert_eq!(head_line(&view, cx), "jo · far · pair again");
+        assert_eq!(away_why(&view, cx), "far · pair again");
         assert_eq!(state_of(&view, cx, "far"), "not reached: pair again");
         assert!(drawn(cx, "away why") && drawn(cx, "pair again"));
         // Esc leaves the list, and the yard stays as it is.
@@ -19391,14 +20003,14 @@ mod tests {
         // Back to the yard that answers by a click on its row, with no
         // settings: what was typed there is in its line, and the three
         // that were not reached are said so, each with its own why.
-        click_on(cx, "which yard");
+        click_on(cx, "switch tile");
         click_on(cx, "switch this machine");
         wait(cx, "this machine's yard again", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
         assert!(!settings_open(&view, cx));
         assert_eq!(typed(&view, cx), "kept");
-        assert_eq!(head_line(&view, cx), "jo · this machine");
+        assert_eq!(open_yard(&view, cx), "this machine");
         assert_eq!(state_of(&view, cx, "this machine"), "open");
         assert_eq!(
             state_of(&view, cx, "second home"),
@@ -19423,7 +20035,7 @@ mod tests {
         wait(cx, "the second home's yard", |cx| {
             texts(&view, cx) == ["From the second home."]
         });
-        assert_eq!(head_line(&view, cx), "jo · second home");
+        assert_eq!(open_yard(&view, cx), "second home");
         assert_eq!(state_of(&view, cx, "second home"), "open");
         cx.simulate_keystrokes("secondary-1");
         wait(cx, "this machine's yard once more", |cx| {
@@ -19487,7 +20099,7 @@ mod tests {
         wait(cx, "that the session is not signed in", |cx| {
             state_of(&view, cx, "south") == "not reached: sign in again"
         });
-        click_on(cx, "which yard");
+        click_on(cx, "switch tile");
         click_on(cx, "switch south");
         wait(cx, "the hosted yard signed out", |cx| {
             view.read_with(cx, |v, _| v.away == Away::SignedOut)
@@ -19498,7 +20110,7 @@ mod tests {
             "{why}"
         );
         assert_eq!(open_yard(&view, cx), "south");
-        assert_eq!(head_line(&view, cx), "jo · south · sign in again");
+        assert_eq!(away_why(&view, cx), "south · sign in again");
         assert!(drawn(cx, "away why"));
         assert!(!drawn(cx, "pair again"));
     }
@@ -19691,10 +20303,7 @@ mod tests {
             texts(&view, cx) == ["From afar."]
         });
         assert_eq!(mode_of(&token), 0o600);
-        assert_eq!(
-            head_line(&view, cx),
-            format!("jo · south · signed in as {KRATOS_EMAIL}")
-        );
+        assert_eq!(open_yard(&view, cx), "south");
         assert_eq!(
             which_yard(&view, cx),
             format!(
@@ -19796,10 +20405,7 @@ mod tests {
         wait(cx, "the hosted yard's conversations", |cx| {
             texts(&view, cx) == ["From afar."]
         });
-        assert_eq!(
-            head_line(&view, cx),
-            format!("jo · south · signed in as {KRATOS_EMAIL}")
-        );
+        assert_eq!(open_yard(&view, cx), "south");
 
         // The session is revoked at the edge: signing in again is
         // offered where the yard says so. (That pairing again is not is
@@ -19842,9 +20448,9 @@ mod tests {
         assert_eq!(mode_of(&session), 0o600);
     }
 
-    /// A yard that answered and goes away keeps its view: the sidebar,
-    /// the decisions and the open conversation stay as last seen, the
-    /// head's status row is the one quiet line, and Send is held with
+    /// A yard that answered and goes away keeps its view: the list, the
+    /// decisions and the open conversation stay as last seen, the status
+    /// row is the one quiet line, and Send is held with
     /// the reason beside the line: the draft stays as typed, and goes
     /// on Enter once the yard answers. Nothing is queued meanwhile.
     #[gpui::test]
@@ -19880,7 +20486,6 @@ mod tests {
         // (The away screen painted before the first answer, so its
         // absence is the state, not the selectors.)
         assert!(view.read_with(cx, |v, _| v.reconnecting()));
-        assert_eq!(head_line(&view, cx), "jo · this machine · nothing answers");
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
         assert!(drawn(cx, "rows") && drawn(cx, "conversation top"));
         assert!(drawn(cx, "reconnecting") && drawn(cx, "send held"));
@@ -19963,6 +20568,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -19978,7 +20584,10 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.reconnecting()));
         assert!(drawn(cx, "send bead-w 9") && drawn(cx, "send held"));
         // The words are typed while the yard is away, and held: from
-        // Enter as from the button, nothing goes.
+        // Enter as from the button, nothing goes. The mode step left the
+        // focus on the window, as opening a card does, so `i` types in
+        // the card's line first.
+        cx.simulate_keystrokes("i");
         cx.simulate_input("warmly");
         assert_eq!(typed(&view, cx), "warmly");
         cx.simulate_keystrokes("enter");
@@ -20042,7 +20651,6 @@ mod tests {
             view.read_with(cx, |v, _| v.down.is_some())
         });
         assert!(view.read_with(cx, |v, _| v.reconnecting()));
-        assert_eq!(head_line(&view, cx), "jo · far · nothing answers");
         assert_eq!(texts(&view, cx), ["From afar."]);
         assert!(drawn(cx, "reconnecting") && drawn(cx, "send held"));
         assert!(!drawn(cx, "away why") && !drawn(cx, "switch state"));
@@ -20052,7 +20660,7 @@ mod tests {
         assert_eq!(far.asked("Mail"), Vec::<Value>::new());
     }
 
-    /// A far yard has no head status row: even with Settings open instead
+    /// A far yard has no status row: even with Settings open instead
     /// of its conversation, its reconnecting strip stays visible.
     #[gpui::test]
     fn a_far_yard_reconnecting_in_settings_says_so(cx: &mut TestAppContext) {
@@ -20093,7 +20701,8 @@ mod tests {
     }
 
     /// The one yard the environment names has no other to go to: away, it
-    /// has no column, and its settings are reached from under the words.
+    /// keeps the rail with the gear and no tile, its modes dimmed and
+    /// inert.
     #[gpui::test]
     fn the_environment_s_yard_away_has_no_switcher(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -20116,12 +20725,25 @@ mod tests {
             })
         });
         assert!(drawn(cx, "away why") && drawn(cx, "settings"));
-        assert!(!drawn(cx, "which yard"));
+        assert!(!drawn(cx, "switch tile"));
         // Nor a way to another yard: it is the one there is.
         assert!(!drawn(cx, "way near") && !drawn(cx, "way far") && !drawn(cx, "way hosted"));
         assert!(!drawn(cx, "way here"));
         cx.simulate_keystrokes("secondary-y");
         assert_eq!(switching(&view, cx), None);
+        // The rail stands with the mark and the three modes, dimmed and
+        // inert: a click and the brackets change nothing.
+        assert!(drawn(cx, "rail mark"));
+        assert!(drawn(cx, "rail chat") && drawn(cx, "rail decisions"));
+        assert!(drawn(cx, "rail timetable"));
+        click_on(cx, "rail timetable");
+        cx.simulate_keystrokes("secondary-]");
+        cx.run_until_parked();
+        assert_eq!(rail_mode(&view, cx), Mode::Chat);
+        assert!(view.read_with(cx, |v, _| v.model.is_none()));
+        // The gear stays alive: the settings open from the rail.
+        click_on(cx, "settings");
+        assert!(settings_open(&view, cx));
     }
 
     /// A window with nothing at this run's socket and no settings kept:
@@ -20863,12 +21485,12 @@ mod tests {
         view.read_with(cx, |v, _| v.switch_busy.is_none() && !v.switch_reading)
     }
 
-    /// The head shows a stopped yard with Start, which runs `up` on the
-    /// yard's home: its socket minus `yard.sock`. Once the yard answers,
-    /// the head shows Running with Stop. Nothing of the switch acts as
-    /// anyone: no `--actor` anywhere.
+    /// The status row shows a stopped yard with Start, which runs `up`
+    /// on the yard's home: its socket minus `yard.sock`. Once the yard
+    /// answers, the status row shows Running with Stop. Nothing of the
+    /// switch acts as anyone: no `--actor` anywhere.
     #[gpui::test]
-    fn the_head_shows_a_stopped_yard_and_start_runs_up_on_its_home(cx: &mut TestAppContext) {
+    fn the_status_row_shows_a_stopped_yard_and_start_runs_up_on_its_home(cx: &mut TestAppContext) {
         use crate::setup::standin;
 
         let dir = tempfile::tempdir().unwrap();
@@ -20941,41 +21563,84 @@ mod tests {
         assert!(drawn(cx, "switch stop"));
     }
 
-    /// The status row holds at the narrowest window: with a failure
-    /// longer than the column, the words end in an ellipsis, and Start
-    /// stands on the row's end, inside the column.
-    #[gpui::test]
-    fn the_status_row_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
+    /// The status row holds one line in the mode's list at the
+    /// narrowest window, with its action on its row, inside the list's
+    /// edge.
+    fn status_row_holds_in(mode: Mode, cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        let (view, cx) = no_yard(dir.path(), cx);
-        wait(cx, "the switch read", |cx| settled(&view, cx));
+        let socket = dir.path().join("second/yard.sock");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            yards: vec![settings::Yard::near("second", socket.to_str().unwrap())],
+            open: "second".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yard running", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_none() && v.model.is_some())
+        });
+        match mode {
+            Mode::Chat => to_chat(&view, cx),
+            Mode::Decisions => to_decisions(&view, cx),
+            Mode::Timetable => to_timetable(&view, cx),
+        }
+        cx.run_until_parked();
+        // Tests fetch no yardr: say it is there, so the row is Running
+        // with Stop, as on a machine with one.
         view.update(cx, |v, _| {
             v.switch_program = Some(dir.path().join("yardr"));
             v.switch_note = None;
-            v.switch_troubles = vec![
-                "the daemon would not start: launchd refused the plist, and herdr's server answered nothing on its socket".to_string(),
-            ];
         });
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(560.), px(360.)));
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
         let state = bounds_of(cx, "switch state");
-        let button = bounds_of(cx, "switch start");
-        let yard = bounds_of(cx, "which yard");
-        // The yard's line ends at the column's edge, short of the head's
-        // own padding only: Start past that runs past the column.
-        let edge = yard.right() + settings_of(&view, cx).rem() * 0.75 + px(1.);
+        let button = bounds_of(cx, "switch stop");
+        let rows = bounds_of(cx, "rows");
+        assert!(
+            state.size.height <= button.size.height + px(2.),
+            "the status row wraps in {}: {state:?} against {button:?}",
+            mode.name()
+        );
         assert!(
             button.top() >= state.top() - px(1.) && button.bottom() <= state.bottom() + px(1.),
-            "Start stands off the status row: {state:?} {button:?}"
+            "Stop stands off the status row in {}: {state:?} {button:?}",
+            mode.name()
         );
         assert!(
-            button.right() <= edge,
-            "Start runs past the column: {button:?} past {yard:?}"
+            button.right() <= rows.right() + px(1.),
+            "Stop runs past the list in {}: {button:?} past {rows:?}",
+            mode.name()
         );
-        assert!(
-            state.size.height <= yard.size.height + px(2.),
-            "the status row wraps: {state:?} against the yard's line {yard:?}"
-        );
+    }
+
+    /// The status row holds at the narrowest window in chat: one line,
+    /// with Stop inside the list's edge.
+    #[gpui::test]
+    fn the_status_row_holds_in_chat_at_the_narrowest_window(cx: &mut TestAppContext) {
+        status_row_holds_in(Mode::Chat, cx);
+    }
+
+    /// The status row holds at the narrowest window in decisions: one
+    /// line, with Stop inside the list's edge.
+    #[gpui::test]
+    fn the_status_row_holds_in_decisions_at_the_narrowest_window(cx: &mut TestAppContext) {
+        status_row_holds_in(Mode::Decisions, cx);
+    }
+
+    /// The status row holds at the narrowest window in timetable: one
+    /// line, with Stop inside the list's edge.
+    #[gpui::test]
+    fn the_status_row_holds_in_timetable_at_the_narrowest_window(cx: &mut TestAppContext) {
+        status_row_holds_in(Mode::Timetable, cx);
     }
 
     /// The head shows a running yard with Stop, which first asks what
@@ -21423,8 +22088,8 @@ mod tests {
     /// Where no yard was ever made, the screen says so in one plain
     /// sentence, with no socket, no error and no yardr command in it; the
     /// socket, the error and the hint hide under details, shut at first.
-    /// "Set up a yard here" is the first way, and the sidebar names the
-    /// yard alone, whole in its pane.
+    /// "Set up a yard here" is the first way, and the screen names the
+    /// yard with its short why.
     #[gpui::test]
     fn no_yard_made_here_says_so_plainly_with_its_details_shut(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -21459,9 +22124,8 @@ mod tests {
                 && here.left() <= near.left(),
             "{here:?} {near:?} {far:?}"
         );
-        // The sidebar names the yard alone: the short why would run past
-        // the pane's edge.
-        assert_eq!(head_line(&view, cx), "this machine");
+        // The screen names the yard with its short why.
+        assert_eq!(away_why(&view, cx), "this machine · nothing answers");
         // A click opens the details: the error and the socket, as they
         // stood on the screen before.
         click_on(cx, "away details");
@@ -21510,13 +22174,11 @@ mod tests {
         let lead = view.read_with(cx, |v, _| v.away_lead(v.down.as_ref().unwrap()));
         assert_eq!(
             lead,
-            "This yard is stopped. Start it with Start, in the head."
+            "This yard is stopped. Start it with Start, at the top of the list."
         );
         assert!(drawn(cx, "switch start"));
-        // The head names the stopped yard alone: the status row under it
-        // already says Stopped, with Start, and the short why would run
-        // past the pane's edge.
-        assert_eq!(head_line(&view, cx), "this machine");
+        // The screen names the stopped yard with its short why.
+        assert_eq!(away_why(&view, cx), "this machine · nothing answers");
     }
 
     /// What a start could not start is the head's, in yardr's words, with
@@ -22051,6 +22713,7 @@ mod tests {
     ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
         let (view, cx) = opened_at(at, file, cx);
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -22175,13 +22838,15 @@ mod tests {
         assert!(file.exists());
         nowhere(&view, cx, "a setting kept");
         // Leaving the card forgets it: it is in no draft of the
-        // conversation that opens, and is not back with the card.
-        cx.simulate_keystrokes("tab");
+        // conversation that opens, and is not back with the card. Tab
+        // stays in the mode's list, and this yard's decisions hold one
+        // row alone, so leaving steps to chat and back.
+        cx.simulate_keystrokes("secondary-[");
         cx.run_until_parked();
         assert_eq!(secret_field(&view, cx).0, "");
         assert_eq!(typed(&view, cx), "");
         nowhere(&view, cx, "the card left");
-        cx.simulate_keystrokes("shift-tab");
+        cx.simulate_keystrokes("secondary-]");
         wait(cx, "the card again", |cx| drawn(cx, "secret bead-s 7"));
         assert_eq!(secret_field(&view, cx).0, "");
         nowhere(&view, cx, "the card again");
@@ -22816,13 +23481,17 @@ mod tests {
         assert_eq!(approvals(cx), [1, 0, 0]);
 
         // After a switch the card names the other yard, and its key and
-        // its button approve there.
+        // its button approve there. A yard not opened before opens in
+        // chat; the card is read in decisions.
         for (key, name, asked) in [
             ("secondary-2", "second home", [1, 1, 0]),
             ("secondary-3", "far", [1, 1, 1]),
         ] {
             cx.simulate_keystrokes(key);
-            wait(cx, "the other yard's card", |cx| names(&view, cx, name));
+            wait(cx, "the other yard's card", |cx| {
+                to_decisions(&view, cx);
+                names(&view, cx, name)
+            });
             cx.simulate_keystrokes("secondary-enter");
             wait(cx, "that yard's refusal", |cx| {
                 notice(&view, cx) == format!("not approved: {name} refuses")
@@ -24164,6 +24833,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -24467,7 +25137,8 @@ mod tests {
 
     /// A yard left on a card is on that card again, expanded as it was
     /// and as far down it as it stood. A row that is gone when the yard is opened again is not
-    /// opened: the yard opens as one opened for the first time.
+    /// opened: the yard opens in its remembered mode with no row, as one opened for the
+    /// first time.
     #[gpui::test]
     fn a_yard_opened_again_is_on_its_card_where_it_stood_or_as_new_when_the_row_is_gone(
         cx: &mut TestAppContext,
@@ -24487,7 +25158,10 @@ mod tests {
         };
         let (view, cx) = opened_at(env, &file, cx);
         let card = Some(Selected::Decision("bead-a".into()));
-        wait(cx, "the decision", |cx| open_row(&view, cx) == card);
+        wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
+            open_row(&view, cx) == card
+        });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
         cx.run_until_parked();
         // Expanded over sixty notes the card scrolls, further than it is
@@ -24525,29 +25199,28 @@ mod tests {
         assert_eq!(card_offset_of(&view, cx).y, px(-400.));
 
         // Its asks are dealt with elsewhere while the other yard is open:
-        // the card is gone, and the yard opens on the yardmaster's
-        // conversation at its newest, with nothing to be put back.
+        // the card is gone, and the yard opens in its remembered mode
+        // with no row, as one opened for the first time: nothing to be
+        // put back.
         cx.simulate_keystrokes("secondary-2");
         wait(cx, "the second home's yard again", |cx| {
             texts(&view, cx) == ["From the second home."]
         });
         near.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         near.emit(r#"{"seq": 31, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 4}, "at": "2026-10-10T10:31:00Z"}"#);
-        assert_eq!(state_of(&view, cx, "this machine"), "1 mail, 1 decision");
+        // The yard opened in chat on the yardmaster's conversation, which
+        // read its mail: what waits is the decision alone.
+        assert_eq!(state_of(&view, cx, "this machine"), "1 decision");
         wait(cx, "the yard that is not open to lose its card", |cx| {
-            state_of(&view, cx, "this machine") == "1 mail"
+            state_of(&view, cx, "this machine") == "nothing waiting"
         });
         cx.simulate_keystrokes("secondary-1");
         wait(cx, "this machine's yard without the card", |cx| {
-            texts(&view, cx) == ["Shall I land it?"]
+            rail_mode(&view, cx) == Mode::Decisions && open_row(&view, cx).is_none()
         });
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
-        assert_eq!(
-            open_row(&view, cx),
-            Some(Selected::Conversation("yardmaster".into()))
-        );
-        assert!(at_bottom(&view, cx));
+        assert_eq!(open_row(&view, cx), None);
         view.read_with(cx, |v, _| assert!(v.returning.is_none()));
     }
 

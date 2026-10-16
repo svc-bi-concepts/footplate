@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, TimeZone};
+use serde::{Deserialize, Serialize};
 
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
@@ -198,6 +199,60 @@ pub enum Selected {
     Bead(String),
 }
 
+impl Selected {
+    /// The mode whose list holds the row: the conversations and the yard
+    /// row are chat's, the beads with open asks and the dealt with are
+    /// decisions', the arrivals row and an arrival's bead timetable's.
+    pub fn mode(&self) -> Mode {
+        match self {
+            Selected::Conversation(_) | Selected::Yard => Mode::Chat,
+            Selected::Decision(_) | Selected::Decided(_, _) => Mode::Decisions,
+            Selected::Arrivals | Selected::Bead(_) => Mode::Timetable,
+        }
+    }
+}
+
+/// One of the rail's three modes: the crew and the conversation, the open
+/// asks with their cards, or the timetable with the arrivals board. Kept
+/// per yard in the settings, chat where none was chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Chat,
+    Decisions,
+    Timetable,
+}
+
+impl Mode {
+    /// The three, as the rail lists them.
+    pub const ALL: [Mode; 3] = [Mode::Chat, Mode::Decisions, Mode::Timetable];
+
+    /// The mode's place among the three.
+    pub fn index(self) -> usize {
+        match self {
+            Mode::Chat => 0,
+            Mode::Decisions => 1,
+            Mode::Timetable => 2,
+        }
+    }
+
+    /// The mode `by` steps on from this one, around the ends.
+    pub fn step(self, by: isize) -> Mode {
+        let n = Self::ALL.len() as isize;
+        Self::ALL[(self.index() as isize + by).rem_euclid(n) as usize]
+    }
+
+    /// The mode's name, as its tooltip says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Chat => "chat",
+            Mode::Decisions => "decisions",
+            Mode::Timetable => "timetable",
+        }
+    }
+}
+
 /// What Enter sends for an ask with the line's words.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnswerAction {
@@ -209,18 +264,38 @@ pub enum AnswerAction {
 }
 
 /// One bead's row among the decisions: the question's first line in plain
-/// words, or the bead's title with how many it asks.
+/// words, or the bead's title with how many it asks, with every ask
+/// expanded beneath it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRow {
     /// The bead's id, whole; `short` is what the row ends with.
     pub bead: String,
     /// The question's first line, or `<title>: <n> questions`.
     pub head: String,
+    /// Every open ask expanded, in ask order.
+    pub asks: Vec<DecisionRowAsk>,
     /// `<asker> · <waits>`, or `<waits>` when several ask.
     pub sub: String,
     /// The bead's id small, at the row's end: past its last `-`.
     pub short: String,
     pub selected: bool,
+}
+
+/// One ask of a bead's open row, as its expanded row shows it: the
+/// question's first line with its numbered options from the Bead read, or
+/// what its card shows where it has none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionRowAsk {
+    /// The ask note's seq: what an answer names.
+    pub ask: u64,
+    /// The question's first line in plain words.
+    pub head: String,
+    /// The numbered options' words, from the Bead read: empty until read.
+    pub options: Vec<(u64, String)>,
+    /// What a secret ask asks for, in the yard's words; none on any other.
+    pub secret: Option<String>,
+    /// The command a run ask proposes, whole; none on any other.
+    pub run: Option<String>,
 }
 
 /// One topic's beads, in the order their oldest ask waits.
@@ -572,10 +647,9 @@ pub struct Model {
 impl Model {
     /// The model of a state just read. `selected` is what was open before
     /// the yard was lost, if any: it stays open when its row is still
-    /// there. Else the yardmaster's conversation is, as in `yardr chat`,
-    /// else the first row from the top.
-    pub fn new(state: State, selected: Option<Selected>) -> (Model, Vec<Effect>) {
-        Self::new_returning(state, selected, false)
+    /// there. Else the mode's own default is.
+    pub fn new(state: State, mode: Mode, selected: Option<Selected>) -> (Model, Vec<Effect>) {
+        Self::new_returning(state, mode, selected, false)
     }
 
     /// The model of a state read when returning to a yard. The folded
@@ -583,11 +657,12 @@ impl Model {
     /// rows do not exist in the order while it is folded.
     pub fn new_returning(
         state: State,
+        mode: Mode,
         selected: Option<Selected>,
         decided_expanded: bool,
     ) -> (Model, Vec<Effect>) {
         let mut m = Self::of(state, decided_expanded);
-        m.selected = m.row(selected);
+        m.selected = m.row_in(mode, selected);
         m.opened();
         let effects = m.open();
         (m, effects)
@@ -632,34 +707,36 @@ impl Model {
         m
     }
 
-    /// The row to open: `selected` where it is still there, else an open
-    /// decision, else the yardmaster's conversation, else the first row
-    /// from the top. An arrival's bead has no row of the list, and stays
-    /// open as a row that is still there does: it shows what the Bead
-    /// call returns, whether the yard serves the row still or not.
-    fn row(&self, selected: Option<Selected>) -> Option<Selected> {
-        let order = self.order();
+    /// The row to open in `mode`: `selected` where it is still there,
+    /// else the mode's own default. In chat that is the yardmaster's
+    /// conversation, as in `yardr chat`, else the first row from the top;
+    /// in decisions the first open decision, and none where there is
+    /// none; in timetable the arrivals row. An arrival's bead has no row
+    /// of the list, and stays open as a row that is still there does: it
+    /// shows what the Bead call returns, whether the yard serves the row
+    /// still or not.
+    fn row_in(&self, mode: Mode, selected: Option<Selected>) -> Option<Selected> {
+        let order = self.order_in(mode);
         selected
-            .filter(|s| matches!(s, Selected::Bead(_)) || order.contains(s))
-            .or_else(|| {
-                // A kept expansion makes dealt-with rows visible, but a saved
-                // row that disappeared falls back as it did before that list
-                // was kept: to an open decision, yardmaster, or first row.
-                let order: Vec<Selected> = order
-                    .into_iter()
-                    .filter(|s| !matches!(s, Selected::Decided(_, _)))
-                    .collect();
-                order
+            .filter(|s| {
+                (mode == Mode::Timetable && matches!(s, Selected::Bead(_))) || order.contains(s)
+            })
+            .or_else(|| match mode {
+                Mode::Chat => order
+                    .iter()
+                    .find_map(|s| match s {
+                        Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| order.into_iter().next()),
+                // A kept expansion makes dealt-with rows visible, but a
+                // saved row that disappeared falls back as it did before
+                // that list was kept: to an open decision, or none.
+                Mode::Decisions => order
                     .iter()
                     .find(|s| matches!(s, Selected::Decision(_)))
-                    .cloned()
-                    .or_else(|| {
-                        order.iter().find_map(|s| match s {
-                            Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
-                            _ => None,
-                        })
-                    })
-                    .or_else(|| order.into_iter().next())
+                    .cloned(),
+                Mode::Timetable => Some(Selected::Arrivals),
             })
     }
 
@@ -675,10 +752,25 @@ impl Model {
     /// The window shows this yard again: on `selected`, the row it was left
     /// on, where that is still there, as [`Model::new_returning`] opens
     /// one.
-    pub fn back_to(&mut self, selected: Option<Selected>, decided_expanded: bool) -> Vec<Effect> {
+    pub fn back_to(
+        &mut self,
+        mode: Mode,
+        selected: Option<Selected>,
+        decided_expanded: bool,
+    ) -> Vec<Effect> {
         self.aside = false;
         self.decided_expanded |= decided_expanded;
-        self.selected = self.row(selected);
+        self.selected = self.row_in(mode, selected);
+        self.opened();
+        self.open()
+    }
+
+    /// Opens the mode's row: `selected` where it is still there, else the
+    /// mode's own default. What the mode is opened on when the person
+    /// steps to it.
+    pub fn show(&mut self, mode: Mode, selected: Option<Selected>) -> Vec<Effect> {
+        self.selected = self.row_in(mode, selected);
+        self.notice.clear();
         self.opened();
         self.open()
     }
@@ -686,13 +778,13 @@ impl Model {
     /// The model of a state read again after the yard was lost: what was
     /// open stays open as in [`Model::new`], and the conversation to come
     /// back to from a decision stays that one.
-    pub fn resumed(&self, state: State) -> (Model, Vec<Effect>) {
+    pub fn resumed(&self, state: State, mode: Mode) -> (Model, Vec<Effect>) {
         let unread = state.unread.clone();
         // Of a yard the window does not show, no row is open afterwards
         // either.
         let (mut m, mut effects) = match self.aside {
             true => (Model::new_aside(state), Vec::new()),
-            false => Model::new(state, self.selected.clone()),
+            false => Model::new(state, mode, self.selected.clone()),
         };
         if m.back.is_none() {
             m.back = self.back.clone();
@@ -946,28 +1038,46 @@ impl Model {
         beads
     }
 
-    /// Every row of the left list from the top: the beads with open asks,
-    /// the dealt with when "Decided" stands open, the conversations, the
-    /// yard row, the arrivals row. An arrival's bead is open from the
-    /// board, and has no row here.
-    fn order(&self) -> Vec<Selected> {
+    /// Every row of one mode's list from the top: the conversations and
+    /// the yard row in chat, the beads with open asks with the dealt with
+    /// when "Decided" stands open in decisions, the arrivals row in
+    /// timetable. An arrival's bead is open from the board, and has no
+    /// row here.
+    fn order_in(&self, mode: Mode) -> Vec<Selected> {
         let mut out: Vec<Selected> = Vec::new();
-        for (bead, _) in self.decision_beads() {
-            out.push(Selected::Decision(bead));
-        }
-        if self.decided_expanded {
-            for ask in &self.decided {
-                out.push(Selected::Decided(ask.bead.clone(), ask.ask));
+        match mode {
+            Mode::Chat => {
+                out.extend(
+                    self.conversation_names()
+                        .into_iter()
+                        .map(Selected::Conversation),
+                );
+                out.push(Selected::Yard);
+            }
+            Mode::Decisions => {
+                for (bead, _) in self.decision_beads() {
+                    out.push(Selected::Decision(bead));
+                }
+                if self.decided_expanded {
+                    for ask in &self.decided {
+                        out.push(Selected::Decided(ask.bead.clone(), ask.ask));
+                    }
+                }
+            }
+            Mode::Timetable => {
+                out.push(Selected::Arrivals);
             }
         }
-        out.extend(
-            self.conversation_names()
-                .into_iter()
-                .map(Selected::Conversation),
-        );
-        out.push(Selected::Yard);
-        out.push(Selected::Arrivals);
         out
+    }
+
+    /// Every row of every list: what a dealt-with decision leads back
+    /// through, the open decisions first.
+    fn order(&self) -> Vec<Selected> {
+        [Mode::Decisions, Mode::Chat, Mode::Timetable]
+            .into_iter()
+            .flat_map(|mode| self.order_in(mode))
+            .collect()
     }
 
     fn member(&self, name: &str) -> Option<&CrewMember> {
@@ -1075,9 +1185,29 @@ impl Model {
         let mut groups: Vec<TopicGroup> = Vec::new();
         for (bead, asks) in self.decision_beads() {
             let first = asks[0];
+            let cached = self.beads.get(&bead);
             let row = DecisionRow {
                 bead: bead.clone(),
                 head: decision_head(first, &asks),
+                asks: asks
+                    .iter()
+                    .map(|ask| {
+                        let full =
+                            cached.and_then(|b| b.asks.iter().find(|full| full.ask == ask.ask));
+                        DecisionRowAsk {
+                            ask: ask.ask,
+                            head: row_head(&ask.question),
+                            options: full.map_or(Vec::new(), |full| {
+                                card_options(full)
+                                    .into_iter()
+                                    .map(|option| (option.number, option.label))
+                                    .collect()
+                            }),
+                            secret: ask.secret.as_ref().map(|secret| secret.line.clone()),
+                            run: ask.run.as_ref().map(|run| plain(&run.line())),
+                        }
+                    })
+                    .collect(),
                 sub: decision_sub(first, &asks, now),
                 short: short_bead(&bead),
                 selected: self.selected.as_ref() == Some(&Selected::Decision(bead)),
@@ -2062,15 +2192,15 @@ impl Model {
         })
     }
 
-    /// Opens a row of the list: a bead, one dealt with, a conversation,
-    /// the yard row, the arrivals row, or one arrival's bead from the
-    /// board, which has no row of the list. A row that is not there
-    /// changes nothing.
     /// Whether the yard has the row `sel` to open.
     pub fn has_row(&self, sel: &Selected) -> bool {
         matches!(sel, Selected::Bead(_)) || self.order().contains(sel)
     }
 
+    /// Opens a row of a list: a bead, one dealt with, a conversation,
+    /// the yard row, the arrivals row, or one arrival's bead from the
+    /// board, which has no row of the list. A row that is not there
+    /// changes nothing.
     pub fn select(&mut self, sel: Selected) -> Vec<Effect> {
         if !self.has_row(&sel) {
             return Vec::new();
@@ -2081,9 +2211,10 @@ impl Model {
         self.open()
     }
 
-    /// Opens the row `by` after the open one, around the ends.
-    pub fn step(&mut self, by: isize) -> Vec<Effect> {
-        let order = self.order();
+    /// Opens the row `by` after the open one in the mode's list, around
+    /// the ends.
+    pub fn step_in(&mut self, mode: Mode, by: isize) -> Vec<Effect> {
+        let order = self.order_in(mode);
         if order.is_empty() {
             return Vec::new();
         }
@@ -3405,7 +3536,7 @@ mod tests {
 
     #[test]
     fn the_rows_are_the_crew_then_those_the_linked_yards_expose() {
-        let (m, _) = Model::new(yard(&[]), None);
+        let (m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(
             names(&m),
             [
@@ -3428,7 +3559,11 @@ mod tests {
     /// until the window is back on it, whatever arrives or is read again.
     #[test]
     fn a_yard_held_aside_sees_nothing_until_the_window_is_back_on_its_row() {
-        let (mut m, _) = Model::new(yard(&[]), Some(Selected::Conversation("assembly".into())));
+        let (mut m, _) = Model::new(
+            yard(&[]),
+            Mode::Chat,
+            Some(Selected::Conversation("assembly".into())),
+        );
         m.conversation("assembly", Vec::new());
         m.leave();
         assert_eq!(m.selected(), None);
@@ -3441,7 +3576,7 @@ mod tests {
 
         // The stream ends and the yard is read again: still no row, and
         // what arrived meanwhile is news as it is of an open yard.
-        let (mut m, effects) = m.resumed(yard(&[(21, "assembly"), (22, "yardmaster")]));
+        let (mut m, effects) = m.resumed(yard(&[(21, "assembly"), (22, "yardmaster")]), Mode::Chat);
         assert_eq!(effects, []);
         assert_eq!(m.selected(), None);
         assert_eq!(m.take_news().len(), 1);
@@ -3454,7 +3589,11 @@ mod tests {
 
         // Back on the row it was left on: its mail is read and marked so.
         assert_eq!(
-            m.back_to(Some(Selected::Conversation("assembly".into())), false),
+            m.back_to(
+                Mode::Chat,
+                Some(Selected::Conversation("assembly".into())),
+                false
+            ),
             [page("assembly", 0)]
         );
         assert_eq!(
@@ -3471,7 +3610,7 @@ mod tests {
             [Effect::Ack { through: 21 }]
         );
         // With no row kept it opens as a yard opened for the first time.
-        assert!(!fresh.back_to(None, false).is_empty());
+        assert!(!fresh.back_to(Mode::Chat, None, false).is_empty());
         assert_eq!(
             fresh.selected(),
             Some(&Selected::Conversation("yardmaster".into()))
@@ -3486,15 +3625,21 @@ mod tests {
             ask: 2,
             ..DecidedAsk::default()
         });
-        let (model, _) =
-            Model::new_returning(state, Some(Selected::Decided("gone".into(), 1)), true);
-        assert_eq!(model.selected(), Some(&Selected::Yard));
+        let (model, _) = Model::new_returning(
+            state,
+            Mode::Decisions,
+            Some(Selected::Decided("gone".into(), 1)),
+            true,
+        );
+        // No open decision to fall back to: the mode opens on nothing,
+        // and not on a dealt with, as before that list was kept.
+        assert_eq!(model.selected(), None);
         assert!(model.decided_expanded());
     }
 
     #[test]
     fn an_asker_is_written_to_in_their_conversation_or_not_at_all() {
-        let (m, _) = Model::new(yard(&[]), None);
+        let (m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert!(m.can_write("yardmaster"));
         assert!(m.can_write("assembly"));
         assert!(m.can_write("clerk@north"));
@@ -3526,7 +3671,7 @@ mod tests {
             name: "south".into(),
             ..Peer::default()
         });
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(names(&m).len(), 5);
     }
 
@@ -3543,7 +3688,7 @@ mod tests {
 
     #[test]
     fn it_opens_on_the_yardmaster_and_reads_that_conversation() {
-        let (m, effects) = Model::new(yard(&[]), None);
+        let (m, effects) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
         assert_eq!(effects, [page("yardmaster", 0)]);
         assert!(m.rows()[1].selected);
@@ -3554,7 +3699,7 @@ mod tests {
     fn without_a_yardmaster_it_opens_on_the_first_row_and_on_the_own_in_an_empty_yard() {
         let mut state = yard(&[]);
         state.crew.remove(1);
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.selected_conversation(), Some("assembly"));
 
         let (mut m, effects) = Model::new(
@@ -3562,6 +3707,7 @@ mod tests {
                 me: "jo".into(),
                 ..State::default()
             },
+            Mode::Chat,
             None,
         );
         // The user's own row and the yard row stand whatever the yard has.
@@ -3569,7 +3715,7 @@ mod tests {
         assert_eq!(effects, [page("jo", 0)]);
         assert_eq!(m.target(), Some(Target::Crew("jo".into())));
         // The yard row reads the mail the yard itself sent.
-        assert_eq!(m.step(1), [read("yard", 0)]);
+        assert_eq!(m.step_in(Mode::Chat, 1), [read("yard", 0)]);
         assert_eq!(m.selected(), Some(&Selected::Yard));
         assert_eq!(m.target(), None);
         m.conversation("yard", vec![]);
@@ -3581,17 +3727,22 @@ mod tests {
     fn the_conversation_that_was_open_stays_open_when_the_yard_is_back() {
         let (m, _) = Model::new(
             yard(&[]),
+            Mode::Chat,
             Some(Selected::Conversation("clerk@north".into())),
         );
         assert_eq!(m.selected_conversation(), Some("clerk@north"));
         // One that is gone meanwhile does not.
-        let (m, _) = Model::new(yard(&[]), Some(Selected::Conversation("gone".into())));
+        let (m, _) = Model::new(
+            yard(&[]),
+            Mode::Chat,
+            Some(Selected::Conversation("gone".into())),
+        );
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
     }
 
     #[test]
     fn selecting_opens_a_conversation_and_reads_it_once() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(
             m.select(Selected::Conversation("assembly".into())),
             [page("assembly", 0)]
@@ -3610,38 +3761,38 @@ mod tests {
     }
 
     #[test]
-    fn step_goes_to_the_next_row_and_around_the_ends() {
-        let (mut m, _) = Model::new(yard(&[]), None);
-        m.step(1);
+    fn step_goes_to_the_next_row_of_the_mode_and_around_the_ends() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.step_in(Mode::Chat, 1);
         assert_eq!(m.selected_conversation(), Some("clerk@north"));
-        m.step(1);
+        m.step_in(Mode::Chat, 1);
         assert_eq!(m.selected_conversation(), Some("mckean@north"));
-        m.step(1);
+        m.step_in(Mode::Chat, 1);
         assert_eq!(m.selected_conversation(), Some("jo"));
-        m.step(1);
+        m.step_in(Mode::Chat, 1);
         assert_eq!(m.selected(), Some(&Selected::Yard));
-        m.step(1);
-        assert_eq!(m.selected(), Some(&Selected::Arrivals));
-        m.step(1);
+        m.step_in(Mode::Chat, 1);
         assert_eq!(m.selected_conversation(), Some("assembly"));
-        m.step(-1);
-        assert_eq!(m.selected(), Some(&Selected::Arrivals));
-        m.step(-1);
+        m.step_in(Mode::Chat, -1);
         assert_eq!(m.selected(), Some(&Selected::Yard));
+        // The timetable's one row steps to itself.
+        m.select(Selected::Arrivals);
+        m.step_in(Mode::Timetable, 1);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
     }
 
     #[test]
     fn stepping_from_an_arrival_bead_uses_the_arrivals_row() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
         m.select(Selected::Bead("yd-zulu".into()));
-        m.step(-1);
-        assert_eq!(m.selected(), Some(&Selected::Yard));
+        m.step_in(Mode::Timetable, -1);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
 
         m.select(Selected::Bead("yd-zulu".into()));
-        m.step(1);
+        m.step_in(Mode::Timetable, 1);
         let next_from_bead = m.selected().cloned();
         m.select(Selected::Arrivals);
-        m.step(1);
+        m.step_in(Mode::Timetable, 1);
         assert_eq!(m.selected().cloned(), next_from_bead);
     }
 
@@ -3649,6 +3800,7 @@ mod tests {
     fn unread_is_counted_by_sender() {
         let (m, _) = Model::new(
             yard(&[(6, "assembly"), (7, "assembly"), (8, "clerk@north")]),
+            Mode::Chat,
             None,
         );
         assert_eq!(m.unread("assembly"), 2);
@@ -3665,13 +3817,17 @@ mod tests {
             read: true,
             ..letter(9, "assembly", "jo", "read")
         });
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.unread("assembly"), 1);
     }
 
     #[test]
     fn opening_a_conversation_acknowledges_the_mail_it_shows() {
-        let (mut m, effects) = Model::new(yard(&[(6, "yardmaster"), (7, "yardmaster")]), None);
+        let (mut m, effects) = Model::new(
+            yard(&[(6, "yardmaster"), (7, "yardmaster")]),
+            Mode::Chat,
+            None,
+        );
         // The yardmaster's is open from the start.
         assert_eq!(effects, [page("yardmaster", 0)]);
         // Nothing of it is shown before the yard answers the conversation.
@@ -3699,6 +3855,7 @@ mod tests {
                 (8, "yard"),
                 (9, "clerk@north"),
             ]),
+            Mode::Chat,
             None,
         );
         assert_eq!(m.unread("clerk@north"), 2);
@@ -3763,7 +3920,7 @@ mod tests {
     fn the_yard_row_counts_notices_and_the_yards_mail() {
         let mut state = yard(&[(6, "yard")]);
         state.notifications = vec![notification(10, "yd-shed", "yd-shed created", false)];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.yard_unread(), 2);
         // Opening reads the mail; the notice waits for its key.
         m.select(Selected::Yard);
@@ -3776,7 +3933,7 @@ mod tests {
     fn a_crew_member_named_yard_keeps_its_mail_on_its_own_row() {
         let mut state = yard(&[(6, "yard")]);
         state.crew.push(member("yard", "running", "idle"));
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!((m.unread("yard"), m.yard_unread()), (1, 0));
         assert_eq!(m.select(Selected::Yard), []);
         assert_eq!(m.yard_mail(), []);
@@ -3788,12 +3945,12 @@ mod tests {
         // ada's mail is on the yard row, which was not opened: it holds
         // back the yardmaster's 8.
         let unread = [(6, "yardmaster"), (7, "ada"), (8, "yardmaster")];
-        let (mut m, _) = Model::new(yard(&unread), None);
+        let (mut m, _) = Model::new(yard(&unread), Mode::Chat, None);
         m.conversation("yardmaster", vec![]);
         m.select(Selected::Conversation("assembly".into()));
         assert_eq!(m.unread("yardmaster"), 0);
         // The yard was lost before it took the acknowledgement of 6.
-        let (m, effects) = m.resumed(yard(&unread));
+        let (m, effects) = m.resumed(yard(&unread), Mode::Chat);
         assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(m.unread("yardmaster"), 0);
         assert_eq!(effects, [page("assembly", 0), Effect::Ack { through: 6 }]);
@@ -3804,6 +3961,7 @@ mod tests {
     fn mail_of_a_conversation_not_opened_holds_back_what_came_after_it() {
         let (mut m, effects) = Model::new(
             yard(&[(6, "yardmaster"), (7, "assembly"), (8, "yardmaster")]),
+            Mode::Chat,
             None,
         );
         assert_eq!(effects, [page("yardmaster", 0)]);
@@ -3830,7 +3988,7 @@ mod tests {
 
     #[test]
     fn nothing_is_acknowledged_twice() {
-        let (mut m, _) = Model::new(yard(&[(6, "yardmaster")]), None);
+        let (mut m, _) = Model::new(yard(&[(6, "yardmaster")]), Mode::Chat, None);
         assert_eq!(
             m.conversation("yardmaster", vec![letter(6, "yardmaster", "jo", "x")]),
             [Effect::Ack { through: 6 }]
@@ -3849,7 +4007,7 @@ mod tests {
 
     #[test]
     fn an_acknowledgement_the_yard_did_not_take_is_asked_again() {
-        let (mut m, _) = Model::new(yard(&[(6, "yardmaster")]), None);
+        let (mut m, _) = Model::new(yard(&[(6, "yardmaster")]), Mode::Chat, None);
         m.conversation("yardmaster", vec![]);
         m.ack_failed("the yard does not answer");
         assert!(
@@ -3867,7 +4025,7 @@ mod tests {
 
     #[test]
     fn mail_that_arrives_in_the_open_conversation_is_shown_and_acknowledged() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation("yardmaster", vec![]);
         assert_eq!(
             m.event(&mail_to_jo(21, "yardmaster")),
@@ -3888,7 +4046,7 @@ mod tests {
 
     #[test]
     fn mail_that_arrives_in_another_conversation_counts_there_and_is_not_acknowledged() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(m.event(&mail_to_jo(21, "assembly")), []);
         assert_eq!(m.event(&mail_to_jo(22, "clerk@north")), []);
         assert_eq!(
@@ -3913,7 +4071,7 @@ mod tests {
 
     #[test]
     fn mail_to_someone_else_or_to_a_crew_member_of_the_user_s_name_is_not_the_user_s() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.event(&event(
             21,
             "mail",
@@ -3933,7 +4091,7 @@ mod tests {
 
     #[test]
     fn the_user_s_own_mail_is_in_the_conversation_whichever_client_sent_it() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation("yardmaster", vec![]);
         assert_eq!(
             m.event(&event(
@@ -3954,7 +4112,7 @@ mod tests {
 
     #[test]
     fn a_mail_the_stream_and_the_yard_both_tell_of_is_there_once_and_in_order() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.event(&mail_to_jo(22, "yardmaster"));
         m.conversation(
             "yardmaster",
@@ -3985,7 +4143,7 @@ mod tests {
 
     #[test]
     fn a_conversation_opens_on_its_newest_page_and_its_top_asks_for_the_page_before() {
-        let (mut m, effects) = Model::new(yard(&[]), None);
+        let (mut m, effects) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(effects, [page("yardmaster", 0)]);
         // The yard has not said yet whether there is older mail.
         assert_eq!(m.top(), Top::Unread);
@@ -4021,7 +4179,7 @@ mod tests {
 
     #[test]
     fn a_page_the_yard_did_not_answer_is_asked_for_again() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true);
         assert_eq!(m.older(), [page("yardmaster", 51)]);
         m.page_failed("yardmaster", "the yard does not answer");
@@ -4032,7 +4190,7 @@ mod tests {
 
     #[test]
     fn a_yard_that_knows_no_pages_answers_all_and_is_asked_no_more() {
-        let (mut m, effects) = Model::new(yard(&[]), None);
+        let (mut m, effects) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(effects, [page("yardmaster", 0)]);
         // All five hundred to a call for fifty, and no word of more.
         m.page("yardmaster", 0, letters(1..=500, "yardmaster"), false);
@@ -4043,7 +4201,11 @@ mod tests {
 
     #[test]
     fn unread_mail_older_than_the_pages_read_is_not_acknowledged_until_it_is_shown() {
-        let (mut m, _) = Model::new(yard(&[(8, "yardmaster"), (60, "yardmaster")]), None);
+        let (mut m, _) = Model::new(
+            yard(&[(8, "yardmaster"), (60, "yardmaster")]),
+            Mode::Chat,
+            None,
+        );
         // The newest page shows 60 and not 8, which holds 60 back.
         assert_eq!(
             m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true),
@@ -4066,7 +4228,7 @@ mod tests {
     fn a_row_of_two_conversations_shows_no_mail_older_than_where_one_of_them_stops() {
         let mut state = yard(&[(10, "jo@airy"), (460, "jo")]);
         state.peers.push(airy());
-        let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo".into())));
+        let (mut m, _) = Model::new(state, Mode::Chat, Some(Selected::Conversation("jo".into())));
         // The user's own notes go further back than a page; the trusted
         // name wrote twice, long ago and lately.
         m.page("jo", 0, letters(451..=500, "jo"), true);
@@ -4096,7 +4258,7 @@ mod tests {
     fn the_images_of_mail_that_was_not_read_are_not_asked_for() {
         let mut state = yard(&[]);
         state.peers.push(airy());
-        let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo".into())));
+        let (mut m, _) = Model::new(state, Mode::Chat, Some(Selected::Conversation("jo".into())));
         let picture = |seq: u64, from: &str, hash: &str| Letter {
             files: vec![BlobRef {
                 hash: hash.into(),
@@ -4119,12 +4281,12 @@ mod tests {
 
     #[test]
     fn an_older_page_of_a_conversation_not_read_since_the_yard_was_back_is_left() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.page("yardmaster", 0, letters(51..=100, "yardmaster"), true);
         assert_eq!(m.older(), [page("yardmaster", 51)]);
         // The yard was lost and is back: the page asked for before is
         // answered to a model that has not read the conversation's newest.
-        let (mut m, effects) = m.resumed(yard(&[]));
+        let (mut m, effects) = m.resumed(yard(&[]), Mode::Chat);
         assert_eq!(effects, [page("yardmaster", 0)]);
         assert_eq!(
             m.page("yardmaster", 51, letters(1..=50, "yardmaster"), false),
@@ -4141,6 +4303,7 @@ mod tests {
     fn a_conversation_with_a_linked_yard_is_read_again_from_the_oldest_mail_it_has() {
         let (mut m, _) = Model::new(
             yard(&[]),
+            Mode::Chat,
             Some(Selected::Conversation("clerk@north".into())),
         );
         m.page("clerk@north", 0, letters(51..=100, "clerk@north"), true);
@@ -4155,7 +4318,7 @@ mod tests {
 
     #[test]
     fn after_a_send_only_what_is_new_is_read() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation("yardmaster", vec![letter(12, "yardmaster", "jo", "first")]);
         assert_eq!(m.sent("yardmaster"), [read("yardmaster", 12)]);
         // A conversation the yard was never asked for is read from its
@@ -4166,7 +4329,7 @@ mod tests {
 
     #[test]
     fn mail_read_by_the_user_elsewhere_clears_the_count() {
-        let (mut m, _) = Model::new(yard(&[(6, "assembly"), (9, "assembly")]), None);
+        let (mut m, _) = Model::new(yard(&[(6, "assembly"), (9, "assembly")]), Mode::Chat, None);
         assert_eq!(
             m.event(&event(
                 21,
@@ -4188,7 +4351,7 @@ mod tests {
 
     #[test]
     fn mail_read_by_a_crew_member_marks_what_the_user_sent_it() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation(
             "yardmaster",
             vec![
@@ -4214,7 +4377,7 @@ mod tests {
 
     #[test]
     fn mails_that_stand_alike_share_one_line_under_the_last() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.select(Selected::Conversation("assembly".into()));
         m.conversation(
             "assembly",
@@ -4233,7 +4396,7 @@ mod tests {
 
     #[test]
     fn mail_to_a_linked_yard_stands_by_its_delivery() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(
             m.select(Selected::Conversation("clerk@north".into())),
             [page("clerk@north", 0)]
@@ -4314,7 +4477,7 @@ mod tests {
 
     #[test]
     fn mail_refused_over_the_hour_says_so_under_it() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(
             m.select(Selected::Conversation("clerk@north".into())),
             [page("clerk@north", 0)]
@@ -4416,7 +4579,7 @@ mod tests {
 
     #[test]
     fn what_is_typed_goes_to_a_crew_member_as_mail() {
-        let (m, _) = Model::new(yard(&[]), None);
+        let (m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(m.target(), Some(Target::Crew("yardmaster".into())));
     }
 
@@ -4425,6 +4588,7 @@ mod tests {
         let mut state = yard(&[]);
         let (m, _) = Model::new(
             state.clone(),
+            Mode::Chat,
             Some(Selected::Conversation("clerk@north".into())),
         );
         assert_eq!(
@@ -4433,11 +4597,13 @@ mod tests {
         );
         let (m, _) = Model::new(
             state.clone(),
+            Mode::Chat,
             Some(Selected::Conversation("mckean@north".into())),
         );
         assert_eq!(m.about(), ["a person of the linked yard north"]);
         let (m, _) = Model::new(
             state.clone(),
+            Mode::Chat,
             Some(Selected::Conversation("yardmaster".into())),
         );
         assert_eq!(m.about(), Vec::<String>::new());
@@ -4445,6 +4611,7 @@ mod tests {
         state.peers[0].said.as_mut().unwrap().roster[0].mail = false;
         let (m, _) = Model::new(
             state.clone(),
+            Mode::Chat,
             Some(Selected::Conversation("clerk@north".into())),
         );
         assert!(
@@ -4453,7 +4620,11 @@ mod tests {
             m.about()
         );
         state.peers[0].send.clear();
-        let (m, _) = Model::new(state, Some(Selected::Conversation("clerk@north".into())));
+        let (m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation("clerk@north".into())),
+        );
         assert!(
             m.about()[1].ends_with("yardr peer allow north --send mail"),
             "{:?}",
@@ -4463,7 +4634,7 @@ mod tests {
 
     #[test]
     fn a_crew_status_event_changes_the_row() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(
             m.event(&event(
                 21,
@@ -4478,7 +4649,7 @@ mod tests {
 
     #[test]
     fn other_crew_events_have_the_crew_read_again() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(
             m.event(&event(21, "crew_stopped", "", json!({"crew": "assembly"}))),
             [Effect::Crew]
@@ -4502,7 +4673,7 @@ mod tests {
 
     #[test]
     fn arrivals_are_read_again_on_a_bead_s_events_and_their_other_inputs() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         // Every event about a bead, whatever its kind: a note re-reads
         // the queue beside the board.
         assert_eq!(
@@ -4591,7 +4762,7 @@ mod tests {
 
     #[test]
     fn the_board_is_the_board_as_read_now_over_a_yard_lost() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert!(m.arrival_rows().is_empty());
         m.arrivals(board(
             vec![arrival("yd-links", "new", "yardr", "2h–3h", "", "none")],
@@ -4599,7 +4770,7 @@ mod tests {
         ));
         assert_eq!(m.arrival_rows().len(), 1);
         // Read again after the yard was lost: the board is as read now.
-        let (again, _) = m.resumed(yard(&[]));
+        let (again, _) = m.resumed(yard(&[]), Mode::Chat);
         assert!(again.arrival_rows().is_empty());
     }
 
@@ -4609,7 +4780,7 @@ mod tests {
     /// the rows are as served.
     #[test]
     fn the_board_groups_the_served_rows_by_platform_in_the_served_order() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let rows = vec![
             arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
             arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
@@ -4633,7 +4804,7 @@ mod tests {
     /// order, each with its rows in the served order.
     #[test]
     fn without_a_platforms_list_the_board_groups_in_first_appearance_order() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let rows = vec![
             arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
             arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
@@ -4653,7 +4824,7 @@ mod tests {
     /// other unnamed ones.
     #[test]
     fn a_platform_the_list_does_not_name_stands_last_in_appearance_order() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let rows = vec![
             arrival("yd-first", "shape", "yardr", "20m–35m", "", "none"),
             arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
@@ -4681,7 +4852,7 @@ mod tests {
     /// bead, which has no row of its own.
     #[test]
     fn the_arrivals_row_counts_what_is_in_transit() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let row = m.arrivals_row();
         assert_eq!(row.name, "arrivals");
         assert_eq!(row.line, "none in transit");
@@ -4781,7 +4952,7 @@ mod tests {
     /// are empty.
     #[test]
     fn an_arrival_s_bead_is_what_the_bead_call_returned_with_its_row() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.arrivals(board(
             vec![arrival(
                 "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
@@ -4832,7 +5003,7 @@ mod tests {
     /// moves it.
     #[test]
     fn the_open_arrival_s_bead_stays_open_over_a_queue_read_again() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.arrivals(board(
             vec![arrival("yd-zulu", "draft", "yardr", "5h–8h", "", "none")],
             &[],
@@ -4846,7 +5017,7 @@ mod tests {
 
     #[test]
     fn a_crew_read_before_a_status_event_does_not_put_the_older_status_back() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.event(&event(
             25,
             "crew_status",
@@ -4875,7 +5046,7 @@ mod tests {
 
     #[test]
     fn when_the_open_row_is_gone_the_first_is_opened() {
-        let (mut m, _) = Model::new(yard(&[(6, "assembly")]), None);
+        let (mut m, _) = Model::new(yard(&[(6, "assembly")]), Mode::Chat, None);
         let effects = m.listed(21, vec![member("assembly", "running", "idle")]);
         assert_eq!(m.selected_conversation(), Some("assembly"));
         assert_eq!(effects, [page("assembly", 0)]);
@@ -4886,6 +5057,7 @@ mod tests {
 
         let (mut m, _) = Model::new(
             yard(&[]),
+            Mode::Chat,
             Some(Selected::Conversation("clerk@north".into())),
         );
         assert_eq!(
@@ -4928,7 +5100,7 @@ mod tests {
     fn the_users_of_the_yard_have_rows_after_the_linked_yards_and_the_window_s_own_is_theirs() {
         let mut state = yard(&[(6, "ada"), (7, "jo")]);
         state.users = vec![user("ada"), user("jo")];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(
             names(&m),
             [
@@ -4985,7 +5157,7 @@ mod tests {
     fn a_user_a_crew_member_has_the_name_of_has_no_second_row() {
         let mut state = yard(&[]);
         state.users = vec![user("assembly"), user("jo")];
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(
             names(&m),
             [
@@ -5009,7 +5181,7 @@ mod tests {
         unread.extend((8..28).map(|seq| (seq, "yardmaster")));
         let mut state = yard(&unread);
         state.peers.push(airy());
-        let (mut m, effects) = Model::new(state, None);
+        let (mut m, effects) = Model::new(state, Mode::Chat, None);
         // The yardmaster's mail is shown: no row counts it, and nothing is
         // acknowledged, since 6 and 7 are not seen.
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
@@ -5063,7 +5235,7 @@ mod tests {
     fn removing_a_user_refreshes_trust_grants() {
         let mut state = yard(&[]);
         state.peers.push(airy());
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(
             m.event(&event(21, "user_removed", "jo", json!({"user": "ada"}))),
             [Effect::Peers]
@@ -5074,7 +5246,7 @@ mod tests {
     fn where_an_answer_goes_is_not_known_before_all_of_a_user_s_row_is_read() {
         let mut state = yard(&[]);
         state.peers.push(airy());
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         // A row with one party goes one way whatever its mail says.
         assert!(!m.reading());
         m.select(Selected::Conversation("jo".into()));
@@ -5098,7 +5270,7 @@ mod tests {
     fn in_a_user_s_row_what_is_typed_answers_whoever_wrote_last() {
         let mut state = yard(&[]);
         state.peers.push(airy());
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.select(Selected::Conversation("jo".into()));
         // Nobody wrote: it is mail to the user in this yard.
         assert_eq!(m.target(), Some(Target::Crew("jo".into())));
@@ -5140,7 +5312,7 @@ mod tests {
 
     #[test]
     fn a_note_to_oneself_counts_on_the_own_row_until_it_is_shown_and_is_no_news() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.take_news();
         // Written elsewhere, with the yardmaster's conversation open.
         assert_eq!(m.event(&mail_to_jo(21, "jo")), []);
@@ -5181,6 +5353,7 @@ mod tests {
                 (8, "yard"),
                 (9, "yardmaster"),
             ]),
+            Mode::Chat,
             None,
         );
         assert_eq!(effects, [page("yardmaster", 0)]);
@@ -5223,7 +5396,7 @@ mod tests {
 
     #[test]
     fn mail_from_a_name_of_this_yard_with_no_row_has_the_users_read_again() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         // ada was added after the users were read.
         assert_eq!(m.event(&mail_to_jo(21, "ada")), [Effect::Users]);
         assert_eq!(m.yard_unread(), 1);
@@ -5235,7 +5408,7 @@ mod tests {
 
         // On the open yard row her mail is seen as it arrives; with her
         // row it is hers, and stays seen.
-        let (mut m, _) = Model::new(yard(&[]), Some(Selected::Yard));
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, Some(Selected::Yard));
         assert_eq!(
             m.event(&mail_to_jo(21, "ada")),
             [Effect::Ack { through: 21 }, Effect::Users]
@@ -5250,7 +5423,11 @@ mod tests {
         let mut untrusted = airy();
         untrusted.trust.clear();
         state.peers.push(untrusted);
-        let (mut m, _) = Model::new(state, Some(Selected::Conversation("jo@airy".into())));
+        let (mut m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation("jo@airy".into())),
+        );
         assert_eq!(m.selected_conversation(), Some("jo@airy"));
         m.conversation("jo@airy", vec![]);
         assert_eq!(m.linked(&[north(), airy()]), [page("jo", 0)]);
@@ -5268,7 +5445,11 @@ mod tests {
         peer.trust.insert("jo".into(), "assembly".into());
         state.peers.push(peer);
 
-        let (mut m, _) = Model::new(state, Some(Selected::Conversation("yardmaster".into())));
+        let (mut m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation("yardmaster".into())),
+        );
         assert!(!names(&m).contains(&"jo@airy".to_string()));
         assert_eq!(m.unread("assembly"), 1);
         assert_eq!(m.unread("jo@airy"), 0);
@@ -5308,7 +5489,7 @@ mod tests {
         // U+2028 and U+2029 go with the control characters: a viewer that
         // breaks a line on them would let a title start a line again.
         assert_eq!(plain("one\u{2028}two\u{2029}three"), "onetwothree");
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation(
             "yardmaster",
             vec![letter(12, "yardmaster", "jo", "a\u{1b}b")],
@@ -5338,7 +5519,7 @@ mod tests {
 
     #[test]
     fn a_mail_s_images_are_shown_with_it_from_the_yard_and_from_the_stream() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let files: Vec<BlobRef> = serde_json::from_value(json!([png("aa"), png("bb")])).unwrap();
         m.conversation(
             "yardmaster",
@@ -5408,7 +5589,7 @@ mod tests {
             ..BlobRef::default()
         }));
         assert!(!is_page(&BlobRef::default()));
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let files: Vec<BlobRef> = serde_json::from_value(json!([html("pp"), png("aa")])).unwrap();
         m.conversation(
             "yardmaster",
@@ -5444,7 +5625,7 @@ mod tests {
         assert!(!is_image(&file("application/pdf")));
         assert!(!is_image(&file("image/svg+xml")));
         assert!(!is_image(&file("")));
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let files: Vec<BlobRef> = serde_json::from_value(json!([
             {"hash": "ff", "type": "application/pdf", "bytes": 900, "name": "report.pdf"},
             png("aa"),
@@ -5484,7 +5665,7 @@ mod tests {
             "tonight",
             "",
         )];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         let mut bead = links_bead();
         bead.notes[0].files = vec![
             BlobRef {
@@ -5756,7 +5937,7 @@ mod tests {
     fn decisions_are_grouped_by_topic_oldest_first_without_the_prefix() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.decisions_count(), 4);
         let groups = m.decision_groups(&noon());
         // Topics in the order their oldest ask waits.
@@ -5776,21 +5957,55 @@ mod tests {
     }
 
     #[test]
-    fn first_open_decision_is_selected_before_the_yardmaster_conversation() {
+    fn each_mode_opens_on_its_first_row() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Decisions, None);
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
 
-        let (m, _) = Model::new(yard(&[]), None);
+        let (m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
+
+        let (m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
+
+        // Decisions with none open opens on nothing.
+        let (m, _) = Model::new(yard(&[]), Mode::Decisions, None);
+        assert_eq!(m.selected(), None);
+    }
+
+    #[test]
+    fn the_modes_step_around_the_ends_in_the_rail_s_order() {
+        assert_eq!(Mode::ALL, [Mode::Chat, Mode::Decisions, Mode::Timetable]);
+        assert_eq!(Mode::Chat.step(1), Mode::Decisions);
+        assert_eq!(Mode::Decisions.step(1), Mode::Timetable);
+        assert_eq!(Mode::Timetable.step(1), Mode::Chat);
+        assert_eq!(Mode::Chat.step(-1), Mode::Timetable);
+        assert_eq!(Mode::Timetable.step(-1), Mode::Decisions);
+        assert_eq!(Mode::Decisions.step(-1), Mode::Chat);
+    }
+
+    #[test]
+    fn every_row_is_one_mode_s() {
+        assert_eq!(
+            Selected::Conversation("yardmaster".into()).mode(),
+            Mode::Chat
+        );
+        assert_eq!(Selected::Yard.mode(), Mode::Chat);
+        assert_eq!(Selected::Decision("bead-a".into()).mode(), Mode::Decisions);
+        assert_eq!(
+            Selected::Decided("bead-a".into(), 3).mode(),
+            Mode::Decisions
+        );
+        assert_eq!(Selected::Arrivals.mode(), Mode::Timetable);
+        assert_eq!(Selected::Bead("yd-zulu".into()).mode(), Mode::Timetable);
     }
 
     #[test]
     fn a_row_leads_with_the_question_then_asker_and_waits_bead_small_at_its_end() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         let groups = m.decision_groups(&noon());
         let row = &groups[0].rows[0];
         assert_eq!(row.sub, "yardmaster · 2h");
@@ -5843,7 +6058,7 @@ mod tests {
                 "2026-10-10T11:45:00Z",
             ),
         ];
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.decisions_count(), 1);
         let groups = m.decision_groups(&noon());
         assert_eq!(groups.len(), 1);
@@ -5907,12 +6122,12 @@ mod tests {
                 "2026-10-11T09:30:00Z",
             ),
         ];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.decided_count(), 4);
         assert!(!m.decided_expanded());
         // Folded: its rows are not in the tab order.
         m.select(Selected::Yard);
-        m.step(-1);
+        m.step_in(Mode::Chat, -1);
         assert_eq!(m.selected_conversation(), Some("jo"));
 
         m.toggle_decided();
@@ -5923,16 +6138,16 @@ mod tests {
         assert_eq!(rows[1].sub, "yardmaster · warmly");
         assert_eq!(rows[2].sub, "yardmaster · declined · not mine");
         assert_eq!(rows[3].sub, "yardmaster · put aside");
-        // Open: its rows stand between the decisions and the conversations.
-        m.select(Selected::Yard);
-        m.step(-1);
-        assert_eq!(m.selected_conversation(), Some("jo"));
-        m.select(Selected::Conversation("assembly".into()));
-        m.step(-1);
+        // Open: its rows stand in the decisions' tab order, after the
+        // open ones.
+        m.select(Selected::Decided("yd-links".into(), 6));
+        m.step_in(Mode::Decisions, 1);
         assert_eq!(
             m.selected(),
-            Some(&Selected::Decided("yd-links".into(), 12))
+            Some(&Selected::Decided("yd-greet".into(), 10))
         );
+        m.step_in(Mode::Decisions, -1);
+        assert_eq!(m.selected(), Some(&Selected::Decided("yd-links".into(), 6)));
         // The open dealt with shows its pick.
         let detail = m.decided_detail("yd-links", 6, &chrono::Utc).unwrap();
         assert_eq!(detail.question, "Send them to build?");
@@ -5951,7 +6166,7 @@ mod tests {
             decided_ask("b", 2, "Q?", "answered", "Go", "", ""),
             decided_ask("c", 3, "Q?", "put aside", "", "", "2026-10-11T09:30:00Z"),
         ];
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         let at = |at: &str| {
             DateTime::parse_from_rfc3339(at)
                 .unwrap()
@@ -5965,7 +6180,7 @@ mod tests {
         );
         assert_eq!(m.next_return(Some(at("2026-10-12T09:30:00Z"))), None);
 
-        let (m, _) = Model::new(yard(&[]), None);
+        let (m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert_eq!(m.next_return(None), None);
     }
 
@@ -5977,7 +6192,7 @@ mod tests {
             notification(11, "yd-shed", "yd-shed noted", true),
             notification(12, "", "the release went out", false),
         ];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         let yard = m.yard_row();
         assert_eq!((yard.name.as_str(), yard.unread), ("yard", 2));
         assert!(!yard.selected);
@@ -6015,7 +6230,7 @@ mod tests {
             notification(11, "yd-shed", "yd-shed noted", false),
             notification(12, "", "the release went out", false),
         ];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         // Another open row is not the yard row.
         m.select(Selected::Conversation("assembly".into()));
         assert_eq!(m.dismiss_all(), []);
@@ -6037,7 +6252,7 @@ mod tests {
             notification(11, "yd-shed", "yd-shed noted", false),
             notification(12, "", "the release went out", true),
         ];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.select(Selected::Yard);
         assert_eq!(m.dismiss_all(), [Effect::AckNotifications { through: 11 }]);
         // A refused acknowledgement keeps them unread and says so.
@@ -6057,7 +6272,7 @@ mod tests {
             notification(10, "yd-shed", "yd-shed created", false),
             notification(11, "yd-shed", "yd-shed noted", false),
         ];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.event(&event(
             21,
             "notifications_read",
@@ -6077,7 +6292,7 @@ mod tests {
 
     #[test]
     fn the_lists_follow_the_stream_and_ask_nothing_in_a_loop() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         // A note on a bead: the queue is read again.
         assert_eq!(
             m.event(&event(21, "noted", "yardmaster", json!({"note": 1}))),
@@ -6119,7 +6334,7 @@ mod tests {
     fn a_queue_read_again_opens_the_first_row_when_the_open_bead_is_gone() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
         m.select(Selected::Decision("yardr-n8ta".into()));
         // Its last ask answered: the bead is gone from the queue.
         let mut open = evening();
@@ -6144,7 +6359,11 @@ mod tests {
     fn evening_from(conversation: &str) -> Model {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (m, _) = Model::new(state, Some(Selected::Conversation(conversation.into())));
+        let (m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation(conversation.into())),
+        );
         assert_eq!(m.selected_conversation(), Some(conversation));
         m
     }
@@ -6194,7 +6413,7 @@ mod tests {
         m.select(Selected::Decision("yardr-n8ta".into()));
         // By click, then by key to the next: neither is a conversation.
         m.select(Selected::Decision("yardr-9f2c".into()));
-        m.step(-1);
+        m.step_in(Mode::Decisions, -1);
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
         m.picked("yardr-3msx", 4, 1, "");
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
@@ -6221,7 +6440,11 @@ mod tests {
         let mut open = evening();
         open[1].bead = "yardr-n8ta".into();
         state.asks.open = open;
-        let (mut m, _) = Model::new(state, Some(Selected::Conversation("yardmaster".into())));
+        let (mut m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation("yardmaster".into())),
+        );
         m.select(Selected::Decision("yardr-n8ta".into()));
         m.picked("yardr-n8ta", 3, 1, "");
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
@@ -6234,7 +6457,7 @@ mod tests {
         // The window opened on a decision: the next decision is first.
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
         m.picked("yardr-n8ta", 3, 1, "");
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
@@ -6253,7 +6476,7 @@ mod tests {
         m.select(Selected::Decision("yardr-3msx".into()));
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = m.resumed(state);
+        let (mut m, _) = m.resumed(state, Mode::Decisions);
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
         m.picked("yardr-3msx", 4, 1, "");
         assert_eq!(m.selected_conversation(), Some("yardmaster"));
@@ -6352,7 +6575,7 @@ mod tests {
     fn evening_with_links() -> Model {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
         m.bead_loaded(links_bead());
         m
     }
@@ -6445,7 +6668,7 @@ mod tests {
     fn words_with_no_option_chosen_go_as_a_note_and_the_ask_stays_open() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         // No recommendation: words alone are a note.
         let mut bead = links_bead();
         bead.asks[0].recommend = 0;
@@ -6465,7 +6688,7 @@ mod tests {
     fn an_ask_with_no_options_wants_words_as_the_answer() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.bead_loaded(words_bead());
         let detail = m.decision_detail("yardr-7h11", &noon()).unwrap();
         assert!(detail.asks[0].options.is_empty());
@@ -6555,7 +6778,7 @@ mod tests {
                 "2026-10-10T10:00:00Z",
             )
         }];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.bead_loaded(Bead {
             id: "yd-link".into(),
             asks: vec![BeadAsk {
@@ -6843,7 +7066,7 @@ mod tests {
                 "2026-10-10T10:00:00Z",
             )
         }];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.bead_loaded(Bead {
             id: "yd-crm".into(),
             asks: vec![BeadAsk {
@@ -6932,7 +7155,7 @@ mod tests {
         );
         let mut state = yard(&[]);
         state.asks.decided = vec![taken, foreign];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.toggle_decided();
         let rows = m.decided_rows();
         assert_eq!(
@@ -6968,7 +7191,7 @@ mod tests {
                 "",
             )
         }];
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.secret("yd-crm", 18), Some(&books()));
         assert_eq!(m.giving("yd-crm", 18), None);
         let detail = m.decided_detail("yd-crm", 18, &chrono::Utc).unwrap();
@@ -7127,7 +7350,7 @@ mod tests {
         let words = decided_ask("yd-greet", 11, "Who greets?", "answered", "", "warmly", "");
         let mut state = yard(&[]);
         state.asks.decided = vec![answered, answered_words, aside, declined, left, words];
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
         let line = |ask: u64| {
             m.decided_detail("yd-links", ask, &chrono::Utc)
                 .or_else(|| m.decided_detail("yd-greet", ask, &chrono::Utc))
@@ -7181,7 +7404,7 @@ mod tests {
     fn a_design_bead_s_document_is_named_by_path_and_branch_not_fetched() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         let mut bead = links_bead();
         bead.notes[0].text = "Doc: docs/design/2026-10-11-yardr-me78-depot-rules.md.".into();
         m.bead_loaded(bead);
@@ -7200,7 +7423,7 @@ mod tests {
     fn the_open_bead_is_read_when_it_opens_and_again_on_its_events() {
         let mut state = yard(&[]);
         state.asks.open = evening();
-        let (mut m, effects) = Model::new(state, None);
+        let (mut m, effects) = Model::new(state, Mode::Decisions, None);
         // The oldest decision opens, and its bead is read.
         assert_eq!(
             effects,
@@ -7291,7 +7514,11 @@ mod tests {
     #[test]
     fn mail_that_arrives_for_the_person_is_news_and_what_was_unread_at_the_start_is_not() {
         // The window opens on the yardmaster, with mail of assembly unread.
-        let (mut m, _) = Model::new(yard(&[(6, "assembly"), (7, "yardmaster")]), None);
+        let (mut m, _) = Model::new(
+            yard(&[(6, "assembly"), (7, "yardmaster")]),
+            Mode::Chat,
+            None,
+        );
         assert_eq!(m.take_news(), []);
         // The conversation the yard answers with is no news either.
         m.conversation("yardmaster", vec![letter(7, "yardmaster", "jo", "unread")]);
@@ -7326,7 +7553,7 @@ mod tests {
 
     #[test]
     fn what_the_person_wrote_and_mail_for_others_is_no_news() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         // The person's own, from this window or another client.
         m.event(&event(
             21,
@@ -7361,7 +7588,7 @@ mod tests {
 
     #[test]
     fn the_yard_s_own_mail_is_news_of_the_yard_row() {
-        let (mut m, _) = Model::new(yard(&[]), None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.event(&mail_to_jo(21, YARD));
         assert_eq!(
             m.take_news(),
@@ -7382,7 +7609,7 @@ mod tests {
         let new = open.pop().unwrap();
         state.asks.open = open.clone();
         // The window opens on the first bead's card.
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
         assert_eq!(m.take_news(), []);
         // The queue read again as it was: nothing new.
@@ -7438,7 +7665,7 @@ mod tests {
             ),
             decided_ask("yardr-9f2c", 5, "Build?", "answered", "Yes", "", ""),
         ];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         // Both are open again: the one put aside came back, and the yard
         // did not take the answer to the other.
         let open: Vec<OpenAsk> = evening()
@@ -7464,7 +7691,7 @@ mod tests {
     fn a_notice_newer_than_those_there_is_news_and_one_read_is_not() {
         let mut state = yard(&[]);
         state.notifications = vec![notification(10, "yd-shed", "yd-shed created", false)];
-        let (mut m, _) = Model::new(state, None);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
         assert_eq!(m.take_news(), []);
         m.notifications(vec![
             notification(10, "yd-shed", "yd-shed created", false),
@@ -7494,14 +7721,14 @@ mod tests {
     fn what_arrived_while_the_yard_was_away_is_news_when_it_is_back() {
         let mut state = yard(&[(6, "assembly")]);
         state.asks.open = evening()[..1].to_vec();
-        let (m, _) = Model::new(state, None);
+        let (m, _) = Model::new(state, Mode::Chat, None);
 
         // The yard is back with the mail and the ask it had, a mail and an
         // ask more, and a notice.
         let mut back = yard(&[(6, "assembly"), (9, "assembly")]);
         back.asks.open = evening()[..2].to_vec();
         back.notifications = vec![notification(10, "yd-shed", "yd-shed created", false)];
-        let (mut m, _) = m.resumed(back.clone());
+        let (mut m, _) = m.resumed(back.clone(), Mode::Chat);
         let news = m.take_news();
         assert_eq!(
             news.iter().map(|n| (n.kind, &n.target)).collect::<Vec<_>>(),
@@ -7512,7 +7739,7 @@ mod tests {
             ]
         );
         // Away and back once more with nothing new: no news.
-        let (mut m, _) = m.resumed(back);
+        let (mut m, _) = m.resumed(back, Mode::Chat);
         assert_eq!(m.take_news(), []);
     }
 }
