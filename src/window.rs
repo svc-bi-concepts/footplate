@@ -16092,6 +16092,32 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn the_addresses_fields_hold_the_kept_ones_at_the_start(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let base = view_up();
+        let run = view_up();
+        Settings::default()
+            .with_yard_view(settings::HERE, &base)
+            .unwrap()
+            .with_yard_run(settings::HERE, &run)
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.view.read(cx).text().to_string(), base);
+            assert_eq!(v.run.read(cx).text().to_string(), run);
+        });
+    }
+
     /// "Agents and you" reads the near yard's operator settings: the style
     /// the yard has, and the line. Saving sets the chosen style and the
     /// line about the operator, and says the next session picks it up;
