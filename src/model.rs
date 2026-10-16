@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
-    DecidedAsk, Event, Letter, Me, Notification, OpenAsk, Peer, Ran, Run, Secret, User,
+    DecidedAsk, Event, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer, Ran,
+    Run, Secret, User,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -37,6 +38,11 @@ pub const YARD: &str = "yard";
 
 /// The row below the yard row: the beads in transit.
 pub const ARRIVALS: &str = "arrivals";
+
+/// The timetable's row for the beads travelling with no line: it stands
+/// last, and only while any travel. The details and the back link name
+/// it in lowercase, as the design quotes them (`no line`).
+pub const NO_LINE: &str = "No line";
 
 /// What a window for the user `me` starts from, read at the seq `head`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -63,6 +69,12 @@ pub struct State {
     /// Why the arrivals board is empty, in the window's words; `None`
     /// where the board was read.
     pub arrivals_notice: Option<String>,
+    /// The flows view as read: the lines with their flows, stages, beads
+    /// and lamps, the unassigned rows, and the travelling totals.
+    pub flows: Flows,
+    /// Why the flows view is empty, in the window's words; `None` where
+    /// it was read.
+    pub flows_notice: Option<String>,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -130,6 +142,15 @@ fn transit_words(transit: usize) -> String {
     }
 }
 
+/// What a line's row says is in transit under it: the number, or that
+/// nothing is.
+fn line_transit_words(transit: usize) -> String {
+    match transit {
+        0 => "nothing in transit".to_string(),
+        transit => format!("{transit} in transit"),
+    }
+}
+
 /// What a crew member's session does, in the words of `yardr chat`.
 pub fn state_of(member: &CrewMember) -> &'static str {
     match (member.state.as_str(), member.status.as_str()) {
@@ -181,8 +202,8 @@ pub enum Target {
 }
 
 /// What the left list has open: a bead with open asks, one dealt with, a
-/// conversation, what the yard reports, the arrivals board, or one
-/// arrival's bead.
+/// conversation, what the yard reports, the arrivals board, a line's
+/// flows, the beads with no line, or one travelling bead whole.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selected {
     /// A bead with open asks, by its id. A bead with several is one row.
@@ -194,27 +215,35 @@ pub enum Selected {
     Yard,
     /// The arrivals board: the served rows under their platform.
     Arrivals,
-    /// One arrival's bead whole, by its id. It has no row of the list:
-    /// it opens from the board, and the arrivals row stands open for it.
+    /// One line's flows, by depot name, in the served order.
+    Line(String),
+    /// The beads travelling with no line, newest change first. It stands
+    /// only while any travel.
+    NoLine,
+    /// One travelling bead whole, by its id. It has no row of the list:
+    /// it opens from the board, a flow, Elsewhere or No line, and that
+    /// row stands open for it.
     Bead(String),
 }
 
 impl Selected {
     /// The mode whose list holds the row: the conversations and the yard
     /// row are chat's, the beads with open asks and the dealt with are
-    /// decisions', the arrivals row and an arrival's bead timetable's.
+    /// decisions', the timetable's rows and a travelling bead timetable's.
     pub fn mode(&self) -> Mode {
         match self {
             Selected::Conversation(_) | Selected::Yard => Mode::Chat,
             Selected::Decision(_) | Selected::Decided(_, _) => Mode::Decisions,
-            Selected::Arrivals | Selected::Bead(_) => Mode::Timetable,
+            Selected::Arrivals | Selected::Line(_) | Selected::NoLine | Selected::Bead(_) => {
+                Mode::Timetable
+            }
         }
     }
 }
 
 /// One of the rail's three modes: the crew and the conversation, the open
-/// asks with their cards, or the timetable with the arrivals board. Kept
-/// per yard in the settings, chat where none was chosen.
+/// asks with their cards, or the timetable with the board and the lines.
+/// Kept per yard in the settings, chat where none was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -495,6 +524,8 @@ pub enum Effect {
     Asks,
     /// `Arrivals`; answered to [`Model::arrivals`].
     Arrivals,
+    /// `Flows`; answered to [`Model::flows`].
+    Flows,
     /// `Bead` with `bead`; answered to [`Model::bead_loaded`] or
     /// [`Model::bead_failed`].
     Bead { bead: String },
@@ -581,6 +612,13 @@ pub struct Model {
     /// serves no list, and then the board groups in first-appearance
     /// order.
     arrival_platforms: Vec<String>,
+    /// The flows view as read: the lines with their flows, stages, beads
+    /// and lamps, the unassigned rows, and the travelling totals.
+    flows: Flows,
+    /// The timetable row a travelling bead was opened from: the board, a
+    /// line or No line. The list's open row and the details' back link
+    /// while the bead is open.
+    bead_from: Option<Selected>,
     /// The users of the yard by name, the window's own among them.
     users: Vec<String>,
     parties: Vec<Party>,
@@ -690,6 +728,7 @@ impl Model {
             crew: state.crew,
             arrivals: state.arrivals.rows,
             arrival_platforms: state.arrivals.platforms,
+            flows: state.flows,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -715,7 +754,7 @@ impl Model {
     /// else the mode's own default. In chat that is the yardmaster's
     /// conversation, as in `yardr chat`, else the first row from the top;
     /// in decisions the first open decision, and none where there is
-    /// none; in timetable the arrivals row. An arrival's bead has no row
+    /// none; in timetable the arrivals row. A travelling bead has no row
     /// of the list, and stays open as a row that is still there does: it
     /// shows what the Bead call returns, whether the yard serves the row
     /// still or not.
@@ -794,6 +833,9 @@ impl Model {
         };
         if m.back.is_none() {
             m.back = self.back.clone();
+        }
+        if m.bead_from.is_none() {
+            m.bead_from = self.bead_from.clone();
         }
         // What was shown before the yard was lost is not unseen again.
         for (seq, w) in m.unread.iter_mut() {
@@ -1046,9 +1088,10 @@ impl Model {
 
     /// Every row of one mode's list from the top: the conversations and
     /// the yard row in chat, the beads with open asks with the dealt with
-    /// when "Decided" stands open in decisions, the arrivals row in
-    /// timetable. An arrival's bead is open from the board, and has no
-    /// row here.
+    /// when "Decided" stands open in decisions, the arrivals row, the
+    /// lines in the served order and No line last in timetable, while
+    /// unassigned beads travel. A travelling bead is open from the board,
+    /// a flow, Elsewhere or No line, and has no row here.
     fn order_in(&self, mode: Mode) -> Vec<Selected> {
         let mut out: Vec<Selected> = Vec::new();
         match mode {
@@ -1072,6 +1115,15 @@ impl Model {
             }
             Mode::Timetable => {
                 out.push(Selected::Arrivals);
+                out.extend(
+                    self.flows
+                        .depots
+                        .iter()
+                        .map(|depot| Selected::Line(depot.name.clone())),
+                );
+                if !self.flows.unassigned.is_empty() {
+                    out.push(Selected::NoLine);
+                }
             }
         }
         out
@@ -1283,27 +1335,155 @@ impl Model {
         groups
     }
 
-    /// The arrivals row of the left list: under the yard row, with how
-    /// many beads are in transit. It stands open for an arrival's bead
-    /// too, which has no row of its own.
-    pub fn arrivals_row(&self) -> Row {
-        Row {
-            name: ARRIVALS.to_string(),
-            line: transit_words(self.arrivals.len()),
-            unread: 0,
-            selected: matches!(
-                self.selected.as_ref(),
-                Some(Selected::Arrivals) | Some(Selected::Bead(_))
-            ),
+    /// The yard-wide travelling total the Flows call serves: the open
+    /// beads outside the backlog, complete, not capped.
+    pub fn travelling(&self) -> usize {
+        self.flows.travelling
+    }
+
+    /// The flows view as read again. A line or No line that is gone
+    /// falls back to the board; a travelling bead is never gone.
+    pub fn flows(&mut self, board: Flows) -> Vec<Effect> {
+        self.flows = board;
+        self.reselect()
+    }
+
+    /// One line's flows as served, when the yard serves the line.
+    pub fn depot(&self, name: &str) -> Option<&FlowDepot> {
+        self.flows.depots.iter().find(|d| d.name == name)
+    }
+
+    /// The beads travelling with no line, newest change first, as served.
+    pub fn unassigned(&self) -> &[FlowBead] {
+        &self.flows.unassigned
+    }
+
+    /// The timetable row a travelling bead was opened from: the board, a
+    /// line or No line. The board where none was, or where the line is
+    /// gone or nothing travels without one anymore.
+    pub fn bead_back(&self) -> Selected {
+        match self.bead_from.as_ref() {
+            Some(Selected::Line(name)) if self.depot(name).is_some() => {
+                Selected::Line(name.clone())
+            }
+            Some(Selected::NoLine) if !self.flows.unassigned.is_empty() => Selected::NoLine,
+            Some(Selected::Arrivals) => Selected::Arrivals,
+            _ => Selected::Arrivals,
         }
     }
 
-    /// One arrival's bead whole, as the details pane shows it: what the
+    /// The arrivals row of the timetable list: with the yard-wide
+    /// travelling total the Flows call serves. It stands open for a
+    /// travelling bead from the board too, which has no row of its own.
+    pub fn arrivals_row(&self) -> Row {
+        Row {
+            name: ARRIVALS.to_string(),
+            line: transit_words(self.flows.travelling),
+            unread: 0,
+            selected: matches!(self.selected.as_ref(), Some(Selected::Arrivals))
+                || matches!(self.selected.as_ref(), Some(Selected::Bead(_)))
+                    && self.bead_back() == Selected::Arrivals,
+        }
+    }
+
+    /// The lines of the timetable list in the served order, each with
+    /// its served travelling total. Every served line stands here,
+    /// travelling or not. A line stands open for a travelling bead from
+    /// its flows or its Elsewhere too.
+    pub fn line_rows(&self) -> Vec<Row> {
+        self.flows
+            .depots
+            .iter()
+            .map(|depot| {
+                let back = Selected::Line(depot.name.clone());
+                Row {
+                    name: depot.name.clone(),
+                    line: line_transit_words(depot.travelling),
+                    unread: 0,
+                    selected: self.selected.as_ref() == Some(&back)
+                        || matches!(self.selected.as_ref(), Some(Selected::Bead(_)))
+                            && self.bead_back() == back,
+                }
+            })
+            .collect()
+    }
+
+    /// The No line row of the timetable list: with how many beads travel
+    /// with no line. It stands last, and only while any travel. It stands
+    /// open for a travelling bead from under it too.
+    pub fn no_line_row(&self) -> Option<Row> {
+        if self.flows.unassigned.is_empty() {
+            return None;
+        }
+        Some(Row {
+            name: NO_LINE.to_string(),
+            line: transit_words(self.flows.unassigned.len()),
+            unread: 0,
+            selected: matches!(self.selected.as_ref(), Some(Selected::NoLine))
+                || matches!(self.selected.as_ref(), Some(Selected::Bead(_)))
+                    && self.bead_back() == Selected::NoLine,
+        })
+    }
+
+    /// A travelling bead's row of the flows view with the depot it stands
+    /// in, `None` for one travelling with no line. The stages first, in
+    /// the served order, then the depot's Elsewhere, then the unassigned.
+    fn flow_bead(&self, bead: &str) -> Option<(&FlowBead, Option<&str>)> {
+        for depot in &self.flows.depots {
+            for flow in &depot.flows {
+                for stage in &flow.stages {
+                    if let Some(found) = stage.beads.iter().find(|b| b.bead == bead) {
+                        return Some((found, Some(depot.name.as_str())));
+                    }
+                }
+            }
+            if let Some(found) = depot.elsewhere.iter().find(|b| b.bead == bead) {
+                return Some((found, Some(depot.name.as_str())));
+            }
+        }
+        self.flows
+            .unassigned
+            .iter()
+            .find(|b| b.bead == bead)
+            .map(|found| (found, None))
+    }
+
+    /// One travelling bead whole, as the details pane shows it: what the
     /// Bead call returned, with the line, expected arrival and remark of
-    /// the arrivals row it came from. None until the bead is read.
+    /// the row it came from. The board's row where the yard serves the
+    /// bead still, else the flows view's; `no line` for a bead with none.
+    /// None until the bead is read.
     pub fn arrival_detail(&self, bead: &str) -> Option<ArrivalDetail> {
         let b = self.beads.get(bead)?;
         let row = self.arrivals.iter().find(|r| r.bead == bead);
+        let flowed = self.flow_bead(bead);
+        let (line, expected, remark, tone) = match (row, flowed) {
+            (Some(r), _) if !r.line.is_empty() => (
+                r.line.clone(),
+                r.expected.clone(),
+                r.remark.clone(),
+                r.tone.clone(),
+            ),
+            (Some(r), _) => (
+                "no line".to_string(),
+                r.expected.clone(),
+                r.remark.clone(),
+                r.tone.clone(),
+            ),
+            (None, Some((found, Some(depot)))) => (
+                depot.to_string(),
+                found.expected.clone(),
+                found.remark.clone(),
+                found.tone.clone(),
+            ),
+            (None, Some((found, None))) => (
+                "no line".to_string(),
+                found.expected.clone(),
+                found.remark.clone(),
+                found.tone.clone(),
+            ),
+            (None, None) => (String::new(), String::new(), String::new(), String::new()),
+        };
         let mut notes: Vec<&BeadNote> = b.notes.iter().collect();
         // The notes newest last. The yard serves them oldest first; the
         // order by seq stands even where it serves them otherwise, and a
@@ -1313,10 +1493,10 @@ impl Model {
             bead: b.id.clone(),
             title: b.title.clone(),
             stage: b.stage.clone(),
-            line: row.map_or(String::new(), |r| r.line.clone()),
-            expected: row.map_or(String::new(), |r| r.expected.clone()),
-            remark: row.map_or(String::new(), |r| r.remark.clone()),
-            tone: row.map_or(String::new(), |r| r.tone.clone()),
+            line,
+            expected,
+            remark,
+            tone,
             labels: b.labels.iter().map(|l| plain(l)).collect(),
             body: plain(&b.body),
             notes: notes
@@ -2204,9 +2384,9 @@ impl Model {
     }
 
     /// Opens a row of a list: a bead, one dealt with, a conversation,
-    /// the yard row, the arrivals row, or one arrival's bead from the
-    /// board, which has no row of the list. A row that is not there
-    /// changes nothing.
+    /// the yard row, a timetable row, or one travelling bead from the
+    /// board, a flow, Elsewhere or No line, which has no row of the list.
+    /// A row that is not there changes nothing.
     pub fn select(&mut self, sel: Selected) -> Vec<Effect> {
         if !self.has_row(&sel) {
             return Vec::new();
@@ -2218,7 +2398,7 @@ impl Model {
     }
 
     /// Opens the row `by` after the open one in the mode's list, around
-    /// the ends.
+    /// the ends. From a travelling bead, from the row it was opened from.
     pub fn step_in(&mut self, mode: Mode, by: isize) -> Vec<Effect> {
         let order = self.order_in(mode);
         if order.is_empty() {
@@ -2229,10 +2409,11 @@ impl Model {
             .selected
             .as_ref()
             .and_then(|s| {
-                order.iter().position(|o| match (s, o) {
-                    (Selected::Bead(_), Selected::Arrivals) => true,
-                    _ => o == s,
-                })
+                let from = match s {
+                    Selected::Bead(_) => self.bead_back(),
+                    _ => s.clone(),
+                };
+                order.iter().position(|o| *o == from)
             })
             .unwrap_or(0) as isize;
         let next = (at + by).rem_euclid(n) as usize;
@@ -2260,22 +2441,28 @@ impl Model {
         }
     }
 
-    /// What opening a row does here: the unread mail it shows is seen, and
-    /// a conversation is the one to come back to.
+    /// What opening a row does here: the unread mail it shows is seen, a
+    /// conversation is the one to come back to, and a timetable row is
+    /// the one a travelling bead opened next comes back to.
     fn opened(&mut self) {
         self.see();
         if let Some(Selected::Conversation(sel)) = &self.selected {
             self.back = Some(sel.clone());
+        }
+        if let Some(sel @ (Selected::Arrivals | Selected::Line(_) | Selected::NoLine)) =
+            &self.selected
+        {
+            self.bead_from = Some(sel.clone());
         }
     }
 
     /// Reads the open conversation if it was not read before, its newest
     /// page, with each whose mail it shows, and acknowledges what opening
     /// it showed; the yard row does so with its mail, whole, and its
-    /// notices need no call. A bead, one dealt with and one arrival's
-    /// bead read the bead whole when it was not read before. The board
-    /// needs no call: its rows came with the state, and events re-read
-    /// them.
+    /// notices need no call. A bead, one dealt with and one travelling
+    /// bead read the bead whole when it was not read before. The board,
+    /// a line and No line need no call: their rows came with the state,
+    /// and events re-read them.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
             Some(sel @ Selected::Conversation(_)) => {
@@ -2556,7 +2743,9 @@ impl Model {
         }
         // Arrivals move with every event about a bead, and with the
         // changes that move their other inputs though they name none:
-        // docs/api.md names them with the call.
+        // docs/api.md names them with the call. The flows view moves with
+        // those and one more: a removed depot's line leaves the timetable,
+        // and only `depot_removed` says so.
         let arrivals = !e.bead.is_empty()
             || matches!(
                 e.kind.as_str(),
@@ -2574,6 +2763,9 @@ impl Model {
                 && matches!(e.text("key"), "max_sessions" | "operator");
         if arrivals {
             effects.push(Effect::Arrivals);
+        }
+        if arrivals || e.kind.as_str() == "depot_removed" {
+            effects.push(Effect::Flows);
         }
         effects
     }
@@ -2837,8 +3029,8 @@ impl Model {
         {
             keep.insert(bead.clone());
         }
-        // The open arrival's bead is none of the queue's, and stays what
-        // the details show.
+        // The open travelling bead is none of the queue's, and stays
+        // what the details show.
         if let Some(Selected::Bead(bead)) = self.selected.as_ref() {
             keep.insert(bead.clone());
         }
@@ -2884,9 +3076,10 @@ impl Model {
 
     /// When the open row is gone, falls back within its mode. In chat, a
     /// decision opened from a conversation leads back there; decisions
-    /// stay among their own rows, and the timetable keeps its board or
-    /// bead. An arrival's bead is never gone: it shows what the Bead call
-    /// returns, whether the yard serves the row still or not.
+    /// stay among their own rows, and the timetable keeps its board,
+    /// line, No line or bead. A travelling bead is never gone: it shows
+    /// what the Bead call returns, whether the yard serves the row still
+    /// or not.
     fn reselect(&mut self) -> Vec<Effect> {
         // No row is open of a yard the window does not show.
         if self.aside {
@@ -4678,20 +4871,20 @@ mod tests {
     }
 
     #[test]
-    fn arrivals_are_read_again_on_a_bead_s_events_and_their_other_inputs() {
+    fn arrivals_and_flows_are_read_again_on_a_bead_s_events_and_their_other_inputs() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         // Every event about a bead, whatever its kind: a note re-reads
-        // the queue beside the board.
+        // the queue beside the board and the flows view.
         assert_eq!(
             m.event(&bead_event(21, "noted", "yd-links", json!({}))),
-            [Effect::Asks, Effect::Arrivals]
+            [Effect::Asks, Effect::Arrivals, Effect::Flows]
         );
         assert_eq!(
             m.event(&bead_event(22, "session_ended", "yd-links", json!({}))),
-            [Effect::Arrivals]
+            [Effect::Arrivals, Effect::Flows]
         );
-        // The changes that move the board's other inputs though they
-        // name no bead: docs/api.md names them with the call.
+        // The changes that move their other inputs though they name no
+        // bead: docs/api.md names them with the calls.
         for (seq, kind) in [
             (23, "group_set"),
             (24, "group_removed"),
@@ -4705,39 +4898,45 @@ mod tests {
         ] {
             assert_eq!(
                 m.event(&event(seq, kind, "", json!({}))),
-                [Effect::Arrivals],
+                [Effect::Arrivals, Effect::Flows],
                 "{kind}"
             );
         }
-        for (seq, key) in [(32, "max_sessions"), (33, "operator")] {
+        // A removed depot's line leaves the timetable, and only
+        // `depot_removed` says so: the flows view alone moves for it.
+        assert_eq!(
+            m.event(&event(32, "depot_removed", "", json!({}))),
+            [Effect::Flows]
+        );
+        for (seq, key) in [(33, "max_sessions"), (34, "operator")] {
             assert_eq!(
                 m.event(&event(seq, "setting_changed", "", json!({"key": key}))),
-                [Effect::Arrivals],
+                [Effect::Arrivals, Effect::Flows],
                 "{key}"
             );
         }
         // A setting of any other name, a crew status and whatever else
-        // names no bead move nothing of the board.
+        // names no bead move nothing of the board or the flows view.
         assert_eq!(
             m.event(&event(
-                34,
+                35,
                 "setting_changed",
                 "",
                 json!({"key": "web_addr"})
             )),
             []
         );
-        assert_eq!(m.event(&event(35, "setting_changed", "", json!({}))), []);
+        assert_eq!(m.event(&event(36, "setting_changed", "", json!({}))), []);
         assert_eq!(
             m.event(&event(
-                36,
+                37,
                 "crew_status",
                 "",
                 json!({"crew": "assembly", "status": "blocked", "was": "idle"})
             )),
             []
         );
-        assert_eq!(m.event(&event(37, "timer", "", json!({}))), []);
+        assert_eq!(m.event(&event(38, "timer", "", json!({}))), []);
     }
 
     fn arrival(
@@ -4853,9 +5052,10 @@ mod tests {
         assert_eq!(groups[3].rows, vec![rows[3].clone()]);
     }
 
-    /// The arrivals row stands under the yard row with how many beads
-    /// are in transit. It stands open for the board and for an arrival's
-    /// bead, which has no row of its own.
+    /// The arrivals row stands at the timetable's head with the
+    /// yard-wide travelling total the Flows call serves, complete where
+    /// the board's rows are capped. It stands open for the board and for
+    /// a travelling bead from it, which has no row of its own.
     #[test]
     fn the_arrivals_row_counts_what_is_in_transit() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
@@ -4864,23 +5064,27 @@ mod tests {
         assert_eq!(row.line, "none in transit");
         assert_eq!(row.unread, 0);
         assert!(!row.selected);
-        m.arrivals(board(
-            vec![
-                arrival("yd-a", "new", "yardr", "2h–3h", "", "none"),
-                arrival("yd-b", "new", "yardr", "2h–3h", "", "none"),
-            ],
-            &[],
-        ));
-        assert_eq!(m.arrivals_row().line, "2 in transit");
+        // The served total, not the served rows: sixteen travel, fifteen
+        // show.
+        m.flows(Flows {
+            travelling: 16,
+            ..Flows::default()
+        });
         m.arrivals(board(
             vec![arrival("yd-a", "new", "yardr", "2h–3h", "", "none")],
             &[],
         ));
+        assert_eq!(m.travelling(), 16);
+        assert_eq!(m.arrivals_row().line, "16 in transit");
+        m.flows(Flows {
+            travelling: 1,
+            ..Flows::default()
+        });
         assert_eq!(m.arrivals_row().line, "1 in transit");
         // Opening the board needs no call: its rows came with the state.
         assert_eq!(m.select(Selected::Arrivals), []);
         assert!(m.arrivals_row().selected);
-        // An arrival's bead reads the bead whole when it was not read
+        // A travelling bead reads the bead whole when it was not read
         // before, and the row stands open for it.
         assert_eq!(
             m.select(Selected::Bead("yd-a".into())),
@@ -4897,6 +5101,290 @@ mod tests {
         // Elsewhere the row stands shut.
         m.select(Selected::Yard);
         assert!(!m.arrivals_row().selected);
+    }
+
+    fn flowed(bead: &str, title: &str, expected: &str, remark: &str, tone: &str) -> FlowBead {
+        FlowBead {
+            bead: bead.into(),
+            title: title.into(),
+            expected: expected.into(),
+            remark: remark.into(),
+            tone: tone.into(),
+            working: false,
+        }
+    }
+
+    /// Two lines as served, one travelling and one not, with an
+    /// unassigned bead: yardr's default flow with a turn and a fault
+    /// stage and an Elsewhere bead, footplate's empty flow, and the
+    /// yard-wide total.
+    fn flow_view() -> Flows {
+        use crate::api::{Flow, FlowDepot, FlowStage};
+        Flows {
+            travelling: 3,
+            depots: vec![
+                FlowDepot {
+                    name: "yardr".into(),
+                    kind: "git".into(),
+                    travelling: 2,
+                    flows: vec![Flow {
+                        name: "default".into(),
+                        flow_type: "".into(),
+                        source: "store".into(),
+                        stages: vec![
+                            FlowStage {
+                                stage: "new".into(),
+                                group: "muse-builders".into(),
+                                human: false,
+                                lamp: "turn".into(),
+                                beads: vec![flowed(
+                                    "yd-zulu",
+                                    "Zulu's late turn",
+                                    "5h–8h",
+                                    "late",
+                                    "amber",
+                                )],
+                            },
+                            FlowStage {
+                                stage: "review".into(),
+                                group: "mckean".into(),
+                                human: true,
+                                lamp: "fault".into(),
+                                beads: vec![flowed(
+                                    "yd-alpha",
+                                    "Alpha moves first",
+                                    "20m–35m",
+                                    "held",
+                                    "red",
+                                )],
+                            },
+                        ],
+                    }],
+                    elsewhere: vec![flowed(
+                        "yardr-pinned",
+                        "A pinned flow's bead",
+                        "—",
+                        "",
+                        "none",
+                    )],
+                    error: "".into(),
+                },
+                FlowDepot {
+                    name: "footplate".into(),
+                    kind: "git".into(),
+                    travelling: 0,
+                    flows: vec![Flow {
+                        name: "default".into(),
+                        flow_type: "".into(),
+                        source: "store".into(),
+                        stages: vec![FlowStage {
+                            stage: "new".into(),
+                            group: "".into(),
+                            human: false,
+                            lamp: "none".into(),
+                            beads: vec![],
+                        }],
+                    }],
+                    elsewhere: vec![],
+                    error: "".into(),
+                },
+            ],
+            unassigned: vec![flowed("yd-shed", "Paint the shed", "2h–3h", "", "none")],
+        }
+    }
+
+    /// The lines stand in the served order with their served travelling
+    /// totals, every served line travelling or not; opening one needs no
+    /// call. A removed depot's line is gone from the order.
+    #[test]
+    fn the_lines_stand_in_the_served_order_with_their_totals() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert!(m.line_rows().is_empty());
+        assert!(m.depot("yardr").is_none());
+        m.flows(flow_view());
+        let rows = m.line_rows();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.name.as_str(), r.line.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("yardr", "2 in transit"),
+                ("footplate", "nothing in transit"),
+            ]
+        );
+        assert!(rows.iter().all(|r| r.unread == 0));
+        assert!(rows.iter().all(|r| !r.selected));
+        // Opening a line needs no call: its flows came with the state.
+        assert_eq!(m.select(Selected::Line("yardr".into())), []);
+        assert_eq!(m.selected(), Some(&Selected::Line("yardr".into())));
+        let rows = m.line_rows();
+        assert!(rows[0].selected);
+        assert!(!rows[1].selected);
+        assert!(!m.arrivals_row().selected);
+        // No such line changes nothing.
+        assert_eq!(m.select(Selected::Line("signalbox".into())), []);
+        assert_eq!(m.selected(), Some(&Selected::Line("yardr".into())));
+        // A removed depot's line is gone from the order, and over a
+        // yard lost the board opens where it stood.
+        let (again, _) = m.resumed(
+            State {
+                flows: Flows {
+                    travelling: 1,
+                    depots: vec![FlowDepot {
+                        name: "footplate".into(),
+                        travelling: 0,
+                        ..FlowDepot::default()
+                    }],
+                    unassigned: vec![flowed("yd-shed", "Paint the shed", "2h–3h", "", "none")],
+                },
+                ..yard(&[])
+            },
+            Mode::Timetable,
+        );
+        assert_eq!(again.selected(), Some(&Selected::Arrivals));
+        // Read again with the line gone, the window falls back the same.
+        m.flows(Flows {
+            travelling: 1,
+            depots: vec![FlowDepot {
+                name: "footplate".into(),
+                travelling: 0,
+                ..FlowDepot::default()
+            }],
+            unassigned: vec![],
+        });
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
+    }
+
+    /// The No line row stands last, only while beads travel with no line,
+    /// with how many travel. Opening it needs no call.
+    #[test]
+    fn the_no_line_row_stands_last_only_while_unassigned_beads_travel() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert_eq!(m.no_line_row(), None);
+        assert_eq!(m.unassigned(), &[]);
+        m.flows(flow_view());
+        let row = m.no_line_row().unwrap();
+        assert_eq!(row.name, "No line");
+        assert_eq!(row.line, "1 in transit");
+        assert!(!row.selected);
+        assert_eq!(m.unassigned().len(), 1);
+        assert_eq!(m.unassigned()[0].bead, "yd-shed");
+        assert_eq!(m.select(Selected::NoLine), []);
+        assert_eq!(m.selected(), Some(&Selected::NoLine));
+        assert!(m.no_line_row().unwrap().selected);
+        // Nothing without a line: the row is gone, and the board opens
+        // where it stood, read again or over a yard lost.
+        let (again, _) = m.resumed(
+            State {
+                flows: Flows {
+                    travelling: 2,
+                    depots: m.flows.depots.clone(),
+                    unassigned: vec![],
+                },
+                ..yard(&[])
+            },
+            Mode::Timetable,
+        );
+        assert_eq!(again.selected(), Some(&Selected::Arrivals));
+        m.flows(Flows {
+            travelling: 2,
+            depots: m.flows.depots.clone(),
+            unassigned: vec![],
+        });
+        assert_eq!(m.no_line_row(), None);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
+    }
+
+    /// A travelling bead comes back to the row it was opened from: the
+    /// board, a line or No line. That row stands open for it, and the
+    /// board where none was or the row is gone.
+    #[test]
+    fn a_travelling_bead_comes_back_to_the_row_it_came_from() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.flows(flow_view());
+        // None opened yet: the board.
+        assert_eq!(m.bead_back(), Selected::Arrivals);
+        m.select(Selected::Arrivals);
+        m.select(Selected::Bead("yd-zulu".into()));
+        assert_eq!(m.bead_back(), Selected::Arrivals);
+        assert!(m.arrivals_row().selected);
+        // From a line: the line stands open for the bead.
+        m.select(Selected::Line("yardr".into()));
+        m.select(Selected::Bead("yd-zulu".into()));
+        assert_eq!(m.bead_back(), Selected::Line("yardr".into()));
+        assert!(!m.arrivals_row().selected);
+        assert!(m.line_rows()[0].selected);
+        // From No line.
+        m.select(Selected::NoLine);
+        m.select(Selected::Bead("yd-shed".into()));
+        assert_eq!(m.bead_back(), Selected::NoLine);
+        assert!(m.no_line_row().unwrap().selected);
+        // The line is gone: the board.
+        m.flows(Flows::default());
+        assert_eq!(m.bead_back(), Selected::Arrivals);
+        // Over a yard lost the row comes back too.
+        m.flows(flow_view());
+        m.select(Selected::Line("footplate".into()));
+        m.select(Selected::Bead("yd-zulu".into()));
+        let (again, _) = m.resumed(
+            State {
+                flows: m.flows.clone(),
+                ..yard(&[])
+            },
+            Mode::Timetable,
+        );
+        assert_eq!(again.selected(), Some(&Selected::Bead("yd-zulu".into())));
+        assert_eq!(again.bead_back(), Selected::Line("footplate".into()));
+    }
+
+    /// From a line's bead Tab steps from the line's row, as from the
+    /// board's for a bead from there.
+    #[test]
+    fn stepping_from_a_line_s_bead_uses_the_line_s_row() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.flows(flow_view());
+        m.select(Selected::Line("yardr".into()));
+        m.select(Selected::Bead("yd-zulu".into()));
+        m.step_in(Mode::Timetable, 1);
+        assert_eq!(m.selected(), Some(&Selected::Line("footplate".into())));
+        m.select(Selected::Line("yardr".into()));
+        m.select(Selected::Bead("yd-zulu".into()));
+        m.step_in(Mode::Timetable, -1);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
+    }
+
+    /// A bead the board no longer serves — beyond its cap — is detailed
+    /// from the flows view's row, with its line; `no line` for a bead
+    /// with none, on the board or under No line.
+    #[test]
+    fn a_bead_beyond_the_board_is_detailed_from_the_flows_view() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.flows(flow_view());
+        m.bead_loaded(arrival_bead());
+        // Not on the board: the flows view's row, with its line.
+        let detail = m.arrival_detail("yd-zulu").unwrap();
+        assert_eq!(detail.line, "yardr");
+        assert_eq!(detail.expected, "5h–8h");
+        assert_eq!(detail.remark, "late");
+        assert_eq!(detail.tone, "amber");
+        // Under No line: `no line`.
+        m.bead_loaded(Bead {
+            id: "yd-shed".into(),
+            ..Bead::default()
+        });
+        let detail = m.arrival_detail("yd-shed").unwrap();
+        assert_eq!(detail.line, "no line");
+        assert_eq!(detail.expected, "2h–3h");
+        // On the board with no depot: `no line` too.
+        m.arrivals(board(
+            vec![arrival("yd-stray", "new", "", "1h–2h", "", "none")],
+            &[],
+        ));
+        m.bead_loaded(Bead {
+            id: "yd-stray".into(),
+            ..Bead::default()
+        });
+        assert_eq!(m.arrival_detail("yd-stray").unwrap().line, "no line");
     }
 
     fn arrival_bead() -> Bead {
@@ -6004,6 +6492,8 @@ mod tests {
             Mode::Decisions
         );
         assert_eq!(Selected::Arrivals.mode(), Mode::Timetable);
+        assert_eq!(Selected::Line("yardr".into()).mode(), Mode::Timetable);
+        assert_eq!(Selected::NoLine.mode(), Mode::Timetable);
         assert_eq!(Selected::Bead("yd-zulu".into()).mode(), Mode::Timetable);
     }
 
@@ -7453,7 +7943,8 @@ mod tests {
         // Back: the bead is here, so nothing is asked.
         assert_eq!(m.select(Selected::Decision("yardr-n8ta".into())), []);
         // An event whose bead is one shown reads it again, with the queue
-        // on a note, and the board on every bead's event.
+        // on a note, and the board and the flows view on every bead's
+        // event.
         assert_eq!(
             m.event(&event(21, "noted", "yardmaster", json!({"note": 1}))),
             [Effect::Asks]
@@ -7467,7 +7958,8 @@ mod tests {
                 Effect::Bead {
                     bead: "yardr-n8ta".into()
                 },
-                Effect::Arrivals
+                Effect::Arrivals,
+                Effect::Flows
             ]
         );
         // A bead's other events, whose kinds are yardr's own, read it too.
@@ -7479,14 +7971,18 @@ mod tests {
                 Effect::Bead {
                     bead: "yardr-n8ta".into()
                 },
-                Effect::Arrivals
+                Effect::Arrivals,
+                Effect::Flows
             ]
         );
-        // One that is shown nowhere reads no card, but the board moves
-        // with every bead's event all the same.
+        // One that is shown nowhere reads no card, but the board and the
+        // flows view move with every bead's event all the same.
         let mut elsewhere = event(24, "noted", "yardmaster", json!({"note": 3}));
         elsewhere.bead = "yd-elsewhere".into();
-        assert_eq!(m.event(&elsewhere), [Effect::Asks, Effect::Arrivals]);
+        assert_eq!(
+            m.event(&elsewhere),
+            [Effect::Asks, Effect::Arrivals, Effect::Flows]
+        );
     }
 
     #[test]

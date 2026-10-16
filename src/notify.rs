@@ -220,6 +220,8 @@ pub fn name(yard: &str, target: &Selected) -> String {
         Selected::Decision(bead) | Selected::Decided(bead, _) => format!("decision:{bead}"),
         Selected::Yard => "yard".to_string(),
         Selected::Arrivals => "arrivals".to_string(),
+        Selected::Line(line) => format!("line:{line}"),
+        Selected::NoLine => "no line".to_string(),
         Selected::Bead(bead) => format!("bead:{bead}"),
     };
     format!("{}:{yard}:{row}", yard.len())
@@ -244,10 +246,14 @@ fn row_in_yard(name: &str) -> Option<Selected> {
     if name == "arrivals" {
         return Some(Selected::Arrivals);
     }
+    if name == "no line" {
+        return Some(Selected::NoLine);
+    }
     let (kind, of) = name.split_once(':')?;
     match kind {
         "conversation" => Some(Selected::Conversation(of.to_string())),
         "decision" => Some(Selected::Decision(of.to_string())),
+        "line" => Some(Selected::Line(of.to_string())),
         "bead" => Some(Selected::Bead(of.to_string())),
         _ => None,
     }

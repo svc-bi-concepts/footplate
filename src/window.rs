@@ -17,6 +17,7 @@ use gpui::{
 };
 
 use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
+use crate::api::{Flow, FlowBead, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
@@ -389,6 +390,22 @@ fn arriving_words(arriving: usize) -> String {
     match arriving {
         1 => "1 arriving".to_string(),
         arriving => format!("{arriving} arriving"),
+    }
+}
+
+/// What a stage's head says stands on it: the number with "bead".
+fn bead_words(beads: usize) -> String {
+    match beads {
+        1 => "1 bead".to_string(),
+        beads => format!("{beads} beads"),
+    }
+}
+
+/// What a line's head says it carries: the number with "flow".
+fn flow_words(flows: usize) -> String {
+    match flows {
+        1 => "1 flow".to_string(),
+        flows => format!("{flows} flows"),
     }
 }
 
@@ -1473,9 +1490,9 @@ pub struct Footplate {
 
 /// The row a screenshot state opens on instead of the yard's own: the
 /// refused mail's conversation for the undelivered shot, the open card
-/// for the plain, page and run shots, the board for the arrivals shot
-/// and one arrival's bead for the arrival shot, else none. A debug
-/// build's alone.
+/// for the plain, page and run shots, the board for the arrivals shot,
+/// one arrival's bead for the arrival shot and yardr's line for the flow
+/// shot, else none. A debug build's alone.
 fn shot_selected() -> Option<Selected> {
     // The card shots open their cards, in decisions: a debug build's
     // alone, as the settings and the draft of Footplate::opened.
@@ -1486,6 +1503,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("run") => return Some(Selected::Decision("bead-s".into())),
         Ok("arrivals") => return Some(Selected::Arrivals),
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
+        Ok("flow") => return Some(Selected::Line("yardr".into())),
         _ => {}
     }
     None
@@ -2489,12 +2507,17 @@ impl Footplate {
                 let mut state = *state;
                 held.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
+                let flows_notice = state.flows_notice.take();
                 let (mut model, effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state, self.settings.mode_of(&yard)),
                     None => (Model::new_aside(state), Vec::new()),
                 };
-                if let Some(notice) = arrivals_notice {
-                    model.notice = notice;
+                let notices: Vec<String> = [arrivals_notice, flows_notice]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if !notices.is_empty() {
+                    model.notice = notices.join("; ");
                 }
                 let news = model.take_news();
                 held.model = Some(model);
@@ -2533,6 +2556,7 @@ impl Footplate {
                 let mut state = *state;
                 self.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
+                let flows_notice = state.flows_notice.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
                 // The yard was opened: in its remembered mode, on the row
@@ -2562,8 +2586,12 @@ impl Footplate {
                         kept.decided_expanded,
                     ),
                 };
-                if let Some(notice) = arrivals_notice {
-                    model.notice = notice;
+                let notices: Vec<String> = [arrivals_notice, flows_notice]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if !notices.is_empty() {
+                    model.notice = notices.join("; ");
                 }
                 if fresh {
                     model.expand(&kept.expanded);
@@ -3006,10 +3034,13 @@ impl Footplate {
             Selected::Conversation(_) | Selected::Yard => {
                 self.conversation.max_offset().height + self.conversation.offset().y
             }
-            // The board and the bead read from the top, as a card does.
+            // The board, the lines, No line and the bead read from the
+            // top, as a card does.
             Selected::Decision(_)
             | Selected::Decided(_, _)
             | Selected::Arrivals
+            | Selected::Line(_)
+            | Selected::NoLine
             | Selected::Bead(_) => px(0.) - self.decision.offset().y,
         };
         let model = self.model.as_ref();
@@ -3039,8 +3070,9 @@ impl Footplate {
             Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead) => {
                 model.has_bead(bead)
             }
-            // The board's rows came with the state: it is whole at once.
-            Selected::Arrivals => true,
+            // The board's, a line's and No line's rows came with the
+            // state: they are whole at once.
+            Selected::Arrivals | Selected::Line(_) | Selected::NoLine => true,
         };
         // Under the settings nothing of the row is laid out.
         if !here || self.settings_open {
@@ -3077,6 +3109,8 @@ impl Footplate {
             Selected::Decision(_)
             | Selected::Decided(_, _)
             | Selected::Arrivals
+            | Selected::Line(_)
+            | Selected::NoLine
             | Selected::Bead(_) => {
                 let mut at = self.decision.offset();
                 at.y = px(0.) - off;
@@ -3157,6 +3191,8 @@ impl Footplate {
                 Selected::Decision(_)
                 | Selected::Decided(_, _)
                 | Selected::Arrivals
+                | Selected::Line(_)
+                | Selected::NoLine
                 | Selected::Bead(_),
             ) => Some(&self.decision),
             None => None,
@@ -3517,8 +3553,13 @@ impl Footplate {
             Selected::Decided(bead, ask) => {
                 self.ask_words.insert((bead.clone(), *ask), typed);
             }
-            // Nothing is typed on the yard row, the board or the bead.
-            Selected::Yard | Selected::Arrivals | Selected::Bead(_) => {}
+            // Nothing is typed on the yard row, the board, a line, No
+            // line or the bead.
+            Selected::Yard
+            | Selected::Arrivals
+            | Selected::Line(_)
+            | Selected::NoLine
+            | Selected::Bead(_) => {}
         }
     }
 
@@ -3975,6 +4016,19 @@ impl Footplate {
                         Err(err) => this.notice_in(
                             session,
                             format!("the arrivals could not be read: {err}"),
+                            cx,
+                        ),
+                    },
+                ),
+                Effect::Flows => self.ask_in(
+                    session,
+                    cx,
+                    |client, _| client.flows(),
+                    move |this, flows, cx| match flows {
+                        Ok(board) => this.change_in(session, cx, |m| m.flows(board)),
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the flows could not be read: {err}"),
                             cx,
                         ),
                     },
@@ -8463,8 +8517,9 @@ impl Footplate {
         self.column(body, palette, cx)
     }
 
-    /// The timetable's list: the arrivals row, with how many beads are in
-    /// transit. The lines list stands here once the yard serves it.
+    /// The timetable's list: the arrivals row with the yard-wide
+    /// travelling total, the lines in the served order with their own,
+    /// and No line last while beads travel with none.
     fn list_timetable(
         &self,
         model: &Model,
@@ -8475,6 +8530,13 @@ impl Footplate {
         let arrivals = model.arrivals_row();
         body = body.child(section_head("Timetable", arrivals.line.clone(), palette));
         body = body.child(self.row(arrivals, Selected::Arrivals, palette, cx));
+        for row in model.line_rows() {
+            let sel = Selected::Line(row.name.clone());
+            body = body.child(self.row(row, sel, palette, cx));
+        }
+        if let Some(row) = model.no_line_row() {
+            body = body.child(self.row(row, Selected::NoLine, palette, cx));
+        }
         self.column(body, palette, cx)
     }
 
@@ -9411,6 +9473,10 @@ impl Footplate {
                 .into_any_element(),
             Some(Selected::Yard) => self.talk_yard(model, palette, cx).into_any_element(),
             Some(Selected::Arrivals) => self.talk_arrivals(model, palette, cx).into_any_element(),
+            Some(Selected::Line(line)) => {
+                self.talk_flow(model, line, palette, cx).into_any_element()
+            }
+            Some(Selected::NoLine) => self.talk_no_line(model, palette, cx).into_any_element(),
             Some(Selected::Bead(bead)) => {
                 self.talk_bead(model, bead, palette, cx).into_any_element()
             }
@@ -9758,7 +9824,9 @@ impl Footplate {
 
     /// The arrivals board: the served rows under their platform, each
     /// group headed by the platform name and its count, each row opening
-    /// the bead's details.
+    /// the bead's details. The head carries the complete travelling
+    /// total, and where the board's rows are capped a quiet last line
+    /// says how many of them show.
     fn talk_arrivals(
         &self,
         model: &Model,
@@ -9782,7 +9850,7 @@ impl Footplate {
                 div()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child("The beads in transit, under their platform."),
+                    .child(format!("{} · all lines", model.arrivals_row().line)),
             );
         let mono = select::mono(cx);
         let mut list = div()
@@ -9802,6 +9870,18 @@ impl Footplate {
             for group in groups {
                 list = list.child(self.arrival_group(group, mono.clone(), palette, cx));
             }
+        }
+        // The board caps at 15 rows; the total is complete.
+        let travelling = model.travelling();
+        let shown = model.arrival_rows().len();
+        if travelling > shown {
+            list = list.child(
+                div()
+                    .debug_selector(|| "arrivals capped".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(format!("{shown} of {travelling} shown")),
+            );
         }
         pane.children(self.reconnect_strip(palette))
             .child(head)
@@ -9867,12 +9947,421 @@ impl Footplate {
             )
     }
 
-    /// One arrival's bead whole: the title, id, platform and line, the
+    /// One line's flows: each flow a section with its stages in travel
+    /// order, each stage its lamp, name, count and beads beneath, and an
+    /// Elsewhere section under the flows for the line's beads in no
+    /// stage of them. A bead's click opens its details.
+    fn talk_flow(
+        &self,
+        model: &Model,
+        line: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let Some(depot) = model.depot(line) else {
+            return pane
+                .items_center()
+                .justify_center()
+                .text_color(palette.faint)
+                .child("The line is gone.");
+        };
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector({
+                        let line = line.to_string();
+                        move || format!("flow head {line}")
+                    })
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(line.to_string()),
+            )
+            .child(div().text_sm().text_color(palette.faint).child(format!(
+                        "{} · {}",
+                        model
+                            .line_rows()
+                            .iter()
+                            .find(|row| row.name == line)
+                            .map(|row| row.line.clone())
+                            .unwrap_or_default(),
+                        flow_words(depot.flows.len())
+                    )));
+        let mono = select::mono(cx);
+        let mut list = div()
+            .id("flow")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
+        if !depot.error.is_empty() {
+            list = list.child(
+                div()
+                    .debug_selector({
+                        let line = line.to_string();
+                        move || format!("flow error {line}")
+                    })
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(depot.error.clone()),
+            );
+        }
+        for flow in &depot.flows {
+            list = list.child(self.flow_section(flow, mono.clone(), palette, cx));
+        }
+        if !depot.elsewhere.is_empty() {
+            let mut section = div().flex().flex_col().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .debug_selector(|| "elsewhere".to_string())
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Elsewhere"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "elsewhere count".to_string())
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .flex_none()
+                            .child(bead_words(depot.elsewhere.len())),
+                    ),
+            );
+            for row in &depot.elsewhere {
+                section = section.child(self.elsewhere_row(row, mono.clone(), palette, cx));
+            }
+            list = list.child(section);
+        }
+        if depot.flows.is_empty() && depot.elsewhere.is_empty() {
+            list = list.child(div().text_color(palette.faint).child("None in transit."));
+        }
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(list)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One flow's section: the flow name with its type where typed and
+    /// its source, then its stages in travel order with their beads.
+    /// Stages never collapse.
+    fn flow_section(
+        &self,
+        flow: &Flow,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut section = div().flex().flex_col().child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .debug_selector({
+                            let flow = flow.name.clone();
+                            move || format!("flow {flow}")
+                        })
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(flow.name.clone()),
+                )
+                .child(div().text_xs().text_color(palette.faint).child(
+                    match flow.flow_type.is_empty() {
+                        true => flow.source.clone(),
+                        false => format!("{} · {}", flow.flow_type, flow.source),
+                    },
+                )),
+        );
+        for stage in &flow.stages {
+            section = section.child(self.flow_stage(flow, stage, mono.clone(), palette, cx));
+        }
+        section
+    }
+
+    /// One stage of a flow: its lamp, name and count, and its beads
+    /// beneath as served. The lamp burns red for fault, rust for turn,
+    /// and nothing where neither burns.
+    fn flow_stage(
+        &self,
+        flow: &Flow,
+        stage: &FlowStage,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let lamp = match stage.lamp.as_str() {
+            "fault" => Some(palette.warn),
+            "turn" => Some(palette.accent),
+            _ => None,
+        };
+        let mut section = div().flex().flex_col().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(lamp.map(|color| {
+                    div()
+                        .debug_selector({
+                            let (flow, stage) = (flow.name.clone(), stage.stage.clone());
+                            move || format!("lamp {flow} {stage}")
+                        })
+                        .size(rems(0.5))
+                        .rounded_full()
+                        .bg(color)
+                        .flex_none()
+                }))
+                .child(
+                    div()
+                        .debug_selector({
+                            let (flow, stage) = (flow.name.clone(), stage.stage.clone());
+                            move || format!("stage {flow} {stage}")
+                        })
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(stage.stage.clone()),
+                )
+                .child(
+                    div()
+                        .debug_selector({
+                            let (flow, stage) = (flow.name.clone(), stage.stage.clone());
+                            move || format!("stage {flow} {stage} count")
+                        })
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .flex_none()
+                        .child(bead_words(stage.beads.len())),
+                ),
+        );
+        for row in &stage.beads {
+            section = section.child(self.flow_bead_row(row, mono.clone(), palette, cx));
+        }
+        section
+    }
+
+    /// One bead of a flow's stage: the title, the expected arrival in
+    /// mono at the row's end, and faint the id and remark on the second
+    /// line, the remark in its tone. The line stands over the row, as its
+    /// pane's head, and not in it. A click opens the bead's details.
+    fn flow_bead_row(
+        &self,
+        row: &FlowBead,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        self.served_bead_row(row, "flow bead", mono, palette, cx)
+    }
+
+    /// One bead of a line's Elsewhere: drawn as a flow's bead, under the
+    /// Elsewhere head instead of a stage. A click opens the details.
+    fn elsewhere_row(
+        &self,
+        row: &FlowBead,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        self.served_bead_row(row, "elsewhere bead", mono, palette, cx)
+    }
+
+    /// One bead travelling with no line: drawn as a flow's bead, in the
+    /// plain list newest change first. A click opens the details.
+    fn no_line_bead_row(
+        &self,
+        row: &FlowBead,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        self.served_bead_row(row, "no line bead", mono, palette, cx)
+    }
+
+    /// One bead of the flows view, wherever it stands: the title, the
+    /// expected arrival in mono at the row's end, and faint the id and
+    /// remark on the second line. `which` names the row's place for the
+    /// tests: `flow bead`, `elsewhere bead` or `no line bead`.
+    fn served_bead_row(
+        &self,
+        row: &FlowBead,
+        which: &'static str,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bead = row.bead.clone();
+        let sel = Selected::Bead(row.bead.clone());
+        let el = div()
+            .id(SharedString::from(format!("{which} {bead}")))
+            .debug_selector({
+                let bead = bead.clone();
+                move || format!("{which} {bead}")
+            })
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.hover))
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
+        let remark = match row.tone.as_str() {
+            "red" => palette.warn,
+            "amber" => palette.accent,
+            _ => palette.faint,
+        };
+        let mut time = div()
+            .flex_none()
+            .debug_selector({
+                let bead = bead.clone();
+                move || format!("{which} time {bead}")
+            })
+            .text_color(match row.expected.as_str() {
+                "—" => palette.faint,
+                _ => palette.text,
+            })
+            .child(row.expected.clone());
+        if let Some(mono) = mono {
+            time = time.font_family(mono);
+        }
+        el.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .debug_selector({
+                            let bead = bead.clone();
+                            move || format!("{which} title {bead}")
+                        })
+                        .child(row.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(palette.faint)
+                                .debug_selector({
+                                    let bead = bead.clone();
+                                    move || format!("{which} sub {bead}")
+                                })
+                                .child(bead.clone()),
+                        )
+                        .children((!row.remark.is_empty()).then(|| {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(remark)
+                                .debug_selector({
+                                    let bead = bead.clone();
+                                    move || format!("{which} remark {bead}")
+                                })
+                                .child(format!("· {}", row.remark))
+                        })),
+                ),
+        )
+        .child(time)
+    }
+
+    /// The beads travelling with no line: a plain list, newest change
+    /// first, each row drawn as a flow's bead. No flows, no stages, no
+    /// lamps, because a bead with no depot travels no flow.
+    fn talk_no_line(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| "no line head".to_string())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(model::NO_LINE),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(model.no_line_row().map(|row| row.line).unwrap_or_default()),
+            );
+        let mono = select::mono(cx);
+        let mut list = div()
+            .id("no line")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
+        for row in model.unassigned() {
+            list = list.child(self.no_line_bead_row(row, mono.clone(), palette, cx));
+        }
+        if model.unassigned().is_empty() {
+            list = list.child(div().text_color(palette.faint).child("None in transit."));
+        }
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(list)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One travelling bead whole: the title, id, platform and line, the
     /// expected arrival and remark of the row it came from, the labels,
     /// the body, then the notes newest last. Its asks are the Decisions
-    /// rows' job: one line counts them and links nothing. A quiet
-    /// arrivals link leads back to the board, and Open takes the bead's
-    /// page to the browser where the web view answers.
+    /// rows' job: one line counts them and links nothing. A quiet back
+    /// link naming where it came from leads there, and Open takes the
+    /// bead's page to the browser where the web view answers.
     fn talk_bead(
         &self,
         model: &Model,
@@ -9898,6 +10387,15 @@ impl Footplate {
                 .bead_url(&detail.bead),
             _ => None,
         };
+        // The quiet back link names where the bead was opened from:
+        // the board, the line, or No line.
+        let back = model.bead_back();
+        let back_name = match &back {
+            Selected::Arrivals => model::ARRIVALS.to_string(),
+            Selected::Line(line) => line.clone(),
+            Selected::NoLine => "no line".to_string(),
+            _ => model::ARRIVALS.to_string(),
+        };
         let head = div()
             .p_3()
             .border_b_1()
@@ -9918,10 +10416,10 @@ impl Footplate {
                             .text_color(palette.faint)
                             .cursor_pointer()
                             .hover(|style| style.text_color(palette.text))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.select(Selected::Arrivals, window, cx)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select(back.clone(), window, cx)
                             }))
-                            .child("arrivals"),
+                            .child(back_name),
                     )
                     .children(url.map(|url| {
                         let open = self.means.open.clone();
@@ -11556,6 +12054,10 @@ mod tests {
         yard.answer("AckUserNotifications", "{}");
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         yard.answer("Arrivals", r#"{"result": []}"#);
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
+        );
         yard.answer("Mail", "{}");
         yard.answer(
             "MailPeer",
@@ -13050,6 +13552,77 @@ mod tests {
         json!({"result": arrivals_board_rows()}).to_string()
     }
 
+    /// The flows view the fake yard serves beside the board: three
+    /// travelling, yardr's two on its default flow's turn and quiet
+    /// stages, footplate's one on a fault stage, and nothing without a
+    /// line.
+    fn flows_board() -> String {
+        json!({"result": {
+            "travelling": 3,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yd-zulu", "title": "Zulu's late turn",
+                             "expected": "5h–8h", "remark": "late", "tone": "amber",
+                             "working": false}]},
+                        {"stage": "review", "group": "mckean", "human": true,
+                         "lamp": "none", "beads": [
+                            {"bead": "yd-alpha", "title": "Alpha moves first",
+                             "expected": "20m–35m", "remark": "", "tone": "none",
+                             "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+                {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "fault", "beads": [
+                            {"bead": "footplate-p512",
+                             "title": "The sign-in's password label",
+                             "expected": "—", "remark": "held", "tone": "red",
+                             "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+            ],
+            "unassigned": [],
+        }})
+        .to_string()
+    }
+
+    /// The flows view with an Elsewhere bead and two beads travelling
+    /// with no line: yardr's pinned bead off its flow, and the No line
+    /// rows newest change first.
+    fn flows_elsewhere() -> String {
+        json!({"result": {
+            "travelling": 4,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yd-zulu", "title": "Zulu's late turn",
+                             "expected": "5h–8h", "remark": "late", "tone": "amber",
+                             "working": false}]},
+                    ]},
+                ], "elsewhere": [
+                    {"bead": "yardr-pinned", "title": "A pinned flow's bead",
+                     "expected": "—", "remark": "", "tone": "none",
+                     "working": true},
+                ]},
+            ],
+            "unassigned": [
+                {"bead": "yd-bravo", "title": "Bravo travels light",
+                 "expected": "1h–2h", "remark": "", "tone": "none",
+                 "working": false},
+                {"bead": "yd-shed", "title": "Paint the shed",
+                 "expected": "2h–3h", "remark": "", "tone": "none",
+                 "working": false},
+            ],
+        }})
+        .to_string()
+    }
+
     /// One arrival's bead whole, as the Bead call answers it: the body,
     /// the stage, two labels, two notes, and three asks, two of them
     /// open.
@@ -13075,6 +13648,19 @@ mod tests {
                  "since": "2026-10-10T10:00:00Z",
                  "question": "Shape it?", "state": "answered"},
             ],
+        }})
+        .to_string()
+    }
+
+    /// One bead travelling with no line whole, as the Bead call
+    /// answers it: the body, the stage, and no asks.
+    fn bead_shed() -> String {
+        json!({"result": {
+            "id": "yd-shed", "title": "Paint the shed",
+            "body": "The shed wants its paint.",
+            "stage": "new", "labels": [],
+            "notes": [],
+            "asks": [],
         }})
         .to_string()
     }
@@ -17184,6 +17770,7 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // The crew stands in chat, and the arrivals row in timetable.
         assert!(drawn(cx, "row name yardmaster"));
@@ -17260,6 +17847,8 @@ mod tests {
             assert_eq!(groups[1].platform, "draft");
             assert_eq!(groups[1].rows.len(), 2);
         });
+        // Three travel and three show: no capped line stands.
+        assert!(!drawn(cx, "arrivals capped"));
     }
 
     /// Against a yard that serves no platforms list the board still
@@ -17272,6 +17861,7 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board_no_list());
+        yard.answer("Flows", &flows_board());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
@@ -17307,6 +17897,7 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
@@ -17372,12 +17963,279 @@ mod tests {
         assert_eq!(ask_words(12), "12 questions, among your decisions");
     }
 
+    /// A stage's head counts its beads, and a line's head its flows.
+    #[test]
+    fn a_stage_counts_its_beads_and_a_line_its_flows() {
+        assert_eq!(bead_words(0), "0 beads");
+        assert_eq!(bead_words(1), "1 bead");
+        assert_eq!(bead_words(2), "2 beads");
+        assert_eq!(flow_words(1), "1 flow");
+        assert_eq!(flow_words(2), "2 flows");
+    }
+
+    /// The timetable's list holds the arrivals row with the yard-wide
+    /// travelling total, the lines in the served order with their own,
+    /// every served line travelling or not, and No line last only while
+    /// beads travel with none.
+    #[gpui::test]
+    fn the_timetable_lists_the_lines_with_their_travelling_totals(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row arrivals"));
+        assert!(drawn(cx, "row yardr"));
+        assert!(drawn(cx, "row footplate"));
+        assert!(!drawn(cx, "row No line"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.travelling(), 3);
+            assert_eq!(model.arrivals_row().line, "3 in transit");
+            assert_eq!(
+                model
+                    .line_rows()
+                    .iter()
+                    .map(|row| (row.name.clone(), row.line.clone()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("yardr".to_string(), "2 in transit".to_string()),
+                    ("footplate".to_string(), "1 in transit".to_string()),
+                ]
+            );
+            assert_eq!(model.no_line_row(), None);
+        });
+        // The served order from the top: the board, then the lines.
+        let arrivals = bounds_of(cx, "row arrivals").top();
+        let yardr = bounds_of(cx, "row yardr").top();
+        let footplate = bounds_of(cx, "row footplate").top();
+        assert!(
+            arrivals < yardr && yardr < footplate,
+            "the lines stand out of the served order: {arrivals:?} {yardr:?} {footplate:?}"
+        );
+    }
+
+    /// With beads travelling with no line the No line row stands last,
+    /// with how many travel; a click opens its plain list, newest change
+    /// first, each row drawn as a flow's bead, with no stages or lamps.
+    #[gpui::test]
+    fn the_no_line_row_opens_its_plain_list(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_elsewhere());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row No line"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.travelling(), 4);
+            assert_eq!(model.no_line_row().unwrap().line, "2 in transit");
+        });
+        let yardr = bounds_of(cx, "row yardr").top();
+        let no_line = bounds_of(cx, "row No line").top();
+        assert!(yardr < no_line, "No line stands above the lines");
+        click_on(cx, "row No line");
+        wait(cx, "No line", |cx| drawn(cx, "no line head"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::NoLine)
+            );
+        });
+        assert!(drawn(cx, "no line head"));
+        // The served order, newest change first, with no stages or lamps.
+        for bead in ["yd-bravo", "yd-shed"] {
+            assert!(drawn(cx, &format!("no line bead {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("no line bead title {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("no line bead time {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("no line bead sub {bead}")), "{bead}");
+        }
+        let bravo = bounds_of(cx, "no line bead yd-bravo").top();
+        let shed = bounds_of(cx, "no line bead yd-shed").top();
+        assert!(bravo < shed, "No line stands out of the served order");
+        assert!(!drawn(cx, "stage default new"));
+        assert!(!drawn(cx, "lamp default new"));
+    }
+
+    /// A line's click opens its flows: each flow a section with its
+    /// stages in travel order, each stage its lamp, name, count and beads
+    /// beneath as served. The lamp burns for fault and turn, and nothing
+    /// where neither burns.
+    #[gpui::test]
+    fn a_line_s_click_opens_its_flows_with_stages_lamps_and_beads(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row yardr");
+        wait(cx, "the flow", |cx| drawn(cx, "flow head yardr"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Line("yardr".into()))
+            );
+        });
+        assert!(drawn(cx, "flow head yardr"));
+        assert!(drawn(cx, "flow default"));
+        // The stages in travel order with their beads beneath.
+        assert!(drawn(cx, "stage default new"));
+        assert!(drawn(cx, "stage default new count"));
+        assert!(drawn(cx, "stage default review"));
+        assert!(drawn(cx, "stage default review count"));
+        assert!(drawn(cx, "flow bead yd-zulu"));
+        assert!(drawn(cx, "flow bead yd-alpha"));
+        let new = bounds_of(cx, "stage default new").top();
+        let zulu = bounds_of(cx, "flow bead yd-zulu").top();
+        let review = bounds_of(cx, "stage default review").top();
+        let alpha = bounds_of(cx, "flow bead yd-alpha").top();
+        assert!(
+            new < zulu && zulu < review && review < alpha,
+            "the stages stand out of travel order: {new:?} {zulu:?} {review:?} {alpha:?}"
+        );
+        // The lamps: turn burns, none is absent.
+        assert!(drawn(cx, "lamp default new"));
+        assert!(!drawn(cx, "lamp default review"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let depot = model.depot("yardr").unwrap();
+            assert_eq!(
+                depot.flows[0]
+                    .stages
+                    .iter()
+                    .map(|stage| (stage.stage.as_str(), stage.lamp.as_str()))
+                    .collect::<Vec<_>>(),
+                [("new", "turn"), ("review", "none")]
+            );
+        });
+        // The other line's fault stage burns too.
+        click_on(cx, "row footplate");
+        wait(cx, "the fault", |cx| drawn(cx, "flow head footplate"));
+        assert!(drawn(cx, "lamp default new"));
+        assert!(drawn(cx, "flow bead footplate-p512"));
+        assert!(drawn(cx, "flow bead remark footplate-p512"));
+    }
+
+    /// An Elsewhere section stands under the line's flows for its beads
+    /// in no stage of them, with its count and its rows.
+    #[gpui::test]
+    fn the_elsewhere_section_stands_under_the_flows(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_elsewhere());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row yardr");
+        wait(cx, "the flow", |cx| drawn(cx, "elsewhere"));
+        assert!(drawn(cx, "flow default"));
+        assert!(drawn(cx, "elsewhere"));
+        assert!(drawn(cx, "elsewhere count"));
+        assert!(drawn(cx, "elsewhere bead yardr-pinned"));
+        assert!(drawn(cx, "elsewhere bead title yardr-pinned"));
+        let flow = bounds_of(cx, "flow default").top();
+        let elsewhere = bounds_of(cx, "elsewhere").top();
+        let pinned = bounds_of(cx, "elsewhere bead yardr-pinned").top();
+        assert!(
+            flow < elsewhere && elsewhere < pinned,
+            "Elsewhere stands above the flows: {flow:?} {elsewhere:?} {pinned:?}"
+        );
+    }
+
+    /// A bead's details link back to where they were opened from: the
+    /// board, a flow, Elsewhere or No line. The back link names the row,
+    /// and a click opens it again.
+    #[gpui::test]
+    fn a_bead_s_details_link_back_to_where_they_came_from(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_elsewhere());
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        // From a flow: the line's name, back to the line.
+        click_on(cx, "row yardr");
+        wait(cx, "the flow", |cx| drawn(cx, "flow bead yd-zulu"));
+        click_on(cx, "flow bead yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.selected(), Some(&Selected::Bead("yd-zulu".into())));
+            assert_eq!(model.bead_back(), Selected::Line("yardr".into()));
+        });
+        click_on(cx, "bead back");
+        wait(cx, "the line again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some(&Selected::Line("yardr".into()))
+            })
+        });
+        // From No line: back to No line.
+        click_on(cx, "row No line");
+        wait(cx, "No line", |cx| drawn(cx, "no line bead yd-shed"));
+        yard.answer("Bead", &bead_shed());
+        click_on(cx, "no line bead yd-shed");
+        wait(cx, "the bead again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some(&Selected::Bead("yd-shed".into()))
+            })
+        });
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.model.as_ref().unwrap().bead_back(), Selected::NoLine);
+        });
+        click_on(cx, "bead back");
+        wait(cx, "No line again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some(&Selected::NoLine)
+            })
+        });
+    }
+
+    /// Where more travel than the board shows, a quiet last line says
+    /// how many of them show; where all show, no line stands.
+    #[gpui::test]
+    fn the_board_says_how_many_of_the_travelling_show_where_capped(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // Fifteen rows, sixteen travelling: the cap stands.
+        let rows: Vec<_> = (0..15)
+            .map(|n| {
+                json!({"bead": format!("yd-many-{n:02}"), "title": format!("Many {n:02}"),
+                       "platform": "new", "line": "yardr", "expected": "1h–2h",
+                       "remark": "", "tone": "none"})
+            })
+            .collect();
+        yard.answer(
+            "Arrivals",
+            &json!({"result": {"rows": rows, "platforms": ["new"]}}).to_string(),
+        );
+        yard.answer(
+            "Flows",
+            &json!({"result": {"travelling": 16, "depots": [], "unassigned": []}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrivals capped"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.travelling(), 16);
+            assert_eq!(model.arrival_rows().len(), 15);
+        });
+    }
+
     /// The bead's page opens through Open where the web view answers.
     #[gpui::test]
     fn the_bead_s_page_opens_where_the_view_answers(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // The view answers at its address: the head carries Open.
@@ -17410,6 +18268,7 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // Nothing answers at the view's address: the head has no Open.
@@ -17440,6 +18299,7 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);

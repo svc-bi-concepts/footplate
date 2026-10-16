@@ -252,6 +252,108 @@ pub struct Arrival {
     pub tone: String,
 }
 
+/// The flows view as the yard serves it: the depots as lines, each with
+/// its travelling total, its flows, each flow its stages in travel order
+/// with the open beads on each and its lamp, and its Elsewhere rows; the
+/// beads travelling with no line; and the yard-wide travelling total.
+/// footplate draws the lines, their flows, stages, beads and lamps as
+/// they come, in the served order.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Flows {
+    /// The yard's open beads outside the backlog: the depots' totals plus
+    /// the unassigned count. Complete, not capped.
+    #[serde(default)]
+    pub travelling: usize,
+    #[serde(default, deserialize_with = "or_default")]
+    pub depots: Vec<FlowDepot>,
+    /// The open beads outside the backlog with no depot, the newest
+    /// change first, each row shaped as a flow bead.
+    #[serde(default, deserialize_with = "or_default")]
+    pub unassigned: Vec<FlowBead>,
+}
+
+/// One depot as the flows view shows it: its flows, and the open beads
+/// in no stage of them. Every depot stands here, travelling or not.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct FlowDepot {
+    pub name: String,
+    /// `git` or `dir`, as the depot is.
+    #[serde(default)]
+    pub kind: String,
+    /// The depot's open beads outside the backlog.
+    #[serde(default)]
+    pub travelling: usize,
+    #[serde(default, deserialize_with = "or_default")]
+    pub flows: Vec<Flow>,
+    /// The depot's open beads in no stage of the flows above, the newest
+    /// change first, as on /flows.
+    #[serde(default, deserialize_with = "or_default")]
+    pub elsewhere: Vec<FlowBead>,
+    /// Why the depot's flows could not be read; its beads are then all
+    /// in Elsewhere. Absent when they read.
+    #[serde(default)]
+    pub error: String,
+}
+
+/// One flow of a depot: the depot's own (an empty type) or a bead
+/// type's, with its stages in travel order.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Flow {
+    pub name: String,
+    /// The bead type it governs, `""` for the depot's own.
+    #[serde(default, rename = "type")]
+    pub flow_type: String,
+    /// Where the flow comes from, as `yardr flow show` says it: `store`,
+    /// `repo@<sha>`, `repo (directory)`.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub stages: Vec<FlowStage>,
+}
+
+/// One stage of a flow and the open beads in it, with the stage's wait
+/// light.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct FlowStage {
+    pub stage: String,
+    /// The group a bead of the flow's type would be routed to in this
+    /// stage, `""` when no route matches.
+    #[serde(default)]
+    pub group: String,
+    /// The group is a manual one.
+    #[serde(default)]
+    pub human: bool,
+    /// `fault` where a held, blocked or stranded bead stands here,
+    /// `turn` where only a person's turn does, `none` otherwise.
+    #[serde(default)]
+    pub lamp: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub beads: Vec<FlowBead>,
+}
+
+/// One bead of the flows view: the bead with its Arrivals row, so the
+/// board and the flows can never disagree about it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct FlowBead {
+    pub bead: String,
+    #[serde(default)]
+    pub title: String,
+    /// The expected arrival as the yard prints it: the usual range, one
+    /// span when both ends agree, `—` where the yard serves none.
+    #[serde(default)]
+    pub expected: String,
+    #[serde(default)]
+    pub remark: String,
+    /// `red` for a hold and a stall, `amber` for a wait and a late mark,
+    /// `none` with no remark.
+    #[serde(default)]
+    pub tone: String,
+    /// An agent's or a command's session claimed it; a manual group's
+    /// claim is a person's turn and no work.
+    #[serde(default)]
+    pub working: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Peer {
     pub name: String,
@@ -1877,6 +1979,20 @@ impl Client {
             }
             board => serde_json::from_value(board)
                 .map_err(|err| Error::Protocol(format!("Arrivals: {err}"))),
+        }
+    }
+
+    /// The flows view: the depots as lines, each with its travelling
+    /// total, its flows, each flow its stages in travel order with the
+    /// open beads on each and its lamp, and its Elsewhere rows; the beads
+    /// travelling with no line; and the yard-wide travelling total. No
+    /// answer at all reads as an empty view.
+    pub fn flows(&self) -> Result<Flows> {
+        let result = self.call("Flows", json!({}))?.unwrap_or(Value::Null);
+        match result {
+            Value::Null => Ok(Flows::default()),
+            board => serde_json::from_value(board)
+                .map_err(|err| Error::Protocol(format!("Flows: {err}"))),
         }
     }
 
@@ -3815,6 +3931,84 @@ mod tests {
         // No answer at all is an empty board.
         yard.answer("Arrivals", r#"{"result": null}"#);
         assert_eq!(yard.client().arrivals().unwrap(), Arrivals::default());
+    }
+
+    #[test]
+    fn flows_come_with_depots_flows_stages_beads_lamps_and_totals() {
+        let yard = Yard::start();
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 4, "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yardr-bwm2", "title": "Hosted v0 trial",
+                             "expected": "20m–35m", "remark": "waits for mckean",
+                             "tone": "amber", "working": false}]},
+                        {"stage": "review", "group": "mckean", "human": true,
+                         "lamp": "none", "beads": []}
+                    ]},
+                    {"name": "design", "type": "design", "source": "repo@0f415ee",
+                     "stages": []}
+                ], "elsewhere": [
+                    {"bead": "yardr-pinned", "title": "A pinned flow's bead",
+                     "expected": "—", "remark": "", "tone": "none", "working": true}
+                ]},
+                {"name": "drafts", "kind": "dir", "travelling": 1, "flows": [],
+                 "elsewhere": [
+                    {"bead": "yd-greet", "title": "The greeting",
+                     "expected": "—", "remark": "held", "tone": "red", "working": false}
+                 ],
+                 "error": ".yardr/flows/default.flow: flow line 1: want a stage"}
+            ], "unassigned": [
+                {"bead": "yd-shed", "title": "Paint the shed",
+                 "expected": "2h–3h", "remark": "", "tone": "none", "working": false}
+            ]}}"#,
+        );
+        let board = yard.client().flows().unwrap();
+        assert_eq!(yard.asked("Flows"), vec![json!({})]);
+        assert_eq!(board.travelling, 4);
+        assert_eq!(board.depots.len(), 2);
+        let depot = &board.depots[0];
+        assert_eq!((depot.name.as_str(), depot.kind.as_str()), ("yardr", "git"));
+        assert_eq!(depot.travelling, 2);
+        assert_eq!(depot.flows.len(), 2);
+        assert_eq!(depot.flows[0].name.as_str(), "default");
+        assert_eq!(depot.flows[0].flow_type.as_str(), "");
+        assert_eq!(depot.flows[0].source.as_str(), "store");
+        assert_eq!(depot.flows[1].flow_type.as_str(), "design");
+        let stages = &depot.flows[0].stages;
+        assert_eq!(stages.len(), 2);
+        assert_eq!(
+            (
+                stages[0].stage.as_str(),
+                stages[0].group.as_str(),
+                stages[0].human,
+                stages[0].lamp.as_str()
+            ),
+            ("new", "muse-builders", false, "turn")
+        );
+        assert_eq!(stages[0].beads.len(), 1);
+        assert_eq!(stages[0].beads[0].bead.as_str(), "yardr-bwm2");
+        assert_eq!(stages[0].beads[0].remark.as_str(), "waits for mckean");
+        assert_eq!(stages[0].beads[0].tone.as_str(), "amber");
+        assert!(!stages[0].beads[0].working);
+        assert_eq!(stages[1].lamp.as_str(), "none");
+        assert!(stages[1].beads.is_empty());
+        assert_eq!(depot.elsewhere.len(), 1);
+        assert_eq!(depot.elsewhere[0].bead.as_str(), "yardr-pinned");
+        assert!(depot.elsewhere[0].working);
+        assert!(depot.error.is_empty());
+        let drafts = &board.depots[1];
+        assert!(drafts.flows.is_empty());
+        assert_eq!(drafts.elsewhere.len(), 1);
+        assert!(!drafts.error.is_empty());
+        assert_eq!(board.unassigned.len(), 1);
+        assert_eq!(board.unassigned[0].bead.as_str(), "yd-shed");
+        // No answer at all is an empty view.
+        yard.answer("Flows", r#"{"result": null}"#);
+        assert_eq!(yard.client().flows().unwrap(), Flows::default());
     }
 
     #[test]

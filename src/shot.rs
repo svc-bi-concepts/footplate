@@ -29,7 +29,8 @@ use crate::yard::Env;
 /// canned doctor of two providers and their model offers, the first
 /// screen with the hosted way's fields open and filled, and the away
 /// screen of a hosted yard that is signed out, the arrivals board open
-/// on the arrivals row, and one arrival's bead open from the board.
+/// on the arrivals row, one arrival's bead open from the board, and one
+/// line's flow open on its row.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -66,6 +67,7 @@ pub const STATES: &[&str] = &[
     "signedout",
     "arrivals",
     "arrival",
+    "flow",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -370,16 +372,55 @@ fn populate(yard: &Yard, state: &str) {
         ], "platforms": ["new", "review", "draft"]}})
         .to_string(),
     );
+    // The flows view every state loads: the three arrivals travelling,
+    // yardr's two on its default flow's turn and quiet stages,
+    // footplate's one on a fault stage. The window counts the totals in
+    // the timetable's rows, and the flow state opens yardr's line.
+    yard.answer(
+        "Flows",
+        &json!({"result": {
+            "travelling": 3,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yd-zulu", "title": "Zulu's late turn",
+                             "expected": "5h–8h", "remark": "late",
+                             "tone": "amber", "working": false}]},
+                        {"stage": "review", "group": "mckean", "human": true,
+                         "lamp": "none", "beads": [
+                            {"bead": "yd-alpha", "title": "Alpha moves first",
+                             "expected": "20m–35m", "remark": "",
+                             "tone": "none", "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+                {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "fault", "beads": [
+                            {"bead": "footplate-p512",
+                             "title": "The sign-in's password label",
+                             "expected": "—", "remark": "held",
+                             "tone": "red", "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+            ],
+            "unassigned": [],
+        }})
+        .to_string(),
+    );
     match state {
         // The yard at an address is opened from the settings, not from
         // this yard, and the settings open over a running one: both
         // serve the yardmaster's conversation, as does the yard that is
         // stopped once it is read, the one that answers under the
         // first screen's open fields, the signed-out yard's, which
-        // the window never reaches past the edge, and the arrivals
-        // states', which the window opens on the board and the bead.
+        // the window never reaches past the edge, and the timetable
+        // states', which the window opens on the board, the bead and
+        // the flow.
         "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout"
-        | "arrivals" | "arrival" => {
+        | "arrivals" | "arrival" | "flow" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -724,7 +765,7 @@ mod tests {
                     assert_eq!(letters.len(), 3, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
                 }
-                "arrivals" | "arrival" => {
+                "arrivals" | "arrival" | "flow" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");
@@ -757,6 +798,18 @@ mod tests {
                         ["new", "review", "draft"],
                         "{state}"
                     );
+                    // The flows view beside the board: three travelling,
+                    // yardr's two on a turn and a quiet stage, footplate's
+                    // one on a fault stage, and nothing without a line.
+                    assert_eq!(loaded.flows.travelling, 3, "{state}");
+                    assert_eq!(loaded.flows.depots.len(), 2, "{state}");
+                    assert_eq!(loaded.flows.depots[0].name, "yardr", "{state}");
+                    assert_eq!(loaded.flows.depots[0].travelling, 2, "{state}");
+                    assert_eq!(
+                        loaded.flows.depots[0].flows[0].stages[0].lamp, "turn",
+                        "{state}"
+                    );
+                    assert!(loaded.flows.unassigned.is_empty(), "{state}");
                     // One arrival's bead, which the arrival state opens:
                     // the body, two labels, two notes, and three asks, two
                     // of them open.

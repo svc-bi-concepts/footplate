@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::api::{self, Arrivals, Client, Event};
+use crate::api::{self, Arrivals, Client, Event, Flows};
 use crate::model::State;
 
 /// How long until the yard is tried again.
@@ -244,12 +244,20 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     let notifications = client.user_notifications(&user.name, 0)?.notifications;
     let asks = client.user_asks(&user.name)?;
     // One call's failure must not hold the whole yard away: an
-    // unreadable board reads as empty, with why for the window to say.
+    // unreadable board reads as empty, with why for the window to say,
+    // and an unreadable flows view with it.
     let (arrivals, arrivals_notice) = match client.arrivals() {
         Ok(board) => (board, None),
         Err(err) => (
             Arrivals::default(),
             Some(format!("the arrivals could not be read: {err}")),
+        ),
+    };
+    let (flows, flows_notice) = match client.flows() {
+        Ok(board) => (board, None),
+        Err(err) => (
+            Flows::default(),
+            Some(format!("the flows could not be read: {err}")),
         ),
     };
     Ok(State {
@@ -265,6 +273,8 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         asks,
         arrivals,
         arrivals_notice,
+        flows,
+        flows_notice,
         yard,
     })
 }
@@ -376,6 +386,10 @@ mod tests {
         );
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         yard.answer("Arrivals", r#"{"result": []}"#);
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
+        );
     }
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;
@@ -507,6 +521,35 @@ mod tests {
         yard.answer("Arrivals", r#"{"result": []}"#);
         let state = load(&yard.client(), "jo").unwrap();
         assert_eq!(state.arrivals_notice, None);
+    }
+
+    /// A flows view the yard serves unreadably does not fail the state
+    /// read either: the view is empty, with why for the window to say.
+    #[test]
+    fn load_reads_on_past_an_unreadable_flows_view() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Flows", r#"{"result": {"travelling": [7]}}"#);
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.flows.travelling, 0);
+        assert!(state.flows.depots.is_empty());
+        assert!(state.flows.unassigned.is_empty());
+        assert!(
+            state
+                .flows_notice
+                .as_deref()
+                .unwrap()
+                .starts_with("the flows could not be read: "),
+            "{:?}",
+            state.flows_notice
+        );
+        // A view that reads carries no notice.
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.flows_notice, None);
     }
 
     /// A yard at an address: the window is for the user its token is of,

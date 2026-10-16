@@ -26,7 +26,8 @@
 # `hosted` (the first screen with the hosted way's fields open and
 # filled), `signedout` (the away screen of a hosted yard that is
 # signed out), `arrivals` (the arrivals board open on the arrivals
-# row) and `arrival` (one arrival's bead open from the board).
+# row), `arrival` (one arrival's bead open from the board) and `flow`
+# (yardr's line open on its flow).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the
@@ -45,7 +46,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run stopped far settings reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival"
+states="yardmaster plain run stopped far settings reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

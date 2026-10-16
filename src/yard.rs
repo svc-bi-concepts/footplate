@@ -765,6 +765,10 @@ mod tests {
         );
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         yard.answer("Arrivals", r#"{"result": []}"#);
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
+        );
     }
 
     #[test]
