@@ -14,7 +14,7 @@
 --text-primary:var(--ink-100);--text-secondary:var(--ink-300);
 --text-accent:var(--yard-400);--accent:var(--yard-500);
 --status-running:var(--signal-green);--status-error:var(--signal-red);
---tile-bg:#0E0F10;--track-stroke:#F5F5F5;
+--tile-bg:var(--dusk-950);--track-stroke:#F5F5F5;
 display:flex;background:var(--surface-app);color:var(--text-primary);
 font:400 13px/18px var(--sans);overflow:hidden;text-align:left;
 }
@@ -42,7 +42,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 .list{width:270px;flex:none;border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;overflow:hidden}
 .status{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border-subtle);flex:none}
 .dot{width:8px;height:8px;border-radius:999px;background:var(--status-running);flex:none}
-.dot.red{background:var(--status-error)}.dot.amber{background:var(--text-accent)}
+.dot.red{background:var(--status-error)}.dot.turn{background:var(--text-accent)}
 .status .st{font-weight:500}
 .status .act{margin-left:auto;color:var(--text-secondary)}
 .sect{display:flex;justify-content:space-between;align-items:center;padding:8px 12px 4px;flex:none}
@@ -80,7 +80,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 .brow .l1{display:flex;justify-content:space-between;gap:8px}
 .brow .tm{font-family:var(--mono);font-size:12px;flex:none}
 .brow .l2{font-size:12px;line-height:16px;color:var(--text-secondary)}
-.brow .l2 .rd{color:var(--status-error)}.brow .l2 .am{color:var(--text-accent)}
+.brow .l2 .rd{color:var(--status-error)}.brow .l2 .wait{color:var(--text-accent)}
 .stage{padding:2px 0}
 .stage .sh{display:flex;align-items:center;gap:8px;padding:6px 12px 2px}
 .stage .sh .t{font-weight:600}
@@ -88,13 +88,13 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 .flowhead{padding:10px 12px 2px}
 .flowhead .t{font-weight:600}
 .flowhead .s{font-size:12px;color:var(--text-secondary)}
-</style></head><body><body style="background:#0B0C0D;padding:24px;font-family:var(--sans)">
+</style></head><body><body style="background:#101112;padding:24px;font-family:var(--sans)">
 <h1 style="color:#E9E9EA;font-size:18px;margin-bottom:4px">footplate rail: three modes, two sizes, two themes</h1>
 <p style="color:#ABADB0;font-size:13px;margin-bottom:20px">Frames are exact pixels: the floor is 616 by 360, the large 1200 by 800. Tokens from yardr-design.</p>
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 616 by 360 &middot; dark</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:616px;height:360px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -120,7 +120,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 616 by 360 &middot; dark</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:616px;height:360px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -154,7 +154,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 616 by 360 &middot; dark</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:616px;height:360px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -178,13 +178,13 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <div class="l2">yd-links &middot; yardr &middot; <span class="rd">held</span></div></div>
 <div class="sect"><div class="t">review</div><div class="c">1 arriving</div></div>
 <div class="brow"><div class="l1"><div class="nm">Release train</div><div class="tm">45m&ndash;1h</div></div>
-<div class="l2">yd-train &middot; footplate &middot; <span class="am">waits for mckean</span></div></div>
+<div class="l2">yd-train &middot; footplate &middot; <span class="wait">waits for mckean</span></div></div>
 </div></div>
 </div></div>
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 1200 by 800 &middot; dark</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:1200px;height:800px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -210,7 +210,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 1200 by 800 &middot; dark</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:1200px;height:800px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -244,7 +244,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 1200 by 800 &middot; dark</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:1200px;height:800px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -262,9 +262,9 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <div class="pane"><div class="phead"><div class="t">yardr</div><div class="s">2 in transit &middot; 2 flows</div></div>
 <div class="body" style="padding:4px 0">
 <div class="flowhead"><div class="t">default</div><div class="s">repo@0f415ee</div></div>
-<div class="stage"><div class="sh"><div class="dot amber"></div><div class="t">new</div><div class="c">2 beads</div></div>
+<div class="stage"><div class="sh"><div class="dot turn"></div><div class="t">new</div><div class="c">2 beads</div></div>
 <div class="brow"><div class="l1"><div class="nm">Paint the shed</div><div class="tm">2h&ndash;3h</div></div>
-<div class="l2">yd-shed &middot; <span class="am">waits for mckean</span></div></div>
+<div class="l2">yd-shed &middot; <span class="wait">waits for mckean</span></div></div>
 <div class="brow"><div class="l1"><div class="nm">Move the links</div><div class="tm">&mdash;</div></div>
 <div class="l2">yd-links &middot; <span class="rd">held</span></div></div></div>
 <div class="stage"><div class="sh"><div class="dot red"></div><div class="t">review</div><div class="c">1 bead</div></div>
@@ -279,7 +279,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 616 by 360 &middot; light</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:616px;height:360px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -305,7 +305,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 616 by 360 &middot; light</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:616px;height:360px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -339,7 +339,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 616 by 360 &middot; light</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:616px;height:360px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -363,13 +363,13 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <div class="l2">yd-links &middot; yardr &middot; <span class="rd">held</span></div></div>
 <div class="sect"><div class="t">review</div><div class="c">1 arriving</div></div>
 <div class="brow"><div class="l1"><div class="nm">Release train</div><div class="tm">45m&ndash;1h</div></div>
-<div class="l2">yd-train &middot; footplate &middot; <span class="am">waits for mckean</span></div></div>
+<div class="l2">yd-train &middot; footplate &middot; <span class="wait">waits for mckean</span></div></div>
 </div></div>
 </div></div>
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 1200 by 800 &middot; light</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:1200px;height:800px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -395,7 +395,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 1200 by 800 &middot; light</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:1200px;height:800px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -429,7 +429,7 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 1200 by 800 &middot; light</h2>
 <div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:1200px;height:800px"><div class="rail">
 <div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
-<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg></div>
 <div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
 <div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
 <div class="foot">
@@ -447,9 +447,9 @@ line-height:30px;font-weight:600;color:var(--text-primary)}
 <div class="pane"><div class="phead"><div class="t">yardr</div><div class="s">2 in transit &middot; 2 flows</div></div>
 <div class="body" style="padding:4px 0">
 <div class="flowhead"><div class="t">default</div><div class="s">repo@0f415ee</div></div>
-<div class="stage"><div class="sh"><div class="dot amber"></div><div class="t">new</div><div class="c">2 beads</div></div>
+<div class="stage"><div class="sh"><div class="dot turn"></div><div class="t">new</div><div class="c">2 beads</div></div>
 <div class="brow"><div class="l1"><div class="nm">Paint the shed</div><div class="tm">2h&ndash;3h</div></div>
-<div class="l2">yd-shed &middot; <span class="am">waits for mckean</span></div></div>
+<div class="l2">yd-shed &middot; <span class="wait">waits for mckean</span></div></div>
 <div class="brow"><div class="l1"><div class="nm">Move the links</div><div class="tm">&mdash;</div></div>
 <div class="l2">yd-links &middot; <span class="rd">held</span></div></div></div>
 <div class="stage"><div class="sh"><div class="dot red"></div><div class="t">review</div><div class="c">1 bead</div></div>
