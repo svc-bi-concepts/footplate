@@ -2070,7 +2070,12 @@ impl Model {
         let at = self
             .selected
             .as_ref()
-            .and_then(|s| order.iter().position(|o| o == s))
+            .and_then(|s| {
+                order.iter().position(|o| match (s, o) {
+                    (Selected::Bead(_), Selected::Arrivals) => true,
+                    _ => o == s,
+                })
+            })
             .unwrap_or(0) as isize;
         let next = (at + by).rem_euclid(n) as usize;
         self.select(order[next].clone())
@@ -3602,6 +3607,21 @@ mod tests {
         assert_eq!(m.selected(), Some(&Selected::Arrivals));
         m.step(-1);
         assert_eq!(m.selected(), Some(&Selected::Yard));
+    }
+
+    #[test]
+    fn stepping_from_an_arrival_bead_uses_the_arrivals_row() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.select(Selected::Bead("yd-zulu".into()));
+        m.step(-1);
+        assert_eq!(m.selected(), Some(&Selected::Yard));
+
+        m.select(Selected::Bead("yd-zulu".into()));
+        m.step(1);
+        let next_from_bead = m.selected().cloned();
+        m.select(Selected::Arrivals);
+        m.step(1);
+        assert_eq!(m.selected().cloned(), next_from_bead);
     }
 
     #[test]
