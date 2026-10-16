@@ -1092,6 +1092,9 @@ pub struct Footplate {
     back_position: Option<(String, gpui::Point<gpui::Pixels>)>,
     /// The open card's own scroll: mail and notices arriving never move it.
     decision: ScrollHandle,
+    /// The left list's own scroll: the window never moves it, but the
+    /// arrivals shots stand at its end, where the arrivals row is.
+    rows: ScrollHandle,
     /// What is selected of the open conversation's messages.
     selection: Entity<Selection>,
     /// The images of the conversations and cards that were open, by hash:
@@ -1571,6 +1574,7 @@ impl Footplate {
             older_at: None,
             back_position: None,
             decision: ScrollHandle::new(),
+            rows: ScrollHandle::new(),
             selection,
             images: HashMap::new(),
             image_open: None,
@@ -2708,6 +2712,23 @@ impl Footplate {
             self.new_below = 0;
         }
         self.reach_top(cx);
+        // The arrivals shots show the list's end, where the arrivals row
+        // stands: a debug build's alone, as the page shot's stand at its
+        // card's end. The layout says how far the end is, so the frame
+        // that first has it whole stands there; past that the list is
+        // the reader's.
+        #[cfg(debug_assertions)]
+        if matches!(
+            std::env::var("FOOTPLATE_SHOT").as_deref(),
+            Ok("yardmaster") | Ok("arrivals") | Ok("arrival")
+        ) {
+            let max = self.rows.max_offset().height;
+            if max > px(0.) && self.rows.offset().y == px(0.) {
+                let mut at = self.rows.offset();
+                at.y = px(0.) - max;
+                self.rows.set_offset(at);
+            }
+        }
     }
 
     /// Where the open yard stands, on `row`: what is kept of it when
@@ -7794,6 +7815,7 @@ impl Footplate {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.rows)
             .py_1();
         // The open questions above the conversations, grouped by topic.
         let decisions = model.decisions_count();
