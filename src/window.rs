@@ -8646,18 +8646,50 @@ impl Footplate {
             .text_color(palette.faint)
             .child(format!("page, {}", model::size(file.bytes)));
         let Some(base) = self.view_base() else {
-            return row
-                .child(label)
-                .child(
-                    div()
-                        .text_color(palette.faint)
-                        .debug_selector({
-                            let hash = hash.clone();
-                            move || format!("page unset {hash}")
-                        })
-                        .child("this yard's web view is not set: set it in the settings"),
-                )
-                .into_any_element();
+            let row = row.child(label).child(
+                div()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let hash = hash.clone();
+                        move || format!("page unset {hash}")
+                    })
+                    .child("this yard's web view is not set: set it in the settings"),
+            );
+            // A note's page can still run through an explicitly set run
+            // base when this yard has no web view. The run base is a
+            // separate address; only Open needs the web view.
+            if !note {
+                return row.into_any_element();
+            }
+            return match (self.run_address(), self.run_up_now()) {
+                (Some(base), Some(true)) => {
+                    let Some(url) = base.page_url(&file.hash) else {
+                        return row.into_any_element();
+                    };
+                    let run = self.means.open.clone();
+                    row.child(
+                        div()
+                            .id(SharedString::from(format!("page run {hash}")))
+                            .debug_selector(move || format!("page run {hash}"))
+                            .text_color(palette.accent)
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| (run)(&url, cx))
+                            .child("run"),
+                    )
+                    .into_any_element()
+                }
+                (_, Some(false)) => row
+                    .child(
+                        div()
+                            .text_color(palette.faint)
+                            .debug_selector(move || format!("page run down {hash}"))
+                            .child(
+                                "run is not reached: update the yard's yardr, or set the run base",
+                            ),
+                    )
+                    .into_any_element(),
+                _ => row.into_any_element(),
+            };
         };
         match self.view_up_now() {
             Some(true) => {
@@ -14372,6 +14404,58 @@ mod tests {
         assert!(drawn(cx, &format!("page open {page}")));
         assert!(drawn(cx, &format!("page run down {page}")));
         assert!(!drawn(cx, &format!("page run {page}")));
+    }
+
+    #[gpui::test]
+    fn a_note_s_page_can_run_through_its_set_base_without_a_web_view(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        far.answer("UserAsks", &asks_three());
+        let page = "ab".repeat(32);
+        far.answer("Bead", &bead_note_page(&page));
+        let run = view_up();
+        let settings = Settings {
+            yards: vec![settings::Yard::far("far", far.address(), "yard-far.token")],
+            open: "far".to_string(),
+            ..Settings::default()
+        }
+        .with_yard_run("far", &run)
+        .unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        settings.write(&file).unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-far.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        wait(cx, "the run base", |cx| {
+            run_answered(&view, cx) == Some(true)
+        });
+        assert_eq!(view_answered(&view, cx), None);
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        assert!(drawn(cx, &format!("page unset {page}")));
+        assert!(drawn(cx, &format!("page run {page}")));
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("page run {page}"));
+        cx.run_until_parked();
+        assert_eq!(opened.borrow().as_slice(), [format!("{run}/blobs/{page}")]);
     }
 
     /// The words of a card are typed in the same line as a mail: shift
