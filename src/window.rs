@@ -5083,6 +5083,7 @@ impl Footplate {
     /// The shown yard's web view is unset again: its usual.
     fn usual_view(&mut self, cx: &mut Context<Self>) {
         self.view_said = None;
+        self.view.update(cx, |line, cx| line.set_text("", cx));
         let yard = self.yard.clone();
         if let Ok(settings) = self.settings.clone().with_yard_view(&yard, "") {
             self.set(settings, cx);
@@ -16083,6 +16084,14 @@ mod tests {
         click_on(cx, "view save");
         assert_eq!(entry_of(&view, cx).web_view, "");
         assert!(drawn(cx, "view said"));
+        // The usual address clears an unsaved invalid value too, even
+        // though the stored setting was already unset.
+        click_on(cx, "view usual");
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.view.read(cx).text().to_string()),
+            ""
+        );
+        assert_eq!(view.read_with(cx, |v, _| v.view_said.clone()), None);
         // Kept, it is the yard's, and the file has it on its entry.
         let base = view_up();
         view.update(cx, |v, cx| {
