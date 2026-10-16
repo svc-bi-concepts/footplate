@@ -8220,7 +8220,7 @@ impl Footplate {
                 Mode::Timetable => track_glyph(color).into_any_element(),
             };
             let tip = match live {
-                true => format!("{} ({}+[ {}+])", m.name(), SECONDARY, SECONDARY),
+                true => format!("{} ({}+[ or {}+])", m.name(), SECONDARY, SECONDARY),
                 false => "the yard is away".to_string(),
             };
             let id = format!("rail {}", m.name());
