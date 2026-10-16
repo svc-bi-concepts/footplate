@@ -219,6 +219,8 @@ pub fn name(yard: &str, target: &Selected) -> String {
         Selected::Conversation(with) => format!("conversation:{with}"),
         Selected::Decision(bead) | Selected::Decided(bead, _) => format!("decision:{bead}"),
         Selected::Yard => "yard".to_string(),
+        Selected::Arrivals => "arrivals".to_string(),
+        Selected::Bead(bead) => format!("bead:{bead}"),
     };
     format!("{}:{yard}:{row}", yard.len())
 }
@@ -239,10 +241,14 @@ fn row_in_yard(name: &str) -> Option<Selected> {
     if name == "yard" {
         return Some(Selected::Yard);
     }
+    if name == "arrivals" {
+        return Some(Selected::Arrivals);
+    }
     let (kind, of) = name.split_once(':')?;
     match kind {
         "conversation" => Some(Selected::Conversation(of.to_string())),
         "decision" => Some(Selected::Decision(of.to_string())),
+        "bead" => Some(Selected::Bead(of.to_string())),
         _ => None,
     }
 }
@@ -810,6 +816,8 @@ mod tests {
             Selected::Conversation("clerk:of@north".into()),
             Selected::Decision("yardr-n8ta".into()),
             Selected::Yard,
+            Selected::Arrivals,
+            Selected::Bead("yardr-n8ta".into()),
         ] {
             // A yard's name is whatever a person called it, and none at
             // all for a window that follows no yard of the settings.
@@ -839,7 +847,7 @@ mod tests {
             "conversation:yardmaster",
             "5:north",
             "5:north:yards",
-            "5:north:bead:yd-1",
+            "5:north:wagon:yd-1",
             // A length that is not the name's, or that ends within a letter.
             "9:north:yard",
             "1:é:yard",

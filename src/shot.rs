@@ -28,8 +28,8 @@ use crate::yard::Env;
 /// esc opens it, step 2 of setting up a yard here, posed with a
 /// canned doctor of two providers and their model offers, the first
 /// screen with the hosted way's fields open and filled, and the away
-/// screen of a hosted yard that is signed out, and the arrivals board
-/// open under the switch.
+/// screen of a hosted yard that is signed out, the arrivals board open
+/// on the arrivals row, and one arrival's bead open from the board.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -65,6 +65,7 @@ pub const STATES: &[&str] = &[
     "hosted",
     "signedout",
     "arrivals",
+    "arrival",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -352,7 +353,8 @@ fn populate(yard: &Yard, state: &str) {
     yard.answer("DeclineAsk", "{}");
     // The arrivals board every state loads: three rows, one with an
     // amber remark, one with none, one with a red one and no expected
-    // arrival. The window shows it under the switch's Arrivals.
+    // arrival. The window counts it in the arrivals row, and the arrivals
+    // states open it.
     yard.answer(
         "Arrivals",
         &json!({"result": [
@@ -375,9 +377,9 @@ fn populate(yard: &Yard, state: &str) {
         // stopped once it is read, the one that answers under the
         // first screen's open fields, the signed-out yard's, which
         // the window never reaches past the edge, and the arrivals
-        // board's, which the window shows under the switch.
+        // states', which the window opens on the board and the bead.
         "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout"
-        | "arrivals" => {
+        | "arrivals" | "arrival" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -397,6 +399,12 @@ fn populate(yard: &Yard, state: &str) {
             ]});
             yard.answer("Conversation", &conversation.to_string());
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            // One arrival's bead, which the arrival state opens: the
+            // body, two labels, two notes, and three asks, two of them
+            // open.
+            if state == "arrival" {
+                yard.answer("Bead", &bead_zulu());
+            }
         }
         "plain" => {
             yard.answer(
@@ -620,6 +628,35 @@ fn queued_run(question: &str) -> serde_json::Value {
     })
 }
 
+/// The arrival yd-zulu whole, as the Bead call answers it.
+fn bead_zulu() -> String {
+    json!({"result": {
+        "id": "yd-zulu", "title": "Zulu's late turn",
+        "body": "The turn the yard waits on: its tests are green, and the landing waits for the review.",
+        "stage": "draft", "labels": ["size:medium", "eyes"],
+        "notes": [
+            {"seq": 3, "kind": "note", "author": "assembly",
+             "text": "running late: the review has two beads ahead of it",
+             "at": "2026-10-10T10:30:00Z"},
+            {"seq": 5, "kind": "note", "author": "yardmaster",
+             "text": "still late, and still first in line",
+             "at": "2026-10-10T11:30:00Z"},
+        ],
+        "asks": [
+            {"ask": 7, "to": "jo", "asker": "yardmaster",
+             "since": "2026-10-10T11:00:00Z",
+             "question": "Wait for it?", "state": "open"},
+            {"ask": 8, "to": "jo", "asker": "assembly",
+             "since": "2026-10-10T11:30:00Z",
+             "question": "Land it now?", "state": "open"},
+            {"ask": 6, "to": "jo", "asker": "yardmaster",
+             "since": "2026-10-10T10:00:00Z",
+             "question": "Shape it?", "state": "answered"},
+        ],
+    }})
+    .to_string()
+}
+
 /// The bead of that ask, asking `question` with `context`.
 fn bead_run(question: &str, context: &[&str]) -> String {
     json!({"result": {"id": "bead-s", "title": "The link with airy", "body": "The body.",
@@ -687,13 +724,13 @@ mod tests {
                     assert_eq!(letters.len(), 3, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
                 }
-                "arrivals" => {
+                "arrivals" | "arrival" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
-                    // The board the window shows under the switch: three
-                    // rows, with an amber remark, none, and a red one.
+                    // The board the window opens: three rows, with an
+                    // amber remark, none, and a red one.
                     assert_eq!(loaded.arrivals.len(), 3, "{state}");
                     assert_eq!(loaded.arrivals[0].bead, "yd-zulu", "{state}");
                     assert_eq!(
@@ -714,6 +751,23 @@ mod tests {
                         ("—", "held", "red"),
                         "{state}"
                     );
+                    // One arrival's bead, which the arrival state opens:
+                    // the body, two labels, two notes, and three asks, two
+                    // of them open.
+                    if *state == "arrival" {
+                        let bead = yard.client().bead("yd-zulu").unwrap();
+                        assert_eq!(bead.title, "Zulu's late turn", "{state}");
+                        assert_eq!(bead.stage, "draft", "{state}");
+                        assert_eq!(bead.labels.len(), 2, "{state}");
+                        assert!(!bead.body.is_empty(), "{state}");
+                        assert_eq!(bead.notes.len(), 2, "{state}");
+                        assert_eq!(bead.asks.len(), 3, "{state}");
+                        assert_eq!(
+                            bead.asks.iter().filter(|a| a.state == "open").count(),
+                            2,
+                            "{state}"
+                        );
+                    }
                 }
                 "plain" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

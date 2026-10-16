@@ -18,8 +18,8 @@ use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
-    self, AnswerAction, DecidedDetail, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow,
-    Effect, Entry, Kind, Model, News, Row, Selected, Target, Top,
+    self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedRow, DecisionAsk,
+    DecisionDetail, DecisionRow, Effect, Entry, Kind, Model, News, Row, Selected, Target, Top,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -349,12 +349,12 @@ fn unread_words(unread: usize) -> String {
     }
 }
 
-/// What the switch says arrives under it: the number with "arriving",
-/// or that none does.
-fn arriving_words(arriving: usize) -> String {
-    match arriving {
-        0 => "none arriving".to_string(),
-        arriving => format!("{arriving} arriving"),
+/// What an arrival's asks line says: how many questions the bead has
+/// open, which are the Decisions rows' job.
+fn ask_words(asks: usize) -> String {
+    match asks {
+        1 => "1 question, among your decisions".to_string(),
+        asks => format!("{asks} questions, among your decisions"),
     }
 }
 
@@ -1271,9 +1271,15 @@ pub struct Footplate {
 /// refused mail's conversation for the undelivered shot, else none. A
 /// debug build's alone.
 fn shot_selected() -> Option<Selected> {
+    // The arrivals shot opens the board, and the arrival shot one
+    // arrival's bead: a debug build's alone, as the settings and the
+    // draft of Footplate::opened.
     #[cfg(debug_assertions)]
-    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("undelivered") {
-        return Some(Selected::Conversation("clerk@north".into()));
+    match std::env::var("FOOTPLATE_SHOT").as_deref() {
+        Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
+        Ok("arrivals") => return Some(Selected::Arrivals),
+        Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
+        _ => {}
     }
     None
 }
@@ -2251,16 +2257,10 @@ impl Footplate {
             Update::Up(state) => {
                 let mut state = *state;
                 held.said = state.yard.take();
-                let fresh = held.model.is_none();
                 let (mut model, effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state),
                     None => (Model::new_aside(state), Vec::new()),
                 };
-                if fresh {
-                    // The lower part shows the yard's kept choice, Crew
-                    // where none was.
-                    model.show_arrivals(self.settings.arrivals_shown(&yard));
-                }
                 let news = model.take_news();
                 held.model = Some(model);
                 held.down = None;
@@ -2313,19 +2313,8 @@ impl Footplate {
                     ),
                 };
                 if fresh {
-                    // The lower part shows the yard's kept choice, Crew
-                    // where none was.
-                    let yard = self.yard.clone();
-                    model.show_arrivals(self.settings.arrivals_shown(&yard));
                     if let Some(place) = &kept {
                         model.expand(&place.expanded);
-                    }
-                    // The arrivals shot shows the board: a debug build's
-                    // alone, as the settings and the draft of
-                    // Footplate::opened.
-                    #[cfg(debug_assertions)]
-                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("arrivals") {
-                        model.show_arrivals(true);
                     }
                     // The page shot opens the card, so the note's page row
                     // and image show: a debug build's alone, as the settings
@@ -2532,7 +2521,10 @@ impl Footplate {
             // Another row is open than the one the yard was left on.
             self.returning = None;
             match &after_sel {
-                Some(Selected::Decision(_)) | Some(Selected::Decided(_, _)) => {
+                Some(Selected::Decision(_))
+                | Some(Selected::Decided(_, _))
+                | Some(Selected::Arrivals)
+                | Some(Selected::Bead(_)) => {
                     self.decision.scroll_to_item(0);
                 }
                 _ if returning_position.is_some() => {}
@@ -2728,7 +2720,11 @@ impl Footplate {
             Selected::Conversation(_) | Selected::Yard => {
                 self.conversation.max_offset().height + self.conversation.offset().y
             }
-            Selected::Decision(_) | Selected::Decided(_, _) => px(0.) - self.decision.offset().y,
+            // The board and the bead read from the top, as a card does.
+            Selected::Decision(_)
+            | Selected::Decided(_, _)
+            | Selected::Arrivals
+            | Selected::Bead(_) => px(0.) - self.decision.offset().y,
         };
         let model = self.model.as_ref();
         Place {
@@ -2754,7 +2750,11 @@ impl Footplate {
         };
         let here = match &place.row {
             Selected::Conversation(_) | Selected::Yard => model.answered(),
-            Selected::Decision(bead) | Selected::Decided(bead, _) => model.has_bead(bead),
+            Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead) => {
+                model.has_bead(bead)
+            }
+            // The board's rows came with the state: it is whole at once.
+            Selected::Arrivals => true,
         };
         // Under the settings nothing of the row is laid out.
         if !here || self.settings_open {
@@ -2788,7 +2788,10 @@ impl Footplate {
                 self.conversation.set_offset(at);
             }
             // Where the card is shorter now, the layout stops at its end.
-            Selected::Decision(_) | Selected::Decided(_, _) => {
+            Selected::Decision(_)
+            | Selected::Decided(_, _)
+            | Selected::Arrivals
+            | Selected::Bead(_) => {
                 let mut at = self.decision.offset();
                 at.y = px(0.) - place.off;
                 self.decision.set_offset(at);
@@ -2855,16 +2858,21 @@ impl Footplate {
     }
 
     /// The scroll of what is shown: the open conversation's, the open
-    /// card's, or the yard row's, which is the conversation's. None
-    /// under the settings, where none of those is shown, and none with
-    /// nothing open.
+    /// card's, the board's or the bead's, or the yard row's, which is the
+    /// conversation's. None under the settings, where none of those is
+    /// shown, and none with nothing open.
     fn scrolled(&self) -> Option<&ScrollHandle> {
         if self.settings_open {
             return None;
         }
         match self.model.as_ref()?.selected() {
             Some(Selected::Conversation(_) | Selected::Yard) => Some(&self.conversation),
-            Some(Selected::Decision(_) | Selected::Decided(_, _)) => Some(&self.decision),
+            Some(
+                Selected::Decision(_)
+                | Selected::Decided(_, _)
+                | Selected::Arrivals
+                | Selected::Bead(_),
+            ) => Some(&self.decision),
             None => None,
         }
     }
@@ -3101,7 +3109,8 @@ impl Footplate {
             Selected::Decided(bead, ask) => {
                 self.ask_words.insert((bead.clone(), *ask), typed);
             }
-            Selected::Yard => {}
+            // Nothing is typed on the yard row, the board or the bead.
+            Selected::Yard | Selected::Arrivals | Selected::Bead(_) => {}
         }
     }
 
@@ -7396,29 +7405,6 @@ impl Footplate {
         });
     }
 
-    /// Shows Crew or Arrivals under the switch: the model's from here on,
-    /// and the yard's choice kept, Crew where none was.
-    fn switch_lower(&mut self, arrivals: bool, cx: &mut Context<Self>) {
-        let showing = self.model.as_ref().is_some_and(|m| m.arrivals_shown());
-        if showing == arrivals {
-            return;
-        }
-        self.change(cx, |m| {
-            m.show_arrivals(arrivals);
-            Vec::new()
-        });
-        let mut settings = self.settings.clone();
-        match arrivals {
-            true => {
-                settings.arrivals.insert(self.yard.clone());
-            }
-            false => {
-                settings.arrivals.remove(&self.yard);
-            }
-        }
-        self.set(settings, cx);
-    }
-
     /// The away screen's first words: a yard that is only stopped says
     /// that, with where to start it; where no yard was ever made, one
     /// plain sentence says so and what to do, with no socket, no error
@@ -7854,13 +7840,8 @@ impl Footplate {
             body = body.child(divider(palette));
         }
         let unread: usize = rows.iter().map(|row| row.unread).sum();
-        body = body.child(self.lower_switch(model, unread, palette, cx));
-        if model.arrivals_shown() {
-            let mono = select::mono(cx);
-            for row in model.arrival_rows() {
-                body = body.child(self.arrival_row(row, mono.clone(), palette));
-            }
-        } else if rows.is_empty() {
+        body = body.child(section_head("Crew", unread_words(unread), palette));
+        if rows.is_empty() {
             body =
                 body.child(
                     div().p_3().text_sm().text_color(palette.faint).child(
@@ -7876,105 +7857,25 @@ impl Footplate {
         body = body.child(divider(palette));
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
+        let arrivals = model.arrivals_row();
+        body = body.child(self.row(arrivals, Selected::Arrivals, palette, cx));
         self.column(Some(model.me()), body, palette, cx)
     }
 
-    /// The head of the sidebar's lower part: the switch between Crew and
-    /// Arrivals, with what waits under the one that shows. Text only: the
-    /// one that shows in the accent, the other quiet; one row high, as a
-    /// section's head. The kit has no segmented control, so the switch is
-    /// built from the palette here.
-    fn lower_switch(
-        &self,
-        model: &Model,
-        unread: usize,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let arrivals = model.arrivals_shown();
-        let count = match arrivals {
-            true => arriving_words(model.arrival_rows().len()),
-            false => unread_words(unread),
-        };
-        div()
-            .px_3()
-            .pt_2()
-            .pb_1()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(self.switch_option("Crew", false, arrivals, palette, cx))
-                    .child(div().text_sm().text_color(palette.faint).child("|"))
-                    .child(self.switch_option("Arrivals", true, arrivals, palette, cx)),
-            )
-            .child(
-                div()
-                    .debug_selector(|| "switch count".to_string())
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .flex_none()
-                    .child(count),
-            )
-    }
-
-    /// One side of the lower switch: the one that shows in the accent,
-    /// the other quiet, and a click away from showing.
-    fn switch_option(
-        &self,
-        title: &'static str,
-        shows: bool,
-        arrivals: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let chosen = shows == arrivals;
-        div()
-            .id(SharedString::from(format!(
-                "switch {}",
-                title.to_lowercase()
-            )))
-            .debug_selector(move || format!("switch {}", title.to_lowercase()))
-            .text_sm()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(match chosen {
-                true => palette.accent,
-                false => palette.faint,
-            })
-            .when(!chosen, |el| {
-                el.cursor_pointer()
-                    .hover(|style| style.text_color(palette.text))
-                    .on_click(cx.listener(move |this, _, _, cx| this.switch_lower(shows, cx)))
-            })
-            .child(title)
-    }
-
-    /// One arrival: the title, the expected arrival in mono at the row's
-    /// end, and faint the id, platform, line and remark on the second
+    /// One arrival of the board: the title, the expected arrival in mono
+    /// at the row's end, and faint the id, line and remark on the second
     /// line. A red remark in the warn colour, amber in the accent. The
-    /// row opens the bead's page where the web view answers, and is no
-    /// button where it does not, as a page row's Open is.
+    /// platform stands over the row, as its group's head, and not in it.
+    /// A click opens the bead's details.
     fn arrival_row(
         &self,
         row: &Arrival,
         mono: Option<SharedString>,
         palette: Palette,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let bead = row.bead.clone();
-        // The probe answered at this address, so it parses: the same
-        // reading, not another. An id that is none opens nothing, and
-        // the row is no button.
-        let url = match self.view_up_now() {
-            Some(true) => Address::parse_view(&self.settings.web_view)
-                .expect("the web view answered at this address")
-                .bead_url(&row.bead),
-            _ => None,
-        };
+        let sel = Selected::Bead(row.bead.clone());
         let el = div()
             .id(SharedString::from(format!("arrival {bead}")))
             .debug_selector({
@@ -7988,17 +7889,11 @@ impl Footplate {
             .flex()
             .items_center()
             .justify_between()
-            .gap_2();
-        let el = match url {
-            Some(url) => {
-                let open = self.means.open.clone();
-                el.cursor_pointer()
-                    .hover(|style| style.bg(palette.hover))
-                    .on_click(move |_, _, cx| (open)(&url, cx))
-            }
-            None => el,
-        };
-        let faint = [row.bead.as_str(), row.platform.as_str(), row.line.as_str()]
+            .gap_2()
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.hover))
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
+        let faint = [row.bead.as_str(), row.line.as_str()]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
@@ -8086,7 +7981,8 @@ impl Footplate {
         };
         let name = row.name.clone();
         div()
-            .id(SharedString::from(id))
+            .id(SharedString::from(id.clone()))
+            .debug_selector(move || id.clone())
             .mx_1()
             .px_2()
             .py_1p5()
@@ -8779,6 +8675,10 @@ impl Footplate {
                 .talk_conversation(model, with, palette, cx)
                 .into_any_element(),
             Some(Selected::Yard) => self.talk_yard(model, palette, cx).into_any_element(),
+            Some(Selected::Arrivals) => self.talk_arrivals(model, palette, cx).into_any_element(),
+            Some(Selected::Bead(bead)) => {
+                self.talk_bead(model, bead, palette, cx).into_any_element()
+            }
             Some(Selected::Decision(bead)) => self
                 .talk_decision(model, bead, palette, cx)
                 .into_any_element(),
@@ -9113,6 +9013,364 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child("x marks one notice read, X all of them; mail is read when shown here"),
             )
+    }
+
+    /// The arrivals board: the served rows under their platform, each
+    /// group headed by the platform name and its count, each row opening
+    /// the bead's details.
+    fn talk_arrivals(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .debug_selector(|| "arrivals head".to_string())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("arrivals"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("The beads in transit, under their platform."),
+            );
+        let mono = select::mono(cx);
+        let mut list = div()
+            .id("arrivals")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
+        let groups = model.arrival_groups();
+        if groups.is_empty() {
+            list = list.child(div().text_color(palette.faint).child("None in transit."));
+        } else {
+            for group in groups {
+                list = list.child(self.arrival_group(group, mono.clone(), palette, cx));
+            }
+        }
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(list)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One platform's arrivals: the platform name and its count in the
+    /// section style, then the served rows as they came.
+    fn arrival_group(
+        &self,
+        group: ArrivalGroup,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let platform = group.platform.clone();
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .debug_selector({
+                                let platform = platform.clone();
+                                move || format!("arrival group {platform}")
+                            })
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(group.platform),
+                    )
+                    .child(
+                        div()
+                            .debug_selector({
+                                let platform = platform.clone();
+                                move || format!("arrival group {platform} count")
+                            })
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .flex_none()
+                            .child(group.rows.len().to_string()),
+                    ),
+            )
+            .children(
+                group
+                    .rows
+                    .iter()
+                    .map(|row| self.arrival_row(row, mono.clone(), palette, cx)),
+            )
+    }
+
+    /// One arrival's bead whole: the title, id, platform and line, the
+    /// expected arrival and remark of the row it came from, the labels,
+    /// the body, then the notes newest last. Its asks are the Decisions
+    /// rows' job: one line counts them and links nothing. A quiet
+    /// arrivals link leads back to the board, and Open takes the bead's
+    /// page to the browser where the web view answers.
+    fn talk_bead(
+        &self,
+        model: &Model,
+        bead: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        let Some(detail) = model.arrival_detail(bead) else {
+            return pane
+                .items_center()
+                .justify_center()
+                .text_color(palette.faint)
+                .child("Reading the bead.");
+        };
+        // The probe answered at this address, so it parses: the same
+        // reading, not another. An id that is none opens nothing, and
+        // the head has no Open, as a page row behaves.
+        let url = match self.view_up_now() {
+            Some(true) => Address::parse_view(&self.settings.web_view)
+                .expect("the web view answered at this address")
+                .bead_url(&detail.bead),
+            _ => None,
+        };
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("bead back")
+                            .debug_selector(|| "bead back".to_string())
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(palette.text))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.select(Selected::Arrivals, window, cx)
+                            }))
+                            .child("arrivals"),
+                    )
+                    .children(url.map(|url| {
+                        let open = self.means.open.clone();
+                        let bead = detail.bead.clone();
+                        div()
+                            .id(SharedString::from(format!("bead open {bead}")))
+                            .debug_selector({
+                                let bead = bead.clone();
+                                move || format!("bead open {bead}")
+                            })
+                            .text_sm()
+                            .text_color(palette.accent)
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| (open)(&url, cx))
+                            .child("Open")
+                    })),
+            )
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .debug_selector({
+                        let bead = detail.bead.clone();
+                        move || format!("bead title {bead}")
+                    })
+                    .child(detail.title.clone()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let bead = detail.bead.clone();
+                        move || format!("bead sub {bead}")
+                    })
+                    .child(
+                        [
+                            detail.bead.as_str(),
+                            detail.stage.as_str(),
+                            detail.line.as_str(),
+                        ]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    ),
+            )
+            .children((!detail.expected.is_empty()).then(|| {
+                let remark = match detail.tone.as_str() {
+                    "red" => palette.warn,
+                    "amber" => palette.accent,
+                    _ => palette.faint,
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .child(
+                        div()
+                            .text_color(palette.faint)
+                            .child(format!("arrives {}", detail.expected)),
+                    )
+                    .children((!detail.remark.is_empty()).then(|| {
+                        div()
+                            .text_color(remark)
+                            .debug_selector({
+                                let bead = detail.bead.clone();
+                                move || format!("bead remark {bead}")
+                            })
+                            .child(format!("· {}", detail.remark))
+                    }))
+            }))
+            .children((!detail.labels.is_empty()).then(|| {
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let bead = detail.bead.clone();
+                        move || format!("bead labels {bead}")
+                    })
+                    .child(detail.labels.join(" · "))
+            }));
+        let mut list = div()
+            .id("bead")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_4();
+        if detail.open_asks > 0 {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let bead = detail.bead.clone();
+                        move || format!("bead asks {bead}")
+                    })
+                    .child(ask_words(detail.open_asks)),
+            );
+        }
+        list =
+            list.child(self.bead_body(select::key(("bead", &detail.bead)), &detail, palette, cx));
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(list)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One arrival's bead whole: its body, and its notes newest last,
+    /// each with its author and time, a note's files as a mail's.
+    fn bead_body(
+        &self,
+        bead_key: u64,
+        detail: &ArrivalDetail,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut out = div().flex().flex_col().gap_2();
+        if !detail.body.is_empty() {
+            out = out
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(palette.faint)
+                        .child("body"),
+                )
+                .child(select::text(
+                    expanded_text_key(bead_key, "body", 0, &detail.body),
+                    detail.body.clone(),
+                    &self.selection,
+                ));
+        }
+        if !detail.notes.is_empty() {
+            out = out.child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette.faint)
+                    .child("notes"),
+            );
+            // Who wrote a note stands over it and not before it: a note's
+            // first line may be a heading or an item, which begin a line.
+            for (ix, note) in detail.notes.iter().enumerate() {
+                let mut block = div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(note.author.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(palette.faint)
+                                    .child(model::clock(&note.at, &chrono::Local)),
+                            ),
+                    )
+                    .child(select::text(
+                        expanded_text_key(bead_key, "note", ix, &note.text),
+                        note.text.clone(),
+                        &self.selection,
+                    ));
+                // A note's files as a mail's: no run beside a page here,
+                // as on a card.
+                for file in &note.files {
+                    block = block.child(self.picture(file, false, palette, cx));
+                }
+                out = out.child(block);
+            }
+        }
+        out
     }
 
     /// A bead with open asks, as read-only text: the picking is the next
@@ -11999,7 +12257,8 @@ mod tests {
 
     /// Three arrivals as served: out of every order of the yard's, one
     /// with an amber remark, one with none, one with a red one and no
-    /// expected arrival.
+    /// expected arrival. Two stand at one platform, one at another, so
+    /// the board's groups are a group of two and a group of one.
     fn arrivals_board() -> String {
         json!({"result": [
             {"bead": "yd-zulu", "title": "Zulu's late turn",
@@ -12009,9 +12268,38 @@ mod tests {
              "platform": "review", "line": "yardr", "expected": "20m–35m",
              "remark": "", "tone": "none"},
             {"bead": "footplate-p512", "title": "The sign-in's password label",
-             "platform": "new", "line": "footplate", "expected": "—",
+             "platform": "draft", "line": "footplate", "expected": "—",
              "remark": "held", "tone": "red"},
         ]})
+        .to_string()
+    }
+
+    /// One arrival's bead whole, as the Bead call answers it: the body,
+    /// the stage, two labels, two notes, and three asks, two of them
+    /// open.
+    fn bead_zulu() -> String {
+        json!({"result": {
+            "id": "yd-zulu", "title": "Zulu's late turn",
+            "body": "The turn the yard waits on.",
+            "stage": "draft", "labels": ["size:medium", "eyes"],
+            "notes": [
+                {"seq": 3, "kind": "note", "author": "assembly",
+                 "text": "running late", "at": "2026-10-10T10:30:00Z"},
+                {"seq": 5, "kind": "note", "author": "yardmaster",
+                 "text": "still late", "at": "2026-10-10T11:30:00Z"},
+            ],
+            "asks": [
+                {"ask": 7, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T11:00:00Z",
+                 "question": "Wait for it?", "state": "open"},
+                {"ask": 8, "to": "jo", "asker": "assembly",
+                 "since": "2026-10-10T11:30:00Z",
+                 "question": "Land it now?", "state": "open"},
+                {"ask": 6, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Shape it?", "state": "answered"},
+            ],
+        }})
         .to_string()
     }
 
@@ -15517,10 +15805,9 @@ mod tests {
     }
 
     /// The left list's sections stand under their titles, each with its
-    /// count at the right: "Decisions" over the open questions, the Crew
-    /// | Arrivals switch over the conversations. With nothing to decide
-    /// the Decisions head is gone; the switch stands whatever the yard
-    /// holds.
+    /// count at the right: "Decisions" over the open questions, "Crew"
+    /// over the conversations. With nothing to decide the Decisions head
+    /// is gone; the Crew head stands whatever the yard holds.
     #[gpui::test]
     fn the_sections_stand_under_their_titles_with_their_counts(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -15551,20 +15838,18 @@ mod tests {
         });
         assert!(drawn(cx, "section Decisions"));
         assert!(drawn(cx, "section Decisions count"));
-        assert!(drawn(cx, "switch crew"));
-        assert!(drawn(cx, "switch arrivals"));
-        assert!(drawn(cx, "switch count"));
+        assert!(drawn(cx, "section Crew"));
+        assert!(drawn(cx, "section Crew count"));
         let decisions = bounds_of(cx, "section Decisions");
         let decision_count = bounds_of(cx, "section Decisions count");
-        let crew = bounds_of(cx, "switch crew");
-        let arrivals = bounds_of(cx, "switch arrivals");
-        let count = bounds_of(cx, "switch count");
+        let crew = bounds_of(cx, "section Crew");
+        let crew_count = bounds_of(cx, "section Crew count");
         let rows = bounds_of(cx, "rows");
         assert!(
             decisions.bottom() <= crew.top(),
-            "the switch stands above the Decisions head: {crew:?} {decisions:?}"
+            "the Crew head stands above the Decisions head: {crew:?} {decisions:?}"
         );
-        for (head, count) in [(&decisions, &decision_count), (&arrivals, &count)] {
+        for (head, count) in [(&decisions, &decision_count), (&crew, &crew_count)] {
             assert!(
                 head.right() <= count.left() && count.right() <= rows.right() + px(1.),
                 "the count is not at its head's right end: {head:?} {count:?} {rows:?}"
@@ -15574,22 +15859,13 @@ mod tests {
                 "the count stands off its head's row: {head:?} {count:?}"
             );
         }
-        // The switch is one row: Crew and Arrivals stand beside each
-        // other, the count on their row.
-        assert!(
-            crew.right() <= arrivals.left(),
-            "the switch's sides overlap: {crew:?} {arrivals:?}"
-        );
-        assert!(
-            crew.top() <= arrivals.bottom() && arrivals.top() <= crew.bottom(),
-            "the switch stands on two rows: {crew:?} {arrivals:?}"
-        );
     }
 
-    /// With nothing to decide there is no Decisions head; the switch
-    /// stands alone over the conversations.
+    /// With nothing to decide there is no Decisions head; the Crew head
+    /// stands alone over the conversations, and the yard and arrivals
+    /// rows below them.
     #[gpui::test]
-    fn without_decisions_the_switch_stands_alone(cx: &mut TestAppContext) {
+    fn without_decisions_the_crew_head_stands_alone(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
@@ -15598,128 +15874,194 @@ mod tests {
         });
         assert!(!drawn(cx, "section Decisions"));
         assert!(!drawn(cx, "section Decisions count"));
-        assert!(drawn(cx, "switch crew"));
-        assert!(drawn(cx, "switch arrivals"));
-        assert!(drawn(cx, "switch count"));
+        assert!(drawn(cx, "section Crew"));
+        assert!(drawn(cx, "section Crew count"));
+        assert!(drawn(cx, "row name yardmaster"));
+        assert!(drawn(cx, "row yard"));
+        assert!(drawn(cx, "row arrivals"));
+        // The arrivals row stands under the yard row, at the list's end.
+        let yard_row = bounds_of(cx, "row yard");
+        let arrivals = bounds_of(cx, "row arrivals");
+        assert!(
+            yard_row.bottom() <= arrivals.top(),
+            "the arrivals row stands above the yard row: {arrivals:?} {yard_row:?}"
+        );
+        // Nothing in transit: the row says so.
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().arrivals_row().line,
+                "none in transit"
+            );
+        });
     }
 
-    /// The switch shows Crew first: the conversations stand under it, and
-    /// no arrival. A click on Arrivals shows the served rows in the served
-    /// order, with their remarks as served; a click on Crew shows the
-    /// conversations again.
+    /// The crew list is one list again, with the arrivals row under the
+    /// yard row counting what is in transit. A click on it opens the
+    /// board: the served rows grouped by platform, the platforms in the
+    /// order they first appear in the served order, each with its rows
+    /// in the served order and remarked as served.
     #[gpui::test]
-    fn the_switch_shows_crew_first_and_arrivals_on_a_click(cx: &mut TestAppContext) {
+    fn the_arrivals_row_opens_the_board_grouped_by_platform(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        // Crew first: the conversations stand, and no arrival.
+        // The crew stands, and the arrivals row counts the board.
         assert!(drawn(cx, "row name yardmaster"));
+        assert!(drawn(cx, "row arrivals"));
         assert!(!drawn(cx, "arrival yd-zulu"));
-        assert!(view.read_with(cx, |v, _| !v.model.as_ref().unwrap().arrivals_shown()));
-        // Arrivals on a click: the served rows. The frame keeps every
-        // selector it ever drew, so the conversations' absence is the
-        // model's: the list draws them only under Crew.
-        click_on(cx, "switch arrivals");
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().arrivals_row().line,
+                "3 in transit"
+            );
+        });
+        // The board on a click: the groups in first-appearance order,
+        // draft's two rows before review's one.
+        click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
-        assert!(view.read_with(cx, |v, _| v.model.as_ref().unwrap().arrivals_shown()));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Arrivals)
+            );
+        });
+        assert!(drawn(cx, "arrivals head"));
+        assert!(drawn(cx, "arrival group draft"));
+        assert!(drawn(cx, "arrival group draft count"));
+        assert!(drawn(cx, "arrival group review"));
+        assert!(drawn(cx, "arrival group review count"));
         for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
             assert!(drawn(cx, &format!("arrival {bead}")), "{bead}");
             assert!(drawn(cx, &format!("arrival title {bead}")), "{bead}");
             assert!(drawn(cx, &format!("arrival time {bead}")), "{bead}");
             assert!(drawn(cx, &format!("arrival sub {bead}")), "{bead}");
         }
-        // The served order, which is none of the window's: the rows stand
-        // as they came, with no sorting of their own.
-        let tops: Vec<_> = ["yd-zulu", "yd-alpha", "footplate-p512"]
-            .into_iter()
-            .map(|bead| bounds_of(cx, &format!("arrival {bead}")).top())
-            .collect();
+        let draft = bounds_of(cx, "arrival group draft").top();
+        let zulu = bounds_of(cx, "arrival yd-zulu").top();
+        let p512 = bounds_of(cx, "arrival footplate-p512").top();
+        let review = bounds_of(cx, "arrival group review").top();
+        let alpha = bounds_of(cx, "arrival yd-alpha").top();
         assert!(
-            tops.windows(2).all(|pair| pair[0] < pair[1]),
-            "the rows stand out of the served order: {tops:?}"
+            draft < zulu && zulu < p512 && p512 < review && review < alpha,
+            "the groups stand out of arrival order: {draft:?} {zulu:?} {p512:?} {review:?} {alpha:?}"
         );
-        // The remarks as served: late, none, and held.
+        // The rows as served: late, none, and held, with their tones,
+        // and no sorting or remarking of the window's own.
         assert!(drawn(cx, "arrival remark yd-zulu"));
         assert!(!drawn(cx, "arrival remark yd-alpha"));
         assert!(drawn(cx, "arrival remark footplate-p512"));
         view.read_with(cx, |v, _| {
-            let rows = v.model.as_ref().unwrap().arrival_rows();
+            let model = v.model.as_ref().unwrap();
             assert_eq!(
-                rows.iter()
-                    .map(|row| (row.bead.as_str(), row.remark.as_str(), row.tone.as_str()))
+                model
+                    .arrival_rows()
+                    .iter()
+                    .map(|row| (
+                        row.bead.as_str(),
+                        row.platform.as_str(),
+                        row.remark.as_str(),
+                        row.tone.as_str()
+                    ))
                     .collect::<Vec<_>>(),
                 [
-                    ("yd-zulu", "late", "amber"),
-                    ("yd-alpha", "", "none"),
-                    ("footplate-p512", "held", "red"),
+                    ("yd-zulu", "draft", "late", "amber"),
+                    ("yd-alpha", "review", "", "none"),
+                    ("footplate-p512", "draft", "held", "red"),
                 ]
             );
+            let groups = model.arrival_groups();
+            assert_eq!(groups.len(), 2);
+            assert_eq!(groups[0].platform, "draft");
+            assert_eq!(groups[0].rows.len(), 2);
+            assert_eq!(groups[1].platform, "review");
+            assert_eq!(groups[1].rows.len(), 1);
         });
-        // And Crew again on a click.
-        click_on(cx, "switch crew");
-        wait(cx, "the crew", |cx| {
+    }
+
+    /// A board row's click opens the bead's details: the title, id,
+    /// platform and line, the expected arrival and remark of its row,
+    /// the labels, the body, then the notes newest last with their
+    /// author and time. Its asks are one line that links nothing, and a
+    /// quiet arrivals link leads back to the board.
+    #[gpui::test]
+    fn a_board_row_s_click_opens_the_bead_s_details(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        // The bead from the Bead call, through a row's click.
+        click_on(cx, "arrival yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.selected(), Some(&Selected::Bead("yd-zulu".into())));
+            assert!(model.arrivals_row().selected);
+            let detail = model.arrival_detail("yd-zulu").unwrap();
+            assert_eq!(detail.title, "Zulu's late turn");
+            assert_eq!(detail.stage, "draft");
+            assert_eq!(detail.line, "yardr");
+            assert_eq!(detail.expected, "5h–8h");
+            assert_eq!(detail.remark, "late");
+            assert_eq!(detail.labels, ["size:medium", "eyes"]);
+            assert_eq!(detail.body, "The turn the yard waits on.");
+            assert_eq!(
+                detail
+                    .notes
+                    .iter()
+                    .map(|n| (n.author.as_str(), n.at.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("assembly", "2026-10-10T10:30:00Z"),
+                    ("yardmaster", "2026-10-10T11:30:00Z"),
+                ]
+            );
+            assert_eq!(detail.open_asks, 2);
+        });
+        assert!(drawn(cx, "bead title yd-zulu"));
+        assert!(drawn(cx, "bead sub yd-zulu"));
+        assert!(drawn(cx, "bead remark yd-zulu"));
+        assert!(drawn(cx, "bead labels yd-zulu"));
+        assert!(drawn(cx, "bead asks yd-zulu"));
+        // The asks line links nothing: a click leaves the bead open.
+        click_on(cx, "bead asks yd-zulu");
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Bead("yd-zulu".into()))
+            );
+        });
+        // And back to the board on the arrivals link.
+        click_on(cx, "bead back");
+        wait(cx, "the board again", |cx| {
             view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| !m.arrivals_shown())
+                v.model.as_ref().unwrap().selected() == Some(&Selected::Arrivals)
             })
         });
     }
 
-    /// The switch's choice is the yard's: it is kept when it is made, and
-    /// the next start opens the yard on it.
-    #[gpui::test]
-    fn the_switch_s_choice_is_kept_and_opened_again(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        yard.answer("Arrivals", &arrivals_board());
-        let env = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
-        let (view, cx) = opened_at(env, &file, cx);
-        wait(cx, "the yard", |cx| {
-            view.read_with(cx, |v, _| v.model.is_some())
-        });
-        // Crew first; Arrivals on a click, and the choice is kept.
-        assert!(drawn(cx, "row name yardmaster"));
-        click_on(cx, "switch arrivals");
-        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
-        assert!(Settings::read(&file).arrivals_shown("this machine"));
-        // The next start opens the yard on Arrivals.
-        let env = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
-        let file_again = file.clone();
-        let (again, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::opened(env, "jo".into(), Some(file_again), window, cx);
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the arrivals again", |cx| {
-            drawn(cx, "arrival yd-zulu")
-                && again.read_with(cx, |v, _| {
-                    v.model.as_ref().is_some_and(|m| m.arrivals_shown())
-                })
-        });
-        assert!(!drawn(cx, "row name yardmaster"));
-        // Choosing Crew keeps that instead.
-        click_on(cx, "switch crew");
-        wait(cx, "the crew again", |cx| drawn(cx, "row name yardmaster"));
-        assert!(!Settings::read(&file).arrivals_shown("this machine"));
-        let _ = view;
+    /// An arrival's asks line counts its open questions, among the
+    /// person's decisions.
+    #[test]
+    fn an_arrival_s_asks_line_counts_its_open_questions() {
+        assert_eq!(ask_words(1), "1 question, among your decisions");
+        assert_eq!(ask_words(2), "2 questions, among your decisions");
+        assert_eq!(ask_words(12), "12 questions, among your decisions");
     }
 
-    /// An arrival row opens the bead's page where the web view answers.
+    /// The bead's page opens through Open where the web view answers.
     #[gpui::test]
-    fn an_arrival_row_opens_the_bead_s_page_where_the_view_answers(cx: &mut TestAppContext) {
+    fn the_bead_s_page_opens_where_the_view_answers(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        // The view answers at its address: the row opens the bead's page.
+        // The view answers at its address: the head carries Open.
         let base = view_up();
         view.update(cx, |v, cx| {
             v.set(
@@ -15733,27 +16075,32 @@ mod tests {
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
-        click_on(cx, "switch arrivals");
+        click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        click_on(cx, "arrival yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        // The head carries Open once the bead is read.
+        wait(cx, "the bead read", |cx| drawn(cx, "bead open yd-zulu"));
         let opened = opened_pages(&view, cx);
-        click_on(cx, "arrival footplate-p512");
+        click_on(cx, "bead open yd-zulu");
         cx.run_until_parked();
         assert_eq!(
             opened.borrow().as_slice(),
-            [format!("{base}/beads/footplate-p512")]
+            [format!("{base}/beads/yd-zulu")]
         );
     }
 
-    /// An arrival row is no button where the web view does not answer: it
-    /// stands, and opens nothing.
+    /// The bead has no Open where the web view does not answer, and the
+    /// board's rows open the details all the same: they are no buttons
+    /// to the browser anymore.
     #[gpui::test]
-    fn an_arrival_row_is_no_button_where_the_view_is_down(cx: &mut TestAppContext) {
+    fn the_bead_has_no_open_where_the_view_is_down(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        // Nothing answers at the view's address: the row stands, and
-        // opens nothing.
+        // Nothing answers at the view's address: the head has no Open.
         let base = view_down();
         view.update(cx, |v, cx| {
             v.set(
@@ -15767,38 +16114,69 @@ mod tests {
         wait(cx, "the web view down", |cx| {
             view_answered(&view, cx) == Some(false)
         });
-        click_on(cx, "switch arrivals");
+        click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
-        let opened = opened_pages(&view, cx);
         click_on(cx, "arrival yd-zulu");
-        cx.run_until_parked();
-        assert!(opened.borrow().is_empty());
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        assert!(!drawn(cx, "bead open yd-zulu"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Bead("yd-zulu".into()))
+            );
+        });
     }
 
-    /// At the narrowest window the arrivals rows stand two lines high in
-    /// the sidebar: time and title on the first, the faint line with the
-    /// remark on the second, inside the column.
+    /// At the narrowest window the arrivals panes hold: the list's row
+    /// inside the column, the board's groups and two-line rows inside
+    /// the pane, and the bead's head and asks line inside it too.
     #[gpui::test]
-    fn the_arrivals_rows_hold_at_the_narrowest_window(cx: &mut TestAppContext) {
+    fn the_arrivals_panes_hold_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        click_on(cx, "switch arrivals");
-        wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
         // The narrowest window the application opens (main.rs).
         cx.simulate_resize(gpui::size(px(560.), px(360.)));
         // The yard's line ends at the column's edge, short of the head's
         // own padding only: a row past that runs past the column.
         let yard_line = bounds_of(cx, "which yard");
         let edge = yard_line.right() + settings_of(&view, cx).rem() * 0.75 + px(1.);
+        let row = bounds_of(cx, "row arrivals");
+        assert!(
+            row.right() <= edge,
+            "the arrivals row runs past the column: {row:?} past {yard_line:?}"
+        );
+        // The board: the groups over their rows, each row two lines high
+        // with time and title on the first and the faint line on the
+        // second, all of it inside the window. The row stands below the
+        // fold at this height, so the board is opened as a click opens
+        // it, and the click itself is the wider window's test.
+        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
+        let right = px(560.);
+        for group in ["draft", "review"] {
+            let head = bounds_of(cx, &format!("arrival group {group}"));
+            let count = bounds_of(cx, &format!("arrival group {group} count"));
+            assert!(
+                head.right() <= count.left(),
+                "the count stands off its group's head: {head:?} {count:?}"
+            );
+            assert!(
+                head.top() <= count.bottom() && count.top() <= head.bottom(),
+                "the count stands off its group's row: {head:?} {count:?}"
+            );
+            assert!(
+                count.right() <= right,
+                "the count runs past the pane: {count:?}"
+            );
+        }
         for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
             let row = bounds_of(cx, &format!("arrival {bead}"));
             let title = bounds_of(cx, &format!("arrival title {bead}"));
             let time = bounds_of(cx, &format!("arrival time {bead}"));
             let sub = bounds_of(cx, &format!("arrival sub {bead}"));
-            // Time and title on the first line, the faint line on the
-            // second, the row two lines high.
             assert!(
                 title.top() <= time.bottom() && time.top() <= title.bottom(),
                 "time stands off the title's row: {title:?} {time:?}"
@@ -15811,14 +16189,12 @@ mod tests {
                 sub.bottom() <= row.bottom() + px(1.),
                 "the faint line stands below the row: {sub:?} {row:?}"
             );
-            // All of it inside the column.
             for part in [&title, &time, &sub] {
                 assert!(
-                    part.right() <= edge,
-                    "the row runs past the column: {part:?} past {yard_line:?}"
+                    part.right() <= right,
+                    "the row runs past the pane: {part:?}"
                 );
             }
-            // The remark, where one is served, on the faint line's row.
             if bead != "yd-alpha" {
                 let remark = bounds_of(cx, &format!("arrival remark {bead}"));
                 assert!(
@@ -15826,10 +16202,31 @@ mod tests {
                     "the remark stands off the faint line's row: {sub:?} {remark:?}"
                 );
                 assert!(
-                    remark.right() <= edge,
-                    "the remark runs past the column: {remark:?} past {yard_line:?}"
+                    remark.right() <= right,
+                    "the remark runs past the pane: {remark:?}"
                 );
             }
+        }
+        // The bead: its head and asks line inside the pane.
+        click_on(cx, "arrival yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead asks yd-zulu"));
+        for selector in [
+            "bead back",
+            "bead title yd-zulu",
+            "bead sub yd-zulu",
+            "bead remark yd-zulu",
+            "bead labels yd-zulu",
+            "bead asks yd-zulu",
+        ] {
+            let part = bounds_of(cx, selector);
+            assert!(
+                part.right() <= right,
+                "the bead runs past the pane: {selector} {part:?}"
+            );
+            assert!(
+                part.top() >= px(0.),
+                "the bead stands above the pane: {selector} {part:?}"
+            );
         }
     }
 

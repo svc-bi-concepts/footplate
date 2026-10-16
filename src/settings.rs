@@ -6,7 +6,6 @@
 //! (`~/.config` when that is not set). It is footplate's to write, on every
 //! change; a file that is missing or that it cannot read is today's look.
 
-use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -151,12 +150,6 @@ pub struct Settings {
     /// opens. Empty, or the name of none, is the first of the list.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub open: String,
-    /// The yards whose sidebar's lower part shows Arrivals rather than
-    /// Crew, by name: the switch's choice, kept per yard. A yard not
-    /// named shows Crew, and choosing it again unnames it. Left out of
-    /// the file while none is named, as the yards are.
-    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
-    pub arrivals: BTreeSet<String>,
     /// What the system tells of. Left out of the file while nothing was
     /// chosen, as the yards are.
     #[serde(skip_serializing_if = "Notify::is_usual")]
@@ -203,7 +196,6 @@ struct Kept {
     look: Look,
     yards: Vec<Yard>,
     open: String,
-    arrivals: BTreeSet<String>,
     remote: bool,
     address: String,
     notifications: Notify,
@@ -219,7 +211,6 @@ impl Default for Kept {
             look: Look::Auto,
             yards: Vec::new(),
             open: String::new(),
-            arrivals: BTreeSet::new(),
             remote: false,
             address: String::new(),
             notifications: Notify::default(),
@@ -263,7 +254,6 @@ impl From<Kept> for Settings {
             text: kept.text,
             look: kept.look,
             open,
-            arrivals: kept.arrivals,
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
             web_view: match kept.web_view.trim() {
@@ -362,7 +352,6 @@ impl Default for Settings {
             look: Look::Auto,
             yards: vec![Yard::near(HERE, "")],
             open: String::new(),
-            arrivals: BTreeSet::new(),
             notifications: Notify::default(),
             menu_bar: true,
             web_view: WEB_VIEW.to_string(),
@@ -416,12 +405,6 @@ impl Settings {
     /// The yard called `name`, if the list has one.
     pub fn yard(&self, name: &str) -> Option<&Yard> {
         self.yards.iter().find(|yard| yard.name == name)
-    }
-
-    /// Whether the yard's lower part shows Arrivals: the switch's choice
-    /// as kept, Crew where none was.
-    pub fn arrivals_shown(&self, yard: &str) -> bool {
-        self.arrivals.contains(yard)
     }
 
     /// With the yard called `name` the one to open.
@@ -549,27 +532,16 @@ impl Settings {
                 Yard::near(&name, socket)
             }
         };
-        let replaced = match at.and_then(|at| self.yards.iter().position(|other| other.name == at))
-        {
+        match at.and_then(|at| self.yards.iter().position(|other| other.name == at)) {
             Some(place) => {
                 if self.open == self.yards[place].name {
                     self.open = name.clone();
                 }
                 self.yards[place] = yard;
-                true
             }
             None => {
                 self.yards.push(yard);
-                false
             }
-        };
-        // A yard that is renamed keeps the switch's choice under its new
-        // name; a yard added or edited keeps what its name says.
-        if replaced
-            && let Some(at) = at
-            && self.arrivals.remove(at)
-        {
-            self.arrivals.insert(name);
         }
         Ok(self)
     }
@@ -695,7 +667,6 @@ impl Settings {
         if self.open == name {
             self.open.clear();
         }
-        self.arrivals.remove(name);
         (self, token, session)
     }
 
@@ -1011,31 +982,18 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_s_choice_is_kept_per_yard_renamed_with_it_and_gone_with_it() {
+    fn a_file_from_before_the_switch_went_reads_and_drops_its_choice() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
-        let mut set = Settings::default();
-        assert!(!set.arrivals.contains(HERE));
-        set.arrivals.insert(HERE.to_string());
-        set.arrivals.insert("plantime".to_string());
+        // The Crew | Arrivals switch kept its choice per yard; the arrivals
+        // row keeps none, and a file that still names it reads all the
+        // same, with the choice dropped.
+        fs::write(&file, r#"{"arrivals": ["this machine"], "open": ""}"#).unwrap();
+        let set = Settings::read(&file);
+        assert_eq!(set, Settings::default());
+        // A write keeps no choice anymore.
         set.write(&file).unwrap();
-        assert_eq!(Settings::read(&file).arrivals, set.arrivals);
-        // Left out of the file while none is named.
-        Settings::default().write(&file).unwrap();
         assert!(!fs::read_to_string(&file).unwrap().contains("arrivals"));
-        // A yard that is renamed keeps the choice under its new name.
-        let mut set = Settings::default()
-            .with_yard(None, Yard::near("shop", ""), None)
-            .unwrap();
-        set.arrivals.insert("shop".to_string());
-        let set = set
-            .with_yard(Some("shop"), Yard::near("bench", ""), None)
-            .unwrap();
-        assert!(!set.arrivals.contains("shop"));
-        assert!(set.arrivals.contains("bench"));
-        // A yard that goes takes its choice with it.
-        let (set, _, _) = set.without("bench", None);
-        assert!(set.arrivals.is_empty());
     }
 
     #[test]

@@ -38,6 +38,8 @@ What a person sees, with three beads travelling: under Decisions, "Arrivals — 
 
 **16 Oct 2026, at approval.** The operator replaced the own section above with a higher nav on the day: below Decisions, a two-way switch, Crew | Arrivals, as the head of the sidebar's lower part, one row high, Crew the default and the choice kept per yard. The rows under Arrivals stand as drawn here, with the bead id faint on the second line beside the platform, line and remark. Amended in footplate-vnfq so the doc stays true; the mock's section-between-Decisions-and-Crew is the rows' shape, not their place.
 
+**16 Oct 2026, after vnfq landed.** The operator replaced the switch with a row of the yard list on the day: below the yard row, an arrivals row counting what is in transit, opening the board in the right pane with the served rows grouped under their platform, and a row's click opening that bead's details in the right pane. The served rows and the no-logic rule stand as drawn here; only their place changed. Amended in footplate-61yx so the doc stays true.
+
 ## 4. Left out
 
 **signalbox reading the served view.** The bead floats it as a later step, and later it stays. signalbox reads the web view's JSON, not the socket; serving the same rows there (a web route over the same computation) or teaching its script the socket is a third bead with its own questions, to file once the two here have landed and the rows have settled.
@@ -53,6 +55,8 @@ What a person sees, with three beads travelling: under Decisions, "Arrivals — 
 **1. Where the panel sits: an own section or a strip under the status row.** An own section between Decisions and Crew costs one more section in `list()`, in the kit's style, beside the two sections that already work that way; at the narrowest window it scrolls with the sidebar, and the status row stays one line as the kit and the window's own test require. A strip under the status row keeps arrivals always visible without scrolling, but it breaks the one-status-row rule ("a dot, the state word and a quiet action, nothing else"), takes a fixed bite of the 360-pixel minimum height, and is a new element with no kit behind it. I would take the own section: it extends what is there, and the mock shows it fits.
 
 **16 Oct 2026, at approval.** The operator took neither: the arrivals are not a list in the sidebar with the crew, and a higher nav — a two-way Crew | Arrivals switch as the head of the sidebar's lower part — switches between them. Decisions stand above it in both views; the status row and the 560 by 360 window stand as they did. Amended in footplate-vnfq so the doc stays true.
+
+**16 Oct 2026, after vnfq landed.** The operator took the switch out again: the arrivals are a row of the yard list, like the yard row, opening the board in the right pane. Amended in footplate-61yx so the doc stays true.
 
 **2. Whether a row opens the bead's page in the browser.** Opening costs one small builder beside `page_url` plus one click handler per row through the probe-gated Open a page row already uses; it needs the web view's address set, and where none is set the row has no Open, exactly as a page row behaves today. Not opening keeps the panel read-only rows, and a person who wants the bead types its id or finds it in the web view. I would take opening: the mechanism exists, the failure mode is already designed, and a board whose rows cannot be boarded is a timetable on the wall.
 

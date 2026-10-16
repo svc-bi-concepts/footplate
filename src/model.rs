@@ -34,6 +34,9 @@ pub const EVERYTHING_ELSE: &str = "Everything else";
 /// The row below the conversations: what the yard reports.
 pub const YARD: &str = "yard";
 
+/// The row below the yard row: the beads in transit.
+pub const ARRIVALS: &str = "arrivals";
+
 /// What a window for the user `me` starts from, read at the seq `head`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct State {
@@ -114,6 +117,15 @@ pub fn trusted(peers: &[Peer]) -> BTreeMap<String, String> {
     out
 }
 
+/// What the arrivals row says is in transit under it: the number, or
+/// that none is.
+fn transit_words(transit: usize) -> String {
+    match transit {
+        0 => "none in transit".to_string(),
+        transit => format!("{transit} in transit"),
+    }
+}
+
 /// What a crew member's session does, in the words of `yardr chat`.
 pub fn state_of(member: &CrewMember) -> &'static str {
     match (member.state.as_str(), member.status.as_str()) {
@@ -165,7 +177,8 @@ pub enum Target {
 }
 
 /// What the left list has open: a bead with open asks, one dealt with, a
-/// conversation, or what the yard reports.
+/// conversation, what the yard reports, the arrivals board, or one
+/// arrival's bead.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selected {
     /// A bead with open asks, by its id. A bead with several is one row.
@@ -175,6 +188,11 @@ pub enum Selected {
     /// A conversation, by crew name, user name or `<name>@<peer>`.
     Conversation(String),
     Yard,
+    /// The arrivals board: the served rows under their platform.
+    Arrivals,
+    /// One arrival's bead whole, by its id. It has no row of the list:
+    /// it opens from the board, and the arrivals row stands open for it.
+    Bead(String),
 }
 
 /// What Enter sends for an ask with the line's words.
@@ -223,6 +241,37 @@ pub struct DecidedRow {
     pub selected: bool,
 }
 
+/// One platform's arrivals, with the served rows that stand at it, in
+/// the served order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrivalGroup {
+    pub platform: String,
+    pub rows: Vec<Arrival>,
+}
+
+/// One arrival's bead whole, as the details pane shows it: what the
+/// Bead call returned, with the line, expected arrival and remark of
+/// the arrivals row it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrivalDetail {
+    pub bead: String,
+    pub title: String,
+    pub stage: String,
+    /// From the arrivals row: empty when the yard serves the bead no
+    /// longer, and the pane shows what the Bead call returned alone.
+    pub line: String,
+    pub expected: String,
+    pub remark: String,
+    pub tone: String,
+    pub labels: Vec<String>,
+    pub body: String,
+    /// The notes oldest first, so the newest stands last.
+    pub notes: Vec<CardNote>,
+    /// How many of the bead's asks are open: the Decisions rows' job,
+    /// counted here for the line that says so.
+    pub open_asks: usize,
+}
+
 /// One notice of the yard row, as it is shown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notice {
@@ -241,10 +290,14 @@ pub struct CardOption {
     pub consequence: String,
 }
 
-/// One note of the bead's body, as the expanded card shows it.
+/// One note of the bead's body, as the expanded card and the arrival's
+/// details show it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CardNote {
     pub author: String,
+    /// When it was written (RFC 3339, as the yard gives it): the
+    /// details show it beside the author, the cards do not.
+    pub at: String,
     pub text: String,
     /// The files the note carries, drawn below its words.
     pub files: Vec<BlobRef>,
@@ -445,9 +498,6 @@ pub struct Model {
     /// The arrivals board as read: the rows as served, ordered and
     /// remarked.
     arrivals: Vec<Arrival>,
-    /// Whether the sidebar's lower part shows Arrivals rather than Crew:
-    /// the switch's choice.
-    arrivals_shown: bool,
     /// The users of the yard by name, the window's own among them.
     users: Vec<String>,
     parties: Vec<Party>,
@@ -575,29 +625,33 @@ impl Model {
 
     /// The row to open: `selected` where it is still there, else an open
     /// decision, else the yardmaster's conversation, else the first row
-    /// from the top.
+    /// from the top. An arrival's bead has no row of the list, and stays
+    /// open as a row that is still there does: it shows what the Bead
+    /// call returns, whether the yard serves the row still or not.
     fn row(&self, selected: Option<Selected>) -> Option<Selected> {
         let order = self.order();
-        selected.filter(|s| order.contains(s)).or_else(|| {
-            // A kept expansion makes dealt-with rows visible, but a saved
-            // row that disappeared falls back as it did before that list
-            // was kept: to an open decision, yardmaster, or first row.
-            let order: Vec<Selected> = order
-                .into_iter()
-                .filter(|s| !matches!(s, Selected::Decided(_, _)))
-                .collect();
-            order
-                .iter()
-                .find(|s| matches!(s, Selected::Decision(_)))
-                .cloned()
-                .or_else(|| {
-                    order.iter().find_map(|s| match s {
-                        Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
-                        _ => None,
+        selected
+            .filter(|s| matches!(s, Selected::Bead(_)) || order.contains(s))
+            .or_else(|| {
+                // A kept expansion makes dealt-with rows visible, but a saved
+                // row that disappeared falls back as it did before that list
+                // was kept: to an open decision, yardmaster, or first row.
+                let order: Vec<Selected> = order
+                    .into_iter()
+                    .filter(|s| !matches!(s, Selected::Decided(_, _)))
+                    .collect();
+                order
+                    .iter()
+                    .find(|s| matches!(s, Selected::Decision(_)))
+                    .cloned()
+                    .or_else(|| {
+                        order.iter().find_map(|s| match s {
+                            Selected::Conversation(name) if name == "yardmaster" => Some(s.clone()),
+                            _ => None,
+                        })
                     })
-                })
-                .or_else(|| order.into_iter().next())
-        })
+                    .or_else(|| order.into_iter().next())
+            })
     }
 
     /// The window shows another yard from here on: the open row is shut,
@@ -634,9 +688,6 @@ impl Model {
         if m.back.is_none() {
             m.back = self.back.clone();
         }
-        // The switch's choice is the yard's, kept between runs: what was
-        // shown before the yard was lost is shown again.
-        m.arrivals_shown = self.arrivals_shown;
         // What was shown before the yard was lost is not unseen again.
         for (seq, w) in m.unread.iter_mut() {
             w.seen |= self.unread.get(seq).is_some_and(|before| before.seen);
@@ -888,7 +939,8 @@ impl Model {
 
     /// Every row of the left list from the top: the beads with open asks,
     /// the dealt with when "Decided" stands open, the conversations, the
-    /// yard row.
+    /// yard row, the arrivals row. An arrival's bead is open from the
+    /// board, and has no row here.
     fn order(&self) -> Vec<Selected> {
         let mut out: Vec<Selected> = Vec::new();
         for (bead, _) in self.decision_beads() {
@@ -905,6 +957,7 @@ impl Model {
                 .map(Selected::Conversation),
         );
         out.push(Selected::Yard);
+        out.push(Selected::Arrivals);
         out
     }
 
@@ -1056,14 +1109,70 @@ impl Model {
         self.arrivals = rows;
     }
 
-    /// Whether the sidebar's lower part shows Arrivals rather than Crew.
-    pub fn arrivals_shown(&self) -> bool {
-        self.arrivals_shown
+    /// The served rows under their platform, the platforms in the order
+    /// they first appear in the served order, each with its rows in the
+    /// served order. footplate invents no stage order and sorts nothing.
+    pub fn arrival_groups(&self) -> Vec<ArrivalGroup> {
+        let mut groups: Vec<ArrivalGroup> = Vec::new();
+        for row in self.arrival_rows() {
+            match groups.iter_mut().find(|g| g.platform == row.platform) {
+                Some(g) => g.rows.push(row.clone()),
+                None => groups.push(ArrivalGroup {
+                    platform: row.platform.clone(),
+                    rows: vec![row.clone()],
+                }),
+            }
+        }
+        groups
     }
 
-    /// Shows Arrivals under the switch, or Crew.
-    pub fn show_arrivals(&mut self, shown: bool) {
-        self.arrivals_shown = shown;
+    /// The arrivals row of the left list: under the yard row, with how
+    /// many beads are in transit. It stands open for an arrival's bead
+    /// too, which has no row of its own.
+    pub fn arrivals_row(&self) -> Row {
+        Row {
+            name: ARRIVALS.to_string(),
+            line: transit_words(self.arrivals.len()),
+            unread: 0,
+            selected: matches!(
+                self.selected.as_ref(),
+                Some(Selected::Arrivals) | Some(Selected::Bead(_))
+            ),
+        }
+    }
+
+    /// One arrival's bead whole, as the details pane shows it: what the
+    /// Bead call returned, with the line, expected arrival and remark of
+    /// the arrivals row it came from. None until the bead is read.
+    pub fn arrival_detail(&self, bead: &str) -> Option<ArrivalDetail> {
+        let b = self.beads.get(bead)?;
+        let row = self.arrivals.iter().find(|r| r.bead == bead);
+        let mut notes: Vec<&BeadNote> = b.notes.iter().collect();
+        // The notes newest last. The yard serves them oldest first; the
+        // order by seq stands even where it serves them otherwise, and a
+        // stable sort keeps the served order within one seq.
+        notes.sort_by_key(|n| n.seq);
+        Some(ArrivalDetail {
+            bead: b.id.clone(),
+            title: b.title.clone(),
+            stage: b.stage.clone(),
+            line: row.map_or(String::new(), |r| r.line.clone()),
+            expected: row.map_or(String::new(), |r| r.expected.clone()),
+            remark: row.map_or(String::new(), |r| r.remark.clone()),
+            tone: row.map_or(String::new(), |r| r.tone.clone()),
+            labels: b.labels.iter().map(|l| plain(l)).collect(),
+            body: plain(&b.body),
+            notes: notes
+                .into_iter()
+                .map(|n| CardNote {
+                    author: n.author.clone(),
+                    at: n.at.clone(),
+                    text: plain(&n.text),
+                    files: n.files.clone(),
+                })
+                .collect(),
+            open_asks: b.asks.iter().filter(|a| a.state == "open").count(),
+        })
     }
 
     /// The dealt with, newest first, with their picks.
@@ -1120,6 +1229,7 @@ impl Model {
                     .iter()
                     .map(|n| CardNote {
                         author: n.author.clone(),
+                        at: n.at.clone(),
                         text: plain(&n.text),
                         files: n.files.clone(),
                     })
@@ -1192,6 +1302,7 @@ impl Model {
                     .iter()
                     .map(|n| CardNote {
                         author: n.author.clone(),
+                        at: n.at.clone(),
                         text: plain(&n.text),
                         files: n.files.clone(),
                     })
@@ -1841,7 +1952,8 @@ impl Model {
     }
 
     /// The notes the open row's expanded cards show: the bead's, where
-    /// one of its cards stands expanded, and none anywhere else.
+    /// one of its cards stands expanded, and none anywhere else. An
+    /// arrival's bead shows its notes whole, so its are here too.
     fn expanded_notes(&self) -> Vec<&BeadNote> {
         let bead = match self.selected.as_ref() {
             Some(Selected::Decision(bead)) if self.expanded.iter().any(|(b, _)| b == bead) => {
@@ -1852,6 +1964,7 @@ impl Model {
             {
                 Some(bead)
             }
+            Some(Selected::Bead(bead)) => Some(bead),
             _ => None,
         };
         bead.and_then(|bead| self.beads.get(bead))
@@ -1928,15 +2041,17 @@ impl Model {
         })
     }
 
-    /// Opens a row of the list: a bead, one dealt with, a conversation, the
-    /// yard row. A row that is not there changes nothing.
+    /// Opens a row of the list: a bead, one dealt with, a conversation,
+    /// the yard row, the arrivals row, or one arrival's bead from the
+    /// board, which has no row of the list. A row that is not there
+    /// changes nothing.
     /// Whether the yard has the row `sel` to open.
     pub fn has_row(&self, sel: &Selected) -> bool {
-        self.order().contains(sel)
+        matches!(sel, Selected::Bead(_)) || self.order().contains(sel)
     }
 
     pub fn select(&mut self, sel: Selected) -> Vec<Effect> {
-        if !self.order().contains(&sel) {
+        if !self.has_row(&sel) {
             return Vec::new();
         }
         self.selected = Some(sel);
@@ -1994,8 +2109,10 @@ impl Model {
     /// Reads the open conversation if it was not read before, its newest
     /// page, with each whose mail it shows, and acknowledges what opening
     /// it showed; the yard row does so with its mail, whole, and its
-    /// notices need no call. A bead and one dealt with read the bead whole
-    /// when it was not read before.
+    /// notices need no call. A bead, one dealt with and one arrival's
+    /// bead read the bead whole when it was not read before. The board
+    /// needs no call: its rows came with the state, and events re-read
+    /// them.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
             Some(sel @ Selected::Conversation(_)) => {
@@ -2020,7 +2137,9 @@ impl Model {
                 effects.extend(self.ack());
                 effects
             }
-            Some(Selected::Decision(bead)) | Some(Selected::Decided(bead, _)) => {
+            Some(Selected::Decision(bead))
+            | Some(Selected::Decided(bead, _))
+            | Some(Selected::Bead(bead)) => {
                 if self.beads.contains_key(&bead) {
                     Vec::new()
                 } else {
@@ -2555,6 +2674,11 @@ impl Model {
         {
             keep.insert(bead.clone());
         }
+        // The open arrival's bead is none of the queue's, and stays what
+        // the details show.
+        if let Some(Selected::Bead(bead)) = self.selected.as_ref() {
+            keep.insert(bead.clone());
+        }
         self.beads.retain(|bead, _| keep.contains(bead));
         self.chosen.retain(|(bead, _), _| keep.contains(bead));
         self.expanded.retain(|(bead, _)| keep.contains(bead));
@@ -2571,7 +2695,9 @@ impl Model {
         // The open bead stayed: it is newly in the queue, or newly without
         // a read bead. It is read when it is not yet.
         match self.selected.as_ref() {
-            Some(Selected::Decision(_) | Selected::Decided(_, _)) => self.open(),
+            Some(Selected::Decision(_) | Selected::Decided(_, _) | Selected::Bead(_)) => {
+                self.open()
+            }
             _ => Vec::new(),
         }
     }
@@ -2597,13 +2723,19 @@ impl Model {
     /// last: a decision picked, put aside, declined or answered elsewhere
     /// leads back to where it was opened from. With none before it, or
     /// when that one is gone too, the first row from the top is opened.
+    /// An arrival's bead is never gone: it shows what the Bead call
+    /// returns, whether the yard serves the row still or not.
     fn reselect(&mut self) -> Vec<Effect> {
         // No row is open of a yard the window does not show.
         if self.aside {
             return Vec::new();
         }
         let order = self.order();
-        if self.selected.as_ref().is_some_and(|s| order.contains(s)) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|s| matches!(s, Selected::Bead(_)) || order.contains(s))
+        {
             return Vec::new();
         }
         self.selected = self
@@ -3463,7 +3595,11 @@ mod tests {
         m.step(1);
         assert_eq!(m.selected(), Some(&Selected::Yard));
         m.step(1);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
+        m.step(1);
         assert_eq!(m.selected_conversation(), Some("assembly"));
+        m.step(-1);
+        assert_eq!(m.selected(), Some(&Selected::Arrivals));
         m.step(-1);
         assert_eq!(m.selected(), Some(&Selected::Yard));
     }
@@ -4386,23 +4522,219 @@ mod tests {
         assert_eq!(m.event(&event(37, "timer", "", json!({}))), []);
     }
 
+    fn arrival(
+        bead: &str,
+        platform: &str,
+        line: &str,
+        expected: &str,
+        remark: &str,
+        tone: &str,
+    ) -> Arrival {
+        Arrival {
+            bead: bead.into(),
+            title: format!("{bead} moves"),
+            platform: platform.into(),
+            line: line.into(),
+            expected: expected.into(),
+            remark: remark.into(),
+            tone: tone.into(),
+        }
+    }
+
     #[test]
-    fn the_switch_s_choice_stands_and_stays_over_a_yard_lost() {
+    fn the_board_is_the_board_as_read_now_over_a_yard_lost() {
         let (mut m, _) = Model::new(yard(&[]), None);
-        assert!(!m.arrivals_shown());
         assert!(m.arrival_rows().is_empty());
-        m.show_arrivals(true);
-        assert!(m.arrivals_shown());
-        m.arrivals(vec![Arrival {
-            bead: "yd-links".into(),
-            ..Arrival::default()
-        }]);
+        m.arrivals(vec![arrival(
+            "yd-links", "new", "yardr", "2h–3h", "", "none",
+        )]);
         assert_eq!(m.arrival_rows().len(), 1);
-        // Read again after the yard was lost: the choice stands, with
-        // the board as read now.
+        // Read again after the yard was lost: the board is as read now.
         let (again, _) = m.resumed(yard(&[]));
-        assert!(again.arrivals_shown());
         assert!(again.arrival_rows().is_empty());
+    }
+
+    /// The board groups the served rows by platform, the platforms in
+    /// the order they first appear in the served order, each with its
+    /// rows in the served order. A group of one is still a group, and
+    /// nothing is sorted or remarked here: the rows are as served.
+    #[test]
+    fn the_board_groups_the_served_rows_by_platform_in_arrival_order() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let rows = vec![
+            arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
+            arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
+            arrival("yd-fourth", "review", "yardr", "1h–2h", "held", "red"),
+        ];
+        m.arrivals(rows.clone());
+        let groups = m.arrival_groups();
+        assert_eq!(groups.len(), 2);
+        // The platforms in first-appearance order: review before draft,
+        // though neither is first alphabetically nor in any flow.
+        assert_eq!(groups[0].platform, "review");
+        assert_eq!(groups[1].platform, "draft");
+        // Each with its rows in the served order, remarked as served.
+        assert_eq!(groups[0].rows, vec![rows[0].clone(), rows[2].clone()]);
+        assert_eq!(groups[1].rows, vec![rows[1].clone()]);
+        assert_eq!(m.arrival_rows(), rows.as_slice());
+    }
+
+    /// The arrivals row stands under the yard row with how many beads
+    /// are in transit. It stands open for the board and for an arrival's
+    /// bead, which has no row of its own.
+    #[test]
+    fn the_arrivals_row_counts_what_is_in_transit() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let row = m.arrivals_row();
+        assert_eq!(row.name, "arrivals");
+        assert_eq!(row.line, "none in transit");
+        assert_eq!(row.unread, 0);
+        assert!(!row.selected);
+        m.arrivals(vec![
+            arrival("yd-a", "new", "yardr", "2h–3h", "", "none"),
+            arrival("yd-b", "new", "yardr", "2h–3h", "", "none"),
+        ]);
+        assert_eq!(m.arrivals_row().line, "2 in transit");
+        m.arrivals(vec![arrival("yd-a", "new", "yardr", "2h–3h", "", "none")]);
+        assert_eq!(m.arrivals_row().line, "1 in transit");
+        // Opening the board needs no call: its rows came with the state.
+        assert_eq!(m.select(Selected::Arrivals), []);
+        assert!(m.arrivals_row().selected);
+        // An arrival's bead reads the bead whole when it was not read
+        // before, and the row stands open for it.
+        assert_eq!(
+            m.select(Selected::Bead("yd-a".into())),
+            [Effect::Bead {
+                bead: "yd-a".into()
+            }]
+        );
+        assert!(m.arrivals_row().selected);
+        m.bead_loaded(Bead {
+            id: "yd-a".into(),
+            ..Bead::default()
+        });
+        assert_eq!(m.select(Selected::Bead("yd-a".into())), []);
+        // Elsewhere the row stands shut.
+        m.select(Selected::Yard);
+        assert!(!m.arrivals_row().selected);
+    }
+
+    fn arrival_bead() -> Bead {
+        Bead {
+            id: "yd-zulu".into(),
+            title: "Zulu's late turn".into(),
+            body: "The turn the yard waits on.".into(),
+            stage: "draft".into(),
+            labels: vec!["size:medium".into(), "eyes".into()],
+            notes: vec![
+                BeadNote {
+                    seq: 5,
+                    kind: "note".into(),
+                    author: "yardmaster".into(),
+                    text: "still late".into(),
+                    at: "2026-10-10T11:30:00Z".into(),
+                    files: vec![],
+                },
+                BeadNote {
+                    seq: 3,
+                    kind: "note".into(),
+                    author: "assembly".into(),
+                    text: "running late".into(),
+                    at: "2026-10-10T10:30:00Z".into(),
+                    files: vec![],
+                },
+            ],
+            asks: vec![
+                BeadAsk {
+                    ask: 7,
+                    asker: "yardmaster".into(),
+                    question: "Wait for it?".into(),
+                    state: "open".into(),
+                    ..BeadAsk::default()
+                },
+                BeadAsk {
+                    ask: 8,
+                    asker: "assembly".into(),
+                    question: "Land it now?".into(),
+                    state: "open".into(),
+                    ..BeadAsk::default()
+                },
+                BeadAsk {
+                    ask: 6,
+                    asker: "yardmaster".into(),
+                    question: "Shape it?".into(),
+                    state: "answered".into(),
+                    ..BeadAsk::default()
+                },
+            ],
+        }
+    }
+
+    /// An arrival's bead is what the Bead call returned — title, stage,
+    /// labels, body, notes newest last with their author and time, and
+    /// how many asks are open — with the line, expected arrival and
+    /// remark of the row it came from. A bead the yard serves no longer
+    /// shows what the call returned with its stage, and the row's parts
+    /// are empty.
+    #[test]
+    fn an_arrival_s_bead_is_what_the_bead_call_returned_with_its_row() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.arrivals(vec![arrival(
+            "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
+        )]);
+        // Nothing until the bead is read.
+        assert_eq!(m.arrival_detail("yd-zulu"), None);
+        m.bead_loaded(arrival_bead());
+        let detail = m.arrival_detail("yd-zulu").unwrap();
+        assert_eq!(detail.bead, "yd-zulu");
+        assert_eq!(detail.title, "Zulu's late turn");
+        assert_eq!(detail.stage, "draft");
+        assert_eq!(detail.line, "yardr");
+        assert_eq!(detail.expected, "5h–8h");
+        assert_eq!(detail.remark, "late");
+        assert_eq!(detail.tone, "amber");
+        assert_eq!(detail.labels, ["size:medium", "eyes"]);
+        assert_eq!(detail.body, "The turn the yard waits on.");
+        // The notes newest last, with their author and time.
+        assert_eq!(
+            detail
+                .notes
+                .iter()
+                .map(|n| (n.author.as_str(), n.at.as_str(), n.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("assembly", "2026-10-10T10:30:00Z", "running late"),
+                ("yardmaster", "2026-10-10T11:30:00Z", "still late"),
+            ]
+        );
+        // Two open asks; the answered one is not counted.
+        assert_eq!(detail.open_asks, 2);
+        // The yard serves the bead no longer: what the call returned
+        // with its stage, and the row's parts empty.
+        m.arrivals(Vec::new());
+        let detail = m.arrival_detail("yd-zulu").unwrap();
+        assert_eq!(detail.title, "Zulu's late turn");
+        assert_eq!(detail.stage, "draft");
+        assert_eq!(detail.line, "");
+        assert_eq!(detail.expected, "");
+        assert_eq!(detail.remark, "");
+        assert_eq!(detail.body, "The turn the yard waits on.");
+    }
+
+    /// The open arrival's bead stays open and read while the queue is
+    /// read again: it is none of the queue's, and no decision's leaving
+    /// moves it.
+    #[test]
+    fn the_open_arrival_s_bead_stays_open_over_a_queue_read_again() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        m.arrivals(vec![arrival(
+            "yd-zulu", "draft", "yardr", "5h–8h", "", "none",
+        )]);
+        m.bead_loaded(arrival_bead());
+        m.select(Selected::Bead("yd-zulu".into()));
+        m.asks(Asks::default());
+        assert_eq!(m.selected(), Some(&Selected::Bead("yd-zulu".into())));
+        assert!(m.arrival_detail("yd-zulu").is_some());
     }
 
     #[test]
