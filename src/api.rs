@@ -530,13 +530,142 @@ pub struct Run {
     /// never cut.
     #[serde(default)]
     pub command: String,
+    /// The command's one line from its help, shown under the command.
+    /// Absent on a yard from before the card said it.
+    #[serde(default)]
+    pub description: String,
     /// The yard's sentences for what the command changes and what is there
-    /// now.
+    /// now. For a source or a pack they are the whole card: every call,
+    /// command and object, each on its own line, never a summary.
     #[serde(default, deserialize_with = "or_default")]
     pub does: Vec<String>,
     /// The command that takes the change back.
     #[serde(default)]
     pub back: String,
+    /// Who may run `back`, in words that stand before "can take it back".
+    /// Absent where that is anyone.
+    #[serde(default)]
+    pub back_by: String,
+    /// What adding a source takes, for an ask that adds one: each source's
+    /// declaration with its command files' texts, the yard's own bytes for
+    /// checking behind the card. Absent on any other command.
+    #[serde(default, deserialize_with = "or_default")]
+    pub carried: Vec<RunSource>,
+    /// The pack a pack apply ask names, with a depot kind's plan. Absent
+    /// on any other command.
+    #[serde(default)]
+    pub pack: Option<RunPack>,
+}
+
+/// What adding one source takes, carried on a run ask: the source's name,
+/// the declaration's whole text, and each command file's bytes. A pack
+/// that would replace a source also carries each command file's change
+/// and each entry the copy would remove. The yard carries the whole
+/// destination inventory beside these for its own stale holding, which no
+/// card shows and this struct does not keep.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunSource {
+    #[serde(default)]
+    pub name: String,
+    /// The declaration's whole text, the ask's own.
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub files: Vec<RunFile>,
+    /// Each command file the pack's file would change, with its unified
+    /// diff old against new. The old bytes are not carried: the diff is
+    /// the showing, and the two hashes are what the approval is held to.
+    #[serde(default, deserialize_with = "or_default")]
+    pub old: Vec<RunFileDiff>,
+    /// Each entry neither declaration names that the copy would remove.
+    #[serde(default, deserialize_with = "or_default")]
+    pub removed: Vec<RunRemoved>,
+}
+
+/// One command file a run ask carries: the program as the declaration
+/// names it, its whole text, and the sha256 of that text.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunFile {
+    #[serde(default)]
+    pub program: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// One command file a pack ask would change: its program, the sha256 of
+/// the copy that stands and of the pack's file, whole, and the unified
+/// diff old against new.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunFileDiff {
+    #[serde(default)]
+    pub program: String,
+    #[serde(default)]
+    pub old_sha256: String,
+    #[serde(default)]
+    pub new_sha256: String,
+    #[serde(default)]
+    pub diff: String,
+}
+
+/// One entry under a source's copies that neither declaration names: its
+/// path, its hash, and its text where it is text, for checking behind
+/// the card. A non-text entry has no text: removing it installs nothing.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunRemoved {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// A pack apply ask's pack as the yard's server read it from its own
+/// binary: its name, kind, the depot a depot kind would be re-applied to,
+/// and the build label the pack is embedded in. A depot kind carries the
+/// plan the server built; the plan's objects and governs stand in the
+/// yard's sentences, and its file texts and diffs behind the card.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunPack {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub depot: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub plan: Option<RunPlan>,
+}
+
+/// A depot pack's plan as a card holds it: every object with its action
+/// and changes. The changes stand in the yard's sentences; what is kept
+/// here is what the tap shows: each changed file's new text and its
+/// unified diff old against new.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunPlan {
+    #[serde(default, deserialize_with = "or_default")]
+    pub objects: Vec<RunPlanObject>,
+}
+
+/// One object of a depot plan: of a file, its hashes whole, old and new,
+/// and for a create or change its new text and the unified diff old
+/// against new, whole, for the tap.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RunPlanObject {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub file_old_sha256: String,
+    #[serde(default)]
+    pub file_new_sha256: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub diff: String,
 }
 
 impl Run {
@@ -552,13 +681,22 @@ impl Run {
 }
 
 /// What an approved run ask ran: the command, and what it prints at a
-/// terminal.
+/// terminal. A pack apply, and a source add that names commands, are
+/// carried out by the yard's server after the approval is recorded: while
+/// the answer holds "approved, to be carried out" the ask reads as being
+/// carried out, and once the carrying out completes it, as ran or, where
+/// `failed` is set, as failed with the failure in words.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Ran {
     #[serde(default, deserialize_with = "or_default")]
     pub argv: Vec<String>,
     #[serde(default)]
     pub result: String,
+    /// The carrying out failed: `result` holds the failure in words, and
+    /// the card reads as failed, not as ran. Absent on every approval
+    /// that ran in its own write.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 impl Ran {
@@ -3029,6 +3167,87 @@ mod tests {
         assert_eq!(bead.asks[0].ran, None);
         assert_eq!(bead.asks[1].ran.as_ref(), Some(did));
         assert_eq!(bead.asks[2].run, None);
+    }
+
+    /// A run ask that adds a source carries its texts: the yard's one line
+    /// for the command, who may take it back, each declaration with its
+    /// command files, the pack with a depot plan's file texts and diffs.
+    /// What the card does not show (the yard's stale holding) is ignored.
+    /// A carrying out that failed says so beside what it printed.
+    #[test]
+    fn a_run_ask_that_adds_a_source_carries_its_texts_and_its_pack() {
+        let run: Run = serde_json::from_value(json!({
+            "argv": ["pack", "apply", "telegram"],
+            "command": "yardr pack apply telegram",
+            "description": "Import a pack into the yard: set the yard to what the pack says",
+            "does": ["pack telegram (embedded in yardr ecbab09), of kind source, into the yard: it adds one source."],
+            "back": "yardr source rm telegram",
+            "back_by": "the operator",
+            "carried": [{
+                "name": "telegram",
+                "text": "name: telegram\nbase: https://api.telegram.org\n",
+                "files": [{"program": "telegram/normalize", "text": "#!/bin/sh\n", "sha256": "dc24"}],
+                "old": [{"program": "telegram/thread", "old_sha256": "aaaa",
+                          "new_sha256": "bbbb", "diff": "--- was\n+++ is\n"}],
+                "removed": [{"path": "old-helper", "sha256": "cccc", "mode": "0700",
+                              "size": 12, "text": "old bytes\n"}],
+                "inventory": [{"path": "telegram/thread", "sha256": "aaaa",
+                                "mode": "0700", "size": 10}]
+            }],
+            "pack": {"name": "telegram", "kind": "source", "label": "ecbab09"}
+        }))
+        .unwrap();
+        assert_eq!(
+            run.description,
+            "Import a pack into the yard: set the yard to what the pack says"
+        );
+        assert_eq!(run.back_by, "the operator");
+        assert_eq!(run.carried.len(), 1);
+        let carried = &run.carried[0];
+        assert_eq!(
+            carried.text,
+            "name: telegram\nbase: https://api.telegram.org\n"
+        );
+        assert_eq!(carried.files[0].program, "telegram/normalize");
+        assert_eq!(carried.old[0].diff, "--- was\n+++ is\n");
+        assert_eq!(carried.removed[0].path, "old-helper");
+        assert_eq!(run.pack.as_ref().unwrap().name, "telegram");
+
+        let depot: Run = serde_json::from_value(json!({
+            "argv": ["pack", "apply", "starter"],
+            "command": "yardr pack apply starter",
+            "does": ["pack starter into the depot yard: it changes one file."],
+            "back": "yardr pack check starter --depot yard",
+            "back_by": "the operator",
+            "pack": {"name": "starter", "kind": "dir", "depot": "yard", "label": "ecbab09",
+                     "plan": {"objects": [
+                         {"kind": "file", "name": "flows/default.md", "action": "change",
+                          "file_old_sha256": "1111", "file_new_sha256": "2222",
+                          "text": "new text\n", "diff": "--- was\n+++ is\n"},
+                         {"kind": "crew", "name": "builders", "action": "unchanged"}
+                     ]}}
+        }))
+        .unwrap();
+        let plan = depot.pack.as_ref().unwrap().plan.as_ref().unwrap();
+        assert_eq!(plan.objects.len(), 2);
+        assert_eq!(plan.objects[0].diff, "--- was\n+++ is\n");
+        assert_eq!(plan.objects[1].text, "");
+
+        let failed: Ran = serde_json::from_value(json!({
+            "argv": ["pack", "apply", "telegram"],
+            "result": "pack telegram: nothing further was applied",
+            "failed": true
+        }))
+        .unwrap();
+        assert!(failed.failed);
+        assert!(failed.result.contains("nothing further"));
+        // Absent where the approval ran in its own write.
+        let ran: Ran = serde_json::from_value(json!({
+            "argv": ["pack", "apply", "telegram"],
+            "result": "pack telegram: 1 source declared"
+        }))
+        .unwrap();
+        assert!(!ran.failed);
     }
 
     #[test]

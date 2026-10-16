@@ -547,6 +547,21 @@ fn approve_label(yard: &str) -> String {
     format!("Approve in {yard} ({APPROVE_KEY})")
 }
 
+/// What a run ask's card says over what the command changes: the
+/// command's one line from its help, as a terminal says it.
+fn description_line(description: &str) -> String {
+    format!("what the command does: {description}")
+}
+
+/// Who may run the command that takes the change back, as a terminal
+/// says it: the yard's words, or anyone where it sends none.
+fn take_back_label(back_by: &str) -> String {
+    match back_by.is_empty() {
+        true => "anyone can take it back:".to_string(),
+        false => format!("{back_by} can take it back:"),
+    }
+}
+
 /// What it says over the command of one that takes no approval any more.
 const RUN_PROPOSED: &str = "the command this ask proposed:";
 
@@ -581,6 +596,118 @@ fn fenced(command: &str) -> String {
     }
     let fence = "`".repeat((longest + 1).max(3));
     format!("{fence}\n{command}\n{fence}")
+}
+
+/// One text a run ask holds behind the tap: its heading, its bytes, and
+/// the section its copy control is keyed under.
+struct RunText {
+    heading: String,
+    text: String,
+    section: &'static str,
+}
+
+/// Every text a run ask holds, in the order a terminal prints them: each
+/// carried source's declaration, command files, file changes and removed
+/// entries' texts, then each plan file's change and new text. The headings
+/// are the terminal's words, so the two readings agree. An empty text is
+/// no text: a removed entry that is not text, and a plan object with
+/// neither a change nor a new text, stand in the yard's sentences alone.
+fn run_texts(run: &api::Run) -> Vec<RunText> {
+    let mut texts = Vec::new();
+    for carried in &run.carried {
+        texts.push(RunText {
+            heading: format!(
+                "the declaration of source {}, whole as carried:",
+                model::plain(&carried.name)
+            ),
+            text: carried.text.clone(),
+            section: "declaration",
+        });
+        for file in &carried.files {
+            texts.push(RunText {
+                heading: format!(
+                    "the command file {} (sha256 {}), whole as carried:",
+                    model::plain(&file.program),
+                    model::plain(&file.sha256),
+                ),
+                text: file.text.clone(),
+                section: "command file",
+            });
+        }
+        for change in &carried.old {
+            texts.push(RunText {
+                heading: format!(
+                    "the change to command file {} (sha256 {} -> {}), whole as carried:",
+                    model::plain(&change.program),
+                    or_none(&change.old_sha256),
+                    or_none(&change.new_sha256),
+                ),
+                text: change.diff.clone(),
+                section: "file change",
+            });
+        }
+        for removed in carried.removed.iter().filter(|r| !r.text.is_empty()) {
+            texts.push(RunText {
+                heading: format!(
+                    "the entry {} the copy would remove (sha256 {}), whole as carried:",
+                    model::plain(&removed.path),
+                    model::plain(&removed.sha256),
+                ),
+                text: removed.text.clone(),
+                section: "removed entry",
+            });
+        }
+    }
+    if let Some(pack) = &run.pack
+        && let Some(plan) = &pack.plan
+    {
+        for object in &plan.objects {
+            if !object.diff.is_empty() {
+                texts.push(RunText {
+                    heading: format!(
+                        "the change to file {} (sha256 {} -> {}), whole as carried:",
+                        model::plain(&object.name),
+                        or_none(&object.file_old_sha256),
+                        or_none(&object.file_new_sha256),
+                    ),
+                    text: object.diff.clone(),
+                    section: "plan change",
+                });
+            }
+            if !object.text.is_empty() {
+                texts.push(RunText {
+                    heading: format!(
+                        "the file {} as the pack would install it, whole as carried:",
+                        model::plain(&object.name),
+                    ),
+                    text: object.text.clone(),
+                    section: "plan file",
+                });
+            }
+        }
+    }
+    texts
+}
+
+/// A hash the card names, or that there is none, as the terminal says it.
+fn or_none(sha: &str) -> String {
+    match sha.is_empty() {
+        true => "(none)".to_string(),
+        false => model::plain(sha),
+    }
+}
+
+/// What the tap behind a run ask's sentences reads: how many texts it
+/// holds, and whether they stand shown.
+fn texts_label(count: usize, shown: bool) -> String {
+    let texts = match count {
+        1 => "1 text".to_string(),
+        count => format!("{count} texts"),
+    };
+    match shown {
+        true => format!("hide {texts}"),
+        false => format!("show {texts}"),
+    }
 }
 
 /// The keys of a dealt with: nothing is chosen by default and Enter alone
@@ -979,6 +1106,7 @@ struct Place {
     lists: [Pixels; 3],
     off: Pixels,
     expanded: HashSet<(String, u64)>,
+    texts: HashSet<(String, u64)>,
     decided_expanded: bool,
 }
 
@@ -2357,6 +2485,7 @@ impl Footplate {
         };
         let effects = model.back_to(mode, kept.row(mode), kept.decided_expanded);
         model.expand(&kept.expanded);
+        model.show_texts(&kept.texts);
         if let Some(late) = self.late.take() {
             model.notice = late;
         }
@@ -2595,6 +2724,7 @@ impl Footplate {
                 }
                 if fresh {
                     model.expand(&kept.expanded);
+                    model.show_texts(&kept.texts);
                     // The page shot opens the card, so the note's page row
                     // and image show: a debug build's alone, as the settings
                     // and the draft of Footplate::opened.
@@ -3048,6 +3178,7 @@ impl Footplate {
         kept.lists[mode.index()] = (px(0.) - self.rows.offset().y).max(px(0.));
         kept.off = off.max(px(0.));
         kept.expanded = model.map(|m| m.expanded().clone()).unwrap_or_default();
+        kept.texts = model.map(|m| m.texts().clone()).unwrap_or_default();
         kept.decided_expanded = model.is_some_and(Model::decided_expanded);
         kept
     }
@@ -5200,6 +5331,15 @@ impl Footplate {
     fn expand_for(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
         self.change(cx, |m| {
             m.toggle_expand(&bead, ask);
+            Vec::new()
+        });
+    }
+
+    /// Shows the run ask's carried texts behind the yard's sentences, or
+    /// hides them again: the tap of its card.
+    fn texts_for(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        self.change(cx, |m| {
+            m.toggle_texts(&bead, ask);
             Vec::new()
         });
     }
@@ -10775,7 +10915,7 @@ impl Footplate {
         if let Some(secret) = &ask.secret {
             card = card.child(self.secret_lines(secret, palette));
         } else if let Some(run) = &ask.run {
-            card = card.child(self.run_block(&bead_id, ask_seq, run, true, palette));
+            card = card.child(self.run_block(&bead_id, ask_seq, run, true, palette, cx));
         } else if ask.options.is_empty() {
             card = card.child(
                 div()
@@ -11087,8 +11227,12 @@ impl Footplate {
     /// What a run ask proposes, in the one block of its card, which is all
     /// the yard's and none of it the asker's: the command whole, in a code
     /// block that wraps where the window is narrower and is never cut; the
-    /// yard's sentences for what it changes; and the command that takes it
-    /// back. `open` is an ask that can still be approved.
+    /// command's one line from its help; the yard's sentences for what it
+    /// changes, each on its own line; the texts the ask holds behind one
+    /// tap, for checking the yard's reading against them; and the command
+    /// that takes it back, with who may run it. `open` is an ask that can
+    /// still be approved. The approval is live whether or not the tap was
+    /// opened.
     fn run_block(
         &self,
         bead: &str,
@@ -11096,6 +11240,7 @@ impl Footplate {
         run: &api::Run,
         open: bool,
         palette: Palette,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let card_key = select::key((bead, ask));
         let command = model::plain(&run.line());
@@ -11131,11 +11276,63 @@ impl Footplate {
                         &self.selection,
                     )),
             );
-        for does in &run.does {
-            block = block.child(div().child(format!("the yard says: {}", model::plain(does))));
+        let description = model::plain(&run.description);
+        if !description.is_empty() {
+            block = block.child(
+                div()
+                    .debug_selector(|| format!("run description {bead} {ask}"))
+                    .child(description_line(&description)),
+            );
         }
-        // Who may take it back is not said: the yard says it of some
-        // commands and not of others, and sends no word of it here.
+        for (ix, does) in run.does.iter().enumerate() {
+            block = block.child(
+                div()
+                    .debug_selector(|| format!("run does {bead} {ask} {ix}"))
+                    .child(format!("the yard says: {}", model::plain(does))),
+            );
+        }
+        // The ask's own texts, behind one tap: the approval is live
+        // whether or not it was opened.
+        let texts = run_texts(run);
+        let texts_shown = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.texts_shown(bead, ask));
+        if !texts.is_empty() {
+            let bead_click = bead.to_string();
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("texts {bead} {ask}")))
+                    .debug_selector(|| format!("texts {bead} {ask}"))
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.texts_for(bead_click.clone(), ask, cx)
+                    }))
+                    .child(texts_label(texts.len(), texts_shown)),
+            );
+        }
+        if texts_shown {
+            for (ix, text) in texts.iter().enumerate() {
+                block = block
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(text.heading.clone()),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| format!("run text {bead} {ask} {ix}"))
+                            .child(select::text(
+                                expanded_text_key(card_key, text.section, ix, &text.text),
+                                fenced(&model::plain(&text.text)),
+                                &self.selection,
+                            )),
+                    );
+            }
+        }
         let back = model::plain(&run.back);
         if !back.is_empty() {
             block = block
@@ -11143,7 +11340,7 @@ impl Footplate {
                     div()
                         .text_sm()
                         .text_color(palette.faint)
-                        .child("the command that takes it back:"),
+                        .child(take_back_label(&model::plain(&run.back_by))),
                 )
                 .child(
                     div()
@@ -11248,8 +11445,17 @@ impl Footplate {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(detail.state_line.clone()),
             );
-        // Under an approved run ask's command, what it printed.
-        let printed = detail.ran.as_ref().map(|ran| model::plain(&ran.result));
+        // Under an approved run ask's command, what it printed. One
+        // the yard has not carried out yet printed nothing: its state
+        // line says it is being carried out, and the pending words are
+        // not what it printed.
+        let printed = detail
+            .ran
+            .as_ref()
+            .and_then(|ran| match ran.result.as_str() {
+                model::CARRY_PENDING => None,
+                _ => Some(model::plain(&ran.result)),
+            });
         if let Some(printed) = printed.filter(|printed| !printed.is_empty()) {
             body = body.child(
                 div()
@@ -11327,7 +11533,7 @@ impl Footplate {
             let approving = model.approving(bead, ask).is_some();
             let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
             if let Some(run) = &detail.run {
-                body = body.child(self.run_block(bead, ask, run, approving, palette));
+                body = body.child(self.run_block(bead, ask, run, approving, palette, cx));
                 if approving && elsewhere {
                     body = body.child(self.approve_elsewhere_lines(bead, ask, palette));
                 } else if approving {
@@ -24005,6 +24211,239 @@ mod tests {
             .collect()
     }
 
+    /// telegram's sentences as the yard cards them: the pack line, the
+    /// credential with where it goes, the call with its path whole, the
+    /// body, what it tells, and the command file with its hash whole.
+    const PACK_DESCRIPTION: &str =
+        "Import a pack into the yard: set the yard to what the pack says";
+    const PACK_DOES: [&str; 7] = [
+        "pack telegram (embedded in yardr ecbab0933da6), of kind source, into the yard: it adds one source and copies 2 command files (4 commands), and changes nothing else. It grants no call, makes no hook, and sets no credential's file.",
+        "source telegram: its calls go to https://api.telegram.org. Its credential is the variable TELEGRAM_BOT_TOKEN (the name, never the value), sent in the request path (credential.in_path: true): a call's path holds it, so it stands in the logs of every server on the way. It has no second credential for updates, no mint, and no header of its own.",
+        "call message (update): POST /bot{credential}/sendMessage. It takes chat (string, required, pattern ^-?[0-9]+$), title (string, required, at most 250) and text (string, required, at most 3800), and sends no query.",
+        "call message sends the body {chat_id: \"{chat}\", text: \"{title}\n{text}\"}: the chat and the title and text, no credential but the one in the path. Its answer is returned as it comes. The source names no check call and no idempotency header.",
+        "it can tell a user: the call message, whose chat takes the person's address, read as TELEGRAM_CHAT_ID from the person's own env file; the title fills title and the text fills text, and it takes no link.",
+        "command file telegram/thread: [telegram/thread reply] (thread.reply), [telegram/thread posted] (thread.posted) and [telegram/thread read] (thread.read), each handed the credential as every thread command is: sha256 70e39176f93f2756b16176ea3e46a26b9b523fd0d2febb03a82bcf1d721a457e",
+        "still owed after it: the credential, by a secret ask for telegram; and which user it tells, by yardr user set <user> notify=telegram.",
+    ];
+    const PACK_BACK: &str = "yardr source rm telegram";
+    const PACK_DECLARATION: &str = "name: telegram\nbase: https://api.telegram.org\ncredential: TELEGRAM_BOT_TOKEN\nin_path: true\ncalls:\n  message:\n    kind: update\n    request: POST /bot{credential}/sendMessage\n";
+    const PACK_FILE: &str = "#!/bin/sh\n# normalize a delivery: `jq` reads the body, and ``` marks nothing here\n exec jq -c '{chat: .message.chat.id}'\n";
+    const PACK_DIFF: &str = "--- was\n+++ is\n@@ -1,2 +1,2 @@\n-reply old\n+reply new\n";
+    const PACK_REMOVED: &str = "old bytes\nsecond line\n";
+    const PACK_SHA_NEW: &str = "70e39176f93f2756b16176ea3e46a26b9b523fd0d2febb03a82bcf1d721a457e";
+    const PACK_SHA_OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// The pack apply ask 7 on bead-s: telegram, replacing a source whose
+    /// command copy stands changed.
+    fn run_pack() -> Value {
+        json!({
+            "argv": ["pack", "apply", "telegram"],
+            "command": "yardr pack apply telegram",
+            "description": PACK_DESCRIPTION,
+            "does": PACK_DOES,
+            "back": PACK_BACK,
+            "back_by": "the operator",
+            "carried": [{
+                "name": "telegram",
+                "text": PACK_DECLARATION,
+                "files": [{"program": "telegram/normalize", "text": PACK_FILE,
+                           "sha256": "dc249d6fcdbf396dc3237d7e922d1ef71a256a47549b3db670651dcf1957d70a"}],
+                "old": [{"program": "telegram/thread", "old_sha256": PACK_SHA_OLD,
+                          "new_sha256": PACK_SHA_NEW, "diff": PACK_DIFF}],
+                "removed": [{"path": "old-helper", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                              "text": PACK_REMOVED}]
+            }],
+            "pack": {"name": "telegram", "kind": "source", "label": "yardr ecbab0933da6"}
+        })
+    }
+
+    /// That ask as the queue lists it, open or in `state` with `ran`.
+    fn queued_pack(state: &str, ran: Option<Value>) -> Value {
+        let mut queued = json!({
+            "bead": "bead-s", "bead_title": "Tell me on my phone", "topic": "", "ask": 7,
+            "question": "Add the telegram source so I can tell you on your phone?",
+            "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z", "run": run_pack()
+        });
+        if !state.is_empty() {
+            queued["state"] = json!(state);
+        }
+        if let Some(ran) = ran {
+            queued["ran"] = ran;
+        }
+        queued
+    }
+
+    /// The bead of that ask.
+    fn bead_pack() -> String {
+        json!({"result": {"id": "bead-s", "title": "Tell me on my phone", "body": "The body.",
+            "stage": "new", "labels": [], "notes": [], "asks": [
+                {"ask": 7, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Add the telegram source so I can tell you on your phone?",
+                 "context": ["yardr has no source that tells a user outside the yard."],
+                 "options": [], "state": "open", "run": run_pack()}]}})
+        .to_string()
+    }
+
+    /// The window on a yard whose one open ask is that pack ask, its card
+    /// open and read.
+    fn opened_on_a_pack_ask<'a>(
+        yard: &Yard,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_pack("", None)], "decided": []}}).to_string(),
+        );
+        yard.answer("Bead", &bead_pack());
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// The window on a yard whose one decided ask is that pack ask,
+    /// answered with `ran`, its card open and read.
+    fn opened_on_a_decided_pack_ask<'a>(
+        yard: &Yard,
+        ran: Value,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_pack("answered", Some(ran))]}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_pack());
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(at, file, cx);
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 1)
+            })
+        });
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    /// A depot re-apply's sentences as the yard cards them: the pack line,
+    /// the changed file with its hashes whole, and the counts.
+    const DEPOT_DOES: [&str; 3] = [
+        "pack starter (embedded in yardr ecbab0933da6), of kind dir, into the depot yard: it changes 1 file and changes nothing else.",
+        "file flows/default.md: change, sha256 1111111111111111111111111111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222222222222222222222222222, 2 insertions, 1 deletion",
+        "2 objects unchanged, and 1 dropped but left where it stands.",
+    ];
+    const DEPOT_TEXT: &str = "flow: default\nstages:\n  - new\n";
+    const DEPOT_DIFF: &str =
+        "--- was\n+++ is\n@@ -1,3 +1,3 @@\n-flow: old\n+flow: default\n stages:\n";
+
+    /// The pack apply ask 7 on bead-s for a depot kind's re-apply.
+    fn run_depot() -> Value {
+        json!({
+            "argv": ["pack", "apply", "starter"],
+            "command": "yardr pack apply starter",
+            "description": "Import a pack into a depot",
+            "does": DEPOT_DOES,
+            "back": "no one command takes this back: yardr pack check starter --depot yard shows what stands",
+            "back_by": "the operator",
+            "pack": {"name": "starter", "kind": "dir", "depot": "yard",
+                     "label": "yardr ecbab0933da6",
+                     "plan": {"objects": [
+                         {"kind": "file", "name": "flows/default.md", "action": "change",
+                          "file_old_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "file_new_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+                          "text": DEPOT_TEXT, "diff": DEPOT_DIFF},
+                         {"kind": "crew", "name": "builders", "action": "unchanged"}
+                     ]}}
+        })
+    }
+
+    /// The window on a yard whose one open ask is that depot ask, its card
+    /// open and read.
+    fn opened_on_a_depot_ask<'a>(
+        yard: &Yard,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_depot()], "decided": []}}).to_string(),
+        );
+        yard.answer("Bead", &bead_depot());
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// That depot ask as the queue lists it, and the bead of it.
+    fn queued_depot() -> Value {
+        json!({
+            "bead": "bead-s", "bead_title": "Keep the depot", "topic": "", "ask": 7,
+            "question": "Re-apply the starter pack?",
+            "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z", "run": run_depot()
+        })
+    }
+
+    fn bead_depot() -> String {
+        json!({"result": {"id": "bead-s", "title": "Keep the depot", "body": "The body.",
+            "stage": "new", "labels": [], "notes": [], "asks": [
+                {"ask": 7, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Re-apply the starter pack?",
+                 "context": ["the upgrade moved the pack past the depot."],
+                 "options": [], "state": "open", "run": run_depot()}]}})
+        .to_string()
+    }
+
+    /// The key of one carried text of the ask's card: its section with its
+    /// place among the texts.
+    fn carried_text_key(section: &str, ix: usize, text: &str) -> u64 {
+        expanded_text_key(select::key(("bead-s", 7u64)), section, ix, text)
+    }
+
+    /// Clicks the copy control of one carried text: the card scrolls so
+    /// the control stands in view, and the click lands where the scrolled
+    /// control stands. The control's place is in the card's own
+    /// coordinates, and the click in the window's.
+    fn click_carried_chip(view: &Entity<Footplate>, cx: &mut VisualTestContext, key: u64) {
+        // Where the control stands in the card's own coordinates: what
+        // is recorded is where the scrolled card shows it.
+        let offset = view.read_with(cx, |v, _| v.decision.offset());
+        let center = run_chip(view, cx, key).unwrap();
+        let content = gpui::point(center.x - offset.x, center.y - offset.y);
+        // Scroll the card so the control stands a third down the window.
+        view.update(cx, |v, _| {
+            let mut at = v.decision.offset();
+            at.y = (px(256.) - content.y).min(px(0.));
+            v.decision.set_offset(at);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        // Where the scrolled card shows it now: the click lands there.
+        let center = run_chip(view, cx, key).unwrap();
+        cx.simulate_click(center, gpui::Modifiers::default());
+    }
+
     /// A run ask's card: under the asker's lines the yard's one block, with
     /// the command whole and wrapped, the yard's sentence and the command
     /// that takes it back, and directly under it the button that approves.
@@ -24137,6 +24576,247 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk").len(), 3);
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A pack apply's card: the command's one line, every sentence of
+    /// the yard's whole, each on its own line — the credential's path
+    /// whole, each command file's hash whole, never a summary in their
+    /// place — each wrapped where the window is narrower and never cut,
+    /// and the ask's own texts behind one tap, copied to the letter. The
+    /// approval is live with the tap shut, and reads as being carried
+    /// out until the yard says it ran.
+    #[gpui::test]
+    fn a_pack_apply_card_shows_every_sentence_whole_and_its_texts_behind_one_tap(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_pack_ask(&yard, &file, cx);
+
+        // The yard's sentences stand verbatim on the card.
+        let run = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decision_detail("bead-s", &chrono::Utc::now())
+                .unwrap()
+                .asks[0]
+                .run
+                .clone()
+                .unwrap()
+        });
+        assert_eq!(run.description, PACK_DESCRIPTION);
+        assert_eq!(run.back_by, "the operator");
+        assert_eq!(run.back, PACK_BACK);
+        assert_eq!(run.does.len(), PACK_DOES.len());
+        for (served, shown) in PACK_DOES.iter().zip(run.does.iter()) {
+            assert_eq!(shown, served);
+        }
+        assert!(
+            run.does[2].contains("POST /bot{credential}/sendMessage"),
+            "the call's path whole: {:?}",
+            run.does[2]
+        );
+
+        // Each sentence on its own line, inside the yard's block: wrapped,
+        // never cut — also the unbroken hash.
+        assert!(drawn(cx, "run bead-s 7"));
+        assert!(drawn(cx, "run description bead-s 7"));
+        let block = bounds_of(cx, "run bead-s 7");
+        let description = bounds_of(cx, "run description bead-s 7");
+        assert!(description.right() <= block.right());
+        for ix in 0..PACK_DOES.len() {
+            let line = bounds_of(cx, &format!("run does bead-s 7 {ix}"));
+            assert!(
+                line.left() >= block.left() && line.right() <= block.right(),
+                "sentence {ix} inside the block: {line:?} in {block:?}"
+            );
+        }
+        // A long sentence wraps: several rows where one line stands one.
+        let tap = bounds_of(cx, "texts bead-s 7");
+        let credential = bounds_of(cx, "run does bead-s 7 1");
+        assert!(
+            credential.size.height > tap.size.height * 1.5,
+            "{credential:?} wraps over {tap:?}"
+        );
+
+        // The texts stand behind one tap, and are the ask's own, byte for
+        // byte: the declaration, the command file with its backticks, the
+        // change with its hashes, and the removed entry.
+        assert!(!drawn(cx, "run text bead-s 7 0"));
+        click_on(cx, "texts bead-s 7");
+        wait(cx, "the texts", |cx| drawn(cx, "run text bead-s 7 3"));
+        for ix in 0..4 {
+            let text = bounds_of(cx, &format!("run text bead-s 7 {ix}"));
+            assert!(
+                text.left() >= block.left() && text.right() <= block.right(),
+                "text {ix} inside the block: {text:?} in {block:?}"
+            );
+        }
+        for (section, ix, bytes) in [
+            ("declaration", 0, PACK_DECLARATION),
+            ("command file", 1, PACK_FILE),
+            ("file change", 2, PACK_DIFF),
+            ("removed entry", 3, PACK_REMOVED),
+        ] {
+            click_carried_chip(&view, cx, carried_text_key(section, ix, bytes));
+            assert_eq!(clipboard(cx).as_deref(), Some(bytes), "{section}");
+        }
+        // Back to the top, and the tap shuts again: the card stands as
+        // it stood before the tap, which showed no text. (What was drawn
+        // stays drawn to the test's eyes, so the shut half reads the
+        // model.)
+        view.update(cx, |v, _| {
+            let mut at = v.decision.offset();
+            at.y = px(0.);
+            v.decision.set_offset(at);
+        });
+        cx.run_until_parked();
+        click_on(cx, "texts bead-s 7");
+        cx.run_until_parked();
+        let shown = view.read_with(cx, |v, _| {
+            v.model.as_ref().unwrap().texts_shown("bead-s", 7)
+        });
+        assert!(!shown);
+
+        // The approval is live with the tap shut: approved, the ask reads
+        // as being carried out, with nothing printed under it yet.
+        assert!(drawn(cx, "approve bead-s 7"));
+        let pending = json!({"argv": ["pack", "apply", "telegram"],
+                             "result": "approved, to be carried out"});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_pack("answered", Some(pending))]}})
+                .to_string(),
+        );
+        yard.answer(
+            "ApproveAsk",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "argv": ["pack", "apply", "telegram"], "does": PACK_DOES,
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "being carried out", |cx| {
+            notice(&view, cx) == "approved, being carried out: yardr pack apply telegram"
+        });
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: yardr pack apply telegram"
+        );
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        assert!(drawn(cx, "run bead-s 7"));
+        assert!(!drawn(cx, "ran bead-s 7"));
+        // A command runs once for one ask: no control, and no key.
+        assert!(!approvable(&view, cx));
+    }
+
+    /// A carrying out that failed reads as failed, with the failure in
+    /// words under the command; one the yard has not carried out yet reads
+    /// as being carried out, with nothing printed under it. Neither takes
+    /// a second approval.
+    #[gpui::test]
+    fn a_carrying_out_reads_failed_or_being_carried_out(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let failure = "pack telegram: the copy failed: telegram/thread unwritable. Nothing further was applied. Finish it with yardr pack apply telegram.";
+        let (view, cx) = opened_on_a_decided_pack_ask(
+            &yard,
+            json!({"argv": ["pack", "apply", "telegram"], "result": failure, "failed": true}),
+            &file,
+            cx,
+        );
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, failed: yardr pack apply telegram"
+        );
+        assert_eq!(
+            detail.ran.as_ref().map(|ran| ran.result.as_str()),
+            Some(failure)
+        );
+        assert!(drawn(cx, "run bead-s 7"));
+        assert!(drawn(cx, "ran bead-s 7"));
+        assert!(!drawn(cx, "approve bead-s 7"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_decided_pack_ask(
+            &yard,
+            json!({"argv": ["pack", "apply", "telegram"],
+                   "result": "approved, to be carried out"}),
+            &file,
+            cx,
+        );
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: yardr pack apply telegram"
+        );
+        assert!(drawn(cx, "run bead-s 7"));
+        assert!(!drawn(cx, "ran bead-s 7"));
+        assert!(!drawn(cx, "approve bead-s 7"));
+    }
+
+    /// A depot re-apply's card: each object's action and changes with each
+    /// file's hash whole, each wrapped and never cut, and each changed
+    /// file's diff and new text behind the tap, copied to the letter.
+    #[gpui::test]
+    fn a_depot_re_apply_card_shows_its_objects_and_its_diffs_behind_the_tap(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_depot_ask(&yard, &file, cx);
+
+        let run = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decision_detail("bead-s", &chrono::Utc::now())
+                .unwrap()
+                .asks[0]
+                .run
+                .clone()
+                .unwrap()
+        });
+        assert_eq!(run.does.len(), DEPOT_DOES.len());
+        assert!(
+            run.does[1]
+                .contains("1111111111111111111111111111111111111111111111111111111111111111"),
+            "the old hash whole: {:?}",
+            run.does[1]
+        );
+
+        assert!(drawn(cx, "run bead-s 7"));
+        let block = bounds_of(cx, "run bead-s 7");
+        for ix in 0..DEPOT_DOES.len() {
+            let line = bounds_of(cx, &format!("run does bead-s 7 {ix}"));
+            assert!(
+                line.left() >= block.left() && line.right() <= block.right(),
+                "sentence {ix} inside the block: {line:?} in {block:?}"
+            );
+        }
+
+        assert!(!drawn(cx, "run text bead-s 7 0"));
+        click_on(cx, "texts bead-s 7");
+        wait(cx, "the texts", |cx| drawn(cx, "run text bead-s 7 1"));
+        assert!(!drawn(cx, "run text bead-s 7 2"));
+        for (section, ix, bytes) in [("plan change", 0, DEPOT_DIFF), ("plan file", 1, DEPOT_TEXT)] {
+            let text = bounds_of(cx, &format!("run text bead-s 7 {ix}"));
+            assert!(
+                text.left() >= block.left() && text.right() <= block.right(),
+                "{section} inside the block: {text:?} in {block:?}"
+            );
+            click_carried_chip(&view, cx, carried_text_key(section, ix, bytes));
+            assert_eq!(clipboard(cx).as_deref(), Some(bytes), "{section}");
+        }
     }
 
     /// A run ask whose question forges the yard's lines, with a context
@@ -24619,6 +25299,75 @@ mod tests {
         let blocks = crate::markdown::blocks(&fenced("a\n```\nb"));
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text, "a\n```\nb");
+    }
+
+    /// The texts a run ask holds, in the terminal's order and words: each
+    /// carried source's declaration, command files, file changes and
+    /// removed entries, then each plan file's change and new text. An
+    /// empty text is no text.
+    #[test]
+    fn a_run_ask_s_texts_are_the_terminal_s_in_its_order() {
+        let run: api::Run = serde_json::from_value(json!({
+            "argv": ["pack", "apply", "telegram"],
+            "command": "yardr pack apply telegram",
+            "carried": [{
+                "name": "telegram",
+                "text": "name: telegram\n",
+                "files": [{"program": "telegram/normalize", "text": "#!/bin/sh\n",
+                           "sha256": "dc24"}],
+                "old": [{"program": "telegram/thread", "old_sha256": "aaaa",
+                          "new_sha256": "", "diff": "--- was\n+++ is\n"}],
+                "removed": [
+                    {"path": "old-helper", "sha256": "cccc", "text": "old bytes\n"},
+                    {"path": "old-blob", "sha256": "dddd", "text": ""}
+                ]
+            }],
+            "pack": {"name": "starter", "kind": "dir", "depot": "yard",
+                     "plan": {"objects": [
+                         {"name": "flows/default.md", "file_old_sha256": "1111",
+                          "file_new_sha256": "2222", "text": "new text\n",
+                          "diff": "--- was\n+++ is\n"},
+                         {"name": "roles/x.md", "action": "unchanged"}
+                     ]}}
+        }))
+        .unwrap();
+        let texts = run_texts(&run);
+        let headings: Vec<&str> = texts.iter().map(|t| t.heading.as_str()).collect();
+        assert_eq!(
+            headings,
+            [
+                "the declaration of source telegram, whole as carried:",
+                "the command file telegram/normalize (sha256 dc24), whole as carried:",
+                "the change to command file telegram/thread (sha256 aaaa -> (none)), whole as carried:",
+                "the entry old-helper the copy would remove (sha256 cccc), whole as carried:",
+                "the change to file flows/default.md (sha256 1111 -> 2222), whole as carried:",
+                "the file flows/default.md as the pack would install it, whole as carried:",
+            ]
+        );
+        assert_eq!(texts[0].text, "name: telegram\n");
+        assert_eq!(texts[4].text, "--- was\n+++ is\n");
+        // No tap where there is nothing behind it, and the tap names how
+        // many texts it holds.
+        let bare = api::Run::default();
+        assert!(run_texts(&bare).is_empty());
+        assert_eq!(texts_label(1, false), "show 1 text");
+        assert_eq!(texts_label(6, false), "show 6 texts");
+        assert_eq!(texts_label(6, true), "hide 6 texts");
+    }
+
+    /// The card's words for what the command does and who may take it
+    /// back, as a terminal says them.
+    #[test]
+    fn a_run_ask_s_card_says_what_the_command_does_and_who_takes_it_back() {
+        assert_eq!(
+            description_line("Import a pack into the yard"),
+            "what the command does: Import a pack into the yard"
+        );
+        assert_eq!(
+            take_back_label("the operator"),
+            "the operator can take it back:"
+        );
+        assert_eq!(take_back_label(""), "anyone can take it back:");
     }
 
     /// What the yard says an ask for a person's own address in a notify

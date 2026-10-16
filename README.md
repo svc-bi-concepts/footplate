@@ -913,27 +913,37 @@ card has no options and no line for words. The asker's context lines each
 begin with who says them (`yardmaster says: …`) and are drawn as the text
 they are, with no block in them. Under them is the one block of the card,
 and all of it is the yard's: the command whole, in a code block that wraps
-where the window is narrower and is never cut; the yard's sentences for
-what the command changes and what is there now; and the command that takes
-the change back. Every card's header leads with the name of the open yard,
-before the bead and how long it waits, and a run ask's block leads with it
-too, with the user the command runs as: "in plantime, when you approve, the
-yard runs this as mckean, and nothing else:". Directly under the block is
-the Approve button, which names the yard and its key, "Approve in plantime
-(⌘↵)": `cmd+enter` (`ctrl+enter` on Linux), which no other card answers to.
-Enter alone approves nothing. Approving calls `ApproveAsk`, which names the
-ask and nothing of the command: the yard runs what it stored. Afterwards
-the window says `approved, ran:` with the command and what it printed, or
-the yard's refusal whole, as when the yard has changed since the ask was
-written. When the call ends with no answer it says "the yard did not
-answer; read the card again", never that it was approved. A yard that does
-not have the call, or does not serve it to this window, has the card say so
-in place of the button, with the command that approves in a terminal on the
-yard's machine in a block that copies it: `yardr bead answer <bead> <ask>
---approve`. `x` puts a run ask aside and `d` declines it with words, as on
-any card; one put aside can be approved from its card under "Decided". An
-approved one reads `approved, ran:` there, with the command and, under it,
-what it printed.
+where the window is narrower and is never cut; what the command does, in
+one line from its help; the yard's sentences for what the command changes
+and what is there now, each on its own line — for a source or a pack every
+call, command and object, never a summary; and the command that takes the
+change back, with who may run it. An ask that adds a source or applies a
+pack holds its texts behind one tap in the block: each declaration,
+command file, file change and removed entry, and each depot file's change
+and new text, whole as carried, each in a block that copies it to the
+letter. The tap is for checking the yard's reading against them; the
+approval is live whether or not it was opened. Every card's header leads
+with the name of the open yard, before the bead and how long it waits, and
+a run ask's block leads with it too, with the user the command runs as: "in
+plantime, when you approve, the yard runs this as mckean, and nothing else:".
+Directly under the block is the Approve button, which names the yard and
+its key, "Approve in plantime (⌘↵)": `cmd+enter` (`ctrl+enter` on Linux),
+which no other card answers to. Enter alone approves nothing. Approving
+calls `ApproveAsk`, which names the ask and nothing of the command: the
+yard runs what it stored. Afterwards the window says `approved, ran:` with
+the command and what it printed, `approved, being carried out:` where the
+yard carries the approval out after the call, or the yard's refusal whole,
+as when the yard has changed since the ask was written. When the call ends
+with no answer it says "the yard did not answer; read the card again",
+never that it was approved. A yard that does not have the call, or does not
+serve it to this window, has the card say so in place of the button, with
+the command that approves in a terminal on the yard's machine in a block
+that copies it: `yardr bead answer <bead> <ask> --approve`. `x` puts a run
+ask aside and `d` declines it with words, as on any card; one put aside can
+be approved from its card under "Decided". An approved one reads `approved,
+ran:` there, with the command and, under it, what it printed; one the yard
+has not carried out yet reads `approved, being carried out:`, and one whose
+carrying out failed reads `approved, failed:` with the failure under it.
 
 | Key | Does |
 |---|---|

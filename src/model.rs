@@ -670,6 +670,9 @@ pub struct Model {
     chosen: HashMap<(String, u64), u64>,
     /// The asks whose card stands expanded, by bead and ask.
     expanded: HashSet<(String, u64)>,
+    /// The run asks whose carried texts stand shown, by bead and ask: the
+    /// tap behind the yard's sentences.
+    texts: HashSet<(String, u64)>,
     /// Which ask of a bead with several the keys act on, by bead.
     current: HashMap<String, u64>,
     /// The seq of the last `crew_status` applied to each crew member: a
@@ -1765,6 +1768,32 @@ impl Model {
         self.expanded.extend(asks.iter().cloned());
     }
 
+    /// Shows the run ask's carried texts behind the yard's sentences, or
+    /// hides them again.
+    pub fn toggle_texts(&mut self, bead: &str, ask: u64) {
+        let key = (bead.to_string(), ask);
+        if !self.texts.remove(&key) {
+            self.texts.insert(key);
+        }
+    }
+
+    /// Whether the run ask's carried texts stand shown behind the
+    /// yard's sentences.
+    pub fn texts_shown(&self, bead: &str, ask: u64) -> bool {
+        self.texts.contains(&(bead.to_string(), ask))
+    }
+
+    /// The run asks whose carried texts stand shown, by bead and ask.
+    pub fn texts(&self) -> &HashSet<(String, u64)> {
+        &self.texts
+    }
+
+    /// The carried texts of `asks` stand shown too: those that did before
+    /// the yard was left for another.
+    pub fn show_texts(&mut self, asks: &HashSet<(String, u64)>) {
+        self.texts.extend(asks.iter().cloned());
+    }
+
     /// One bead whole, as read. What is no longer open or dealt with leaves
     /// the cards it kept.
     pub fn bead_loaded(&mut self, bead: Bead) {
@@ -1998,11 +2027,14 @@ impl Model {
 
     /// The yard approved a run ask and ran its command: the ask moves to
     /// "Decided" at once, as one that `ran` it, and the queue and the bead
-    /// are read again for what the yard says.
+    /// are read again for what the yard says. An approval the yard carries
+    /// out after the call answers with `CARRY_PENDING`, and reads as being
+    /// carried out until the queue is read again.
     pub fn approved(&mut self, bead: &str, ask: u64, ran: &api::Approved) -> Vec<Effect> {
         let ran = Some(Ran {
             argv: ran.argv.clone(),
             result: ran.result.clone(),
+            failed: false,
         });
         if let Some(dealt) = self
             .decided
@@ -3253,10 +3285,19 @@ where
         "answered" if !ask.given.is_empty() => format!("you gave {}", ask.given.join(", ")),
         "declined" if ask.secret.is_some() => "you declined".to_string(),
         // A run ask's answer is the command the yard ran, whole; what it
-        // printed stands under it on the card.
+        // printed stands under it on the card. One the yard has not
+        // carried out yet reads as being carried out, and one whose
+        // carrying out failed as failed, with the failure under it.
         "answered" if ask.ran.is_some() => {
-            let ran = ask.ran.as_ref().map(Ran::line).unwrap_or_default();
-            format!("approved, ran: {}", plain(&ran))
+            let ran = ask.ran.as_ref().unwrap();
+            let line = plain(&ran.line());
+            if ran.failed {
+                format!("approved, failed: {line}")
+            } else if ran.result == CARRY_PENDING {
+                format!("approved, being carried out: {line}")
+            } else {
+                format!("approved, ran: {line}")
+            }
         }
         "answered" if ask.option == 0 => {
             format!("you answered: {}", plain(&ask.words))
@@ -3315,14 +3356,24 @@ pub fn approve_command(bead: &str, ask: u64) -> String {
     format!("yardr bead answer {bead} {ask} --approve")
 }
 
+/// What an approval the yard carries out after the call holds until the
+/// carrying out completes it: `CarryPending` in internal/store/runask.go of
+/// the yardr repository, which the card reads as being carried out.
+pub const CARRY_PENDING: &str = "approved, to be carried out";
+
 /// What the yard answered to an approval, in one line: the command as it
-/// ran, whole, and what it printed. The card that proposed it leaves with
-/// the approval.
+/// ran, whole, and what it printed; or that it is being carried out, where
+/// the yard answers with `CARRY_PENDING`. The card that proposed it
+/// leaves with the approval.
 pub fn approved_line(approved: &api::Approved) -> String {
     let ran = Ran {
         argv: approved.argv.clone(),
         result: approved.result.clone(),
+        failed: false,
     };
+    if ran.result == CARRY_PENDING {
+        return format!("approved, being carried out: {}", plain(&ran.line()));
+    }
     match plain(&ran.result) {
         result if result.is_empty() => format!("approved, ran: {}", plain(&ran.line())),
         result => format!("approved, ran: {} · {result}", plain(&ran.line())),
@@ -7257,6 +7308,7 @@ mod tests {
                     .into(),
             ],
             back: "yardr peer allow airy --mail-limit 30".into(),
+            ..Run::default()
         }
     }
 
@@ -7478,6 +7530,71 @@ mod tests {
             approved_line(&approved()),
             "approved, ran: yardr peer allow airy --mail-limit 300 · peer airy: takes 300 mails and asks an hour, and 2400 files"
         );
+    }
+
+    /// An approval the yard carries out after the call reads as being
+    /// carried out, and once the carrying out completes it, as ran or as
+    /// failed with the failure in words.
+    #[test]
+    fn an_approval_the_yard_carries_out_reads_all_three() {
+        let mut m = with_a_run_ask(&[]);
+        let pending = api::Approved {
+            argv: more_mail().argv,
+            result: CARRY_PENDING.into(),
+        };
+        m.approved("yd-link", 2710, &pending);
+        let detail = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: yardr peer allow airy --mail-limit 300"
+        );
+        assert_eq!(
+            approved_line(&pending),
+            "approved, being carried out: yardr peer allow airy --mail-limit 300"
+        );
+        // The queue read again once the yard carried it out: ran.
+        m.decided[0].ran = Some(Ran {
+            argv: more_mail().argv,
+            result: "peer airy: takes 300 mails and asks an hour".into(),
+            failed: false,
+        });
+        let detail = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, ran: yardr peer allow airy --mail-limit 300"
+        );
+        // Or failed, with the failure in words.
+        m.decided[0].ran = Some(Ran {
+            argv: more_mail().argv,
+            result: "pack telegram: nothing further was applied".into(),
+            failed: true,
+        });
+        let detail = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, failed: yardr peer allow airy --mail-limit 300"
+        );
+        assert_eq!(
+            detail.ran.as_ref().map(|ran| ran.result.as_str()),
+            Some("pack telegram: nothing further was applied")
+        );
+    }
+
+    /// A run ask's carried texts stand shown behind its sentences, or
+    /// hidden again; those that stood shown before the yard was left
+    /// stand shown on its return, as expanded cards do.
+    #[test]
+    fn a_run_ask_s_texts_stand_shown_behind_its_sentences() {
+        let mut m = with_a_run_ask(&[]);
+        assert!(!m.texts_shown("yd-link", 2710));
+        m.toggle_texts("yd-link", 2710);
+        assert!(m.texts_shown("yd-link", 2710));
+        m.toggle_texts("yd-link", 2710);
+        assert!(!m.texts_shown("yd-link", 2710));
+        m.toggle_texts("yd-link", 2710);
+        let mut again = with_a_run_ask(&[]);
+        again.show_texts(m.texts());
+        assert!(again.texts_shown("yd-link", 2710));
     }
 
     /// Later and a decline are what they are on any card. One put aside
