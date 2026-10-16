@@ -374,8 +374,9 @@ const MONO: [&str; 7] = [
 ];
 
 /// The face code is drawn in. Without one of them it is the text's face,
-/// and its ground alone tells it from the text.
-fn mono(cx: &App) -> Option<SharedString> {
+/// and its ground alone tells it from the text. The arrivals board's
+/// times are drawn in it too.
+pub(crate) fn mono(cx: &App) -> Option<SharedString> {
     static FACE: OnceLock<Option<&'static str>> = OnceLock::new();
     FACE.get_or_init(|| {
         let names = cx.text_system().all_font_names();

@@ -764,6 +764,7 @@ mod tests {
             r#"{"result": {"notifications": [], "unread": 0, "last": 0}}"#,
         );
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        yard.answer("Arrivals", r#"{"result": []}"#);
     }
 
     #[test]

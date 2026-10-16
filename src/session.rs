@@ -243,6 +243,7 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     let unread = inbox.mail.into_iter().filter(|l| !l.read).collect();
     let notifications = client.user_notifications(&user.name, 0)?.notifications;
     let asks = client.user_asks(&user.name)?;
+    let arrivals = client.arrivals()?;
     Ok(State {
         me: user.name.clone(),
         head,
@@ -254,6 +255,7 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         notification_cursor: user.notification_cursor,
         notifications,
         asks,
+        arrivals,
         yard,
     })
 }
@@ -364,6 +366,7 @@ mod tests {
             r#"{"result": {"notifications": [], "unread": 0, "last": 0}}"#,
         );
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        yard.answer("Arrivals", r#"{"result": []}"#);
     }
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;

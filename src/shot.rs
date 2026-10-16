@@ -28,7 +28,8 @@ use crate::yard::Env;
 /// esc opens it, step 2 of setting up a yard here, posed with a
 /// canned doctor of two providers and their model offers, the first
 /// screen with the hosted way's fields open and filled, and the away
-/// screen of a hosted yard that is signed out.
+/// screen of a hosted yard that is signed out, and the arrivals board
+/// open under the switch.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -63,6 +64,7 @@ pub const STATES: &[&str] = &[
     "setup",
     "hosted",
     "signedout",
+    "arrivals",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -348,14 +350,34 @@ fn populate(yard: &Yard, state: &str) {
     yard.answer("AddNote", "{}");
     yard.answer("DeferAsk", "{}");
     yard.answer("DeclineAsk", "{}");
+    // The arrivals board every state loads: three rows, one with an
+    // amber remark, one with none, one with a red one and no expected
+    // arrival. The window shows it under the switch's Arrivals.
+    yard.answer(
+        "Arrivals",
+        &json!({"result": [
+            {"bead": "yd-zulu", "title": "Zulu's late turn",
+             "platform": "draft", "line": "yardr", "expected": "5h–8h",
+             "remark": "late", "tone": "amber"},
+            {"bead": "yd-alpha", "title": "Alpha moves first",
+             "platform": "review", "line": "yardr", "expected": "20m–35m",
+             "remark": "", "tone": "none"},
+            {"bead": "footplate-p512", "title": "The sign-in's password label",
+             "platform": "new", "line": "footplate", "expected": "—",
+             "remark": "held", "tone": "red"},
+        ]})
+        .to_string(),
+    );
     match state {
         // The yard at an address is opened from the settings, not from
         // this yard, and the settings open over a running one: both
         // serve the yardmaster's conversation, as does the yard that is
         // stopped once it is read, the one that answers under the
-        // first screen's open fields, and the signed-out yard's, which
-        // the window never reaches past the edge.
-        "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout" => {
+        // first screen's open fields, the signed-out yard's, which
+        // the window never reaches past the edge, and the arrivals
+        // board's, which the window shows under the switch.
+        "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout"
+        | "arrivals" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -664,6 +686,34 @@ mod tests {
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
+                }
+                "arrivals" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 3, "{state}");
+                    assert_eq!(letters[1].from, "jo", "{state}");
+                    // The board the window shows under the switch: three
+                    // rows, with an amber remark, none, and a red one.
+                    assert_eq!(loaded.arrivals.len(), 3, "{state}");
+                    assert_eq!(loaded.arrivals[0].bead, "yd-zulu", "{state}");
+                    assert_eq!(
+                        (
+                            loaded.arrivals[0].remark.as_str(),
+                            loaded.arrivals[0].tone.as_str()
+                        ),
+                        ("late", "amber"),
+                        "{state}"
+                    );
+                    assert_eq!(loaded.arrivals[1].remark.as_str(), "", "{state}");
+                    assert_eq!(
+                        (
+                            loaded.arrivals[2].expected.as_str(),
+                            loaded.arrivals[2].remark.as_str(),
+                            loaded.arrivals[2].tone.as_str()
+                        ),
+                        ("—", "held", "red"),
+                        "{state}"
+                    );
                 }
                 "plain" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

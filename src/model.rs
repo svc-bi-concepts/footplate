@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, TimeZone};
 
 use crate::api::{
-    self, AboutBead, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember, DecidedAsk, Event, Letter,
-    Me, Notification, OpenAsk, Peer, Ran, Run, Secret, User,
+    self, AboutBead, Arrival, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember, DecidedAsk,
+    Event, Letter, Me, Notification, OpenAsk, Peer, Ran, Run, Secret, User,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -53,6 +53,9 @@ pub struct State {
     pub notifications: Vec<Notification>,
     /// The person's open asks with what they dealt with.
     pub asks: Asks,
+    /// The arrivals board as read: the rows as served, ordered and
+    /// remarked.
+    pub arrivals: Vec<Arrival>,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -359,6 +362,8 @@ pub enum Effect {
     AckNotifications { through: u64 },
     /// `UserAsks`; answered to [`Model::asks`].
     Asks,
+    /// `Arrivals`; answered to [`Model::arrivals`].
+    Arrivals,
     /// `Bead` with `bead`; answered to [`Model::bead_loaded`] or
     /// [`Model::bead_failed`].
     Bead { bead: String },
@@ -437,6 +442,12 @@ impl Hour {
 pub struct Model {
     me: String,
     crew: Vec<CrewMember>,
+    /// The arrivals board as read: the rows as served, ordered and
+    /// remarked.
+    arrivals: Vec<Arrival>,
+    /// Whether the sidebar's lower part shows Arrivals rather than Crew:
+    /// the switch's choice.
+    arrivals_shown: bool,
     /// The users of the yard by name, the window's own among them.
     users: Vec<String>,
     parties: Vec<Party>,
@@ -540,6 +551,7 @@ impl Model {
             parties: parties(&state.peers),
             trust: trusted(&state.peers),
             crew: state.crew,
+            arrivals: state.arrivals,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -622,6 +634,9 @@ impl Model {
         if m.back.is_none() {
             m.back = self.back.clone();
         }
+        // The switch's choice is the yard's, kept between runs: what was
+        // shown before the yard was lost is shown again.
+        m.arrivals_shown = self.arrivals_shown;
         // What was shown before the yard was lost is not unseen again.
         for (seq, w) in m.unread.iter_mut() {
             w.seen |= self.unread.get(seq).is_some_and(|before| before.seen);
@@ -1028,6 +1043,27 @@ impl Model {
 
     pub fn toggle_decided(&mut self) {
         self.decided_expanded = !self.decided_expanded;
+    }
+
+    /// The arrivals board as read: the rows as served, ordered and
+    /// remarked.
+    pub fn arrival_rows(&self) -> &[Arrival] {
+        &self.arrivals
+    }
+
+    /// The arrivals board as read again.
+    pub fn arrivals(&mut self, rows: Vec<Arrival>) {
+        self.arrivals = rows;
+    }
+
+    /// Whether the sidebar's lower part shows Arrivals rather than Crew.
+    pub fn arrivals_shown(&self) -> bool {
+        self.arrivals_shown
+    }
+
+    /// Shows Arrivals under the switch, or Crew.
+    pub fn show_arrivals(&mut self, shown: bool) {
+        self.arrivals_shown = shown;
     }
 
     /// The dealt with, newest first, with their picks.
@@ -2236,6 +2272,27 @@ impl Model {
                 bead: e.bead.clone(),
             });
         }
+        // Arrivals move with every event about a bead, and with the
+        // changes that move their other inputs though they name none:
+        // docs/api.md names them with the call.
+        let arrivals = !e.bead.is_empty()
+            || matches!(
+                e.kind.as_str(),
+                "group_set"
+                    | "group_removed"
+                    | "route_added"
+                    | "route_removed"
+                    | "flow_set"
+                    | "flow_removed"
+                    | "flow_pointer_set"
+                    | "flow_pointer_cleared"
+                    | "depot_updated"
+            )
+            || e.kind.as_str() == "setting_changed"
+                && matches!(e.text("key"), "max_sessions" | "operator");
+        if arrivals {
+            effects.push(Effect::Arrivals);
+        }
         effects
     }
 
@@ -3144,6 +3201,10 @@ mod tests {
             from,
             json!({"to": "jo", "to_user": true, "text": format!("mail {seq}")}),
         )
+    }
+
+    fn bead_event(seq: u64, kind: &str, bead: &str, data: Value) -> Event {
+        serde_json::from_value(json!({"seq": seq, "kind": kind, "actor": "yardmaster", "at": "2026-10-08T09:30:00Z", "bead": bead, "data": data})).unwrap()
     }
 
     /// A yard with the yardmaster and assembly, north linked, and jo with
@@ -4260,6 +4321,88 @@ mod tests {
             []
         );
         assert_eq!(m.event(&event(24, "bead_sung", "", json!({}))), []);
+    }
+
+    #[test]
+    fn arrivals_are_read_again_on_a_bead_s_events_and_their_other_inputs() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        // Every event about a bead, whatever its kind: a note re-reads
+        // the queue beside the board.
+        assert_eq!(
+            m.event(&bead_event(21, "noted", "yd-links", json!({}))),
+            [Effect::Asks, Effect::Arrivals]
+        );
+        assert_eq!(
+            m.event(&bead_event(22, "session_ended", "yd-links", json!({}))),
+            [Effect::Arrivals]
+        );
+        // The changes that move the board's other inputs though they
+        // name no bead: docs/api.md names them with the call.
+        for (seq, kind) in [
+            (23, "group_set"),
+            (24, "group_removed"),
+            (25, "route_added"),
+            (26, "route_removed"),
+            (27, "flow_set"),
+            (28, "flow_removed"),
+            (29, "flow_pointer_set"),
+            (30, "flow_pointer_cleared"),
+            (31, "depot_updated"),
+        ] {
+            assert_eq!(
+                m.event(&event(seq, kind, "", json!({}))),
+                [Effect::Arrivals],
+                "{kind}"
+            );
+        }
+        for (seq, key) in [(32, "max_sessions"), (33, "operator")] {
+            assert_eq!(
+                m.event(&event(seq, "setting_changed", "", json!({"key": key}))),
+                [Effect::Arrivals],
+                "{key}"
+            );
+        }
+        // A setting of any other name, a crew status and whatever else
+        // names no bead move nothing of the board.
+        assert_eq!(
+            m.event(&event(
+                34,
+                "setting_changed",
+                "",
+                json!({"key": "web_addr"})
+            )),
+            []
+        );
+        assert_eq!(m.event(&event(35, "setting_changed", "", json!({}))), []);
+        assert_eq!(
+            m.event(&event(
+                36,
+                "crew_status",
+                "",
+                json!({"crew": "assembly", "status": "blocked", "was": "idle"})
+            )),
+            []
+        );
+        assert_eq!(m.event(&event(37, "timer", "", json!({}))), []);
+    }
+
+    #[test]
+    fn the_switch_s_choice_stands_and_stays_over_a_yard_lost() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        assert!(!m.arrivals_shown());
+        assert!(m.arrival_rows().is_empty());
+        m.show_arrivals(true);
+        assert!(m.arrivals_shown());
+        m.arrivals(vec![Arrival {
+            bead: "yd-links".into(),
+            ..Arrival::default()
+        }]);
+        assert_eq!(m.arrival_rows().len(), 1);
+        // Read again after the yard was lost: the choice stands, with
+        // the board as read now.
+        let (again, _) = m.resumed(yard(&[]));
+        assert!(again.arrivals_shown());
+        assert!(again.arrival_rows().is_empty());
     }
 
     #[test]
@@ -6635,7 +6778,7 @@ mod tests {
         // Back: the bead is here, so nothing is asked.
         assert_eq!(m.select(Selected::Decision("yardr-n8ta".into())), []);
         // An event whose bead is one shown reads it again, with the queue
-        // on a note.
+        // on a note, and the board on every bead's event.
         assert_eq!(
             m.event(&event(21, "noted", "yardmaster", json!({"note": 1}))),
             [Effect::Asks]
@@ -6648,7 +6791,8 @@ mod tests {
                 Effect::Asks,
                 Effect::Bead {
                     bead: "yardr-n8ta".into()
-                }
+                },
+                Effect::Arrivals
             ]
         );
         // A bead's other events, whose kinds are yardr's own, read it too.
@@ -6656,14 +6800,18 @@ mod tests {
         moved.bead = "yardr-n8ta".into();
         assert_eq!(
             m.event(&moved),
-            [Effect::Bead {
-                bead: "yardr-n8ta".into()
-            }]
+            [
+                Effect::Bead {
+                    bead: "yardr-n8ta".into()
+                },
+                Effect::Arrivals
+            ]
         );
-        // One that is shown nowhere reads nothing.
+        // One that is shown nowhere reads no card, but the board moves
+        // with every bead's event all the same.
         let mut elsewhere = event(24, "noted", "yardmaster", json!({"note": 3}));
         elsewhere.bead = "yd-elsewhere".into();
-        assert_eq!(m.event(&elsewhere), [Effect::Asks]);
+        assert_eq!(m.event(&elsewhere), [Effect::Asks, Effect::Arrivals]);
     }
 
     #[test]

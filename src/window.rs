@@ -14,7 +14,7 @@ use gpui::{
     prelude::*, px, relative, rems, rgba, white,
 };
 
-use crate::api::{self, Address, BlobFile, BlobRef, Client};
+use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
@@ -346,6 +346,15 @@ fn unread_words(unread: usize) -> String {
     match unread {
         0 => "none unread".to_string(),
         unread => format!("{unread} unread"),
+    }
+}
+
+/// What the switch says arrives under it: the number with "arriving",
+/// or that none does.
+fn arriving_words(arriving: usize) -> String {
+    match arriving {
+        0 => "none arriving".to_string(),
+        arriving => format!("{arriving} arriving"),
     }
 }
 
@@ -2242,10 +2251,16 @@ impl Footplate {
             Update::Up(state) => {
                 let mut state = *state;
                 held.said = state.yard.take();
+                let fresh = held.model.is_none();
                 let (mut model, effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state),
                     None => (Model::new_aside(state), Vec::new()),
                 };
+                if fresh {
+                    // The lower part shows the yard's kept choice, Crew
+                    // where none was.
+                    model.show_arrivals(self.settings.arrivals_shown(&yard));
+                }
                 let news = model.take_news();
                 held.model = Some(model);
                 held.down = None;
@@ -2298,8 +2313,19 @@ impl Footplate {
                     ),
                 };
                 if fresh {
+                    // The lower part shows the yard's kept choice, Crew
+                    // where none was.
+                    let yard = self.yard.clone();
+                    model.show_arrivals(self.settings.arrivals_shown(&yard));
                     if let Some(place) = &kept {
                         model.expand(&place.expanded);
+                    }
+                    // The arrivals shot shows the board: a debug build's
+                    // alone, as the settings and the draft of
+                    // Footplate::opened.
+                    #[cfg(debug_assertions)]
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("arrivals") {
+                        model.show_arrivals(true);
                     }
                     // The page shot opens the card, so the note's page row
                     // and image show: a debug build's alone, as the settings
@@ -3518,6 +3544,22 @@ impl Footplate {
                             }
                             Vec::new()
                         })
+                    },
+                ),
+                Effect::Arrivals => self.ask_in(
+                    session,
+                    cx,
+                    |client, _| client.arrivals(),
+                    move |this, arrivals, cx| match arrivals {
+                        Ok(rows) => this.change_in(session, cx, |m| {
+                            m.arrivals(rows);
+                            Vec::new()
+                        }),
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the arrivals could not be read: {err}"),
+                            cx,
+                        ),
                     },
                 ),
                 Effect::Asks => self.ask_in(
@@ -7354,6 +7396,29 @@ impl Footplate {
         });
     }
 
+    /// Shows Crew or Arrivals under the switch: the model's from here on,
+    /// and the yard's choice kept, Crew where none was.
+    fn switch_lower(&mut self, arrivals: bool, cx: &mut Context<Self>) {
+        let showing = self.model.as_ref().is_some_and(|m| m.arrivals_shown());
+        if showing == arrivals {
+            return;
+        }
+        self.change(cx, |m| {
+            m.show_arrivals(arrivals);
+            Vec::new()
+        });
+        let mut settings = self.settings.clone();
+        match arrivals {
+            true => {
+                settings.arrivals.insert(self.yard.clone());
+            }
+            false => {
+                settings.arrivals.remove(&self.yard);
+            }
+        }
+        self.set(settings, cx);
+    }
+
     /// The away screen's first words: a yard that is only stopped says
     /// that, with where to start it; where no yard was ever made, one
     /// plain sentence says so and what to do, with no socket, no error
@@ -7789,8 +7854,13 @@ impl Footplate {
             body = body.child(divider(palette));
         }
         let unread: usize = rows.iter().map(|row| row.unread).sum();
-        body = body.child(section_head("Crew", unread_words(unread), palette));
-        if rows.is_empty() {
+        body = body.child(self.lower_switch(model, unread, palette, cx));
+        if model.arrivals_shown() {
+            let mono = select::mono(cx);
+            for row in model.arrival_rows() {
+                body = body.child(self.arrival_row(row, mono.clone(), palette));
+            }
+        } else if rows.is_empty() {
             body =
                 body.child(
                     div().p_3().text_sm().text_color(palette.faint).child(
@@ -7807,6 +7877,199 @@ impl Footplate {
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
         self.column(Some(model.me()), body, palette, cx)
+    }
+
+    /// The head of the sidebar's lower part: the switch between Crew and
+    /// Arrivals, with what waits under the one that shows. Text only: the
+    /// one that shows in the accent, the other quiet; one row high, as a
+    /// section's head. The kit has no segmented control, so the switch is
+    /// built from the palette here.
+    fn lower_switch(
+        &self,
+        model: &Model,
+        unread: usize,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let arrivals = model.arrivals_shown();
+        let count = match arrivals {
+            true => arriving_words(model.arrival_rows().len()),
+            false => unread_words(unread),
+        };
+        div()
+            .px_3()
+            .pt_2()
+            .pb_1()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(self.switch_option("Crew", false, arrivals, palette, cx))
+                    .child(div().text_sm().text_color(palette.faint).child("|"))
+                    .child(self.switch_option("Arrivals", true, arrivals, palette, cx)),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "switch count".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .flex_none()
+                    .child(count),
+            )
+    }
+
+    /// One side of the lower switch: the one that shows in the accent,
+    /// the other quiet, and a click away from showing.
+    fn switch_option(
+        &self,
+        title: &'static str,
+        shows: bool,
+        arrivals: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let chosen = shows == arrivals;
+        div()
+            .id(SharedString::from(format!(
+                "switch {}",
+                title.to_lowercase()
+            )))
+            .debug_selector(move || format!("switch {}", title.to_lowercase()))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(match chosen {
+                true => palette.accent,
+                false => palette.faint,
+            })
+            .when(!chosen, |el| {
+                el.cursor_pointer()
+                    .hover(|style| style.text_color(palette.text))
+                    .on_click(cx.listener(move |this, _, _, cx| this.switch_lower(shows, cx)))
+            })
+    }
+
+    /// One arrival: the title, the expected arrival in mono at the row's
+    /// end, and faint the id, platform, line and remark on the second
+    /// line. A red remark in the warn colour, amber in the accent. The
+    /// row opens the bead's page where the web view answers, and is no
+    /// button where it does not, as a page row's Open is.
+    fn arrival_row(
+        &self,
+        row: &Arrival,
+        mono: Option<SharedString>,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let bead = row.bead.clone();
+        // The probe answered at this address, so it parses: the same
+        // reading, not another. An id that is none opens nothing, and
+        // the row is no button.
+        let url = match self.view_up_now() {
+            Some(true) => Address::parse_view(&self.settings.web_view)
+                .expect("the web view answered at this address")
+                .bead_url(&row.bead),
+            _ => None,
+        };
+        let el = div()
+            .id(SharedString::from(format!("arrival {bead}")))
+            .debug_selector({
+                let bead = bead.clone();
+                move || format!("arrival {bead}")
+            })
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2();
+        let el = match url {
+            Some(url) => {
+                let open = self.means.open.clone();
+                el.cursor_pointer()
+                    .hover(|style| style.bg(palette.hover))
+                    .on_click(move |_, _, cx| (open)(&url, cx))
+            }
+            None => el,
+        };
+        let faint = [row.bead.as_str(), row.platform.as_str(), row.line.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let remark = match row.tone.as_str() {
+            "red" => palette.warn,
+            "amber" => palette.accent,
+            _ => palette.faint,
+        };
+        let mut time = div()
+            .flex_none()
+            .debug_selector({
+                let bead = bead.clone();
+                move || format!("arrival time {bead}")
+            })
+            .text_color(match row.expected.as_str() {
+                "—" => palette.faint,
+                _ => palette.text,
+            })
+            .child(row.expected.clone());
+        if let Some(mono) = mono {
+            time = time.font_family(mono);
+        }
+        el.child(
+            div()
+                .flex()
+                .flex_col()
+                // Resolve the available row width before measuring the
+                // title, so truncate() can draw its ellipsis.
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .debug_selector({
+                            let bead = bead.clone();
+                            move || format!("arrival title {bead}")
+                        })
+                        .child(row.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(palette.faint)
+                                .debug_selector({
+                                    let bead = bead.clone();
+                                    move || format!("arrival sub {bead}")
+                                })
+                                .child(faint),
+                        )
+                        .children((!row.remark.is_empty()).then(|| {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(remark)
+                                .debug_selector({
+                                    let bead = bead.clone();
+                                    move || format!("arrival remark {bead}")
+                                })
+                                .child(format!("· {}", row.remark))
+                        })),
+                ),
+        )
+        .child(time)
     }
 
     fn row(
@@ -10275,6 +10538,7 @@ mod tests {
         );
         yard.answer("AckUserNotifications", "{}");
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        yard.answer("Arrivals", r#"{"result": []}"#);
         yard.answer("Mail", "{}");
         yard.answer(
             "MailPeer",
@@ -11729,6 +11993,24 @@ mod tests {
              "ask": 5, "question": "Close sketch PR #3?", "asker": "assembly",
              "since": "2026-10-10T11:30:00Z"}
         ], "decided": []}})
+        .to_string()
+    }
+
+    /// Three arrivals as served: out of every order of the yard's, one
+    /// with an amber remark, one with none, one with a red one and no
+    /// expected arrival.
+    fn arrivals_board() -> String {
+        json!({"result": [
+            {"bead": "yd-zulu", "title": "Zulu's late turn",
+             "platform": "draft", "line": "yardr", "expected": "5h–8h",
+             "remark": "late", "tone": "amber"},
+            {"bead": "yd-alpha", "title": "Alpha moves first",
+             "platform": "review", "line": "yardr", "expected": "20m–35m",
+             "remark": "", "tone": "none"},
+            {"bead": "footplate-p512", "title": "The sign-in's password label",
+             "platform": "new", "line": "footplate", "expected": "—",
+             "remark": "held", "tone": "red"},
+        ]})
         .to_string()
     }
 
@@ -15234,9 +15516,10 @@ mod tests {
     }
 
     /// The left list's sections stand under their titles, each with its
-    /// count at the right: "Decisions" over the open questions, "Crew"
-    /// over the conversations. With nothing to decide the Decisions head
-    /// is gone; the Crew head stands whatever the yard holds.
+    /// count at the right: "Decisions" over the open questions, the Crew
+    /// | Arrivals switch over the conversations. With nothing to decide
+    /// the Decisions head is gone; the switch stands whatever the yard
+    /// holds.
     #[gpui::test]
     fn the_sections_stand_under_their_titles_with_their_counts(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -15267,18 +15550,20 @@ mod tests {
         });
         assert!(drawn(cx, "section Decisions"));
         assert!(drawn(cx, "section Decisions count"));
-        assert!(drawn(cx, "section Crew"));
-        assert!(drawn(cx, "section Crew count"));
+        assert!(drawn(cx, "switch crew"));
+        assert!(drawn(cx, "switch arrivals"));
+        assert!(drawn(cx, "switch count"));
         let decisions = bounds_of(cx, "section Decisions");
         let decision_count = bounds_of(cx, "section Decisions count");
-        let crew = bounds_of(cx, "section Crew");
-        let crew_count = bounds_of(cx, "section Crew count");
+        let crew = bounds_of(cx, "switch crew");
+        let arrivals = bounds_of(cx, "switch arrivals");
+        let count = bounds_of(cx, "switch count");
         let rows = bounds_of(cx, "rows");
         assert!(
             decisions.bottom() <= crew.top(),
-            "the Crew head stands above the Decisions head: {crew:?} {decisions:?}"
+            "the switch stands above the Decisions head: {crew:?} {decisions:?}"
         );
-        for (head, count) in [(&decisions, &decision_count), (&crew, &crew_count)] {
+        for (head, count) in [(&decisions, &decision_count), (&arrivals, &count)] {
             assert!(
                 head.right() <= count.left() && count.right() <= rows.right() + px(1.),
                 "the count is not at its head's right end: {head:?} {count:?} {rows:?}"
@@ -15288,12 +15573,22 @@ mod tests {
                 "the count stands off its head's row: {head:?} {count:?}"
             );
         }
+        // The switch is one row: Crew and Arrivals stand beside each
+        // other, the count on their row.
+        assert!(
+            crew.right() <= arrivals.left(),
+            "the switch's sides overlap: {crew:?} {arrivals:?}"
+        );
+        assert!(
+            crew.top() <= arrivals.bottom() && arrivals.top() <= crew.bottom(),
+            "the switch stands on two rows: {crew:?} {arrivals:?}"
+        );
     }
 
-    /// With nothing to decide there is no Decisions head; the Crew head
+    /// With nothing to decide there is no Decisions head; the switch
     /// stands alone over the conversations.
     #[gpui::test]
-    fn without_decisions_the_crew_head_stands_alone(cx: &mut TestAppContext) {
+    fn without_decisions_the_switch_stands_alone(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
@@ -15302,8 +15597,239 @@ mod tests {
         });
         assert!(!drawn(cx, "section Decisions"));
         assert!(!drawn(cx, "section Decisions count"));
-        assert!(drawn(cx, "section Crew"));
-        assert!(drawn(cx, "section Crew count"));
+        assert!(drawn(cx, "switch crew"));
+        assert!(drawn(cx, "switch arrivals"));
+        assert!(drawn(cx, "switch count"));
+    }
+
+    /// The switch shows Crew first: the conversations stand under it, and
+    /// no arrival. A click on Arrivals shows the served rows in the served
+    /// order, with their remarks as served; a click on Crew shows the
+    /// conversations again.
+    #[gpui::test]
+    fn the_switch_shows_crew_first_and_arrivals_on_a_click(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // Crew first: the conversations stand, and no arrival.
+        assert!(drawn(cx, "row name yardmaster"));
+        assert!(!drawn(cx, "arrival yd-zulu"));
+        assert!(view.read_with(cx, |v, _| !v.model.as_ref().unwrap().arrivals_shown()));
+        // Arrivals on a click: the served rows. The frame keeps every
+        // selector it ever drew, so the conversations' absence is the
+        // model's: the list draws them only under Crew.
+        click_on(cx, "switch arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(view.read_with(cx, |v, _| v.model.as_ref().unwrap().arrivals_shown()));
+        for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
+            assert!(drawn(cx, &format!("arrival {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("arrival title {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("arrival time {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("arrival sub {bead}")), "{bead}");
+        }
+        // The served order, which is none of the window's: the rows stand
+        // as they came, with no sorting of their own.
+        let tops: Vec<_> = ["yd-zulu", "yd-alpha", "footplate-p512"]
+            .into_iter()
+            .map(|bead| bounds_of(cx, &format!("arrival {bead}")).top())
+            .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "the rows stand out of the served order: {tops:?}"
+        );
+        // The remarks as served: late, none, and held.
+        assert!(drawn(cx, "arrival remark yd-zulu"));
+        assert!(!drawn(cx, "arrival remark yd-alpha"));
+        assert!(drawn(cx, "arrival remark footplate-p512"));
+        view.read_with(cx, |v, _| {
+            let rows = v.model.as_ref().unwrap().arrival_rows();
+            assert_eq!(
+                rows.iter()
+                    .map(|row| (row.bead.as_str(), row.remark.as_str(), row.tone.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("yd-zulu", "late", "amber"),
+                    ("yd-alpha", "", "none"),
+                    ("footplate-p512", "held", "red"),
+                ]
+            );
+        });
+        // And Crew again on a click.
+        click_on(cx, "switch crew");
+        wait(cx, "the crew", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| !m.arrivals_shown())
+            })
+        });
+    }
+
+    /// The switch's choice is the yard's: it is kept when it is made, and
+    /// the next start opens the yard on it.
+    #[gpui::test]
+    fn the_switch_s_choice_is_kept_and_opened_again(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let env = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yard", |cx| {
+            view.read_with(cx, |v, _| v.model.is_some())
+        });
+        // Crew first; Arrivals on a click, and the choice is kept.
+        assert!(drawn(cx, "row name yardmaster"));
+        click_on(cx, "switch arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(Settings::read(&file).arrivals_shown("this machine"));
+        // The next start opens the yard on Arrivals.
+        let env = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let file_again = file.clone();
+        let (again, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::opened(env, "jo".into(), Some(file_again), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the arrivals again", |cx| {
+            drawn(cx, "arrival yd-zulu")
+                && again.read_with(cx, |v, _| {
+                    v.model.as_ref().is_some_and(|m| m.arrivals_shown())
+                })
+        });
+        assert!(!drawn(cx, "row name yardmaster"));
+        // Choosing Crew keeps that instead.
+        click_on(cx, "switch crew");
+        wait(cx, "the crew again", |cx| drawn(cx, "row name yardmaster"));
+        assert!(!Settings::read(&file).arrivals_shown("this machine"));
+        let _ = view;
+    }
+
+    /// An arrival row opens the bead's page where the web view answers.
+    #[gpui::test]
+    fn an_arrival_row_opens_the_bead_s_page_where_the_view_answers(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The view answers at its address: the row opens the bead's page.
+        let base = view_up();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        click_on(cx, "switch arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        let opened = opened_pages(&view, cx);
+        click_on(cx, "arrival footplate-p512");
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [format!("{base}/beads/footplate-p512")]
+        );
+    }
+
+    /// An arrival row is no button where the web view does not answer: it
+    /// stands, and opens nothing.
+    #[gpui::test]
+    fn an_arrival_row_is_no_button_where_the_view_is_down(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // Nothing answers at the view's address: the row stands, and
+        // opens nothing.
+        let base = view_down();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the web view down", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
+        click_on(cx, "switch arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        let opened = opened_pages(&view, cx);
+        click_on(cx, "arrival yd-zulu");
+        cx.run_until_parked();
+        assert!(opened.borrow().is_empty());
+    }
+
+    /// At the narrowest window the arrivals rows stand two lines high in
+    /// the sidebar: time and title on the first, the faint line with the
+    /// remark on the second, inside the column.
+    #[gpui::test]
+    fn the_arrivals_rows_hold_at_the_narrowest_window(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        click_on(cx, "switch arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
+        // The narrowest window the application opens (main.rs).
+        cx.simulate_resize(gpui::size(px(560.), px(360.)));
+        // The yard's line ends at the column's edge, short of the head's
+        // own padding only: a row past that runs past the column.
+        let yard_line = bounds_of(cx, "which yard");
+        let edge = yard_line.right() + settings_of(&view, cx).rem() * 0.75 + px(1.);
+        for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
+            let row = bounds_of(cx, &format!("arrival {bead}"));
+            let title = bounds_of(cx, &format!("arrival title {bead}"));
+            let time = bounds_of(cx, &format!("arrival time {bead}"));
+            let sub = bounds_of(cx, &format!("arrival sub {bead}"));
+            // Time and title on the first line, the faint line on the
+            // second, the row two lines high.
+            assert!(
+                title.top() <= time.bottom() && time.top() <= title.bottom(),
+                "time stands off the title's row: {title:?} {time:?}"
+            );
+            assert!(
+                sub.top() >= title.bottom() - px(1.),
+                "the faint line stands on the title's row: {title:?} {sub:?}"
+            );
+            assert!(
+                sub.bottom() <= row.bottom() + px(1.),
+                "the faint line stands below the row: {sub:?} {row:?}"
+            );
+            // All of it inside the column.
+            for part in [&title, &time, &sub] {
+                assert!(
+                    part.right() <= edge,
+                    "the row runs past the column: {part:?} past {yard_line:?}"
+                );
+            }
+            // The remark, where one is served, on the faint line's row.
+            if bead != "yd-alpha" {
+                let remark = bounds_of(cx, &format!("arrival remark {bead}"));
+                assert!(
+                    sub.top() <= remark.bottom() && remark.top() <= sub.bottom(),
+                    "the remark stands off the faint line's row: {sub:?} {remark:?}"
+                );
+                assert!(
+                    remark.right() <= edge,
+                    "the remark runs past the column: {remark:?} past {yard_line:?}"
+                );
+            }
+        }
     }
 
     /// The head keeps its line and the button has the foot of the list: at
@@ -16155,6 +16681,7 @@ mod tests {
             r#"{"result": {"notifications": [], "unread": 0, "last": 0}}"#,
         );
         yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        yard.answer("Arrivals", r#"{"result": []}"#);
     }
 
     /// The window as footplate opens it: on the yard `env` names, else the

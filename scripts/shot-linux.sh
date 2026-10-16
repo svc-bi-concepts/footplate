@@ -24,8 +24,9 @@
 # setting up a yard here, posed: a canned doctor of two providers and
 # their model offers, and the working styles as a numbered scale),
 # `hosted` (the first screen with the hosted way's fields open and
-# filled) and `signedout` (the away screen of a hosted yard that is
-# signed out).
+# filled), `signedout` (the away screen of a hosted yard that is
+# signed out) and `arrivals` (the arrivals board open under the
+# switch).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the head draws the same on
@@ -44,7 +45,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain run stopped far settings reconnecting page mail image refusal undelivered answered setup hosted signedout"
+states="yardmaster plain run stopped far settings reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

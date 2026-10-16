@@ -215,6 +215,31 @@ pub struct CrewMember {
     pub status: String,
 }
 
+/// One row of the arrivals board: a bead still travelling, its title,
+/// its platform (stage) and line (depot), the expected arrival as the
+/// yard prints it, and the remark with its tone. Served ordered and
+/// remarked; footplate draws the rows as they come.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Arrival {
+    pub bead: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub platform: String,
+    /// The depot the bead is worked in, `""` when it has none.
+    #[serde(default)]
+    pub line: String,
+    /// The expected arrival as the yard prints it: the usual range, one
+    /// span when both ends agree, `—` where the yard serves none.
+    #[serde(default)]
+    pub expected: String,
+    #[serde(default)]
+    pub remark: String,
+    /// `red`, `amber` or `none`.
+    #[serde(default)]
+    pub tone: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Peer {
     pub name: String,
@@ -924,6 +949,22 @@ impl Address {
             return None;
         }
         Some(format!("{}{}/blobs/{hash}", self.origin(), self.path))
+    }
+
+    /// The browser's URL for the bead `id` at this base address: the
+    /// `/beads/` route under it, for Open. The id is the yard's word, so
+    /// every byte outside the unreserved set goes percent-encoded, and it
+    /// stays one segment whatever it holds. An empty id opens nothing.
+    pub fn bead_url(&self, id: &str) -> Option<String> {
+        match id.is_empty() {
+            true => None,
+            false => Some(format!(
+                "{}{}/beads/{}",
+                self.origin(),
+                self.path,
+                encode_name(id)
+            )),
+        }
     }
 
     /// The browser's URL for the file `hash` under `name` at this base
@@ -1805,6 +1846,12 @@ impl Client {
         self.answer("UserAsks", json!({ "name": name }))
     }
 
+    /// The arrivals board: the open beads still travelling, up to 15
+    /// rows in arrival order, each with its expected arrival and remark.
+    pub fn arrivals(&self) -> Result<Vec<Arrival>> {
+        self.list("Arrivals", json!({}))
+    }
+
     /// One bead whole: body, stage, labels, notes, its asks with their
     /// options, recommendation and state, and the about-beads.
     pub fn bead(&self, bead: &str) -> Result<Bead> {
@@ -2561,6 +2608,29 @@ mod tests {
         for hash in ["", "ab?x=1", "ab/../cd", "ab cd"] {
             assert_eq!(address.file_url(hash, "report.pdf"), None, "{hash:?}");
         }
+    }
+
+    #[test]
+    fn a_bead_s_url_is_the_view_s_beads_route_with_its_id_as_one_segment() {
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        assert_eq!(
+            address.bead_url("footplate-vnfq").as_deref(),
+            Some("http://127.0.0.1:8791/beads/footplate-vnfq")
+        );
+        // Under a proxy's path, alike.
+        let address = Address::parse_view("https://mac.example.net/yard/").unwrap();
+        assert_eq!(
+            address.bead_url("footplate-vnfq").as_deref(),
+            Some("https://mac.example.net/yard/beads/footplate-vnfq")
+        );
+        // The id is the yard's word: no `/`, `?` or `#` of it reaches
+        // the URL as anything but a byte of the id.
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        assert_eq!(
+            address.bead_url("a b/..?c#d%").as_deref(),
+            Some("http://127.0.0.1:8791/beads/a%20b%2F..%3Fc%23d%25")
+        );
+        assert_eq!(address.bead_url(""), None);
     }
 
     #[test]
@@ -3634,6 +3704,54 @@ mod tests {
             ),
             (false, "stopped", "")
         );
+    }
+
+    #[test]
+    fn arrivals_come_in_the_served_order_with_their_remark_and_tone() {
+        let yard = Yard::start();
+        yard.answer(
+            "Arrivals",
+            r#"{"result": [
+                {"bead": "footplate-p512", "title": "The sign-in's password label",
+                 "platform": "new", "line": "footplate", "expected": "—",
+                 "remark": "held", "tone": "red"},
+                {"bead": "yardr-bwm2", "title": "Hosted v0 trial",
+                 "platform": "review", "line": "yardr", "expected": "20m–35m",
+                 "remark": "", "tone": "none"},
+                {"bead": "yd-links", "title": "Move the links",
+                 "platform": "build", "line": "", "expected": "2h–3h",
+                 "remark": "waits for decisions", "tone": "amber"}
+            ]}"#,
+        );
+        let rows = yard.client().arrivals().unwrap();
+        assert_eq!(yard.asked("Arrivals"), vec![json!({})]);
+        assert_eq!(
+            rows.iter().map(|row| row.bead.as_str()).collect::<Vec<_>>(),
+            ["footplate-p512", "yardr-bwm2", "yd-links"]
+        );
+        assert_eq!(
+            (
+                rows[0].title.as_str(),
+                rows[0].platform.as_str(),
+                rows[0].line.as_str(),
+                rows[0].expected.as_str(),
+                rows[0].remark.as_str(),
+                rows[0].tone.as_str()
+            ),
+            (
+                "The sign-in's password label",
+                "new",
+                "footplate",
+                "—",
+                "held",
+                "red"
+            )
+        );
+        assert_eq!(rows[1].remark.as_str(), "");
+        assert_eq!(rows[1].tone.as_str(), "none");
+        assert_eq!(rows[2].line.as_str(), "");
+        assert_eq!(rows[2].remark.as_str(), "waits for decisions");
+        assert_eq!(rows[2].tone.as_str(), "amber");
     }
 
     #[test]
