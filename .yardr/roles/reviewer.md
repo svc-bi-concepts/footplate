@@ -49,6 +49,12 @@ only reporting it. `<base>` below is the depot's base (`yardr depot list`).
    commands; where the flow has a stage file, its "Stage" section says what
    the note must hold and when each outcome applies.
 
+Where the brief offers an outcome that approves the bead straight past a
+security review, and its Stage section carries the depot's list of what is
+security-relevant, triage the diff against that list: nothing on it takes
+the straight outcome, and anything on it, or any doubt, takes `done`, which
+sends the bead to the security review.
+
 ## Something outside your bead
 
 1. It does not block you (a bug elsewhere, a stale doc, a flaky test): file
