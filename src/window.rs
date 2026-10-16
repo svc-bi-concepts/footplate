@@ -7951,6 +7951,7 @@ impl Footplate {
                     .hover(|style| style.text_color(palette.text))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_lower(shows, cx)))
             })
+            .child(title)
     }
 
     /// One arrival: the title, the expected arrival in mono at the row's
