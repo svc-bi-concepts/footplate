@@ -1,0 +1,464 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>footplate rail mock</title>
+<style>
+:root{
+--dusk-950:#101112;--dusk-900:#161718;--dusk-850:#1C1D1F;--dusk-800:#232426;--dusk-750:#2A2B2E;--dusk-700:#333538;
+--ink-100:#E9E9EA;--ink-300:#ABADB0;
+--yard-400:#E2794A;--yard-500:#D3602F;--yard-600:#B54E22;
+--signal-green:#4CC38A;--signal-red:#E5675A;
+--sans:"IBM Plex Sans","Noto Sans","Cantarell","Segoe UI",system-ui,sans-serif;
+--mono:"IBM Plex Mono",ui-monospace,"DejaVu Sans Mono",monospace;
+}
+.win{
+--surface-app:var(--dusk-900);--surface-raised:var(--dusk-850);--surface-hover:var(--dusk-800);
+--border-subtle:#27282B;--border-strong:var(--dusk-700);
+--text-primary:var(--ink-100);--text-secondary:var(--ink-300);
+--text-accent:var(--yard-400);--accent:var(--yard-500);
+--status-running:var(--signal-green);--status-error:var(--signal-red);
+--tile-bg:#0E0F10;--track-stroke:#F5F5F5;
+display:flex;background:var(--surface-app);color:var(--text-primary);
+font:400 13px/18px var(--sans);overflow:hidden;text-align:left;
+}
+.win[data-theme="light"]{
+--surface-app:#F7F7F6;--surface-raised:#FFFFFF;--surface-hover:#EDEDEB;
+--border-subtle:#E2E2DF;--border-strong:#CFCFCB;
+--text-primary:#161718;--text-secondary:#5B5E64;
+--text-accent:var(--yard-600);
+--status-running:#1F9A60;--status-error:#B3382C;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+.rail{width:56px;height:100%;flex:none;border-right:1px solid var(--border-subtle);
+position:relative;padding:8px 0;text-align:center}
+.mark{width:32px;height:32px;margin:0 auto;border-radius:8px;background:var(--tile-bg);
+line-height:32px;box-shadow:0 0 0 1px var(--border-strong)}
+.mark svg{vertical-align:middle}
+.mode{width:32px;height:32px;margin:4px auto 0;border-radius:6px;color:var(--text-secondary);
+line-height:32px}
+.mode svg{vertical-align:middle}
+.mode.gap{margin-top:8px}
+.mode.on{background:var(--surface-hover);color:var(--text-accent)}
+.rail .foot{position:absolute;bottom:8px;left:0;right:0}
+.ytile{width:32px;height:32px;margin:0 auto;border-radius:6px;border:1px solid var(--border-strong);
+line-height:30px;font-weight:600;color:var(--text-primary)}
+.list{width:270px;flex:none;border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;overflow:hidden}
+.status{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border-subtle);flex:none}
+.dot{width:8px;height:8px;border-radius:999px;background:var(--status-running);flex:none}
+.dot.red{background:var(--status-error)}.dot.amber{background:var(--text-accent)}
+.status .st{font-weight:500}
+.status .act{margin-left:auto;color:var(--text-secondary)}
+.sect{display:flex;justify-content:space-between;align-items:center;padding:8px 12px 4px;flex:none}
+.sect .t{font-weight:600}.sect .c{color:var(--text-secondary)}
+.rows{overflow:hidden;padding-bottom:8px}
+.row{margin:0 4px;padding:6px 8px;border-radius:6px}
+.row.on{background:var(--surface-hover)}
+.row .l1{display:flex;justify-content:space-between;gap:8px}
+.row .nm{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .un{color:var(--text-accent);font-weight:600;flex:none}
+.row .l2{font-size:12px;line-height:16px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .q{font-weight:500}
+.row .opt{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.row .sub{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:16px;color:var(--text-secondary)}
+.divider{border-top:1px solid var(--border-subtle);margin:4px 0}
+.pane{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.phead{padding:12px;border-bottom:1px solid var(--border-subtle);flex:none}
+.phead .t{font-size:15px;line-height:20px;font-weight:600}
+.phead .s{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.phead .meta{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.body{flex:1;overflow:hidden;padding:12px;display:flex;flex-direction:column;gap:10px}
+.msg .mhead{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.msg .mhead b{color:var(--text-primary);font-weight:600}
+.line{flex:none;border-top:1px solid var(--border-subtle);padding:8px 12px}
+.line .box{border:1px solid var(--border-strong);border-radius:6px;padding:6px 8px;color:var(--text-secondary)}
+.card .qq{font-size:15px;line-height:20px;font-weight:600}
+.card .rec{color:var(--text-accent)}
+.card .opts{display:flex;flex-direction:column;gap:2px}
+.card .opt{display:flex;gap:8px}
+.card .opt .n{color:var(--text-secondary);flex:none}
+.card .opt.best .w{font-weight:600}
+.card .why{font-size:12px;color:var(--text-secondary)}
+.card .keys{font-size:12px;color:var(--text-secondary)}
+.brow{margin:0 4px;padding:6px 8px;border-radius:6px}
+.brow .l1{display:flex;justify-content:space-between;gap:8px}
+.brow .tm{font-family:var(--mono);font-size:12px;flex:none}
+.brow .l2{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.brow .l2 .rd{color:var(--status-error)}.brow .l2 .am{color:var(--text-accent)}
+.stage{padding:2px 0}
+.stage .sh{display:flex;align-items:center;gap:8px;padding:6px 12px 2px}
+.stage .sh .t{font-weight:600}
+.stage .sh .c{color:var(--text-secondary);font-size:12px}
+.flowhead{padding:10px 12px 2px}
+.flowhead .t{font-weight:600}
+.flowhead .s{font-size:12px;color:var(--text-secondary)}
+</style></head><body><body style="background:#0B0C0D;padding:24px;font-family:var(--sans)">
+<h1 style="color:#E9E9EA;font-size:18px;margin-bottom:4px">footplate rail: three modes, two sizes, two themes</h1>
+<p style="color:#ABADB0;font-size:13px;margin-bottom:20px">Frames are exact pixels: the floor is 616 by 360, the large 1200 by 800. Tokens from yardr-design.</p>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 616 by 360 &middot; dark</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:616px;height:360px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Crew</div><div class="c">3 unread</div></div>
+<div class="rows">
+<div class="row on"><div class="l1"><div class="nm">yardmaster</div><div class="un">2</div></div><div class="l2">working</div></div>
+<div class="row"><div class="l1"><div class="nm">clerk</div></div><div class="l2">idle</div></div>
+<div class="row"><div class="l1"><div class="nm">signaller</div><div class="un">1</div></div><div class="l2">waiting on you</div></div>
+</div><div class="divider"></div><div class="rows">
+<div class="row"><div class="l1"><div class="nm">yard</div><div class="un">1</div></div><div class="l2">notifications</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">yardmaster</div><div class="s">runs this yard</div></div>
+<div class="body">
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 2h</div><div>The rail mock is ready for your eyes.</div></div>
+<div class="msg"><div class="mhead"><b>you</b> &middot; 2h</div><div>On it after lunch.</div></div>
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 20m</div><div>Two decisions wait behind it.</div></div>
+</div><div class="line"><div class="box">write to yardmaster&hellip;</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 616 by 360 &middot; dark</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:616px;height:360px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Decisions</div><div class="c">2 waiting</div></div>
+<div class="rows">
+<div class="sect"><div class="t" style="font-size:12px;color:var(--text-secondary)">Everything else</div></div>
+<div class="row on"><div class="q">Approve the rail mock and its twelve screenshots?</div>
+<div class="opt">1 approve the mock</div><div class="opt">2 ask for changes</div><div class="opt">3 you decide</div>
+<div class="sub"><span>yardmaster &middot; 2h</span><span>zj5f</span></div></div>
+<div class="row"><div class="q">Allow the edge to serve the flows panel?</div>
+<div class="opt">1 allow</div><div class="opt">2 deny</div>
+<div class="sub"><span>yardmaster &middot; 5h</span><span>bwm2</span></div></div>
+<div class="row"><div class="l2">&#9656; Decided (3)</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="meta">mac &middot; footplate-zj5f &middot; 2h</div>
+<div class="t">Approve the rail mock and its twelve screenshots?</div></div>
+<div class="body card">
+<div><span class="rec">recommends: approve</span> <span class="why">&mdash; the rail carries all three modes at the floor</span></div>
+<div class="opts">
+<div class="opt best"><span class="n">1</span><span class="w">approve the mock</span></div>
+<div class="opt"><span class="n">2</span><span>ask for changes</span></div>
+<div class="opt"><span class="n">3</span><span>you decide</span></div>
+</div>
+</div><div class="line"><div class="box">words for the note&hellip;</div></div>
+<div class="line" style="border-top:none;padding-top:0"><div class="keys" style="font-size:12px;color:var(--text-secondary)">1&ndash;3 pick &middot; enter sends &middot; d puts aside</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 616 by 360 &middot; dark</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:616px;height:360px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Timetable</div><div class="c">3 in transit</div></div>
+<div class="rows">
+<div class="row on"><div class="l1"><div class="nm">arrivals</div></div><div class="l2">3 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">yardr</div></div><div class="l2">2 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">footplate</div></div><div class="l2">1 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">signalbox</div></div><div class="l2">nothing in transit</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">arrivals</div><div class="s">3 in transit &middot; all lines</div></div>
+<div class="body" style="padding:4px 0">
+<div class="sect"><div class="t">new</div><div class="c">2 arriving</div></div>
+<div class="brow"><div class="l1"><div class="nm">Paint the shed</div><div class="tm">2h&ndash;3h</div></div>
+<div class="l2">yd-shed &middot; yardr</div></div>
+<div class="brow"><div class="l1"><div class="nm">Move the links</div><div class="tm">&mdash;</div></div>
+<div class="l2">yd-links &middot; yardr &middot; <span class="rd">held</span></div></div>
+<div class="sect"><div class="t">review</div><div class="c">1 arriving</div></div>
+<div class="brow"><div class="l1"><div class="nm">Release train</div><div class="tm">45m&ndash;1h</div></div>
+<div class="l2">yd-train &middot; footplate &middot; <span class="am">waits for mckean</span></div></div>
+</div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 1200 by 800 &middot; dark</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:1200px;height:800px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Crew</div><div class="c">3 unread</div></div>
+<div class="rows">
+<div class="row on"><div class="l1"><div class="nm">yardmaster</div><div class="un">2</div></div><div class="l2">working</div></div>
+<div class="row"><div class="l1"><div class="nm">clerk</div></div><div class="l2">idle</div></div>
+<div class="row"><div class="l1"><div class="nm">signaller</div><div class="un">1</div></div><div class="l2">waiting on you</div></div>
+</div><div class="divider"></div><div class="rows">
+<div class="row"><div class="l1"><div class="nm">yard</div><div class="un">1</div></div><div class="l2">notifications</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">yardmaster</div><div class="s">runs this yard</div></div>
+<div class="body">
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 2h</div><div>The rail mock is ready for your eyes.</div></div>
+<div class="msg"><div class="mhead"><b>you</b> &middot; 2h</div><div>On it after lunch.</div></div>
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 20m</div><div>Two decisions wait behind it.</div></div>
+</div><div class="line"><div class="box">write to yardmaster&hellip;</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 1200 by 800 &middot; dark</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:1200px;height:800px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Decisions</div><div class="c">2 waiting</div></div>
+<div class="rows">
+<div class="sect"><div class="t" style="font-size:12px;color:var(--text-secondary)">Everything else</div></div>
+<div class="row on"><div class="q">Approve the rail mock and its twelve screenshots?</div>
+<div class="opt">1 approve the mock</div><div class="opt">2 ask for changes</div><div class="opt">3 you decide</div>
+<div class="sub"><span>yardmaster &middot; 2h</span><span>zj5f</span></div></div>
+<div class="row"><div class="q">Allow the edge to serve the flows panel?</div>
+<div class="opt">1 allow</div><div class="opt">2 deny</div>
+<div class="sub"><span>yardmaster &middot; 5h</span><span>bwm2</span></div></div>
+<div class="row"><div class="l2">&#9656; Decided (3)</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="meta">mac &middot; footplate-zj5f &middot; 2h</div>
+<div class="t">Approve the rail mock and its twelve screenshots?</div></div>
+<div class="body card">
+<div><span class="rec">recommends: approve</span> <span class="why">&mdash; the rail carries all three modes at the floor</span></div>
+<div class="opts">
+<div class="opt best"><span class="n">1</span><span class="w">approve the mock</span></div>
+<div class="opt"><span class="n">2</span><span>ask for changes</span></div>
+<div class="opt"><span class="n">3</span><span>you decide</span></div>
+</div>
+</div><div class="line"><div class="box">words for the note&hellip;</div></div>
+<div class="line" style="border-top:none;padding-top:0"><div class="keys" style="font-size:12px;color:var(--text-secondary)">1&ndash;3 pick &middot; enter sends &middot; d puts aside</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 1200 by 800 &middot; dark</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="dark" style="width:1200px;height:800px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Timetable</div><div class="c">3 in transit</div></div>
+<div class="rows">
+<div class="row"><div class="l1"><div class="nm">arrivals</div></div><div class="l2">3 in transit</div></div>
+<div class="row on"><div class="l1"><div class="nm">yardr</div></div><div class="l2">2 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">footplate</div></div><div class="l2">1 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">signalbox</div></div><div class="l2">nothing in transit</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">yardr</div><div class="s">2 in transit &middot; 2 flows</div></div>
+<div class="body" style="padding:4px 0">
+<div class="flowhead"><div class="t">default</div><div class="s">repo@0f415ee</div></div>
+<div class="stage"><div class="sh"><div class="dot amber"></div><div class="t">new</div><div class="c">2 beads</div></div>
+<div class="brow"><div class="l1"><div class="nm">Paint the shed</div><div class="tm">2h&ndash;3h</div></div>
+<div class="l2">yd-shed &middot; <span class="am">waits for mckean</span></div></div>
+<div class="brow"><div class="l1"><div class="nm">Move the links</div><div class="tm">&mdash;</div></div>
+<div class="l2">yd-links &middot; <span class="rd">held</span></div></div></div>
+<div class="stage"><div class="sh"><div class="dot red"></div><div class="t">review</div><div class="c">1 bead</div></div>
+<div class="brow"><div class="l1"><div class="nm">Greet the yard</div><div class="tm">3h&ndash;5h</div></div>
+<div class="l2">yd-greet &middot; <span class="rd">stalled</span></div></div></div>
+<div class="flowhead"><div class="t">design.design</div><div class="s">store</div></div>
+<div class="stage"><div class="sh"><div class="dot" style="background:var(--border-strong)"></div><div class="t">draft</div><div class="c">1 bead</div></div>
+<div class="brow"><div class="l1"><div class="nm">Draw the rail</div><div class="tm">1h&ndash;2h</div></div>
+<div class="l2">footplate-zj5f</div></div></div>
+</div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 616 by 360 &middot; light</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:616px;height:360px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Crew</div><div class="c">3 unread</div></div>
+<div class="rows">
+<div class="row on"><div class="l1"><div class="nm">yardmaster</div><div class="un">2</div></div><div class="l2">working</div></div>
+<div class="row"><div class="l1"><div class="nm">clerk</div></div><div class="l2">idle</div></div>
+<div class="row"><div class="l1"><div class="nm">signaller</div><div class="un">1</div></div><div class="l2">waiting on you</div></div>
+</div><div class="divider"></div><div class="rows">
+<div class="row"><div class="l1"><div class="nm">yard</div><div class="un">1</div></div><div class="l2">notifications</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">yardmaster</div><div class="s">runs this yard</div></div>
+<div class="body">
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 2h</div><div>The rail mock is ready for your eyes.</div></div>
+<div class="msg"><div class="mhead"><b>you</b> &middot; 2h</div><div>On it after lunch.</div></div>
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 20m</div><div>Two decisions wait behind it.</div></div>
+</div><div class="line"><div class="box">write to yardmaster&hellip;</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 616 by 360 &middot; light</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:616px;height:360px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Decisions</div><div class="c">2 waiting</div></div>
+<div class="rows">
+<div class="sect"><div class="t" style="font-size:12px;color:var(--text-secondary)">Everything else</div></div>
+<div class="row on"><div class="q">Approve the rail mock and its twelve screenshots?</div>
+<div class="opt">1 approve the mock</div><div class="opt">2 ask for changes</div><div class="opt">3 you decide</div>
+<div class="sub"><span>yardmaster &middot; 2h</span><span>zj5f</span></div></div>
+<div class="row"><div class="q">Allow the edge to serve the flows panel?</div>
+<div class="opt">1 allow</div><div class="opt">2 deny</div>
+<div class="sub"><span>yardmaster &middot; 5h</span><span>bwm2</span></div></div>
+<div class="row"><div class="l2">&#9656; Decided (3)</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="meta">mac &middot; footplate-zj5f &middot; 2h</div>
+<div class="t">Approve the rail mock and its twelve screenshots?</div></div>
+<div class="body card">
+<div><span class="rec">recommends: approve</span> <span class="why">&mdash; the rail carries all three modes at the floor</span></div>
+<div class="opts">
+<div class="opt best"><span class="n">1</span><span class="w">approve the mock</span></div>
+<div class="opt"><span class="n">2</span><span>ask for changes</span></div>
+<div class="opt"><span class="n">3</span><span>you decide</span></div>
+</div>
+</div><div class="line"><div class="box">words for the note&hellip;</div></div>
+<div class="line" style="border-top:none;padding-top:0"><div class="keys" style="font-size:12px;color:var(--text-secondary)">1&ndash;3 pick &middot; enter sends &middot; d puts aside</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 616 by 360 &middot; light</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:616px;height:360px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Timetable</div><div class="c">3 in transit</div></div>
+<div class="rows">
+<div class="row on"><div class="l1"><div class="nm">arrivals</div></div><div class="l2">3 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">yardr</div></div><div class="l2">2 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">footplate</div></div><div class="l2">1 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">signalbox</div></div><div class="l2">nothing in transit</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">arrivals</div><div class="s">3 in transit &middot; all lines</div></div>
+<div class="body" style="padding:4px 0">
+<div class="sect"><div class="t">new</div><div class="c">2 arriving</div></div>
+<div class="brow"><div class="l1"><div class="nm">Paint the shed</div><div class="tm">2h&ndash;3h</div></div>
+<div class="l2">yd-shed &middot; yardr</div></div>
+<div class="brow"><div class="l1"><div class="nm">Move the links</div><div class="tm">&mdash;</div></div>
+<div class="l2">yd-links &middot; yardr &middot; <span class="rd">held</span></div></div>
+<div class="sect"><div class="t">review</div><div class="c">1 arriving</div></div>
+<div class="brow"><div class="l1"><div class="nm">Release train</div><div class="tm">45m&ndash;1h</div></div>
+<div class="l2">yd-train &middot; footplate &middot; <span class="am">waits for mckean</span></div></div>
+</div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">chat &middot; 1200 by 800 &middot; light</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:1200px;height:800px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode on gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Crew</div><div class="c">3 unread</div></div>
+<div class="rows">
+<div class="row on"><div class="l1"><div class="nm">yardmaster</div><div class="un">2</div></div><div class="l2">working</div></div>
+<div class="row"><div class="l1"><div class="nm">clerk</div></div><div class="l2">idle</div></div>
+<div class="row"><div class="l1"><div class="nm">signaller</div><div class="un">1</div></div><div class="l2">waiting on you</div></div>
+</div><div class="divider"></div><div class="rows">
+<div class="row"><div class="l1"><div class="nm">yard</div><div class="un">1</div></div><div class="l2">notifications</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">yardmaster</div><div class="s">runs this yard</div></div>
+<div class="body">
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 2h</div><div>The rail mock is ready for your eyes.</div></div>
+<div class="msg"><div class="mhead"><b>you</b> &middot; 2h</div><div>On it after lunch.</div></div>
+<div class="msg"><div class="mhead"><b>yardmaster</b> &middot; 20m</div><div>Two decisions wait behind it.</div></div>
+</div><div class="line"><div class="box">write to yardmaster&hellip;</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">decisions &middot; 1200 by 800 &middot; light</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:1200px;height:800px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode on" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Decisions</div><div class="c">2 waiting</div></div>
+<div class="rows">
+<div class="sect"><div class="t" style="font-size:12px;color:var(--text-secondary)">Everything else</div></div>
+<div class="row on"><div class="q">Approve the rail mock and its twelve screenshots?</div>
+<div class="opt">1 approve the mock</div><div class="opt">2 ask for changes</div><div class="opt">3 you decide</div>
+<div class="sub"><span>yardmaster &middot; 2h</span><span>zj5f</span></div></div>
+<div class="row"><div class="q">Allow the edge to serve the flows panel?</div>
+<div class="opt">1 allow</div><div class="opt">2 deny</div>
+<div class="sub"><span>yardmaster &middot; 5h</span><span>bwm2</span></div></div>
+<div class="row"><div class="l2">&#9656; Decided (3)</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="meta">mac &middot; footplate-zj5f &middot; 2h</div>
+<div class="t">Approve the rail mock and its twelve screenshots?</div></div>
+<div class="body card">
+<div><span class="rec">recommends: approve</span> <span class="why">&mdash; the rail carries all three modes at the floor</span></div>
+<div class="opts">
+<div class="opt best"><span class="n">1</span><span class="w">approve the mock</span></div>
+<div class="opt"><span class="n">2</span><span>ask for changes</span></div>
+<div class="opt"><span class="n">3</span><span>you decide</span></div>
+</div>
+</div><div class="line"><div class="box">words for the note&hellip;</div></div>
+<div class="line" style="border-top:none;padding-top:0"><div class="keys" style="font-size:12px;color:var(--text-secondary)">1&ndash;3 pick &middot; enter sends &middot; d puts aside</div></div></div>
+</div></div>
+<h2 style="color:#E9E9EA;font-size:14px;margin:20px 0 8px">timetable &middot; 1200 by 800 &middot; light</h2>
+<div style="border:1px solid #333538;display:inline-block"><div class="win" data-theme="light" style="width:1200px;height:800px"><div class="rail">
+<div class="mark" title="footplate"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F5F5F5" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="mode gap" title="chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v10H9l-5 4z"/></svg></div>
+<div class="mode" title="decisions"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg></div>
+<div class="mode on" title="timetable"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg></div>
+<div class="foot">
+<div class="ytile" title="mac &mdash; switch yards">ma</div>
+<div class="mode" title="settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg></div>
+</div>
+</div>
+<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div><div class="sect"><div class="t">Timetable</div><div class="c">3 in transit</div></div>
+<div class="rows">
+<div class="row"><div class="l1"><div class="nm">arrivals</div></div><div class="l2">3 in transit</div></div>
+<div class="row on"><div class="l1"><div class="nm">yardr</div></div><div class="l2">2 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">footplate</div></div><div class="l2">1 in transit</div></div>
+<div class="row"><div class="l1"><div class="nm">signalbox</div></div><div class="l2">nothing in transit</div></div>
+</div></div>
+<div class="pane"><div class="phead"><div class="t">yardr</div><div class="s">2 in transit &middot; 2 flows</div></div>
+<div class="body" style="padding:4px 0">
+<div class="flowhead"><div class="t">default</div><div class="s">repo@0f415ee</div></div>
+<div class="stage"><div class="sh"><div class="dot amber"></div><div class="t">new</div><div class="c">2 beads</div></div>
+<div class="brow"><div class="l1"><div class="nm">Paint the shed</div><div class="tm">2h&ndash;3h</div></div>
+<div class="l2">yd-shed &middot; <span class="am">waits for mckean</span></div></div>
+<div class="brow"><div class="l1"><div class="nm">Move the links</div><div class="tm">&mdash;</div></div>
+<div class="l2">yd-links &middot; <span class="rd">held</span></div></div></div>
+<div class="stage"><div class="sh"><div class="dot red"></div><div class="t">review</div><div class="c">1 bead</div></div>
+<div class="brow"><div class="l1"><div class="nm">Greet the yard</div><div class="tm">3h&ndash;5h</div></div>
+<div class="l2">yd-greet &middot; <span class="rd">stalled</span></div></div></div>
+<div class="flowhead"><div class="t">design.design</div><div class="s">store</div></div>
+<div class="stage"><div class="sh"><div class="dot" style="background:var(--border-strong)"></div><div class="t">draft</div><div class="c">1 bead</div></div>
+<div class="brow"><div class="l1"><div class="nm">Draw the rail</div><div class="tm">1h&ndash;2h</div></div>
+<div class="l2">footplate-zj5f</div></div></div>
+</div></div>
+</div></div>
+</body></body></html>
