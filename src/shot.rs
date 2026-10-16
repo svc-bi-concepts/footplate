@@ -353,11 +353,11 @@ fn populate(yard: &Yard, state: &str) {
     yard.answer("DeclineAsk", "{}");
     // The arrivals board every state loads: three rows, one with an
     // amber remark, one with none, one with a red one and no expected
-    // arrival. The window counts it in the arrivals row, and the arrivals
-    // states open it.
+    // arrival, beside the platforms in travel order. The window counts
+    // it in the arrivals row, and the arrivals states open it.
     yard.answer(
         "Arrivals",
-        &json!({"result": [
+        &json!({"result": {"rows": [
             {"bead": "yd-zulu", "title": "Zulu's late turn",
              "platform": "draft", "line": "yardr", "expected": "5h–8h",
              "remark": "late", "tone": "amber"},
@@ -367,7 +367,7 @@ fn populate(yard: &Yard, state: &str) {
             {"bead": "footplate-p512", "title": "The sign-in's password label",
              "platform": "new", "line": "footplate", "expected": "—",
              "remark": "held", "tone": "red"},
-        ]})
+        ], "platforms": ["new", "review", "draft"]}})
         .to_string(),
     );
     match state {
@@ -730,25 +730,31 @@ mod tests {
                     assert_eq!(letters.len(), 3, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
                     // The board the window opens: three rows, with an
-                    // amber remark, none, and a red one.
-                    assert_eq!(loaded.arrivals.len(), 3, "{state}");
-                    assert_eq!(loaded.arrivals[0].bead, "yd-zulu", "{state}");
+                    // amber remark, none, and a red one, beside the
+                    // platforms in travel order.
+                    assert_eq!(loaded.arrivals.rows.len(), 3, "{state}");
+                    assert_eq!(loaded.arrivals.rows[0].bead, "yd-zulu", "{state}");
                     assert_eq!(
                         (
-                            loaded.arrivals[0].remark.as_str(),
-                            loaded.arrivals[0].tone.as_str()
+                            loaded.arrivals.rows[0].remark.as_str(),
+                            loaded.arrivals.rows[0].tone.as_str()
                         ),
                         ("late", "amber"),
                         "{state}"
                     );
-                    assert_eq!(loaded.arrivals[1].remark.as_str(), "", "{state}");
+                    assert_eq!(loaded.arrivals.rows[1].remark.as_str(), "", "{state}");
                     assert_eq!(
                         (
-                            loaded.arrivals[2].expected.as_str(),
-                            loaded.arrivals[2].remark.as_str(),
-                            loaded.arrivals[2].tone.as_str()
+                            loaded.arrivals.rows[2].expected.as_str(),
+                            loaded.arrivals.rows[2].remark.as_str(),
+                            loaded.arrivals.rows[2].tone.as_str()
                         ),
                         ("—", "held", "red"),
+                        "{state}"
+                    );
+                    assert_eq!(
+                        loaded.arrivals.platforms,
+                        ["new", "review", "draft"],
                         "{state}"
                     );
                     // One arrival's bead, which the arrival state opens:

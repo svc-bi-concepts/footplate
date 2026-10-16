@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, TimeZone};
 
 use crate::api::{
-    self, AboutBead, Arrival, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember, DecidedAsk,
-    Event, Letter, Me, Notification, OpenAsk, Peer, Ran, Run, Secret, User,
+    self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
+    DecidedAsk, Event, Letter, Me, Notification, OpenAsk, Peer, Ran, Run, Secret, User,
 };
 
 /// The kind of message a link must carry out for mail to be written.
@@ -57,8 +57,8 @@ pub struct State {
     /// The person's open asks with what they dealt with.
     pub asks: Asks,
     /// The arrivals board as read: the rows as served, ordered and
-    /// remarked.
-    pub arrivals: Vec<Arrival>,
+    /// remarked, beside the platforms in the order the beads travel.
+    pub arrivals: Arrivals,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -498,6 +498,11 @@ pub struct Model {
     /// The arrivals board as read: the rows as served, ordered and
     /// remarked.
     arrivals: Vec<Arrival>,
+    /// The platforms in the order the beads travel, as served beside
+    /// the rows: the board groups under them. Empty from a yard that
+    /// serves no list, and then the board groups in first-appearance
+    /// order.
+    arrival_platforms: Vec<String>,
     /// The users of the yard by name, the window's own among them.
     users: Vec<String>,
     parties: Vec<Party>,
@@ -601,7 +606,8 @@ impl Model {
             parties: parties(&state.peers),
             trust: trusted(&state.peers),
             crew: state.crew,
-            arrivals: state.arrivals,
+            arrivals: state.arrivals.rows,
+            arrival_platforms: state.arrivals.platforms,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -1105,13 +1111,17 @@ impl Model {
     }
 
     /// The arrivals board as read again.
-    pub fn arrivals(&mut self, rows: Vec<Arrival>) {
-        self.arrivals = rows;
+    pub fn arrivals(&mut self, board: Arrivals) {
+        self.arrivals = board.rows;
+        self.arrival_platforms = board.platforms;
     }
 
-    /// The served rows under their platform, the platforms in the order
-    /// they first appear in the served order, each with its rows in the
-    /// served order. footplate invents no stage order and sorts nothing.
+    /// The served rows under their platform, the platforms in the served
+    /// travel order, each with its rows in the served order. A row whose
+    /// platform the served list does not name stands under its own group
+    /// at the end, in first-appearance order, so the board still draws
+    /// against a yard that serves no list. footplate invents no stage
+    /// order of its own: the groups stand as served.
     pub fn arrival_groups(&self) -> Vec<ArrivalGroup> {
         let mut groups: Vec<ArrivalGroup> = Vec::new();
         for row in self.arrival_rows() {
@@ -1123,6 +1133,14 @@ impl Model {
                 }),
             }
         }
+        // In the served order; what it does not name stands last. The
+        // sort is stable, so those keep first-appearance order.
+        groups.sort_by_key(|g| {
+            self.arrival_platforms
+                .iter()
+                .position(|p| p == &g.platform)
+                .unwrap_or(usize::MAX)
+        });
         groups
     }
 
@@ -4561,13 +4579,21 @@ mod tests {
         }
     }
 
+    fn board(rows: Vec<Arrival>, platforms: &[&str]) -> Arrivals {
+        Arrivals {
+            rows,
+            platforms: platforms.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
     #[test]
     fn the_board_is_the_board_as_read_now_over_a_yard_lost() {
         let (mut m, _) = Model::new(yard(&[]), None);
         assert!(m.arrival_rows().is_empty());
-        m.arrivals(vec![arrival(
-            "yd-links", "new", "yardr", "2h–3h", "", "none",
-        )]);
+        m.arrivals(board(
+            vec![arrival("yd-links", "new", "yardr", "2h–3h", "", "none")],
+            &[],
+        ));
         assert_eq!(m.arrival_rows().len(), 1);
         // Read again after the yard was lost: the board is as read now.
         let (again, _) = m.resumed(yard(&[]));
@@ -4575,28 +4601,76 @@ mod tests {
     }
 
     /// The board groups the served rows by platform, the platforms in
-    /// the order they first appear in the served order, each with its
-    /// rows in the served order. A group of one is still a group, and
-    /// nothing is sorted or remarked here: the rows are as served.
+    /// the served travel order, each with its rows in the served order.
+    /// A group of one is still a group, and nothing is remarked here:
+    /// the rows are as served.
     #[test]
-    fn the_board_groups_the_served_rows_by_platform_in_arrival_order() {
+    fn the_board_groups_the_served_rows_by_platform_in_the_served_order() {
         let (mut m, _) = Model::new(yard(&[]), None);
         let rows = vec![
             arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
             arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
             arrival("yd-fourth", "review", "yardr", "1h–2h", "held", "red"),
         ];
-        m.arrivals(rows.clone());
+        // The served list names draft first, though review appears first
+        // in the served rows: the groups stand as served.
+        m.arrivals(board(rows.clone(), &["draft", "review"]));
         let groups = m.arrival_groups();
         assert_eq!(groups.len(), 2);
-        // The platforms in first-appearance order: review before draft,
-        // though neither is first alphabetically nor in any flow.
+        assert_eq!(groups[0].platform, "draft");
+        assert_eq!(groups[1].platform, "review");
+        // Each with its rows in the served order, remarked as served.
+        assert_eq!(groups[0].rows, vec![rows[1].clone()]);
+        assert_eq!(groups[1].rows, vec![rows[0].clone(), rows[2].clone()]);
+        assert_eq!(m.arrival_rows(), rows.as_slice());
+    }
+
+    /// Without a served platforms list the board groups as it always
+    /// has: the platforms in the order they first appear in the served
+    /// order, each with its rows in the served order.
+    #[test]
+    fn without_a_platforms_list_the_board_groups_in_first_appearance_order() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let rows = vec![
+            arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
+            arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
+            arrival("yd-fourth", "review", "yardr", "1h–2h", "held", "red"),
+        ];
+        m.arrivals(board(rows.clone(), &[]));
+        let groups = m.arrival_groups();
+        assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].platform, "review");
         assert_eq!(groups[1].platform, "draft");
-        // Each with its rows in the served order, remarked as served.
         assert_eq!(groups[0].rows, vec![rows[0].clone(), rows[2].clone()]);
         assert_eq!(groups[1].rows, vec![rows[1].clone()]);
-        assert_eq!(m.arrival_rows(), rows.as_slice());
+    }
+
+    /// A row whose platform the served list does not name stands under
+    /// its own group at the end, in first-appearance order with the
+    /// other unnamed ones.
+    #[test]
+    fn a_platform_the_list_does_not_name_stands_last_in_appearance_order() {
+        let (mut m, _) = Model::new(yard(&[]), None);
+        let rows = vec![
+            arrival("yd-first", "shape", "yardr", "20m–35m", "", "none"),
+            arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
+            arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
+            arrival("yd-fourth", "build", "yardr", "1h–2h", "held", "red"),
+            arrival("yd-fifth", "review", "yardr", "1h–2h", "", "none"),
+        ];
+        m.arrivals(board(rows.clone(), &["draft", "review"]));
+        let groups = m.arrival_groups();
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].platform, "draft");
+        assert_eq!(groups[1].platform, "review");
+        // Shape and build are not on the list: their own groups at the
+        // end, in the order they first appear.
+        assert_eq!(groups[2].platform, "shape");
+        assert_eq!(groups[3].platform, "build");
+        assert_eq!(groups[0].rows, vec![rows[2].clone()]);
+        assert_eq!(groups[1].rows, vec![rows[1].clone(), rows[4].clone()]);
+        assert_eq!(groups[2].rows, vec![rows[0].clone()]);
+        assert_eq!(groups[3].rows, vec![rows[3].clone()]);
     }
 
     /// The arrivals row stands under the yard row with how many beads
@@ -4610,12 +4684,18 @@ mod tests {
         assert_eq!(row.line, "none in transit");
         assert_eq!(row.unread, 0);
         assert!(!row.selected);
-        m.arrivals(vec![
-            arrival("yd-a", "new", "yardr", "2h–3h", "", "none"),
-            arrival("yd-b", "new", "yardr", "2h–3h", "", "none"),
-        ]);
+        m.arrivals(board(
+            vec![
+                arrival("yd-a", "new", "yardr", "2h–3h", "", "none"),
+                arrival("yd-b", "new", "yardr", "2h–3h", "", "none"),
+            ],
+            &[],
+        ));
         assert_eq!(m.arrivals_row().line, "2 in transit");
-        m.arrivals(vec![arrival("yd-a", "new", "yardr", "2h–3h", "", "none")]);
+        m.arrivals(board(
+            vec![arrival("yd-a", "new", "yardr", "2h–3h", "", "none")],
+            &[],
+        ));
         assert_eq!(m.arrivals_row().line, "1 in transit");
         // Opening the board needs no call: its rows came with the state.
         assert_eq!(m.select(Selected::Arrivals), []);
@@ -4699,9 +4779,12 @@ mod tests {
     #[test]
     fn an_arrival_s_bead_is_what_the_bead_call_returned_with_its_row() {
         let (mut m, _) = Model::new(yard(&[]), None);
-        m.arrivals(vec![arrival(
-            "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
-        )]);
+        m.arrivals(board(
+            vec![arrival(
+                "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
+            )],
+            &[],
+        ));
         // Nothing until the bead is read.
         assert_eq!(m.arrival_detail("yd-zulu"), None);
         m.bead_loaded(arrival_bead());
@@ -4731,7 +4814,7 @@ mod tests {
         assert_eq!(detail.open_asks, 2);
         // The yard serves the bead no longer: what the call returned
         // with its stage, and the row's parts empty.
-        m.arrivals(Vec::new());
+        m.arrivals(Arrivals::default());
         let detail = m.arrival_detail("yd-zulu").unwrap();
         assert_eq!(detail.title, "Zulu's late turn");
         assert_eq!(detail.stage, "draft");
@@ -4747,9 +4830,10 @@ mod tests {
     #[test]
     fn the_open_arrival_s_bead_stays_open_over_a_queue_read_again() {
         let (mut m, _) = Model::new(yard(&[]), None);
-        m.arrivals(vec![arrival(
-            "yd-zulu", "draft", "yardr", "5h–8h", "", "none",
-        )]);
+        m.arrivals(board(
+            vec![arrival("yd-zulu", "draft", "yardr", "5h–8h", "", "none")],
+            &[],
+        ));
         m.bead_loaded(arrival_bead());
         m.select(Selected::Bead("yd-zulu".into()));
         m.asks(Asks::default());

@@ -3581,8 +3581,8 @@ impl Footplate {
                     cx,
                     |client, _| client.arrivals(),
                     move |this, arrivals, cx| match arrivals {
-                        Ok(rows) => this.change_in(session, cx, |m| {
-                            m.arrivals(rows);
+                        Ok(board) => this.change_in(session, cx, |m| {
+                            m.arrivals(board);
                             Vec::new()
                         }),
                         Err(err) => this.notice_in(
@@ -12281,8 +12281,8 @@ mod tests {
     /// with an amber remark, one with none, one with a red one and no
     /// expected arrival. Two stand at one platform, one at another, so
     /// the board's groups are a group of two and a group of one.
-    fn arrivals_board() -> String {
-        json!({"result": [
+    fn arrivals_board_rows() -> Value {
+        json!([
             {"bead": "yd-zulu", "title": "Zulu's late turn",
              "platform": "draft", "line": "yardr", "expected": "5h–8h",
              "remark": "late", "tone": "amber"},
@@ -12292,8 +12292,25 @@ mod tests {
             {"bead": "footplate-p512", "title": "The sign-in's password label",
              "platform": "draft", "line": "footplate", "expected": "—",
              "remark": "held", "tone": "red"},
-        ]})
+        ])
+    }
+
+    /// The board the fake yard serves: three rows, draft's two around
+    /// review's one, beside the platforms in travel order, review
+    /// before draft, so the first appearance differs from the served
+    /// order.
+    fn arrivals_board() -> String {
+        json!({"result": {
+            "rows": arrivals_board_rows(),
+            "platforms": ["review", "draft"],
+        }})
         .to_string()
+    }
+
+    /// The same board from a yard that serves no platforms list: the
+    /// bare list of rows, as a yard not yet upgraded answers.
+    fn arrivals_board_no_list() -> String {
+        json!({"result": arrivals_board_rows()}).to_string()
     }
 
     /// One arrival's bead whole, as the Bead call answers it: the body,
@@ -15920,8 +15937,8 @@ mod tests {
     /// The crew list is one list again, with the arrivals row under the
     /// yard row counting what is in transit. A click on it opens the
     /// board: the served rows grouped by platform, the platforms in the
-    /// order they first appear in the served order, each with its rows
-    /// in the served order and remarked as served.
+    /// served travel order, each with its rows in the served order and
+    /// remarked as served.
     #[gpui::test]
     fn the_arrivals_row_opens_the_board_grouped_by_platform(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -15938,8 +15955,9 @@ mod tests {
                 "3 in transit"
             );
         });
-        // The board on a click: the groups in first-appearance order,
-        // draft's two rows before review's one.
+        // The board on a click: the groups in the served order,
+        // review's one row before draft's two, though draft appears
+        // first in the served rows.
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         view.read_with(cx, |v, _| {
@@ -15959,14 +15977,14 @@ mod tests {
             assert!(drawn(cx, &format!("arrival time {bead}")), "{bead}");
             assert!(drawn(cx, &format!("arrival sub {bead}")), "{bead}");
         }
+        let review = bounds_of(cx, "arrival group review").top();
+        let alpha = bounds_of(cx, "arrival yd-alpha").top();
         let draft = bounds_of(cx, "arrival group draft").top();
         let zulu = bounds_of(cx, "arrival yd-zulu").top();
         let p512 = bounds_of(cx, "arrival footplate-p512").top();
-        let review = bounds_of(cx, "arrival group review").top();
-        let alpha = bounds_of(cx, "arrival yd-alpha").top();
         assert!(
-            draft < zulu && zulu < p512 && p512 < review && review < alpha,
-            "the groups stand out of arrival order: {draft:?} {zulu:?} {p512:?} {review:?} {alpha:?}"
+            review < alpha && alpha < draft && draft < zulu && zulu < p512,
+            "the groups stand out of the served order: {review:?} {alpha:?} {draft:?} {zulu:?} {p512:?}"
         );
         // The rows as served: late, none, and held, with their tones,
         // and no sorting or remarking of the window's own.
@@ -15994,10 +16012,44 @@ mod tests {
             );
             let groups = model.arrival_groups();
             assert_eq!(groups.len(), 2);
+            assert_eq!(groups[0].platform, "review");
+            assert_eq!(groups[0].rows.len(), 1);
+            assert_eq!(groups[1].platform, "draft");
+            assert_eq!(groups[1].rows.len(), 2);
+        });
+    }
+
+    /// Against a yard that serves no platforms list the board still
+    /// draws, grouped as it always was: the platforms in the order
+    /// they first appear in the served order.
+    #[gpui::test]
+    fn without_a_platforms_list_the_board_groups_in_first_appearance_order(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board_no_list());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(drawn(cx, "arrival group draft"));
+        assert!(drawn(cx, "arrival group review"));
+        // Draft's two rows before review's one: first appearance, as
+        // the board drew before the yard served the list.
+        let draft = bounds_of(cx, "arrival group draft").top();
+        let zulu = bounds_of(cx, "arrival yd-zulu").top();
+        let p512 = bounds_of(cx, "arrival footplate-p512").top();
+        let review = bounds_of(cx, "arrival group review").top();
+        let alpha = bounds_of(cx, "arrival yd-alpha").top();
+        assert!(
+            draft < zulu && zulu < p512 && p512 < review && review < alpha,
+            "the groups stand out of arrival order: {draft:?} {zulu:?} {p512:?} {review:?} {alpha:?}"
+        );
+        view.read_with(cx, |v, _| {
+            let groups = v.model.as_ref().unwrap().arrival_groups();
+            assert_eq!(groups.len(), 2);
             assert_eq!(groups[0].platform, "draft");
-            assert_eq!(groups[0].rows.len(), 2);
             assert_eq!(groups[1].platform, "review");
-            assert_eq!(groups[1].rows.len(), 1);
         });
     }
 

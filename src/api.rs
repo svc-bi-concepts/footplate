@@ -215,6 +215,18 @@ pub struct CrewMember {
     pub status: String,
 }
 
+/// The arrivals board as the yard serves it: the rows in arrival order
+/// beside the platforms in the order the beads travel, covering every
+/// platform a served row stands on. footplate groups the rows under the
+/// platforms in that order.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Arrivals {
+    #[serde(default, deserialize_with = "or_default")]
+    pub rows: Vec<Arrival>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub platforms: Vec<String>,
+}
+
 /// One row of the arrivals board: a bead still travelling, its title,
 /// its platform (stage) and line (depot), the expected arrival as the
 /// yard prints it, and the remark with its tone. Served ordered and
@@ -1847,9 +1859,25 @@ impl Client {
     }
 
     /// The arrivals board: the open beads still travelling, up to 15
-    /// rows in arrival order, each with its expected arrival and remark.
-    pub fn arrivals(&self) -> Result<Vec<Arrival>> {
-        self.list("Arrivals", json!({}))
+    /// rows in arrival order, each with its expected arrival and remark,
+    /// beside the platforms in the order the beads travel. A yard not
+    /// yet upgraded serves the rows as a bare list, which reads with no
+    /// platforms; no answer at all reads as an empty board.
+    pub fn arrivals(&self) -> Result<Arrivals> {
+        let result = self.call("Arrivals", json!({}))?.unwrap_or(Value::Null);
+        match result {
+            Value::Null => Ok(Arrivals::default()),
+            Value::Array(rows) => {
+                let rows: Vec<Arrival> = serde_json::from_value(Value::Array(rows))
+                    .map_err(|err| Error::Protocol(format!("Arrivals: {err}")))?;
+                Ok(Arrivals {
+                    rows,
+                    platforms: Vec::new(),
+                })
+            }
+            board => serde_json::from_value(board)
+                .map_err(|err| Error::Protocol(format!("Arrivals: {err}"))),
+        }
     }
 
     /// One bead whole: body, stage, labels, notes, its asks with their
@@ -3707,11 +3735,11 @@ mod tests {
     }
 
     #[test]
-    fn arrivals_come_in_the_served_order_with_their_remark_and_tone() {
+    fn arrivals_come_with_their_rows_and_the_platforms_in_travel_order() {
         let yard = Yard::start();
         yard.answer(
             "Arrivals",
-            r#"{"result": [
+            r#"{"result": {"rows": [
                 {"bead": "footplate-p512", "title": "The sign-in's password label",
                  "platform": "new", "line": "footplate", "expected": "—",
                  "remark": "held", "tone": "red"},
@@ -3721,14 +3749,16 @@ mod tests {
                 {"bead": "yd-links", "title": "Move the links",
                  "platform": "build", "line": "", "expected": "2h–3h",
                  "remark": "waits for decisions", "tone": "amber"}
-            ]}"#,
+            ], "platforms": ["new", "review", "build"]}}"#,
         );
-        let rows = yard.client().arrivals().unwrap();
+        let board = yard.client().arrivals().unwrap();
         assert_eq!(yard.asked("Arrivals"), vec![json!({})]);
+        let rows = &board.rows;
         assert_eq!(
             rows.iter().map(|row| row.bead.as_str()).collect::<Vec<_>>(),
             ["footplate-p512", "yardr-bwm2", "yd-links"]
         );
+        assert_eq!(board.platforms, ["new", "review", "build"]);
         assert_eq!(
             (
                 rows[0].title.as_str(),
@@ -3752,6 +3782,39 @@ mod tests {
         assert_eq!(rows[2].line.as_str(), "");
         assert_eq!(rows[2].remark.as_str(), "waits for decisions");
         assert_eq!(rows[2].tone.as_str(), "amber");
+    }
+
+    #[test]
+    fn arrivals_from_a_yard_with_no_list_are_rows_with_no_platforms() {
+        let yard = Yard::start();
+        // A yard not yet upgraded serves the bare list of rows.
+        yard.answer(
+            "Arrivals",
+            r#"{"result": [
+                {"bead": "yd-links", "title": "Move the links",
+                 "platform": "new", "line": "", "expected": "2h–3h",
+                 "remark": "", "tone": "none"}
+            ]}"#,
+        );
+        let board = yard.client().arrivals().unwrap();
+        assert_eq!(board.rows.len(), 1);
+        assert_eq!(board.rows[0].bead.as_str(), "yd-links");
+        assert!(board.platforms.is_empty());
+        // And an object with no platforms reads the same.
+        yard.answer(
+            "Arrivals",
+            r#"{"result": {"rows": [
+                {"bead": "yd-links", "title": "Move the links",
+                 "platform": "new", "line": "", "expected": "2h–3h",
+                 "remark": "", "tone": "none"}
+            ]}}"#,
+        );
+        let board = yard.client().arrivals().unwrap();
+        assert_eq!(board.rows.len(), 1);
+        assert!(board.platforms.is_empty());
+        // No answer at all is an empty board.
+        yard.answer("Arrivals", r#"{"result": null}"#);
+        assert_eq!(yard.client().arrivals().unwrap(), Arrivals::default());
     }
 
     #[test]
