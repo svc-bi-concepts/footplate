@@ -586,6 +586,9 @@ pub struct Model {
     parties: Vec<Party>,
     /// The names the links trust as a user of this yard, with the user.
     trust: BTreeMap<String, String>,
+    /// The list and pane the open row belongs to. A mode switch must not
+    /// leave a row from another list selected when a queue update removes it.
+    mode: Mode,
     selected: Option<Selected>,
     /// The conversation that was open last: the one opened again when the
     /// open row is gone, so that a decision dealt with leads back to where
@@ -662,6 +665,7 @@ impl Model {
         decided_expanded: bool,
     ) -> (Model, Vec<Effect>) {
         let mut m = Self::of(state, decided_expanded);
+        m.mode = mode;
         m.selected = m.row_in(mode, selected);
         m.opened();
         let effects = m.open();
@@ -759,6 +763,7 @@ impl Model {
         decided_expanded: bool,
     ) -> Vec<Effect> {
         self.aside = false;
+        self.mode = mode;
         self.decided_expanded |= decided_expanded;
         self.selected = self.row_in(mode, selected);
         self.opened();
@@ -769,6 +774,7 @@ impl Model {
     /// mode's own default. What the mode is opened on when the person
     /// steps to it.
     pub fn show(&mut self, mode: Mode, selected: Option<Selected>) -> Vec<Effect> {
+        self.mode = mode;
         self.selected = self.row_in(mode, selected);
         self.notice.clear();
         self.opened();
@@ -2876,31 +2882,31 @@ impl Model {
             .min()
     }
 
-    /// When the open row is gone, opens the conversation that was open
-    /// last: a decision picked, put aside, declined or answered elsewhere
-    /// leads back to where it was opened from. With none before it, or
-    /// when that one is gone too, the first row from the top is opened.
-    /// An arrival's bead is never gone: it shows what the Bead call
+    /// When the open row is gone, falls back within its mode. In chat, a
+    /// decision opened from a conversation leads back there; decisions
+    /// stay among their own rows, and the timetable keeps its board or
+    /// bead. An arrival's bead is never gone: it shows what the Bead call
     /// returns, whether the yard serves the row still or not.
     fn reselect(&mut self) -> Vec<Effect> {
         // No row is open of a yard the window does not show.
         if self.aside {
             return Vec::new();
         }
-        let order = self.order();
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|s| matches!(s, Selected::Bead(_)) || order.contains(s))
-        {
+        let order = self.order_in(self.mode);
+        if self.selected.as_ref().is_some_and(|s| {
+            (self.mode == Mode::Timetable && matches!(s, Selected::Bead(_))) || order.contains(s)
+        }) {
             return Vec::new();
         }
-        self.selected = self
-            .back
-            .clone()
-            .map(Selected::Conversation)
-            .filter(|s| order.contains(s))
-            .or_else(|| order.into_iter().next());
+        self.selected = match self.mode {
+            Mode::Chat => self
+                .back
+                .clone()
+                .map(Selected::Conversation)
+                .filter(|s| order.contains(s))
+                .or_else(|| self.row_in(self.mode, None)),
+            Mode::Decisions | Mode::Timetable => self.row_in(self.mode, None),
+        };
         self.opened();
         self.open()
     }
@@ -6345,13 +6351,15 @@ mod tests {
         });
         // The first row from the top, the next decision.
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
-        // All answered: the yardmaster's conversation is not first; the
-        // first row is.
+        // All answered: decisions has no row to fall back to. It stays in
+        // this mode instead of opening a chat conversation beside the
+        // decisions list.
         m.asks(Asks {
             open: vec![],
             decided: vec![],
         });
-        assert_eq!(m.selected_conversation(), Some("assembly"));
+        assert_eq!(m.mode, Mode::Decisions);
+        assert_eq!(m.selected(), None);
     }
 
     /// The evening's asks with the window opened on a conversation, as

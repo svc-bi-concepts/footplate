@@ -4983,6 +4983,9 @@ impl Footplate {
         let existing = self.drafts.take_text(&asker);
         let (text, caret) = draft::prepend_reference(&existing, &reference);
         self.drafts.put_text(&asker, text);
+        // The asker is a chat row. Save the decision row in its own mode
+        // and move the rail with the conversation before opening it.
+        self.set_mode(Mode::Chat, window, cx);
         self.select(Selected::Conversation(asker), window, cx);
         self.line.update(cx, |line, cx| line.set_cursor(caret, cx));
     }
@@ -15787,6 +15790,7 @@ mod tests {
         wait(cx, "the yardmaster", |cx| {
             open_of(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
         });
+        assert_eq!(rail_mode(&view, cx), Mode::Chat);
         assert_eq!(typed(&view, cx), "re bead-a \"Move them now?\"\n\n");
         assert!(yard.asked("Mail").is_empty());
         assert!(yard.asked("MailPeer").is_empty());
@@ -15796,24 +15800,31 @@ mod tests {
             "re bead-a \"Move them now?\"\na question\n"
         );
 
-        // The ask stays open: its row is one step back, and nothing was
-        // answered, deferred or declined.
-        view.update_in(cx, |v, window, cx| {
-            v.select(Selected::Decision("bead-a".into()), window, cx)
-        });
+        // The ask stays open in its own mode: its row was kept while chat
+        // was open, and nothing was answered, deferred or declined.
+        to_decisions(&view, cx);
+        assert_eq!(rail_mode(&view, cx), Mode::Decisions);
+        assert_eq!(
+            open_of(&view, cx),
+            Some(Selected::Decision("bead-a".into()))
+        );
         assert_eq!(current_ask_of(&view, cx), 3);
         assert!(yard.asked("AnswerAsk").is_empty());
         assert!(yard.asked("DeferAsk").is_empty());
         assert!(yard.asked("DeclineAsk").is_empty());
 
-        // And a pick from there leads back to the conversation, with the
-        // draft as it was left: the two do not fight.
+        // Answering stays in decisions when its row leaves the open queue.
         cx.simulate_keystrokes("1");
         cx.simulate_keystrokes("enter");
         wait(cx, "the pick", |_| {
             yard.asked("AnswerAsk")
                 == [json!({"bead": "bead-a", "ask": 3, "option": 1, "actor": "jo"})]
         });
+        wait(cx, "the empty decisions mode", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions && open_of(&view, cx).is_none()
+        });
+        // The chat draft remains with its conversation after answering.
+        to_chat(&view, cx);
         wait(cx, "the yardmaster again", |cx| {
             open_of(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
         });
