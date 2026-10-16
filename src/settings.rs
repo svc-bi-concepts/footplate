@@ -321,9 +321,17 @@ impl From<Kept> for Settings {
         };
         let top_run = kept.run_base.trim();
         if !top_view.is_empty() || !top_run.is_empty() {
-            // The list is never empty: the first yard keeps them where
-            // no near one is listed.
-            let place = yards.iter().position(|yard| !yard.is_far()).unwrap_or(0);
+            // These names were local settings. If the list has no near
+            // yard (one may have been removed), keep them on a near entry
+            // rather than assigning the laptop's address to a paired yard.
+            let place = match yards.iter().position(|yard| !yard.is_far()) {
+                Some(place) => place,
+                None => {
+                    yards.push(Yard::near(HERE, ""));
+                    yards = told_apart(yards);
+                    yards.len() - 1
+                }
+            };
             if !top_view.is_empty() && yards[place].web_view.trim().is_empty() {
                 yards[place].web_view = top_view.to_string();
             }
@@ -2110,6 +2118,22 @@ mod tests {
         assert_eq!(
             read.yard(HERE).unwrap().web_view,
             "https://plantime.example.net:8443/yard/"
+        );
+        fs::write(
+            &file,
+            "{\"yards\": [{\"name\": \"mac\", \"address\": \"https://mac.example.net\", \"token_file\": \"yard-mac.token\"}], \"web_view\": \"https://plantime.example.net:8443/yard/\", \"run_base\": \"https://pages.example.net/\"}",
+        )
+        .unwrap();
+        let read = Settings::read(&file);
+        assert_eq!(read.yard("mac").unwrap().web_view, "");
+        assert_eq!(read.yard("mac").unwrap().run_base, "");
+        assert_eq!(
+            read.yard(HERE).unwrap().web_view,
+            "https://plantime.example.net:8443/yard/"
+        );
+        assert_eq!(
+            read.yard(HERE).unwrap().run_base,
+            "https://pages.example.net/"
         );
         // The view's default at the top is no one's setting, and where an
         // entry already names its own, that is the newer one and stands.

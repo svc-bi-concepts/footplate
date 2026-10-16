@@ -178,7 +178,7 @@ impl Render for OpenTip {
 /// changes.
 #[derive(Clone, Debug, PartialEq)]
 struct Probe {
-    yard: String,
+    yard: YardIdentity,
     base: String,
 }
 
@@ -1991,6 +1991,9 @@ impl Footplate {
         self.run.update(cx, |line, cx| line.set_text(&run, cx));
         self.view
             .update(cx, |line, cx| line.set_placeholder(&usual, cx));
+        let run_usual = self.run_usual();
+        self.run
+            .update(cx, |line, cx| line.set_placeholder(&run_usual, cx));
         self.view_said = None;
         self.run_said = None;
     }
@@ -2242,6 +2245,13 @@ impl Footplate {
         let usual = entry.usual_view(&self.env.socket).unwrap_or("").to_string();
         self.view
             .update(cx, |line, cx| line.set_placeholder(&usual, cx));
+        let run_usual = entry
+            .view(&self.env.socket)
+            .and_then(|view| Address::parse_view(view).ok())
+            .map(|view| view.run_base().to_string())
+            .unwrap_or_default();
+        self.run
+            .update(cx, |line, cx| line.set_placeholder(&run_usual, cx));
         cx.set_global(self.settings.look);
         self.kept = file;
         if self.settings.notifications.on {
@@ -3078,6 +3088,15 @@ impl Footplate {
             .map(str::to_string)
     }
 
+    /// The run base the shown yard uses where none is set: its web
+    /// view's host on the sandbox port, or none where it has no view.
+    fn run_usual(&self) -> String {
+        self.view_base()
+            .and_then(|base| Address::parse_view(&base).ok())
+            .map(|view| view.run_base().to_string())
+            .unwrap_or_default()
+    }
+
     /// The run base the yard the window shows has set: empty where
     /// unset, and of the one yard the environment names, which keeps
     /// none.
@@ -3096,12 +3115,14 @@ impl Footplate {
     /// view nothing is asked, and nowhere is probed for it.
     fn view_probe(&mut self, cx: &mut Context<Self>) {
         let Some(base) = self.view_base() else {
+            self.view_up = ViewUp::Unknown;
             return;
         };
-        let asked = Probe {
-            yard: self.yard.clone(),
-            base,
+        let Some(yard) = self.yard_identity(&self.yard) else {
+            self.view_up = ViewUp::Unknown;
+            return;
         };
+        let asked = Probe { yard, base };
         match &self.view_up {
             ViewUp::Asked(asked_) | ViewUp::Answered(asked_, _) if asked_ == &asked => return,
             _ => {}
@@ -3172,10 +3193,9 @@ impl Footplate {
     /// was asked: what a page is drawn with.
     fn view_up_now(&self) -> Option<bool> {
         let base = self.view_base()?;
+        let yard = self.yard_identity(&self.yard)?;
         match &self.view_up {
-            ViewUp::Answered(asked, up) if asked.yard == self.yard && asked.base == base => {
-                Some(*up)
-            }
+            ViewUp::Answered(asked, up) if asked.yard == yard && asked.base == base => Some(*up),
             _ => None,
         }
     }
@@ -3187,10 +3207,15 @@ impl Footplate {
     /// drawn. Off the window's thread, as a call.
     fn run_probe(&mut self, cx: &mut Context<Self>) {
         if self.view_base().is_none() && self.run_set().trim().is_empty() {
+            self.run_up = ViewUp::Unknown;
             return;
         }
+        let Some(yard) = self.yard_identity(&self.yard) else {
+            self.run_up = ViewUp::Unknown;
+            return;
+        };
         let asked = Probe {
-            yard: self.yard.clone(),
+            yard,
             base: self.run_asked(),
         };
         match &self.run_up {
@@ -3260,8 +3285,9 @@ impl Footplate {
     /// Whether the sandbox origin answers at the shown yard's run base,
     /// if that was asked: what a note's page is drawn with.
     fn run_up_now(&self) -> Option<bool> {
+        let yard = self.yard_identity(&self.yard)?;
         let asked = Probe {
-            yard: self.yard.clone(),
+            yard,
             base: self.run_asked(),
         };
         match &self.run_up {
@@ -4991,7 +5017,11 @@ impl Footplate {
         }
         if run_moved {
             let base = self.run_set();
-            self.run.update(cx, |line, cx| line.set_text(&base, cx));
+            let usual = self.run_usual();
+            self.run.update(cx, |line, cx| {
+                line.set_text(&base, cx);
+                line.set_placeholder(&usual, cx);
+            });
             self.run_probe(cx);
         }
         cx.notify();
@@ -13454,6 +13484,10 @@ mod tests {
         wait(cx, "the yard's conversation", |cx| {
             texts(&view, cx) == ["From afar."]
         });
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.run.read(cx).placeholder().to_string()),
+            ""
+        );
         // The file's row says the view is not set, with the way to set
         // it, and no probe went anywhere for one.
         cx.run_until_parked();
@@ -13503,6 +13537,63 @@ mod tests {
         });
         wait(cx, "the second home's view asked", |cx| {
             view_answered(&view, cx) == Some(false)
+        });
+    }
+
+    /// A yard with neither address has no probe to cache: returning to a
+    /// yard whose view and run base were asked probes both again.
+    #[gpui::test]
+    fn switching_through_a_yard_without_addresses_reprobes_both_origins(cx: &mut TestAppContext) {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let told = Told::new();
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &told, false, cx);
+        let view_base = view_down();
+        let view_hits = view_serve(&view_base);
+        let run_base = view_down();
+        let run_hits = view_serve(&run_base);
+        view.update(cx, |v, cx| {
+            v.set(
+                v.settings
+                    .clone()
+                    .with_yard_view(settings::HERE, &view_base)
+                    .unwrap()
+                    .with_yard_run(settings::HERE, &run_base)
+                    .unwrap(),
+                cx,
+            );
+        });
+        wait(cx, "the first yard's view and run base", |cx| {
+            view_answered(&view, cx) == Some(true)
+                && run_answered(&view, cx) == Some(true)
+                && view_hits.load(Ordering::SeqCst) >= 1
+                && run_hits.load(Ordering::SeqCst) >= 1
+        });
+
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's conversation", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        wait(cx, "no probes on the second home", |cx| {
+            view.read_with(cx, |v, _| {
+                v.view_up == ViewUp::Unknown && v.run_up == ViewUp::Unknown
+            })
+        });
+
+        cx.simulate_keystrokes("secondary-1");
+        wait(cx, "the first yard's conversation again", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "the first yard's view and run base again", |cx| {
+            view_answered(&view, cx) == Some(true)
+                && run_answered(&view, cx) == Some(true)
+                && view_hits.load(Ordering::SeqCst) >= 2
+                && run_hits.load(Ordering::SeqCst) >= 2
         });
     }
 
