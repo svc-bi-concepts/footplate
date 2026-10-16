@@ -13637,6 +13637,7 @@ mod tests {
             view
         });
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
@@ -14955,6 +14956,7 @@ mod tests {
         };
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
                 v.model
                     .as_ref()
