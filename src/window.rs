@@ -2,10 +2,12 @@
 //! conversation and the line to write in. What it shows is the model's
 //! (model.rs); this file draws it and makes the calls the model asks for.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity,
@@ -172,7 +174,8 @@ impl Render for OpenTip {
 
 /// Whether the web view answers at the setting's base address: a page
 /// carries Open when it does, and how to start it when it does not.
-/// Asked once per address; the answer stands until the address changes.
+/// Asked once per address while it answers; a "no" is asked again on a
+/// timer while a file's or page's row is drawn.
 #[derive(Clone, Debug, PartialEq)]
 enum ViewUp {
     /// No probe has gone for the setting's address.
@@ -182,6 +185,11 @@ enum ViewUp {
     /// The address answered, or did not.
     Answered(String, bool),
 }
+
+/// How long a "no" from the web view or the sandbox origin stands before
+/// it is asked again: a view started after the first probe is found
+/// without a restart.
+const PROBE_AGAIN: Duration = Duration::from_secs(10);
 
 /// The sandbox origin's base address for the settings: the run base
 /// where one is set, else the web view's host on the sandbox port.
@@ -1108,6 +1116,11 @@ pub struct Footplate {
     /// note's page is drawn with.
     view_up: ViewUp,
     run_up: ViewUp,
+    /// Whether a file's or page's row was drawn in the latest frame: a
+    /// "no" from the view or the sandbox origin is asked again only
+    /// while one is. Set from the rows, which draw from a shared
+    /// reference, and cleared when the frame starts.
+    rows_shown: Cell<bool>,
     /// What is attached and not sent, for each conversation of each yard,
     /// and the text typed in those that are not open; the open one's is in
     /// the line. They speak of the open yard alone.
@@ -1580,6 +1593,7 @@ impl Footplate {
             image_open: None,
             view_up: ViewUp::Unknown,
             run_up: ViewUp::Unknown,
+            rows_shown: Cell::new(false),
             drafts: Drafts::default(),
             ask_words: HashMap::new(),
             kept_words: HashMap::new(),
@@ -2991,9 +3005,11 @@ impl Footplate {
         self.run_probe(cx);
     }
 
-    /// Asks whether the web view answers at the setting's base address,
-    /// once per address: a page carries Open when it does, and how to
-    /// start it when it does not. Off the window's thread, as a call.
+    /// Asks whether the web view answers at the setting's base address: a
+    /// page carries Open when it does, and how to start it when it does
+    /// not. Once per address while it answers; a "no" is asked again on
+    /// a timer while a file's or page's row is drawn. Off the window's
+    /// thread, as a call.
     fn view_probe(&mut self, cx: &mut Context<Self>) {
         let base = self.settings.web_view.clone();
         match &self.view_up {
@@ -3025,8 +3041,36 @@ impl Footplate {
                 .await;
             this.update(cx, |this, cx| {
                 if matches!(&this.view_up, ViewUp::Asked(asked) if asked == &base) {
-                    this.view_up = ViewUp::Answered(base, up);
+                    this.view_up = ViewUp::Answered(base.clone(), up);
+                    if !up {
+                        this.view_retry(base, cx);
+                    }
                     cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks the web view again after a "no" at `base`, in PROBE_AGAIN: a
+    /// view started after the first probe is found without a restart.
+    /// Only while a file's or page's row is drawn; a "yes" is never
+    /// asked again, and neither is another address.
+    fn view_retry(&mut self, base: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PROBE_AGAIN).await;
+            this.update(cx, |this, cx| {
+                if !matches!(&this.view_up, ViewUp::Answered(asked, false) if asked == &base) {
+                    return;
+                }
+                // The timer ticks on while the answer is "no"; the asking
+                // waits for a row that shows it.
+                if this.rows_shown.get() {
+                    this.view_up = ViewUp::Unknown;
+                    this.view_probe(cx);
+                } else {
+                    this.view_retry(base, cx);
                 }
             })
             .ok();
@@ -3043,9 +3087,11 @@ impl Footplate {
         }
     }
 
-    /// Asks whether the sandbox origin answers at the run base, once
-    /// per base: a note's page carries run beside Open when it does,
-    /// and why not when it does not. Off the window's thread, as a call.
+    /// Asks whether the sandbox origin answers at the run base: a note's
+    /// page carries run beside Open when it does, and why not when it
+    /// does not. Once per base while it answers; a "no" is asked again
+    /// on a timer while a file's or page's row is drawn. Off the
+    /// window's thread, as a call.
     fn run_probe(&mut self, cx: &mut Context<Self>) {
         let asked = self.run_asked();
         match &self.run_up {
@@ -3075,8 +3121,36 @@ impl Footplate {
                 .await;
             this.update(cx, |this, cx| {
                 if matches!(&this.run_up, ViewUp::Asked(asked_) if asked_ == &asked) {
-                    this.run_up = ViewUp::Answered(asked, up);
+                    this.run_up = ViewUp::Answered(asked.clone(), up);
+                    if !up {
+                        this.run_retry(asked, cx);
+                    }
                     cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks the sandbox origin again after a "no" at `asked`, in
+    /// PROBE_AGAIN: an origin started after the first probe is found
+    /// without a restart. Only while a file's or page's row is drawn; a
+    /// "yes" is never asked again, and neither is another base.
+    fn run_retry(&mut self, asked: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PROBE_AGAIN).await;
+            this.update(cx, |this, cx| {
+                if !matches!(&this.run_up, ViewUp::Answered(asked_, false) if asked_ == &asked) {
+                    return;
+                }
+                // The timer ticks on while the answer is "no"; the asking
+                // waits for a row that shows it.
+                if this.rows_shown.get() {
+                    this.run_up = ViewUp::Unknown;
+                    this.run_probe(cx);
+                } else {
+                    this.run_retry(asked, cx);
                 }
             })
             .ok();
@@ -8418,6 +8492,7 @@ impl Footplate {
     /// beside Open. A mail's page is the row without run, since the
     /// sandbox origin serves no mail's bytes, and that stays.
     fn page_row(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
+        self.rows_shown.set(true);
         let hash = file.hash.clone();
         let row = div()
             .flex()
@@ -8519,6 +8594,7 @@ impl Footplate {
     /// Where the view does not answer the row says how to start it instead
     /// of opening nowhere. Never run: only a page runs.
     fn file_row(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
+        self.rows_shown.set(true);
         let hash = file.hash.clone();
         let row = div()
             .flex()
@@ -10372,6 +10448,9 @@ impl Focusable for Footplate {
 
 impl Render for Footplate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A file's or page's row sets it where one is drawn: a "no" from
+        // the view or the sandbox origin is asked again only while one is.
+        self.rows_shown.set(false);
         self.reconcile_scroll(window, cx);
         // The one place the text size is set: every size that goes with the
         // text is in rems, and the text itself is seven eighths of one.
@@ -12513,6 +12592,29 @@ mod tests {
         format!("http://127.0.0.1:{port}")
     }
 
+    /// A listener started after the first probe at the down address
+    /// `base`: the view, now answering its front page there. Counts the
+    /// connections it answers.
+    fn view_serve(base: &str) -> Arc<std::sync::atomic::AtomicUsize> {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        std::thread::spawn(move || {
+            for mut conn in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut asked = [0u8; 1024];
+                let _ = conn.read(&mut asked);
+                let _ = conn.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        hits
+    }
+
     /// Whether the window has the web view up, down, or not asked yet.
     fn view_answered(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<bool> {
         view.read_with(cx, |v, _| v.view_up_now())
@@ -12876,6 +12978,98 @@ mod tests {
         assert!(drawn(cx, &format!("page row {page}")));
         assert!(drawn(cx, &format!("page start {page}")));
         assert!(!drawn(cx, &format!("page open {page}")));
+    }
+
+    /// A "no" from the web view and the run base is asked again on a
+    /// timer while a page's row is drawn: a view started after the first
+    /// probe is found without a restart, and a "yes" is never asked
+    /// again.
+    #[gpui::test]
+    fn a_note_s_page_finds_the_view_started_after_a_no(cx: &mut TestAppContext) {
+        use std::sync::atomic::Ordering;
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        let page = "ab".repeat(32);
+        yard.answer("Bead", &bead_note_page(&page));
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // Nothing answers at the view's address or the run base.
+        let base = view_down();
+        let run = view_down();
+        view.update(cx, |v, cx| {
+            v.set(
+                Settings {
+                    web_view: base.clone(),
+                    run_base: run.clone(),
+                    ..v.settings.clone()
+                },
+                cx,
+            )
+        });
+        wait(cx, "the view not answering", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
+        wait(cx, "the run base not answering", |cx| {
+            run_answered(&view, cx) == Some(false)
+        });
+        // Both answer now, but no row is drawn: the timer ticks on, and
+        // nothing is asked again.
+        let hits = view_serve(&base);
+        let run_hits = view_serve(&run);
+        cx.executor().advance_clock(PROBE_AGAIN);
+        cx.run_until_parked();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(run_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(view_answered(&view, cx), Some(false));
+        assert_eq!(run_answered(&view, cx), Some(false));
+        // One key expands the card: the page is a row with how to start
+        // the view, instead of opening nowhere.
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("e");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        assert!(drawn(cx, &format!("page row {page}")));
+        assert!(drawn(cx, &format!("page start {page}")));
+        assert!(!drawn(cx, &format!("page open {page}")));
+        // The timer asks again at the same addresses: both answer, and
+        // the row carries Open and run, without a restart.
+        cx.executor().advance_clock(PROBE_AGAIN);
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        wait(cx, "the run base", |cx| {
+            run_answered(&view, cx) == Some(true)
+        });
+        assert!(drawn(cx, &format!("page row {page}")));
+        assert!(drawn(cx, &format!("page open {page}")));
+        // No absence of "start it" is asserted: gpui's test keeps the
+        // bounds of what an earlier frame drew.
+        assert!(drawn(cx, &format!("page run {page}")));
+        // A "yes" is never asked again.
+        let asked = hits.load(Ordering::SeqCst);
+        let run_asked = run_hits.load(Ordering::SeqCst);
+        cx.executor().advance_clock(PROBE_AGAIN + PROBE_AGAIN);
+        cx.run_until_parked();
+        assert_eq!(hits.load(Ordering::SeqCst), asked);
+        assert_eq!(run_hits.load(Ordering::SeqCst), run_asked);
+        assert_eq!(view_answered(&view, cx), Some(true));
+        assert_eq!(run_answered(&view, cx), Some(true));
     }
 
     #[gpui::test]
