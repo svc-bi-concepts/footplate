@@ -2904,7 +2904,7 @@ impl Model {
                 .clone()
                 .map(Selected::Conversation)
                 .filter(|s| order.contains(s))
-                .or_else(|| self.row_in(self.mode, None)),
+                .or_else(|| order.into_iter().next()),
             Mode::Decisions | Mode::Timetable => self.row_in(self.mode, None),
         };
         self.opened();
@@ -4958,7 +4958,7 @@ mod tests {
     /// are empty.
     #[test]
     fn an_arrival_s_bead_is_what_the_bead_call_returned_with_its_row() {
-        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
         m.arrivals(board(
             vec![arrival(
                 "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
@@ -5009,7 +5009,7 @@ mod tests {
     /// moves it.
     #[test]
     fn the_open_arrival_s_bead_stays_open_over_a_queue_read_again() {
-        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
         m.arrivals(board(
             vec![arrival("yd-zulu", "draft", "yardr", "5h–8h", "", "none")],
             &[],
@@ -6443,21 +6443,18 @@ mod tests {
     }
 
     #[test]
-    fn a_bead_with_an_ask_left_stays_open_after_a_pick() {
+    fn a_bead_with_an_ask_left_stays_open_after_a_pick_in_decisions() {
         let mut state = yard(&[]);
         let mut open = evening();
         open[1].bead = "yardr-n8ta".into();
         state.asks.open = open;
-        let (mut m, _) = Model::new(
-            state,
-            Mode::Chat,
-            Some(Selected::Conversation("yardmaster".into())),
-        );
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
         m.select(Selected::Decision("yardr-n8ta".into()));
         m.picked("yardr-n8ta", 3, 1, "");
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
         m.picked("yardr-n8ta", 4, 1, "");
-        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+        assert_eq!(m.mode, Mode::Decisions);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-9f2c".into())));
     }
 
     #[test]
@@ -6470,24 +6467,32 @@ mod tests {
         m.picked("yardr-n8ta", 3, 1, "");
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
 
-        // The conversation it was opened from is gone meanwhile.
+        // A conversation remembered by an earlier mode is gone, but it
+        // does not pull the decisions pane out of its own list.
         let mut m = evening_from("clerk@north");
-        m.select(Selected::Decision("yardr-n8ta".into()));
+        m.show(
+            Mode::Decisions,
+            Some(Selected::Decision("yardr-n8ta".into())),
+        );
         assert_eq!(m.linked(&[]), []);
         m.picked("yardr-n8ta", 3, 1, "");
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
     }
 
     #[test]
-    fn the_conversation_to_come_back_to_is_kept_when_the_yard_is_back() {
+    fn a_returning_yard_keeps_decisions_mode_when_an_ask_is_answered() {
         let mut m = evening_from("yardmaster");
-        m.select(Selected::Decision("yardr-3msx".into()));
+        m.show(
+            Mode::Decisions,
+            Some(Selected::Decision("yardr-3msx".into())),
+        );
         let mut state = yard(&[]);
         state.asks.open = evening();
         let (mut m, _) = m.resumed(state, Mode::Decisions);
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
         m.picked("yardr-3msx", 4, 1, "");
-        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+        assert_eq!(m.mode, Mode::Decisions);
+        assert_eq!(m.selected(), Some(&Selected::Decision("yardr-n8ta".into())));
     }
 
     fn option(label: &str, consequence: &str) -> AskOption {

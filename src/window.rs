@@ -15559,7 +15559,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_pick_leads_back_to_the_conversation_with_what_was_typed_in_it(cx: &mut TestAppContext) {
+    fn a_pick_keeps_the_chat_draft_and_scroll_in_their_mode(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         // One bead with one ask: the pick takes its row away.
@@ -15600,7 +15600,8 @@ mod tests {
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
 
-        // The yardmaster's conversation is not the first row: assembly's is.
+        // Chat has its own selected conversation and scroll.
+        to_chat(&view, cx);
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Conversation("yardmaster".into()), window, cx)
         });
@@ -15612,9 +15613,8 @@ mod tests {
         let place = view.read_with(cx, |v, _| v.conversation.offset());
         assert!(place.y < px(0.));
         cx.simulate_input("half a thought");
-        view.update_in(cx, |v, window, cx| {
-            v.select(Selected::Decision("bead-a".into()), window, cx)
-        });
+        to_decisions(&view, cx);
+        assert_eq!(rail_mode(&view, cx), Mode::Decisions);
         assert_eq!(typed(&view, cx), "");
         cx.simulate_keystrokes("1");
         cx.simulate_keystrokes("enter");
@@ -15622,6 +15622,11 @@ mod tests {
             yard.asked("AnswerAsk")
                 == [json!({"bead": "bead-a", "ask": 3, "option": 1, "actor": "jo"})]
         });
+        wait(cx, "the decision that the yard still serves", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
+                && open(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        to_chat(&view, cx);
         wait(cx, "the conversation again", |cx| {
             open(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
         });
@@ -15629,12 +15634,10 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.conversation.offset()), place);
     }
 
-    /// A pick made with the window's keys leaves the focus on the window;
-    /// the conversation it leads back to has it in the line again.
+    /// After a pick, returning to chat restores its row and puts focus in
+    /// the conversation's line.
     #[gpui::test]
-    fn a_pick_by_key_leads_back_to_the_conversation_with_the_focus_in_its_line(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_pick_by_key_keeps_the_focus_with_the_active_mode(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         // One bead with one ask: the pick takes its row away.
@@ -15668,14 +15671,18 @@ mod tests {
             open(&view, cx) == Some(Selected::Decision("bead-a".into()))
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        to_chat(&view, cx);
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Conversation("yardmaster".into()), window, cx)
         });
-        view.update_in(cx, |v, window, cx| {
-            v.select(Selected::Decision("bead-a".into()), window, cx)
-        });
+        to_decisions(&view, cx);
         cx.simulate_keystrokes("1");
         cx.simulate_keystrokes("enter");
+        wait(cx, "the decision that the yard still serves", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
+                && open(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        to_chat(&view, cx);
         wait(cx, "the conversation again", |cx| {
             open(&view, cx) == Some(Selected::Conversation("yardmaster".into()))
         });
@@ -15820,8 +15827,9 @@ mod tests {
             yard.asked("AnswerAsk")
                 == [json!({"bead": "bead-a", "ask": 3, "option": 1, "actor": "jo"})]
         });
-        wait(cx, "the empty decisions mode", |cx| {
-            rail_mode(&view, cx) == Mode::Decisions && open_of(&view, cx).is_none()
+        wait(cx, "the answered decision's successor", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
+                && open_of(&view, cx) == Some(Selected::Decision("bead-a".into()))
         });
         // The chat draft remains with its conversation after answering.
         to_chat(&view, cx);
