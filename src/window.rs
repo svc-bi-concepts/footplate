@@ -2261,10 +2261,14 @@ impl Footplate {
             Update::Up(state) => {
                 let mut state = *state;
                 held.said = state.yard.take();
+                let arrivals_notice = state.arrivals_notice.take();
                 let (mut model, effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state),
                     None => (Model::new_aside(state), Vec::new()),
                 };
+                if let Some(notice) = arrivals_notice {
+                    model.notice = notice;
+                }
                 let news = model.take_news();
                 held.model = Some(model);
                 held.down = None;
@@ -2301,6 +2305,7 @@ impl Footplate {
             Update::Up(state) => {
                 let mut state = *state;
                 self.said = state.yard.take();
+                let arrivals_notice = state.arrivals_notice.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
                 // The yard was opened: on the row it was left on, where
@@ -2316,6 +2321,9 @@ impl Footplate {
                         kept.as_ref().is_some_and(|place| place.decided_expanded),
                     ),
                 };
+                if let Some(notice) = arrivals_notice {
+                    model.notice = notice;
+                }
                 if fresh {
                     if let Some(place) = &kept {
                         model.expand(&place.expanded);
@@ -19181,6 +19189,41 @@ mod tests {
                 == [json!({"to": "yardmaster", "text": "Land it when green.", "actor": "jo"})]
         });
         assert_eq!(typed(&view, cx), "");
+    }
+
+    /// A yard whose arrivals board is garbage still comes back: after a
+    /// stream end the state is read, the board stands empty with why as
+    /// the notice, and the rest is drawn as usual.
+    #[gpui::test]
+    fn a_yard_whose_arrivals_are_garbage_comes_back_with_a_notice(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let socket = yard.socket().to_path_buf();
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        yard.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        // It is back, but its board is garbage: the window comes back
+        // with the rest drawn and a notice saying why the board stands
+        // empty.
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", r#"{"result": [7]}"#);
+        wait(cx, "the yard again", |cx| {
+            view.read_with(cx, |v, _| v.down.is_none())
+        });
+        assert!(view.read_with(cx, |v, _| !v.reconnecting()));
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+        assert!(drawn(cx, "rows") && drawn(cx, "conversation top"));
+        assert!(
+            notice(&view, cx).starts_with("the arrivals could not be read: "),
+            "{}",
+            notice(&view, cx)
+        );
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().arrival_rows().is_empty());
+        });
     }
 
     /// Answers on a decision card are held as a conversation's sends are:

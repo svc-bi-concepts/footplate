@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::api::{self, Client, Event};
+use crate::api::{self, Arrivals, Client, Event};
 use crate::model::State;
 
 /// How long until the yard is tried again.
@@ -243,7 +243,15 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     let unread = inbox.mail.into_iter().filter(|l| !l.read).collect();
     let notifications = client.user_notifications(&user.name, 0)?.notifications;
     let asks = client.user_asks(&user.name)?;
-    let arrivals = client.arrivals()?;
+    // One call's failure must not hold the whole yard away: an
+    // unreadable board reads as empty, with why for the window to say.
+    let (arrivals, arrivals_notice) = match client.arrivals() {
+        Ok(board) => (board, None),
+        Err(err) => (
+            Arrivals::default(),
+            Some(format!("the arrivals could not be read: {err}")),
+        ),
+    };
     Ok(State {
         me: user.name.clone(),
         head,
@@ -256,6 +264,7 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         notifications,
         asks,
         arrivals,
+        arrivals_notice,
         yard,
     })
 }
@@ -473,6 +482,31 @@ mod tests {
             vec![json!({"name": "jo", "limit": 0})]
         );
         assert_eq!(yard.asked("UserAsks"), vec![json!({"name": "jo"})]);
+    }
+
+    /// An arrivals board the yard serves unreadably does not fail the
+    /// state read: the board is empty, with why for the window to say.
+    #[test]
+    fn load_reads_on_past_an_unreadable_arrivals_board() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", r#"{"result": [7]}"#);
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.arrivals.rows.is_empty());
+        assert!(state.arrivals.platforms.is_empty());
+        assert!(
+            state
+                .arrivals_notice
+                .as_deref()
+                .unwrap()
+                .starts_with("the arrivals could not be read: "),
+            "{:?}",
+            state.arrivals_notice
+        );
+        // A board that reads carries no notice.
+        yard.answer("Arrivals", r#"{"result": []}"#);
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.arrivals_notice, None);
     }
 
     /// A yard at an address: the window is for the user its token is of,

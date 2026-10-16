@@ -59,6 +59,9 @@ pub struct State {
     /// The arrivals board as read: the rows as served, ordered and
     /// remarked, beside the platforms in the order the beads travel.
     pub arrivals: Arrivals,
+    /// Why the arrivals board is empty, in the window's words; `None`
+    /// where the board was read.
+    pub arrivals_notice: Option<String>,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
