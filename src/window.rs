@@ -172,18 +172,29 @@ impl Render for OpenTip {
     }
 }
 
-/// Whether the web view answers at the setting's base address: a page
+/// What a probe of the web view or the sandbox origin was asked of: the
+/// yard it was asked for, and the address it was asked at. Asked once per
+/// yard and address; the answer stands until the yard or the address
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+struct Probe {
+    yard: String,
+    base: String,
+}
+
+/// Whether the web view answers at the shown yard's base address: a page
 /// carries Open when it does, and how to start it when it does not.
-/// Asked once per address while it answers; a "no" is asked again on a
-/// timer while a file's or page's row is drawn.
+/// Asked once per yard and address while it answers; a "no" is asked
+/// again on a timer while a file's or page's row is drawn. Switching
+/// yards asks again.
 #[derive(Clone, Debug, PartialEq)]
 enum ViewUp {
-    /// No probe has gone for the setting's address.
+    /// No probe has gone for the yard's address.
     Unknown,
-    /// A probe is underway for the address.
-    Asked(String),
+    /// A probe is underway for the yard and the address.
+    Asked(Probe),
     /// The address answered, or did not.
-    Answered(String, bool),
+    Answered(Probe, bool),
 }
 
 /// How long a "no" from the web view or the sandbox origin stands before
@@ -935,10 +946,24 @@ struct Counts {
 
 /// What makes a yard entry the same yard while a call is away from the
 /// window. Its display name alone may be reused after the entry is removed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq)]
 enum YardIdentity {
     Listed(settings::Yard),
     Environment(String, Option<PathBuf>),
+}
+
+impl PartialEq for YardIdentity {
+    /// The same yard is the same reach: a change of the web view's
+    /// address or the run base alone restores no draft less.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (YardIdentity::Listed(a), YardIdentity::Listed(b)) => a.same_yard(b),
+            (YardIdentity::Environment(a, at), YardIdentity::Environment(b, by)) => {
+                a == b && at == by
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Counts {
@@ -1888,12 +1913,15 @@ impl Footplate {
         let show = self.settings.opened().name.clone();
         // Whether what is followed of a yard is followed further: it is
         // listed as it was opened, it is not to be opened anew, and it is
-        // not the yard to show without a client to show it by.
+        // not the yard to show without a client to show it by. A change
+        // of its web view or run base alone is the same yard, and goes
+        // on.
         let goes_on = |name: &str, entry: &Option<settings::Yard>, client: &Option<Client>| {
-            listed
-                .iter()
-                .any(|yard| yard.name == name && Some(yard) == entry.as_ref())
-                && anew != Some(name)
+            entry.as_ref().is_some_and(|entry| {
+                listed
+                    .iter()
+                    .any(|yard| yard.name == name && yard.same_yard(entry))
+            }) && anew != Some(name)
                 && !(name == show && client.is_none())
         };
         self.held
@@ -1940,9 +1968,31 @@ impl Footplate {
         self.leave_yard(yard, keep, cx);
         self.put(held);
         self.arrive(cx);
+        self.retarget_addresses(cx);
         self.switch_reset();
         self.agents_reset(cx);
         self.refresh_switch(cx);
+    }
+
+    /// The addresses' fields hold the shown yard's set ones, and what a
+    /// typed one said is gone with the yard it was typed for: the yard
+    /// was switched. Its pages go by probes asked for it, which ask
+    /// again.
+    fn retarget_addresses(&mut self, cx: &mut Context<Self>) {
+        let (view, run, usual) = match self.settings.yard(&self.yard) {
+            Some(yard) => (
+                yard.web_view.clone(),
+                yard.run_base.clone(),
+                yard.usual_view(&self.env.socket).unwrap_or("").to_string(),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
+        self.view.update(cx, |line, cx| line.set_text(&view, cx));
+        self.run.update(cx, |line, cx| line.set_text(&run, cx));
+        self.view
+            .update(cx, |line, cx| line.set_placeholder(&usual, cx));
+        self.view_said = None;
+        self.run_said = None;
     }
 
     /// Starts following a yard behind the client, by a follower of its
@@ -2177,8 +2227,21 @@ impl Footplate {
         if let Some(file) = &file {
             self.settings = Settings::read(file);
         }
-        let base = self.settings.web_view.clone();
-        self.view.update(cx, |line, cx| line.set_text(&base, cx));
+        // The addresses' fields hold the shown yard's, or the one the
+        // settings open where the window shows none yet.
+        let shown = self.yard.clone();
+        let entry = self
+            .settings
+            .yard(&shown)
+            .unwrap_or_else(|| self.settings.opened())
+            .clone();
+        self.view
+            .update(cx, |line, cx| line.set_text(&entry.web_view, cx));
+        self.run
+            .update(cx, |line, cx| line.set_text(&entry.run_base, cx));
+        let usual = entry.usual_view(&self.env.socket).unwrap_or("").to_string();
+        self.view
+            .update(cx, |line, cx| line.set_placeholder(&usual, cx));
         cx.set_global(self.settings.look);
         self.kept = file;
         if self.settings.notifications.on {
@@ -3005,15 +3068,42 @@ impl Footplate {
         self.run_probe(cx);
     }
 
-    /// Asks whether the web view answers at the setting's base address: a
-    /// page carries Open when it does, and how to start it when it does
-    /// not. Once per address while it answers; a "no" is asked again on
-    /// a timer while a file's or page's row is drawn. Off the window's
-    /// thread, as a call.
+    /// The web view's base address of the yard the window shows: its
+    /// set one, else its usual. None is no web view: the yard's files
+    /// say it is not set, and nothing is probed for it.
+    fn view_base(&self) -> Option<String> {
+        self.settings
+            .yard(&self.yard)?
+            .view(&self.env.socket)
+            .map(str::to_string)
+    }
+
+    /// The run base the yard the window shows has set: empty where
+    /// unset, and of the one yard the environment names, which keeps
+    /// none.
+    fn run_set(&self) -> String {
+        self.settings
+            .yard(&self.yard)
+            .map(|yard| yard.run_base.clone())
+            .unwrap_or_default()
+    }
+
+    /// Asks whether the web view answers at the shown yard's base
+    /// address: a page carries Open when it does, and how to start it
+    /// when it does not. Once per yard and address while it answers; a
+    /// "no" is asked again on a timer while a file's or page's row is
+    /// drawn. Off the window's thread, as a call. Where the yard has no
+    /// view nothing is asked, and nowhere is probed for it.
     fn view_probe(&mut self, cx: &mut Context<Self>) {
-        let base = self.settings.web_view.clone();
+        let Some(base) = self.view_base() else {
+            return;
+        };
+        let asked = Probe {
+            yard: self.yard.clone(),
+            base,
+        };
         match &self.view_up {
-            ViewUp::Asked(asked) | ViewUp::Answered(asked, _) if asked == &base => return,
+            ViewUp::Asked(asked_) | ViewUp::Answered(asked_, _) if asked_ == &asked => return,
             _ => {}
         }
         // The page shot shows the row with Open and run, and the mail
@@ -3025,25 +3115,25 @@ impl Footplate {
         if matches!(
             std::env::var("FOOTPLATE_SHOT").as_deref(),
             Ok("page") | Ok("mail") | Ok("image")
-        ) && api::Address::parse_view(&base).is_ok()
+        ) && api::Address::parse_view(&asked.base).is_ok()
         {
-            self.view_up = ViewUp::Answered(base, true);
+            self.view_up = ViewUp::Answered(asked, true);
             return;
         }
-        self.view_up = ViewUp::Asked(base.clone());
+        self.view_up = ViewUp::Asked(asked.clone());
         cx.spawn(async move |this, cx| {
-            let asked = base.clone();
+            let base = asked.base.clone();
             let up = cx
                 .background_executor()
                 .spawn(async move {
-                    api::Address::parse_view(&asked).is_ok_and(|address| address.answers())
+                    api::Address::parse_view(&base).is_ok_and(|address| address.answers())
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if matches!(&this.view_up, ViewUp::Asked(asked) if asked == &base) {
-                    this.view_up = ViewUp::Answered(base.clone(), up);
+                if matches!(&this.view_up, ViewUp::Asked(now) if now == &asked) {
+                    this.view_up = ViewUp::Answered(asked.clone(), up);
                     if !up {
-                        this.view_retry(base, cx);
+                        this.view_retry(asked, cx);
                     }
                     cx.notify();
                 }
@@ -3053,15 +3143,15 @@ impl Footplate {
         .detach();
     }
 
-    /// Asks the web view again after a "no" at `base`, in PROBE_AGAIN: a
-    /// view started after the first probe is found without a restart.
+    /// Asks the web view again after a "no" at `asked`, in PROBE_AGAIN:
+    /// a view started after the first probe is found without a restart.
     /// Only while a file's or page's row is drawn; a "yes" is never
-    /// asked again, and neither is another address.
-    fn view_retry(&mut self, base: String, cx: &mut Context<Self>) {
+    /// asked again, and neither is another yard or address.
+    fn view_retry(&mut self, asked: Probe, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PROBE_AGAIN).await;
             this.update(cx, |this, cx| {
-                if !matches!(&this.view_up, ViewUp::Answered(asked, false) if asked == &base) {
+                if !matches!(&this.view_up, ViewUp::Answered(now, false) if now == &asked) {
                     return;
                 }
                 // The timer ticks on while the answer is "no"; the asking
@@ -3070,7 +3160,7 @@ impl Footplate {
                     this.view_up = ViewUp::Unknown;
                     this.view_probe(cx);
                 } else {
-                    this.view_retry(base, cx);
+                    this.view_retry(asked, cx);
                 }
             })
             .ok();
@@ -3078,22 +3168,31 @@ impl Footplate {
         .detach();
     }
 
-    /// Whether the web view answers at the setting's address, if that was
-    /// asked: what a page is drawn with.
+    /// Whether the web view answers at the shown yard's address, if that
+    /// was asked: what a page is drawn with.
     fn view_up_now(&self) -> Option<bool> {
+        let base = self.view_base()?;
         match &self.view_up {
-            ViewUp::Answered(asked, up) if asked == &self.settings.web_view => Some(*up),
+            ViewUp::Answered(asked, up) if asked.yard == self.yard && asked.base == base => {
+                Some(*up)
+            }
             _ => None,
         }
     }
 
-    /// Asks whether the sandbox origin answers at the run base: a note's
-    /// page carries run beside Open when it does, and why not when it
-    /// does not. Once per base while it answers; a "no" is asked again
-    /// on a timer while a file's or page's row is drawn. Off the
-    /// window's thread, as a call.
+    /// Asks whether the sandbox origin answers at the shown yard's run
+    /// base: a note's page carries run beside Open when it does, and why
+    /// not when it does not. Once per yard and base while it answers; a
+    /// "no" is asked again on a timer while a file's or page's row is
+    /// drawn. Off the window's thread, as a call.
     fn run_probe(&mut self, cx: &mut Context<Self>) {
-        let asked = self.run_asked();
+        if self.view_base().is_none() && self.run_set().trim().is_empty() {
+            return;
+        }
+        let asked = Probe {
+            yard: self.yard.clone(),
+            base: self.run_asked(),
+        };
         match &self.run_up {
             ViewUp::Asked(asked_) | ViewUp::Answered(asked_, _) if asked_ == &asked => return,
             _ => {}
@@ -3109,8 +3208,8 @@ impl Footplate {
             return;
         }
         self.run_up = ViewUp::Asked(asked.clone());
-        let run_setting = self.settings.run_base.clone();
-        let view_setting = self.settings.web_view.clone();
+        let run_setting = self.run_set();
+        let view_setting = self.view_base().unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let up = cx
                 .background_executor()
@@ -3120,7 +3219,7 @@ impl Footplate {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if matches!(&this.run_up, ViewUp::Asked(asked_) if asked_ == &asked) {
+                if matches!(&this.run_up, ViewUp::Asked(now) if now == &asked) {
                     this.run_up = ViewUp::Answered(asked.clone(), up);
                     if !up {
                         this.run_retry(asked, cx);
@@ -3136,12 +3235,12 @@ impl Footplate {
     /// Asks the sandbox origin again after a "no" at `asked`, in
     /// PROBE_AGAIN: an origin started after the first probe is found
     /// without a restart. Only while a file's or page's row is drawn; a
-    /// "yes" is never asked again, and neither is another base.
-    fn run_retry(&mut self, asked: String, cx: &mut Context<Self>) {
+    /// "yes" is never asked again, and neither is another yard or base.
+    fn run_retry(&mut self, asked: Probe, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PROBE_AGAIN).await;
             this.update(cx, |this, cx| {
-                if !matches!(&this.run_up, ViewUp::Answered(asked_, false) if asked_ == &asked) {
+                if !matches!(&this.run_up, ViewUp::Answered(now, false) if now == &asked) {
                     return;
                 }
                 // The timer ticks on while the answer is "no"; the asking
@@ -3158,27 +3257,37 @@ impl Footplate {
         .detach();
     }
 
-    /// Whether the sandbox origin answers at the run base, if that was
-    /// asked: what a note's page is drawn with.
+    /// Whether the sandbox origin answers at the shown yard's run base,
+    /// if that was asked: what a note's page is drawn with.
     fn run_up_now(&self) -> Option<bool> {
+        let asked = Probe {
+            yard: self.yard.clone(),
+            base: self.run_asked(),
+        };
         match &self.run_up {
-            ViewUp::Answered(asked, up) if asked == &self.run_asked() => Some(*up),
+            ViewUp::Answered(now, up) if now == &asked => Some(*up),
             _ => None,
         }
     }
 
-    /// The run base as probed: the setting and the view's address, since
-    /// the effective base is derived from the view's where none is set.
-    /// An address holds no whitespace, so the join tells settings apart.
+    /// The run base as probed: the setting and the yard's view address,
+    /// since the effective base is derived from the view's where none is
+    /// set. An address holds no whitespace, so the join tells settings
+    /// apart; the probe's yard tells the yards apart.
     fn run_asked(&self) -> String {
-        format!("{}\n{}", self.settings.run_base, self.settings.web_view)
+        format!(
+            "{}\n{}",
+            self.run_set(),
+            self.view_base().unwrap_or_default()
+        )
     }
 
-    /// The sandbox origin's base address: the run base setting where one
-    /// is set, else the web view's host on the sandbox port. None where
-    /// neither reads as an address.
+    /// The sandbox origin's base address of the yard the window shows:
+    /// the run base setting where one is set, else the yard's view,
+    /// where it has one, on the sandbox port. None where neither reads
+    /// as an address.
     fn run_address(&self) -> Option<api::Address> {
-        run_address_of(&self.settings.run_base, &self.settings.web_view)
+        run_address_of(&self.run_set(), &self.view_base().unwrap_or_default())
     }
 
     /// What `from` was open. When another is now, what is typed stays
@@ -4836,12 +4945,28 @@ impl Footplate {
             self.unkept = settings.write(file).err().map(|err| err.to_string());
         }
         let switched_on = settings.notifications.on && !self.settings.notifications.on;
-        let yards_moved =
-            settings.yards != self.settings.yards || settings.open != self.settings.open;
-        let view_moved = settings.web_view != self.settings.web_view;
+        // The yards moved where another is to open, or one is listed no
+        // longer as it was reached: a change of a web view or a run base
+        // alone moves neither the switch nor what the agents' section
+        // holds.
+        let yards_moved = settings.open != self.settings.open
+            || settings.yards.len() != self.settings.yards.len()
+            || settings
+                .yards
+                .iter()
+                .zip(self.settings.yards.iter())
+                .any(|(set, was)| !set.same_yard(was));
+        let shown = self.yard.clone();
+        let view_of = |set: &Settings| {
+            set.yard(&shown)
+                .and_then(|yard| yard.view(&self.env.socket))
+                .map(str::to_string)
+        };
+        let view_moved = view_of(&settings) != view_of(&self.settings);
         // The run base moves with its setting and with the view's, which
         // it is derived from where none is set.
-        let run_moved = settings.run_base != self.settings.run_base || view_moved;
+        let run_set_of = |set: &Settings| set.yard(&shown).map(|yard| yard.run_base.clone());
+        let run_moved = run_set_of(&settings) != run_set_of(&self.settings) || view_moved;
         self.settings = settings;
         if switched_on {
             self.ask_permission(cx);
@@ -4854,14 +4979,18 @@ impl Footplate {
             self.refresh_switch(cx);
         }
         if view_moved {
-            // The address the field holds is the setting's again, and a
+            // The address the field holds is the yard's again, and a
             // note's pages go by whether the view answers at it.
-            let base = self.settings.web_view.clone();
+            let base = self
+                .settings
+                .yard(&shown)
+                .map(|yard| yard.web_view.clone())
+                .unwrap_or_default();
             self.view.update(cx, |line, cx| line.set_text(&base, cx));
             self.view_probe(cx);
         }
         if run_moved {
-            let base = self.settings.run_base.clone();
+            let base = self.run_set();
             self.run.update(cx, |line, cx| line.set_text(&base, cx));
             self.run_probe(cx);
         }
@@ -4936,13 +5065,13 @@ impl Footplate {
         );
     }
 
-    /// Keeps the web view's base address that is typed: a note's pages
-    /// open in the browser through it. What is no address is said, and
-    /// nothing changed.
+    /// Keeps the web view's base address that is typed, on the yard
+    /// the window shows: its pages open in the browser through it. What
+    /// is no address is said, and nothing changed.
     fn submit_view(&mut self, cx: &mut Context<Self>) {
         let address = self.view.read(cx).text().to_string();
         cx.notify();
-        match self.settings.clone().with_web_view(&address) {
+        match self.settings.clone().with_yard_view(&self.yard, &address) {
             Ok(settings) => {
                 self.view_said = None;
                 self.set(settings, cx);
@@ -4951,25 +5080,23 @@ impl Footplate {
         }
     }
 
-    /// The web view's address is its default again.
+    /// The shown yard's web view is unset again: its usual.
     fn usual_view(&mut self, cx: &mut Context<Self>) {
         self.view_said = None;
-        self.set(
-            Settings {
-                web_view: settings::WEB_VIEW.to_string(),
-                ..self.settings.clone()
-            },
-            cx,
-        );
+        let yard = self.yard.clone();
+        if let Ok(settings) = self.settings.clone().with_yard_view(&yard, "") {
+            self.set(settings, cx);
+        }
     }
 
-    /// Keeps the run base that is typed: a note's pages run in the
-    /// browser through it. What is no address is said, and nothing
-    /// changed; empty is the view's host on the sandbox port again.
+    /// Keeps the run base that is typed, on the yard the window shows:
+    /// its pages run in the browser through it. What is no address is
+    /// said, and nothing changed; empty is the yard's view, where it has
+    /// one, on the sandbox port again.
     fn submit_run(&mut self, cx: &mut Context<Self>) {
         let address = self.run.read(cx).text().to_string();
         cx.notify();
-        match self.settings.clone().with_run_base(&address) {
+        match self.settings.clone().with_yard_run(&self.yard, &address) {
             Ok(settings) => {
                 self.run_said = None;
                 self.set(settings, cx);
@@ -4978,17 +5105,15 @@ impl Footplate {
         }
     }
 
-    /// The run base is the view's host on the sandbox port again.
+    /// The shown yard's run base is empty again: its view, where it has
+    /// one, on the sandbox port.
     fn usual_run(&mut self, cx: &mut Context<Self>) {
         self.run_said = None;
         self.run.update(cx, |line, cx| line.set_text("", cx));
-        self.set(
-            Settings {
-                run_base: String::new(),
-                ..self.settings.clone()
-            },
-            cx,
-        );
+        let yard = self.yard.clone();
+        if let Ok(settings) = self.settings.clone().with_yard_run(&yard, "") {
+            self.set(settings, cx);
+        }
         cx.notify();
     }
 
@@ -6910,69 +7035,76 @@ impl Footplate {
         }
     }
 
-    /// The web view's base address in the settings: the field it is typed
-    /// in, what keeps it, and what a typed one that is none says. A
-    /// note's pages open in the browser through it; a yard reached by
-    /// pairing opens its pages once this names the address that yard's
-    /// view is reached by.
+    /// The shown yard's web view in the settings: the field its base
+    /// address is typed in, what keeps it, and what a typed one that is
+    /// none says. A yard reached by pairing opens its pages once this
+    /// names the address that yard's view is reached by. Of the one yard
+    /// the environment names no address is kept.
     fn view_setting(
         &self,
         setting: impl Fn(String, String) -> Div,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        let Some(entry) = self.settings.yard(&self.yard).cloned() else {
+            return setting("web view".to_string(), String::new()).child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("FOOTPLATE_YARD is set, and this window is of the one yard it names: its web view is not kept"),
+            );
+        };
+        let help = match entry.usual_view(&self.env.socket) {
+            Some(_) => "a note's pages open in the browser through it; empty is the usual address",
+            None => "a note's pages open in the browser through it; empty is no web view",
+        };
         let focus = self.view.focus_handle(cx);
-        let mut section = setting(
-            "web view".to_string(),
-            "a note's pages open in the browser through it".to_string(),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().w(rems(4.)).flex_none().child("address"))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .max_w(rems(28.))
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(palette.line)
-                        .bg(palette.side)
-                        .debug_selector(|| "view address".to_string())
-                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                            window.focus(&focus);
-                            window.prevent_default();
-                        })
-                        .child(self.view.clone()),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(
-                    small_button("save (enter)".to_string(), palette)
-                        .id("view save")
-                        .debug_selector(|| "view save".to_string())
-                        .on_click(cx.listener(|this, _, _, cx| this.submit_view(cx))),
-                )
-                .child(
-                    small_button("the usual address".to_string(), palette)
-                        .id("view usual")
-                        .debug_selector(|| "view usual".to_string())
-                        .when(self.settings.web_view == settings::WEB_VIEW, |el| {
-                            el.opacity(0.5)
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.usual_view(cx))),
-                ),
-        );
+        let mut section = setting(format!("web view of {}", entry.name), help.to_string())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(rems(4.)).flex_none().child("address"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .max_w(rems(28.))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(palette.line)
+                            .bg(palette.side)
+                            .debug_selector(|| "view address".to_string())
+                            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                window.focus(&focus);
+                                window.prevent_default();
+                            })
+                            .child(self.view.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        small_button("save (enter)".to_string(), palette)
+                            .id("view save")
+                            .debug_selector(|| "view save".to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_view(cx))),
+                    )
+                    .child(
+                        small_button("the usual address".to_string(), palette)
+                            .id("view usual")
+                            .debug_selector(|| "view usual".to_string())
+                            .when(entry.web_view.trim().is_empty(), |el| el.opacity(0.5))
+                            .on_click(cx.listener(|this, _, _, cx| this.usual_view(cx))),
+                    ),
+            );
         if let Some(said) = &self.view_said {
             section = section.child(
                 div()
@@ -6983,19 +7115,26 @@ impl Footplate {
         section
     }
 
-    /// The run base in the settings: the field it is typed in, what
-    /// keeps it, and what a typed one that is none says. A note's pages
-    /// run in the browser through it; empty is the web view's host on
-    /// the sandbox port.
+    /// The shown yard's run base in the settings: the field it is
+    /// typed in, what keeps it, and what a typed one that is none says.
+    /// Of the one yard the environment names none is kept.
     fn run_setting(
         &self,
         setting: impl Fn(String, String) -> Div,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        let Some(entry) = self.settings.yard(&self.yard).cloned() else {
+            return setting("run base".to_string(), String::new()).child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("FOOTPLATE_YARD is set, and this window is of the one yard it names: its run base is not kept"),
+            );
+        };
         let focus = self.run.focus_handle(cx);
         let mut section = setting(
-            "run base".to_string(),
+            format!("run base of {}", entry.name),
             "a note's pages run in the browser through it; empty is the web view's host on the sandbox port"
                 .to_string(),
         )
@@ -7040,9 +7179,7 @@ impl Footplate {
                     small_button("the view's host".to_string(), palette)
                         .id("run usual")
                         .debug_selector(|| "run usual".to_string())
-                        .when(self.settings.run_base.is_empty(), |el| {
-                            el.opacity(0.5)
-                        })
+                        .when(entry.run_base.trim().is_empty(), |el| el.opacity(0.5))
                         .on_click(cx.listener(|this, _, _, cx| this.usual_run(cx))),
                 ),
         );
@@ -8485,12 +8622,13 @@ impl Footplate {
     }
 
     /// A page of a mail or of a note: a row with its size, and Open
-    /// in the browser, through the web view's base address, with run
-    /// beside it for a note's, through the run base. Where the view does
-    /// not answer the row says how to start it instead of opening
-    /// nowhere; where the sandbox origin does not answer the row says so
-    /// beside Open. A mail's page is the row without run, since the
-    /// sandbox origin serves no mail's bytes, and that stays.
+    /// in the browser, through the yard's web view, with run beside it
+    /// for a note's, through the run base. Where the yard has no view
+    /// the row says it is not set, with the way to set it; where the
+    /// view does not answer the row says how to start it instead of
+    /// opening nowhere; where the sandbox origin does not answer the row
+    /// says so beside Open. A mail's page is the row without run, since
+    /// the sandbox origin serves no mail's bytes, and that stays.
     fn page_row(&self, file: &BlobRef, note: bool, palette: Palette) -> impl IntoElement + use<> {
         self.rows_shown.set(true);
         let hash = file.hash.clone();
@@ -8507,12 +8645,26 @@ impl Footplate {
         let label = div()
             .text_color(palette.faint)
             .child(format!("page, {}", model::size(file.bytes)));
+        let Some(base) = self.view_base() else {
+            return row
+                .child(label)
+                .child(
+                    div()
+                        .text_color(palette.faint)
+                        .debug_selector({
+                            let hash = hash.clone();
+                            move || format!("page unset {hash}")
+                        })
+                        .child("this yard's web view is not set: set it in the settings"),
+                )
+                .into_any_element();
+        };
         match self.view_up_now() {
             Some(true) => {
                 // The probe answered at this address, so it parses: the
                 // same reading, not another. A hash that is no hex names
                 // no page, and the row has no Open.
-                let Some(url) = Address::parse_view(&self.settings.web_view)
+                let Some(url) = Address::parse_view(&base)
                     .expect("the web view answered at this address")
                     .page_url(&file.hash)
                 else {
@@ -8590,9 +8742,10 @@ impl Footplate {
 
     /// A file of a mail or of a note, neither an image nor a page: a row
     /// with its name and its size, and Open in the browser, through the
-    /// web view's base address, under the name the browser saves it as.
-    /// Where the view does not answer the row says how to start it instead
-    /// of opening nowhere. Never run: only a page runs.
+    /// yard's web view, under the name the browser saves it as. Where the
+    /// yard has no view the row says it is not set, with the way to set
+    /// it; where the view does not answer the row says how to start it
+    /// instead of opening nowhere. Never run: only a page runs.
     fn file_row(&self, file: &BlobRef, palette: Palette) -> impl IntoElement + use<> {
         self.rows_shown.set(true);
         let hash = file.hash.clone();
@@ -8611,12 +8764,26 @@ impl Footplate {
             true => format!("file, {}", model::size(file.bytes)),
         };
         let label = div().text_color(palette.faint).child(label);
+        let Some(base) = self.view_base() else {
+            return row
+                .child(label)
+                .child(
+                    div()
+                        .text_color(palette.faint)
+                        .debug_selector({
+                            let hash = hash.clone();
+                            move || format!("file unset {hash}")
+                        })
+                        .child("this yard's web view is not set: set it in the settings"),
+                )
+                .into_any_element();
+        };
         match self.view_up_now() {
             Some(true) => {
                 // The probe answered at this address, so it parses: the
                 // same reading, not another. A hash that is no hex names
                 // no file, and the row has no Open.
-                let Some(url) = Address::parse_view(&self.settings.web_view)
+                let Some(url) = Address::parse_view(&base)
                     .expect("the web view answered at this address")
                     .file_url(&file.hash, &file.name)
                 else {
@@ -9255,9 +9422,10 @@ impl Footplate {
         };
         // The probe answered at this address, so it parses: the same
         // reading, not another. An id that is none opens nothing, and
-        // the head has no Open, as a page row behaves.
-        let url = match self.view_up_now() {
-            Some(true) => Address::parse_view(&self.settings.web_view)
+        // the head has no Open, as a page row behaves; with no view for
+        // the yard there is none either.
+        let url = match (self.view_base(), self.view_up_now()) {
+            (Some(base), Some(true)) => Address::parse_view(&base)
                 .expect("the web view answered at this address")
                 .bead_url(&detail.bead),
             _ => None,
@@ -12904,15 +13072,7 @@ mod tests {
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
         // The view answers at its address: the row carries Open.
         let base = view_up();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
@@ -12959,15 +13119,7 @@ mod tests {
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
         // Nothing answers at the view's address: the row says how to
         // start it, instead of opening nowhere.
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: view_down(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &view_down());
         wait(cx, "the view not answering", |cx| {
             view_answered(&view, cx) == Some(false)
         });
@@ -13012,16 +13164,8 @@ mod tests {
         // Nothing answers at the view's address or the run base.
         let base = view_down();
         let run = view_down();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    run_base: run.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
+        set_run(&view, cx, &run);
         wait(cx, "the view not answering", |cx| {
             view_answered(&view, cx) == Some(false)
         });
@@ -13091,15 +13235,7 @@ mod tests {
         // The view answers at its address: the row carries Open, with no
         // run, and the yard is asked for none of the page's bytes.
         let base = view_up();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
@@ -13137,15 +13273,7 @@ mod tests {
         // The view answers at its address: each row carries Open, and the
         // yard is asked for none of the files' bytes.
         let base = view_up();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
@@ -13169,6 +13297,180 @@ mod tests {
                 format!("{base}/blobs/{bare}")
             ]
         );
+    }
+
+    /// Two yards with different web views each open a file at their own
+    /// address: Open goes by the shown yard's. A change of views alone
+    /// follows no yard anew.
+    #[gpui::test]
+    fn two_yards_with_different_web_views_each_open_a_file_at_their_own_address(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        // Each yard's mail carries a file, which neither yard is asked for.
+        let here = "cd".repeat(32);
+        let away = "ef".repeat(32);
+        near.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Shall I land it?", "read": false,
+                 "files": [{"hash": here, "type": "application/pdf", "bytes": 900, "name": "figures.pdf"}]}
+            ]})
+            .to_string(),
+        );
+        second.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "From the second home.", "read": false,
+                 "files": [{"hash": away, "type": "application/pdf", "bytes": 12}]}
+            ]})
+            .to_string(),
+        );
+        let told = Told::new();
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &told, false, cx);
+        // Each yard's view answers at its own address.
+        let base_here = view_up();
+        let base_away = view_up();
+        view.update(cx, |v, cx| {
+            v.set(
+                v.settings
+                    .clone()
+                    .with_yard_view(settings::HERE, &base_here)
+                    .unwrap()
+                    .with_yard_view("second home", &base_away)
+                    .unwrap(),
+                cx,
+            );
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        assert!(drawn(cx, &format!("file open {here}")));
+        let opened = opened_pages(&view, cx);
+        click_on(cx, &format!("file open {here}"));
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [format!("{base_here}/blobs/{here}/figures.pdf")]
+        );
+        // The other yard, switched to, opens its file at its own address,
+        // as it stands: setting the views opened no yard anew.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's conversation", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        wait(cx, "the second home's view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        assert_eq!(second.streams_asked().len(), 1);
+        assert!(drawn(cx, &format!("file open {away}")));
+        click_on(cx, &format!("file open {away}"));
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [
+                format!("{base_here}/blobs/{here}/figures.pdf"),
+                format!("{base_away}/blobs/{away}")
+            ]
+        );
+    }
+
+    /// A paired yard with no web view set says so on its files' rows,
+    /// with the way to set it, and probes nowhere for one: never the
+    /// laptop's own loopback.
+    #[gpui::test]
+    fn a_paired_yard_with_no_view_set_shows_it_and_probes_nowhere(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        // The mail carries a file, which the yard is never asked for.
+        let report = "cd".repeat(32);
+        far.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 32, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "From afar.", "read": false,
+                 "files": [{"hash": report, "type": "application/pdf", "bytes": 900, "name": "figures.pdf"}]}
+            ]})
+            .to_string(),
+        );
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            yards: vec![settings::Yard::far("far", far.address(), "yard-far.token")],
+            open: "far".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-far.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yard's conversation", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        // The file's row says the view is not set, with the way to set
+        // it, and no probe went anywhere for one.
+        cx.run_until_parked();
+        assert!(drawn(cx, &format!("file row {report}")));
+        assert!(drawn(cx, &format!("file unset {report}")));
+        assert!(!drawn(cx, &format!("file open {report}")));
+        assert!(!drawn(cx, &format!("file start {report}")));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.view_base(), None);
+            assert_eq!(v.view_up, ViewUp::Unknown);
+        });
+    }
+
+    /// Switching yards probes the shown yard's view again: no yard opens
+    /// its files by another's answer.
+    #[gpui::test]
+    fn switching_yards_probes_the_shown_yard_s_view_again(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let told = Told::new();
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &told, false, cx);
+        // This machine's view answers; the second home's does not.
+        let up = view_up();
+        let down = view_down();
+        view.update(cx, |v, cx| {
+            v.set(
+                v.settings
+                    .clone()
+                    .with_yard_view(settings::HERE, &up)
+                    .unwrap()
+                    .with_yard_view("second home", &down)
+                    .unwrap(),
+                cx,
+            );
+        });
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        // Switched, the other yard's view is asked, not taken as up: its
+        // answer is its own.
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's conversation", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        wait(cx, "the second home's view asked", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
     }
 
     #[gpui::test]
@@ -14004,16 +14306,8 @@ mod tests {
         // run, and the yard is asked for none of the page's bytes.
         let base = view_up();
         let run = view_up();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    run_base: run.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
+        set_run(&view, cx, &run);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
@@ -14062,16 +14356,8 @@ mod tests {
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
         // The view answers and the run base does not: the row carries
         // Open, with why run is not reached beside it.
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: view_up(),
-                    run_base: view_down(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &view_up());
+        set_run(&view, cx, &view_down());
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
@@ -15487,6 +15773,28 @@ mod tests {
         view.read_with(cx, |v, _| v.settings.clone())
     }
 
+    /// The shown yard's entry of the settings, as listed.
+    fn entry_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> settings::Yard {
+        view.read_with(cx, |v, _| v.settings.yard(&v.yard).cloned().unwrap())
+    }
+
+    /// The shown yard's web view set to `base`: what a test sets where
+    /// the window's view address is wanted up or down.
+    fn set_view(view: &Entity<Footplate>, cx: &mut VisualTestContext, base: &str) {
+        view.update(cx, |v, cx| {
+            let yard = v.yard.clone();
+            v.set(v.settings.clone().with_yard_view(&yard, base).unwrap(), cx);
+        });
+    }
+
+    /// The shown yard's run base set to `base`.
+    fn set_run(view: &Entity<Footplate>, cx: &mut VisualTestContext, base: &str) {
+        view.update(cx, |v, cx| {
+            let yard = v.yard.clone();
+            v.set(v.settings.clone().with_yard_run(&yard, base).unwrap(), cx);
+        });
+    }
+
     /// What "Agents and you" holds of the line about the operator, and
     /// what came of its last read or save.
     fn agents_about(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
@@ -15674,9 +15982,13 @@ mod tests {
             bind_keys(cx);
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
-        // The field holds the view's default, from the file that keeps
-        // nothing of it.
-        assert_eq!(settings_of(&view, cx).web_view, settings::WEB_VIEW);
+        // The field holds nothing, from the file that keeps nothing of
+        // the yard's: its view is the usual address.
+        assert_eq!(entry_of(&view, cx).web_view, "");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.view_base()),
+            Some(settings::WEB_VIEW.to_string())
+        );
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         assert!(drawn(cx, "view address"));
@@ -15685,26 +15997,36 @@ mod tests {
             v.view.update(cx, |line, cx| line.set_text("plantime", cx))
         });
         click_on(cx, "view save");
-        assert_eq!(settings_of(&view, cx).web_view, settings::WEB_VIEW);
+        assert_eq!(entry_of(&view, cx).web_view, "");
         assert!(drawn(cx, "view said"));
-        // Kept, it is the setting's, and the file has it.
+        // Kept, it is the yard's, and the file has it on its entry.
         let base = view_up();
         view.update(cx, |v, cx| {
             v.view.update(cx, |line, cx| line.set_text(&base, cx))
         });
         click_on(cx, "view save");
-        assert_eq!(settings_of(&view, cx).web_view, base);
-        assert_eq!(Settings::read(&file).web_view, base);
+        assert_eq!(entry_of(&view, cx).web_view, base);
+        assert_eq!(
+            Settings::read(&file).yard(settings::HERE).unwrap().web_view,
+            base
+        );
         // Said no longer: the test frame's bounds only ever grow, so
         // what is gone is read, not drawn.
         assert_eq!(view.read_with(cx, |v, _| v.view_said.clone()), None);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
-        // The usual address is the default again.
+        // The usual address unsets it again: the yard's usual.
         click_on(cx, "view usual");
-        assert_eq!(settings_of(&view, cx).web_view, settings::WEB_VIEW);
-        assert_eq!(Settings::read(&file).web_view, settings::WEB_VIEW);
+        assert_eq!(entry_of(&view, cx).web_view, "");
+        assert_eq!(
+            Settings::read(&file).yard(settings::HERE).unwrap().web_view,
+            ""
+        );
+        assert_eq!(
+            view.read_with(cx, |v, _| v.view_base()),
+            Some(settings::WEB_VIEW.to_string())
+        );
     }
 
     #[gpui::test]
@@ -15719,8 +16041,9 @@ mod tests {
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
         // The field holds nothing, from the file that keeps nothing of
-        // it: then the view's host on the sandbox port is the run base.
-        assert_eq!(settings_of(&view, cx).run_base, "");
+        // the yard's: then the yard's view on the sandbox port is the
+        // run base.
+        assert_eq!(entry_of(&view, cx).run_base, "");
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         assert!(drawn(cx, "run address"));
@@ -15729,7 +16052,7 @@ mod tests {
             v.run.update(cx, |line, cx| line.set_text("plantime", cx))
         });
         click_on(cx, "run save");
-        assert_eq!(settings_of(&view, cx).run_base, "");
+        assert_eq!(entry_of(&view, cx).run_base, "");
         assert!(drawn(cx, "run said"));
         assert_eq!(
             view.read_with(cx, |v, cx| v.run.read(cx).text().to_string()),
@@ -15743,14 +16066,17 @@ mod tests {
             ""
         );
         assert_eq!(view.read_with(cx, |v, _| v.run_said.clone()), None);
-        // Kept, it is the setting's, and the file has it.
+        // Kept, it is the yard's, and the file has it on its entry.
         let base = view_up();
         view.update(cx, |v, cx| {
             v.run.update(cx, |line, cx| line.set_text(&base, cx))
         });
         click_on(cx, "run save");
-        assert_eq!(settings_of(&view, cx).run_base, base);
-        assert_eq!(Settings::read(&file).run_base, base);
+        assert_eq!(entry_of(&view, cx).run_base, base);
+        assert_eq!(
+            Settings::read(&file).yard(settings::HERE).unwrap().run_base,
+            base
+        );
         // Said no longer: the test frame's bounds only ever grow, so
         // what is gone is read, not drawn.
         assert_eq!(view.read_with(cx, |v, _| v.run_said.clone()), None);
@@ -15759,8 +16085,11 @@ mod tests {
         });
         // The view's host is empty again.
         click_on(cx, "run usual");
-        assert_eq!(settings_of(&view, cx).run_base, "");
-        assert_eq!(Settings::read(&file).run_base, "");
+        assert_eq!(entry_of(&view, cx).run_base, "");
+        assert_eq!(
+            Settings::read(&file).yard(settings::HERE).unwrap().run_base,
+            ""
+        );
     }
 
     /// "Agents and you" reads the near yard's operator settings: the style
@@ -16339,15 +16668,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // The view answers at its address: the head carries Open.
         let base = view_up();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
@@ -16378,15 +16699,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // Nothing answers at the view's address: the head has no Open.
         let base = view_down();
-        view.update(cx, |v, cx| {
-            v.set(
-                Settings {
-                    web_view: base.clone(),
-                    ..v.settings.clone()
-                },
-                cx,
-            )
-        });
+        set_view(&view, cx, &base);
         wait(cx, "the web view down", |cx| {
             view_answered(&view, cx) == Some(false)
         });

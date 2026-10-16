@@ -66,6 +66,19 @@ pub struct Yard {
     /// reached direct.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub account: String,
+    /// The web view's base address, through which this yard's pages and
+    /// images open in the browser. Empty until one is set for the yard,
+    /// and left out of the file while it is: then the yard's usual
+    /// applies ([`Yard::usual_view`]).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub web_view: String,
+    /// The sandbox origin's base address, through which this yard's
+    /// pages run in the browser. Empty until one is set, and left out of
+    /// the file while it is: then the yard's view, where it has one, on
+    /// the sandbox port is the run base. A yard on a custom pages port,
+    /// or one behind a proxy with a second name, is set here whole.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub run_base: String,
 }
 
 impl Yard {
@@ -118,6 +131,68 @@ impl Yard {
             false => "on this machine",
         }
     }
+
+    /// The web view's base address where none is set for the yard: the
+    /// view's default for a yard of this machine reached by this run's
+    /// socket, and none for any other yard — one with another socket, a
+    /// paired yard and a hosted one. No far yard's view is guessed from
+    /// its address. `socket` is this run's.
+    pub fn usual_view(&self, socket: &Path) -> Option<&str> {
+        let here = !self.is_far() && (self.socket.is_empty() || Path::new(&self.socket) == socket);
+        here.then_some(WEB_VIEW)
+    }
+
+    /// The web view's base address of the yard: the set one, else its
+    /// usual. None is no web view: the yard's files say it is not set,
+    /// and nothing is probed for it. `socket` is this run's.
+    pub fn view(&self, socket: &Path) -> Option<&str> {
+        match self.web_view.trim().is_empty() {
+            false => Some(&self.web_view),
+            true => self.usual_view(socket),
+        }
+    }
+
+    /// Whether the yard is the same one `other` is, as what follows a
+    /// yard or sends by it goes: the same name, reach and files. The web
+    /// view's address and the run base say nothing of the yard itself: a
+    /// change of them opens nothing anew and restores no draft less.
+    pub fn same_yard(&self, other: &Yard) -> bool {
+        self.name == other.name
+            && self.socket == other.socket
+            && self.address == other.address
+            && self.token_file == other.token_file
+            && self.session_file == other.session_file
+            && self.account == other.account
+    }
+
+    /// With the web view's base address `address`: what opens the yard's
+    /// pages in the browser. What is no address is refused with why, and
+    /// nothing changed; empty is unset again: the yard's usual.
+    pub fn with_web_view(mut self, address: &str) -> Result<Yard, String> {
+        let address = address.trim();
+        if address.is_empty() {
+            self.web_view = String::new();
+            return Ok(self);
+        }
+        Address::parse_view(address)?;
+        self.web_view = address.to_string();
+        Ok(self)
+    }
+
+    /// With the sandbox origin's base address `address`: what runs the
+    /// yard's pages in the browser. What is no address is refused with
+    /// why, and nothing changed; empty is the yard's view, where it has
+    /// one, on the sandbox port again.
+    pub fn with_run_base(mut self, address: &str) -> Result<Yard, String> {
+        let address = address.trim();
+        if address.is_empty() {
+            self.run_base = String::new();
+            return Ok(self);
+        }
+        Address::parse_run(address)?;
+        self.run_base = address.to_string();
+        Ok(self)
+    }
 }
 
 /// The name a far yard gets where none is typed, and the one yard of a
@@ -160,35 +235,20 @@ pub struct Settings {
     /// window does ([`Settings::closing_hides`]).
     #[serde(skip_serializing_if = "is_on")]
     pub menu_bar: bool,
-    /// The web view's base address, through which pages and images open
-    /// in the browser. The view's default until one is set, and left out
-    /// of the file while it is that. A yard reached by pairing opens its
-    /// pages once this names the address that yard's view is reached by.
-    #[serde(skip_serializing_if = "is_usual_view")]
-    pub web_view: String,
-    /// The sandbox origin's base address, through which a note's pages
-    /// run in the browser. Empty until one is set, and left out of the
-    /// file while it is: then the view's host on the sandbox port is
-    /// the run base. A yard on a custom pages port, or one behind a
-    /// proxy with a second name, is set here whole.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub run_base: String,
 }
 
 fn is_on(on: &bool) -> bool {
     *on
 }
 
-fn is_usual_view(view: &str) -> bool {
-    view == WEB_VIEW
-}
-
 fn nobody_chose(yards: &[Yard]) -> bool {
     yards == [Yard::near(HERE, "")]
 }
 
-/// A settings file as it is read: today's, and the one from before there
-/// were several yards, which had `remote` and `address` for its one.
+/// A settings file as it is read: today's, the one from before there
+/// were several yards, which had `remote` and `address` for its one, and
+/// the one from before each yard kept its own web view and run base,
+/// which named them once at the top.
 #[derive(Deserialize)]
 #[serde(default)]
 struct Kept {
@@ -237,7 +297,7 @@ impl From<Kept> for Settings {
             ],
             true => vec![Yard::near(HERE, "")],
         };
-        let yards = told_apart(yards);
+        let mut yards = told_apart(yards);
         // Before the list, an unmatched `open` fell back to the paired
         // yard. Keep that behavior if it happens to match the new near yard.
         let open = if moved_remote
@@ -249,6 +309,28 @@ impl From<Kept> for Settings {
         } else {
             kept.open
         };
+        // A file from before each yard kept its own names the one web
+        // view and run base at the top: they are the near yard's, which
+        // keeps what was set. The view's default is no one's setting.
+        // Where an entry already names its own, that is the newer one
+        // and stands. Then they are written per yard only.
+        let top_view = kept.web_view.trim();
+        let top_view = match top_view.is_empty() || top_view == WEB_VIEW {
+            true => "",
+            false => top_view,
+        };
+        let top_run = kept.run_base.trim();
+        if !top_view.is_empty() || !top_run.is_empty() {
+            // The list is never empty: the first yard keeps them where
+            // no near one is listed.
+            let place = yards.iter().position(|yard| !yard.is_far()).unwrap_or(0);
+            if !top_view.is_empty() && yards[place].web_view.trim().is_empty() {
+                yards[place].web_view = top_view.to_string();
+            }
+            if !top_run.is_empty() && yards[place].run_base.trim().is_empty() {
+                yards[place].run_base = top_run.to_string();
+            }
+        }
         Settings {
             yards,
             text: kept.text,
@@ -256,11 +338,6 @@ impl From<Kept> for Settings {
             open,
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
-            web_view: match kept.web_view.trim() {
-                "" => WEB_VIEW.to_string(),
-                _ => kept.web_view,
-            },
-            run_base: kept.run_base.trim().to_string(),
         }
     }
 }
@@ -354,8 +431,6 @@ impl Default for Settings {
             open: String::new(),
             notifications: Notify::default(),
             menu_bar: true,
-            web_view: WEB_VIEW.to_string(),
-            run_base: String::new(),
         }
     }
 }
@@ -481,7 +556,13 @@ impl Settings {
                 "There is a yard called {name} already, and two may not share a name. Give this one another."
             ));
         }
-        let yard = match yard.is_far() {
+        // A yard paired or signed in again keeps its web view and run
+        // base: the entry below is built anew from its reach alone.
+        let (web_view, run_base) = (
+            yard.web_view.trim().to_string(),
+            yard.run_base.trim().to_string(),
+        );
+        let mut yard = match yard.is_far() {
             true => {
                 Address::parse(&yard.address)?;
                 let path = yard::token_path(&yard.token_file, file)?;
@@ -532,6 +613,8 @@ impl Settings {
                 Yard::near(&name, socket)
             }
         };
+        yard.web_view = web_view;
+        yard.run_base = run_base;
         match at.and_then(|at| self.yards.iter().position(|other| other.name == at)) {
             Some(place) => {
                 if self.open == self.yards[place].name {
@@ -546,32 +629,28 @@ impl Settings {
         Ok(self)
     }
 
-    /// With the web view's base address `address`: what opens a note's
-    /// pages in the browser. What is no address is refused with why, and
-    /// nothing changed; empty is the view's default again.
-    pub fn with_web_view(mut self, address: &str) -> Result<Settings, String> {
-        let address = address.trim();
-        if address.is_empty() {
-            self.web_view = WEB_VIEW.to_string();
-            return Ok(self);
-        }
-        Address::parse_view(address)?;
-        self.web_view = address.to_string();
+    /// With the web view's base address `address` on the yard called
+    /// `name`: what opens that yard's pages in the browser. What is no
+    /// address, or no yard of the list, is refused with why, and nothing
+    /// changed; empty is unset again: the yard's usual.
+    pub fn with_yard_view(mut self, name: &str, address: &str) -> Result<Settings, String> {
+        let Some(yard) = self.yards.iter_mut().find(|yard| yard.name == name) else {
+            return Err(format!("The settings list no yard called {name}."));
+        };
+        *yard = yard.clone().with_web_view(address)?;
         Ok(self)
     }
 
-    /// With the sandbox origin's base address `address`: what runs a
-    /// note's pages in the browser. What is no address is refused with
-    /// why, and nothing changed; empty is the view's host on the
-    /// sandbox port again.
-    pub fn with_run_base(mut self, address: &str) -> Result<Settings, String> {
-        let address = address.trim();
-        if address.is_empty() {
-            self.run_base = String::new();
-            return Ok(self);
-        }
-        Address::parse_run(address)?;
-        self.run_base = address.to_string();
+    /// With the sandbox origin's base address `address` on the yard
+    /// called `name`: what runs that yard's pages in the browser. What
+    /// is no address, or no yard of the list, is refused with why, and
+    /// nothing changed; empty is the yard's view, where it has one, on
+    /// the sandbox port again.
+    pub fn with_yard_run(mut self, name: &str, address: &str) -> Result<Settings, String> {
+        let Some(yard) = self.yards.iter_mut().find(|yard| yard.name == name) else {
+            return Err(format!("The settings list no yard called {name}."));
+        };
+        *yard = yard.clone().with_run_base(address)?;
         Ok(self)
     }
 
@@ -1838,39 +1917,90 @@ mod tests {
     }
 
     #[test]
-    fn the_web_view_s_address_is_its_default_until_one_is_kept() {
+    fn a_yard_s_view_is_its_usual_until_one_is_set() {
+        let socket = Path::new("/tmp/footplate-test/yard.sock");
+        // A near yard reached by this run's socket: the view's default.
+        // One with another socket, a paired yard and a hosted yard have
+        // none: no far yard's view is guessed from its address.
+        assert_eq!(Yard::near(HERE, "").view(socket), Some(WEB_VIEW));
+        assert_eq!(
+            Yard::near("second home", "/tmp/footplate-test/yard.sock").view(socket),
+            Some(WEB_VIEW)
+        );
+        assert_eq!(
+            Yard::near("second home", "/home/jo/.yardr/yard.sock").view(socket),
+            None
+        );
+        assert_eq!(
+            Yard::far("mac", "https://mac.example.net", "yard-mac.token").view(socket),
+            None
+        );
+        assert_eq!(
+            Yard::hosted(
+                "trial",
+                "https://my.yardr.dev",
+                "yard-trial.token",
+                "yard-trial.session"
+            )
+            .view(socket),
+            None
+        );
+        // Set, the set one wins over the usual, of any yard.
+        let view = "https://plantime.example.net:8443/yard/";
+        assert_eq!(
+            Yard::near(HERE, "")
+                .with_web_view(view)
+                .unwrap()
+                .view(socket),
+            Some(view)
+        );
+        assert_eq!(
+            Yard::far("mac", "https://mac.example.net", "yard-mac.token")
+                .with_web_view(view)
+                .unwrap()
+                .view(socket),
+            Some(view)
+        );
+    }
+
+    #[test]
+    fn the_web_view_s_address_is_kept_per_yard() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
-        // Nobody chose: the view's default, and a file from before it says
-        // nothing of it, as a file that keeps something else still says
-        // nothing.
+        // Nobody chose: unset, and left out of the file.
         let usual = Settings::default();
-        assert_eq!(usual.web_view, WEB_VIEW);
-        fs::write(&file, "{\"text\": 15}").unwrap();
-        assert_eq!(Settings::read(&file).web_view, WEB_VIEW);
+        assert_eq!(usual.yard(HERE).unwrap().web_view, "");
         usual.write(&file).unwrap();
         assert!(!fs::read_to_string(&file).unwrap().contains("web_view"));
-        // An empty one is the default again.
-        fs::write(&file, "{\"web_view\": \"\"}").unwrap();
-        assert_eq!(Settings::read(&file).web_view, WEB_VIEW);
-        // Set, it is kept and read back.
+        // Set on a yard, it is kept on its entry and read back; empty is
+        // unset again.
         let set = usual
-            .with_web_view("https://plantime.example.net:8443/yard/")
+            .with_yard_view(HERE, "https://plantime.example.net:8443/yard/")
             .unwrap();
+        assert_eq!(
+            set.yard(HERE).unwrap().web_view,
+            "https://plantime.example.net:8443/yard/"
+        );
         set.write(&file).unwrap();
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
-            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"web_view\": \"https://plantime.example.net:8443/yard/\"\n}\n"
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"yards\": [\n    {\n      \"name\": \"this machine\",\n      \"web_view\": \"https://plantime.example.net:8443/yard/\"\n    }\n  ]\n}\n"
         );
         assert_eq!(Settings::read(&file), set);
-        // What is no address is refused with why, in the view's words.
-        let why = Settings::default().with_web_view("plantime").unwrap_err();
+        let unset = set.with_yard_view(HERE, "").unwrap();
+        assert_eq!(unset.yard(HERE).unwrap().web_view, "");
+        assert_eq!(unset, Settings::default());
+        // What is no address is refused with why, in the view's words,
+        // and so is no yard of the list.
+        let why = Settings::default()
+            .with_yard_view(HERE, "plantime")
+            .unwrap_err();
         assert_eq!(
             why,
             "\"plantime\" is no address of the web view: one starts with https://, or with http:// for the web view on this machine"
         );
         let why = Settings::default()
-            .with_web_view("http://plantime:8791")
+            .with_yard_view(HERE, "http://plantime:8791")
             .unwrap_err();
         assert!(
             why.starts_with(
@@ -1878,22 +2008,28 @@ mod tests {
             ),
             "{why}"
         );
+        let why = Settings::default()
+            .with_yard_view("elsewhere", WEB_VIEW)
+            .unwrap_err();
+        assert_eq!(why, "The settings list no yard called elsewhere.");
     }
 
     #[test]
-    fn the_run_base_is_empty_until_one_is_kept() {
+    fn the_run_base_is_kept_per_yard() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         // Nobody chose: empty, and left out of the file; then the
-        // view's host on the sandbox port is the run base.
+        // yard's view, where it has one, on the sandbox port is the run
+        // base.
         let usual = Settings::default();
-        assert_eq!(usual.run_base, "");
-        fs::write(&file, "{\"text\": 15}").unwrap();
-        assert_eq!(Settings::read(&file).run_base, "");
+        assert_eq!(usual.yard(HERE).unwrap().run_base, "");
         usual.write(&file).unwrap();
         assert!(!fs::read_to_string(&file).unwrap().contains("run_base"));
-        // Set, it is kept and read back; empty is empty again.
-        let set = usual.with_run_base("https://pages.example.net/").unwrap();
+        // Set on a yard, it is kept on its entry and read back; empty is
+        // empty again.
+        let set = usual
+            .with_yard_run(HERE, "https://pages.example.net/")
+            .unwrap();
         set.write(&file).unwrap();
         assert!(
             fs::read_to_string(&file)
@@ -1901,15 +2037,24 @@ mod tests {
                 .contains("\"run_base\": \"https://pages.example.net/\"")
         );
         assert_eq!(Settings::read(&file), set);
-        assert_eq!(set.with_run_base("").unwrap().run_base, "");
+        assert_eq!(
+            set.with_yard_run(HERE, "")
+                .unwrap()
+                .yard(HERE)
+                .unwrap()
+                .run_base,
+            ""
+        );
         // What is no address is refused with why, in the run base's words.
-        let why = Settings::default().with_run_base("plantime").unwrap_err();
+        let why = Settings::default()
+            .with_yard_run(HERE, "plantime")
+            .unwrap_err();
         assert_eq!(
             why,
             "\"plantime\" is no address of the run base: one starts with https://, or with http:// for the run base on this machine"
         );
         let why = Settings::default()
-            .with_run_base("http://plantime:8789")
+            .with_yard_run(HERE, "http://plantime:8789")
             .unwrap_err();
         assert!(
             why.starts_with(
@@ -1917,6 +2062,96 @@ mod tests {
             ),
             "{why}"
         );
+    }
+
+    #[test]
+    fn a_top_level_view_and_run_base_move_into_the_near_yard_s_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // A file from before each yard kept its own names them once at
+        // the top: the near yard keeps what was set, and they are
+        // written per yard only.
+        fs::write(
+            &file,
+            "{\"web_view\": \"https://plantime.example.net:8443/yard/\", \"run_base\": \"https://pages.example.net/\"}",
+        )
+        .unwrap();
+        let read = Settings::read(&file);
+        assert_eq!(
+            read.yard(HERE).unwrap().web_view,
+            "https://plantime.example.net:8443/yard/"
+        );
+        assert_eq!(
+            read.yard(HERE).unwrap().run_base,
+            "https://pages.example.net/"
+        );
+        read.write(&file).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(written.get("web_view").is_none());
+        assert!(written.get("run_base").is_none());
+        assert_eq!(
+            written["yards"][0]["web_view"],
+            "https://plantime.example.net:8443/yard/"
+        );
+        assert_eq!(
+            written["yards"][0]["run_base"],
+            "https://pages.example.net/"
+        );
+        // Among several yards they are the near one's, and a paired yard
+        // keeps none.
+        fs::write(
+            &file,
+            "{\"yards\": [{\"name\": \"mac\", \"address\": \"https://mac.example.net\", \"token_file\": \"yard-mac.token\"}, {\"name\": \"this machine\"}], \"web_view\": \"https://plantime.example.net:8443/yard/\"}",
+        )
+        .unwrap();
+        let read = Settings::read(&file);
+        assert_eq!(read.yard("mac").unwrap().web_view, "");
+        assert_eq!(
+            read.yard(HERE).unwrap().web_view,
+            "https://plantime.example.net:8443/yard/"
+        );
+        // The view's default at the top is no one's setting, and where an
+        // entry already names its own, that is the newer one and stands.
+        fs::write(&file, format!("{{\"web_view\": \"{WEB_VIEW}\"}}")).unwrap();
+        assert_eq!(Settings::read(&file).yard(HERE).unwrap().web_view, "");
+        fs::write(
+            &file,
+            "{\"yards\": [{\"name\": \"this machine\", \"web_view\": \"https://kept.example.net/\"}], \"web_view\": \"https://plantime.example.net:8443/yard/\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::read(&file).yard(HERE).unwrap().web_view,
+            "https://kept.example.net/"
+        );
+    }
+
+    #[test]
+    fn a_yard_paired_again_keeps_its_view_and_a_change_of_view_alone_is_the_same_yard() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::far("mac", "https://mac.example.net", "yard-mac.token")
+            .with_web_view("https://plantime.example.net:8443/yard/")
+            .unwrap()
+            .with_run_base("https://pages.example.net/")
+            .unwrap();
+        let set = Settings::default()
+            .with_yard(None, yard, Some(&file))
+            .unwrap();
+        // Paired again, the entry is built anew and keeps them.
+        let again = set.yard("mac").unwrap().clone();
+        let set = set.with_yard(Some("mac"), again, Some(&file)).unwrap();
+        let kept = set.yard("mac").unwrap();
+        assert_eq!(kept.web_view, "https://plantime.example.net:8443/yard/");
+        assert_eq!(kept.run_base, "https://pages.example.net/");
+        // What follows the yard goes on through a change of them alone.
+        let moved = kept.clone().with_web_view(WEB_VIEW).unwrap();
+        assert!(kept.same_yard(&moved));
+        assert!(!kept.same_yard(&Yard::far(
+            "mac",
+            "https://shop.example.net",
+            "yard-mac.token"
+        )));
     }
 
     #[test]

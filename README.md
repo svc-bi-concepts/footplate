@@ -273,8 +273,8 @@ mail and for anyone who has no row.
 **Files.** Mail can carry files, and the window shows those of a mail
 under its text: an image in a space 240 points high, scaled down to fit it,
 never up; a page or any other file as a row with Open. A file's row names
-it, with its size; Open takes it to the browser through the web view, under
-the name the browser saves it as. An image is read from the yard once and
+it, with its size; Open takes it to the browser through the yard's web view, under
+the name the browser saves it as. Each yard has its own, set in the settings. An image is read from the yard once and
 kept in memory by its hash, for as long as the window runs. One the yard no
 longer has (`yardr store prune` removes a file no mail names) is a line that
 says so. Footplate never opens a file itself.
@@ -326,7 +326,7 @@ A note takes files as a conversation does, not pages alone. Nothing is sent
 yet. Write what they show, and Enter sends one note with the words and
 every file attached, in the order they came; the ask stays open. The note
 is then like an agent's: its page opens in the browser from the note, and
-stands on the bead's board in the web view. A file belongs to its ask: open
+stands on the bead's board in the yard's web view. A file belongs to its ask: open
 another card, and the words and the files wait where they were. The `×` on
 an attachment removes it, and so does `backspace` in an empty line, the
 last one first.
