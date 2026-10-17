@@ -2387,7 +2387,7 @@ impl Client {
             return Ok(false);
         }
         let events = self.events(after)?;
-        for event in events.take(TIMETABLE_CATCHUP_MOST) {
+        for event in events {
             let event = event?;
             if event.seq > until {
                 break;
@@ -2473,11 +2473,6 @@ impl Client {
         Ok(reply)
     }
 }
-
-/// How many events the timetable's catch-up reads at most: past this
-/// many the rest of the gap is quietly missed, as what the yard no
-/// longer has is.
-const TIMETABLE_CATCHUP_MOST: usize = 10_000;
 
 /// The events of a stream, one a line, until it ends.
 pub struct Events {
@@ -5181,5 +5176,21 @@ mod tests {
         yard.emit(r#"{"seq": 30, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "jo"}}"#);
         assert!(!yard.client().timetable_changed("jo", 20, 25).unwrap());
         assert_eq!(yard.streams_asked(), vec![20]);
+    }
+
+    #[test]
+    fn timetable_changed_reads_past_ten_thousand_events() {
+        let yard = Yard::start();
+        for seq in 21..=10_021 {
+            let event = if seq == 10_021 {
+                format!(
+                    r#"{{"seq": {seq}, "kind": "closed", "bead": "yd-shed", "data": {{"originator": "jo"}}}}"#
+                )
+            } else {
+                format!(r#"{{"seq": {seq}, "kind": "noted"}}"#)
+            };
+            yard.emit(&event);
+        }
+        assert!(yard.client().timetable_changed("jo", 20, 10_021).unwrap());
     }
 }
