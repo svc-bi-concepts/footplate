@@ -1282,6 +1282,12 @@ fn count_words(n: usize, one: &str, more: &str) -> Option<String> {
     }
 }
 
+/// What the open yard's rail may count: its model while it answers, and
+/// nothing while it is away, even where its last rows stay on screen.
+fn rail_counts(model: Option<&Model>, away: bool) -> Option<Counts> {
+    if away { None } else { model.map(Counts::of) }
+}
+
 impl Counts {
     fn of(model: &Model) -> Counts {
         Counts {
@@ -8400,9 +8406,13 @@ impl Footplate {
         let mode = self.mode();
         // The modes answer where a yard's rows are there to show.
         let live = self.model.is_some();
-        // What waits in the open yard, for the glyphs' badges. None
-        // while the yard is away, when there is no model to count.
-        let counts = self.model.as_ref().map(Counts::of);
+        // What waits in the open yard, for the glyphs' badges. A
+        // reconnecting yard keeps its model for its rows, but it is away
+        // and has no current count to show.
+        let counts = rail_counts(
+            self.model.as_ref(),
+            self.down.is_some() && !self.answers_under_adding(),
+        );
         let mut rail = div()
             .debug_selector(|| "rail".to_string())
             .w(px(RAIL))
@@ -18797,6 +18807,48 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.model.is_none()));
         assert!(drawn(cx, "rail chat") && drawn(cx, "rail decisions"));
         assert!(!drawn(cx, "rail badge chat") && !drawn(cx, "rail badge decisions"));
+    }
+
+    /// A yard that answered and then went away keeps its rows as last
+    /// seen, but its badges no longer imply that the counts are current.
+    #[gpui::test]
+    fn the_rail_carries_no_count_while_the_yard_reconnects(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_second_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_words_only());
+        let (view, cx) = opened(&yard, &["From the second home."], cx);
+        wait(cx, "what waits in the open yard", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    let counts = Counts::of(m);
+                    counts.mail == 1 && counts.decisions == 1
+                })
+            })
+        });
+        assert!(drawn(cx, "rail badge chat") && drawn(cx, "rail badge decisions"));
+
+        yard.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        wait(cx, "the switch read after the yard went away", |cx| {
+            settled(&view, cx)
+        });
+        let (down, reconnecting, answers_under_adding, counts) = view.read_with(cx, |v, _| {
+            (
+                v.down.is_some(),
+                v.reconnecting(),
+                v.answers_under_adding(),
+                rail_counts(
+                    v.model.as_ref(),
+                    v.down.is_some() && !v.answers_under_adding(),
+                ),
+            )
+        });
+        assert!(
+            down && reconnecting && !answers_under_adding && counts.is_none(),
+            "away state: down={down}, reconnecting={reconnecting}, answers_under_adding={answers_under_adding}"
+        );
     }
 
     /// Each yard reopens in its remembered mode, and each mode on the row
