@@ -8,45 +8,60 @@ builders.
 
 ## Layout
 
-Top level: `src/` the program, `scripts/` release/screenshot/shell-test
-helpers, `assets/` icons, `docs/design/` decision notes, `.yardr/` the
-yard's gate.
+Top level: `src/` the program, `scripts/` release, screenshot and
+shell-test helpers, `assets/` icons, `docs/design/` decision notes,
+`.yardr/` the yard's gate.
 
-`src/main.rs` opens the one window and owns the app lifecycle; it draws
-nothing itself. `src/window.rs` draws the window and makes the calls the
-model asks for; it holds no protocol and no state of its own.
-`src/model.rs` is what the window shows, without the window: rows, the
-open conversation, unread; it never calls the yard, answering an `Effect`
-the window performs. `src/api.rs` is the yard's socket API: calls, the
-event stream, their JSON, by socket or at an address over TCP+TLS; HTTP
-hand-written, no client library. `src/session.rs` follows one yard on a
-thread: login, initial state, stream, retry. `src/yard.rs` picks which
-yard opens: socket or address, token files, hosted sessions; tokens live
-beside the settings, never in them. `src/settings.rs` is what the window
-keeps between runs, one JSON file in the platform config dir. `src/draft.rs`
-is what is written and not sent yet: attachments and text per
-conversation; it neither calls nor draws. `src/input.rs` is the line
-typed in (gpui has no text field). `src/select.rs` is a message's text
-with mouse selection; selection lives beside the texts, one at a time.
-`src/markdown.rs` is the light Markdown a message draws with: code,
-one-level lists, headings to h3, bold/italic; the rest stays as written.
-`src/theme.rs` is the light/dark palettes. `src/notify.rs` is OS
-notifications: rules as plain functions, then macOS's notification
-center and Linux's `notify-send`. `src/tray.rs` is the Mac menu-bar item
-and the Linux tray item, with the yards menu. `src/dock.rs` is the
-number on the macOS dock icon. `src/taskbar.rs` is the Linux desktop
-entry and window icon. `src/fetch.rs` fetches yardr's release from
-yardr.dev: minisign signature over checksums against the built-in key,
-archive against checksums, binary kept in footplate's directory; plus
-`yardr doctor`-named programs by checksum alone. `src/setup.rs` runs the
-first run as yardr's commands, with no window: args in, JSON out, PATH
-from doctor's data, never through a shell. `src/window/firstrun.rs`
-draws that first run where the yard will be. `src/shot.rs` (debug
-builds only) opens scripted states against a fake yard for screenshots,
-named by `FOOTPLATE_SHOT`. `src/fake.rs` is a yard for tests: socket or
-TCP, scripted JSON, tokens and pairing; no TLS. `src/fixtures/` holds
-test fixtures: `shot-page.png`, and the published yardr v0.10.0
-checksums plus signature the built-in key is held to.
+The window, its state and the yard:
+
+- `src/main.rs`: opens the one window, owns the app lifecycle; draws nothing.
+- `src/window.rs`: draws the window and makes the calls the model asks for;
+  no protocol, no state of its own. `src/window/firstrun.rs` draws the
+  first run where the yard will be.
+- `src/model.rs`: what the window shows, without the window (rows, the open
+  conversation, unread); never calls the yard, it answers an `Effect` the
+  window performs.
+- `src/api.rs`: the yard's socket API (calls, event stream, their JSON), by
+  socket or at an address over TCP+TLS; HTTP hand-written, no client library.
+- `src/session.rs`: follows one yard on a thread: login, initial state,
+  stream, retry.
+- `src/yard.rs`: picks which yard opens (socket or address, token files,
+  hosted sessions); tokens live beside the settings, never in them.
+- `src/settings.rs`: what the window keeps between runs, one JSON file in the
+  platform config dir.
+
+Text and drawing helpers:
+
+- `src/draft.rs`: what is written and not sent yet, per conversation; neither
+  calls nor draws.
+- `src/input.rs`: the line typed in (gpui has no text field).
+- `src/select.rs`: a message's text with mouse selection, one at a time.
+- `src/markdown.rs`: the light Markdown messages draw with (code, one-level
+  lists, headings to h3, bold/italic); the rest stays as written.
+- `src/theme.rs`: the light and dark palettes.
+
+Platform surface:
+
+- `src/notify.rs`: OS notifications; rules as plain functions, then macOS's
+  notification center and Linux's `notify-send`.
+- `src/tray.rs`: the Mac menu-bar item and the Linux tray item, with the
+  yards menu.
+- `src/dock.rs`: the number on the macOS Dock icon.
+- `src/taskbar.rs`: the Linux desktop entry and window icon.
+
+Setup, release and tests:
+
+- `src/fetch.rs`: fetches yardr's release from yardr.dev (minisign over
+  checksums against the built-in key, archive against checksums), plus
+  `yardr doctor`-named programs by checksum alone.
+- `src/setup.rs`: the first run as yardr's commands, with no window (args in,
+  JSON out, PATH from doctor's data, never through a shell).
+- `src/shot.rs` (debug builds only): scripted states against a fake yard for
+  screenshots, named by `FOOTPLATE_SHOT`.
+- `src/fake.rs`: a yard for tests (socket or TCP, scripted JSON, tokens and
+  pairing; no TLS).
+- `src/fixtures/`: `shot-page.png`, and the published yardr v0.10.0 checksums
+  plus signature the built-in key is held to.
 
 ## Where to start
 
