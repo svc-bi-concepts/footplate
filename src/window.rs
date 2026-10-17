@@ -17,18 +17,18 @@ use gpui::{
 };
 
 use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
-use crate::api::{Flow, FlowBead, FlowStage};
+use crate::api::{CrewMember, Flow, FlowBead, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedRow, DecisionAsk,
     DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model, News, Row,
-    Selected, Target, Top,
+    Selected, Target, Top, state_of,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
 use crate::session::{self, Update};
-use crate::settings::{self, Notify, Settings};
+use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
 use crate::theme::{Look, Palette};
 use crate::yard::{self, Env};
@@ -1627,6 +1627,13 @@ pub struct Footplate {
     agents_busy: Option<AgentsBusy>,
     agents_read: bool,
     agents_said: Option<String>,
+    /// "Crew" in the settings: the open yard's crew as read, whether a
+    /// read is underway or one went through, and what came of the last
+    /// read instead.
+    crew: Vec<CrewMember>,
+    crew_reading: bool,
+    crew_read: bool,
+    crew_said: Option<String>,
     /// The row to open once the yard has it: the yardmaster's, after the
     /// first run, whose yard may not have answered yet.
     wanted_row: Option<Selected>,
@@ -1654,6 +1661,22 @@ pub struct Footplate {
     /// it is held here.
     #[cfg(any(target_os = "macos", target_os = "linux", test))]
     _tray_heeding: Task<()>,
+}
+
+/// The settings' section a screenshot state opens on: appearance for
+/// the `settings` shot, the named one for a `settings-<section>` shot,
+/// else none. A debug build's alone.
+#[cfg(debug_assertions)]
+fn shot_section() -> Option<Section> {
+    match std::env::var("FOOTPLATE_SHOT").as_deref() {
+        Ok("settings") => Some(Section::Appearance),
+        Ok("settings-yards") => Some(Section::Yards),
+        Ok("settings-agents") => Some(Section::Agents),
+        Ok("settings-crew") => Some(Section::Crew),
+        Ok("settings-notifications") => Some(Section::Notifications),
+        Ok("settings-connection") => Some(Section::Connection),
+        _ => None,
+    }
 }
 
 /// The row a screenshot state opens on instead of the yard's own: the
@@ -1702,10 +1725,11 @@ impl Footplate {
         let mut this = Self::bare(env, name, window, cx).kept_in(file, cx);
         this.reopen(cx);
         // A screenshot state that opens the settings (shot.rs): a debug
-        // build's alone.
+        // build's alone, on the section the state names.
         #[cfg(debug_assertions)]
-        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings") {
+        if let Some(section) = shot_section() {
             this.settings_open = true;
+            this.settings.section = section;
         }
         // The reconnecting shot has a draft in the composer: the
         // yardmaster's conversation's, which opens first, in the line
@@ -2028,6 +2052,10 @@ impl Footplate {
             agents_busy: None,
             agents_read: false,
             agents_said: None,
+            crew: Vec::new(),
+            crew_reading: false,
+            crew_read: false,
+            crew_said: None,
             wanted_row: None,
             system,
             permission: None,
@@ -2311,6 +2339,7 @@ impl Footplate {
         self.put(held);
         self.switch_reset();
         self.agents_reset(cx);
+        self.crew_reset();
         self.refresh_switch(cx);
     }
 
@@ -2328,6 +2357,7 @@ impl Footplate {
         self.retarget_addresses(cx);
         self.switch_reset();
         self.agents_reset(cx);
+        self.crew_reset();
         self.refresh_switch(cx);
     }
 
@@ -5475,8 +5505,10 @@ impl Footplate {
         // field: nothing typed of a secret waits there.
         self.forget_secret(cx);
         self.shown(cx);
-        // "Agents and you" reads once the settings show.
+        // "Agents and you" reads once the settings show, and the crew
+        // where its section is the open one.
         self.read_agents(cx);
+        self.read_crew(cx);
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
             Some(_) if !self.settings_open => self.line.focus_handle(cx),
@@ -5534,6 +5566,7 @@ impl Footplate {
             // switch said is gone, and read anew.
             self.switch_reset();
             self.agents_reset(cx);
+            self.crew_reset();
             self.refresh_switch(cx);
         }
         if view_moved {
@@ -5982,9 +6015,11 @@ impl Footplate {
             }
         }
         // The settings stand open on the yard this read: its operator
-        // settings are read now that yardr is there to run.
+        // settings are read now that yardr is there to run, and the crew
+        // where its section shows.
         if self.settings_open {
             self.read_agents(cx);
+            self.read_crew(cx);
         }
         cx.notify();
     }
@@ -6366,6 +6401,78 @@ impl Footplate {
         self.agents_said = None;
     }
 
+    /// The settings show `section` alone, and keep it the open one. The
+    /// crew reads where its section is picked.
+    fn pick_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                section,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+        self.read_crew(cx);
+    }
+
+    /// Reads the open yard's crew for the settings' crew section, once it
+    /// shows. A yard that is not reached is said where the list would
+    /// stand, and nothing is read.
+    fn read_crew(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_open
+            || self.settings.section != Section::Crew
+            || self.crew_reading
+            || self.crew_read
+        {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.crew_reading = true;
+        self.crew_said = None;
+        cx.notify();
+        let opening = self.opening;
+        cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move { client.crew() })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.opening != opening {
+                    return;
+                }
+                this.crew_reading = false;
+                match read {
+                    Ok(crew) => {
+                        this.crew = crew;
+                        this.crew_read = true;
+                    }
+                    Err(why) => this.crew_said = Some(why.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Tries the crew again, after it could not be read.
+    fn crew_retry(&mut self, cx: &mut Context<Self>) {
+        self.crew_said = None;
+        self.read_crew(cx);
+        cx.notify();
+    }
+
+    /// The open yard is another: what the crew section said of the last
+    /// is gone, and the yard's own crew is read anew once the section
+    /// shows.
+    fn crew_reset(&mut self) {
+        self.crew = Vec::new();
+        self.crew_reading = false;
+        self.crew_read = false;
+        self.crew_said = None;
+    }
+
     /// A yard is to be added, in the settings or from where there is no
     /// yard: its fields are asked for, with the focus in its name. They
     /// are empty but for the socket of a yard of this machine, where this
@@ -6406,6 +6513,8 @@ impl Footplate {
         if !self.settings_open {
             self.toggle_settings(window, cx);
         }
+        // The code is typed in the yards section, whatever stood open.
+        self.pick_section(Section::Yards, cx);
         self.adding = Some(Adding::Again(name.unwrap_or_else(|| self.yard.clone())));
         self.yard_said = None;
         self.code.update(cx, |line, cx| line.set_text("", cx));
@@ -6425,6 +6534,8 @@ impl Footplate {
         if !self.settings_open {
             self.toggle_settings(window, cx);
         }
+        // The account is typed in the yards section, whatever stood open.
+        self.pick_section(Section::Yards, cx);
         self.adding = Some(Adding::SignInAgain(name.to_string()));
         self.yard_said = None;
         let account = self
@@ -7056,6 +7167,7 @@ impl Footplate {
         let run = self.run_setting(setting, palette, cx);
         let login = self.login_setting(setting, palette, cx);
         let agents = self.agents_setting(setting, palette, cx);
+        let crew = self.crew_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
         let notify = self.settings.notifications;
@@ -7164,28 +7276,61 @@ impl Footplate {
                     .on_click(cx.listener(move |this, _, _, cx| this.tray_mark(mark, cx)))
             }),
         ));
+        // The sections down the left side, as chat's rows are: the open
+        // one stands out, and a click shows that section alone.
+        let open = self.settings.section;
+        let mut list = div()
+            .id("settings sections")
+            .flex_none()
+            .w(rems(9.))
+            .h_full()
+            .overflow_y_scroll()
+            .bg(palette.side)
+            .border_r_1()
+            .border_color(palette.line)
+            .py_2();
+        for section in Section::ALL {
+            let at = format!("settings section {}", section.name());
+            list = list.child(
+                div()
+                    .id(SharedString::from(at.clone()))
+                    .debug_selector(move || at.clone())
+                    .mx_1()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(section == open, |el| el.bg(palette.open))
+                    .when(section != open, |el| {
+                        el.hover(|style| style.bg(palette.hover))
+                    })
+                    .child(section.name())
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_section(section, cx))),
+            );
+        }
         pane.children(self.reconnect_strip(palette))
             .child(head)
             .child(
-                div()
-                    .id("settings pane")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(size)
-                    .child(look)
-                    .child(yard)
-                    .child(view)
-                    .child(run)
-                    .child(login)
-                    .child(notifications)
-                    .child(menu_bar)
-                    .child(mark)
-                    .child(agents),
+                div().flex().flex_1().min_h_0().child(list).child(
+                    div()
+                        .id("settings pane")
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_y_scroll()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .children(match open {
+                            Section::Appearance => vec![size, look, menu_bar, mark],
+                            Section::Yards => vec![yard, login],
+                            Section::Agents => vec![agents],
+                            Section::Crew => vec![crew],
+                            Section::Notifications => vec![notifications],
+                            Section::Connection => vec![view, run],
+                        }),
+                ),
             )
             .when_some(self.unkept.clone(), |el, why| {
                 el.child(
@@ -7618,6 +7763,76 @@ impl Footplate {
                 section
             }
         }
+    }
+
+    /// The open yard's crew in the settings: one row each, with what
+    /// it is doing, in the words of chat's crew list. Read-only: the
+    /// crew is written to from chat, not from here. Where the yard is
+    /// not reached, the section says that instead of the list.
+    fn crew_setting(
+        &self,
+        setting: impl Fn(String, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut section = setting(
+            "crew".to_string(),
+            "who works this yard, and what each is doing".to_string(),
+        );
+        if self.client.is_none() {
+            return section.child(
+                div()
+                    .debug_selector(|| "crew away".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(self.yard_waits(&self.yard)),
+            );
+        }
+        if let Some(said) = &self.crew_said {
+            return section
+                .child(
+                    div()
+                        .debug_selector(|| "crew said".to_string())
+                        .child(said.clone()),
+                )
+                .child(
+                    div().flex().child(
+                        small_button("try again".to_string(), palette)
+                            .id("crew again")
+                            .debug_selector(|| "crew again".to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.crew_retry(cx))),
+                    ),
+                );
+        }
+        if !self.crew_read {
+            return section.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("reading this yard's crew…"),
+            );
+        }
+        if self.crew.is_empty() {
+            return section.child(
+                div()
+                    .debug_selector(|| "crew none".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("This yard has no crew yet."),
+            );
+        }
+        for member in &self.crew {
+            let name = member.name.clone();
+            section = section.child(
+                div()
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("crew row {name}")
+                    })
+                    .child(format!("{name} · {}", state_of(member))),
+            );
+        }
+        section
     }
 
     /// The shown yard's web view in the settings: the field its base
@@ -17638,6 +17853,7 @@ mod tests {
         );
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
+        click_on(cx, "settings section connection");
         assert!(drawn(cx, "view address"));
         // What is no address is said, and nothing changed.
         view.update(cx, |v, cx| {
@@ -17701,6 +17917,7 @@ mod tests {
         assert_eq!(entry_of(&view, cx).run_base, "");
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
+        click_on(cx, "settings section connection");
         assert!(drawn(cx, "run address"));
         // What is no address is said, and nothing changed.
         view.update(cx, |v, cx| {
@@ -17790,8 +18007,8 @@ mod tests {
             bind_keys(cx);
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
-        // The section is the last of the settings: the window is tall
-        // enough to hold every section, so its buttons take clicks.
+        // The section shows alone: the window is tall enough to hold it,
+        // so its buttons take clicks.
         cx.simulate_resize(gpui::size(px(1200.), px(1800.)));
         let (means, program, _) = stand_in_means(dir.path(), false);
         standin::answers(&program, "doctor", 0, &standin::doctor_ready());
@@ -17816,6 +18033,7 @@ mod tests {
         // line in the field.
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
+        click_on(cx, "settings section agents");
         wait(cx, "the operator's settings read", |cx| {
             view.read_with(cx, |v, _| v.agents_read)
         });
@@ -17899,6 +18117,7 @@ mod tests {
         });
         click_on(cx, "settings");
         assert!(settings_open(&view, cx));
+        click_on(cx, "settings section agents");
         assert!(drawn(cx, "agents far"));
         assert!(!drawn(cx, "agents save") && !drawn(cx, "agents about"));
         assert!(!drawn(cx, "agents style guide"));
@@ -17946,6 +18165,122 @@ mod tests {
         assert!(settings_open(&view, cx));
         click_on(cx, "settings back");
         assert!(!settings_open(&view, cx));
+    }
+
+    /// The settings show one section, picked from the side list: each
+    /// section shows its controls, and the open section is kept.
+    #[gpui::test]
+    fn the_settings_show_one_section_picked_from_the_side_list(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        // The login switch and "Agents and you" read yardr's answers.
+        let (means, program, _) = stand_in_means(dir.path(), false);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(true, false));
+        standin::answers(
+            &program,
+            "settings-get",
+            0,
+            &json!([
+                {"key": "operator_style", "value": "work", "from": "set"},
+                {"key": "operator_note", "value": "I read code", "from": "set"},
+            ]),
+        );
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the switch read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        // Appearance opens, and alone: the window's look and text size,
+        // its item and the item's mark.
+        for section in Section::ALL {
+            assert!(
+                drawn(cx, &format!("settings section {}", section.name())),
+                "{}",
+                section.name()
+            );
+        }
+        assert!(drawn(cx, "text size"));
+        assert!(drawn(cx, "look auto"));
+        assert!(drawn(cx, "menu bar on"));
+        assert!(drawn(cx, "tray auto"));
+        assert!(!drawn(cx, "add near"));
+        assert!(!drawn(cx, "agents save"));
+        assert!(!drawn(cx, "notify on"));
+        assert!(!drawn(cx, "view address"));
+        // Yards: the list with its buttons, and the open yard's start at
+        // login.
+        click_on(cx, "settings section yards");
+        assert!(drawn(cx, "yard row this machine"));
+        assert!(drawn(cx, "add near") && drawn(cx, "add far") && drawn(cx, "add hosted"));
+        assert!(drawn(cx, "login off") && drawn(cx, "login on"));
+        // Agents: the operator's styles, the line about them, and save.
+        click_on(cx, "settings section agents");
+        wait(cx, "the operator's settings read", |cx| {
+            view.read_with(cx, |v, _| v.agents_read)
+        });
+        assert!(drawn(cx, "agents style work"));
+        assert!(drawn(cx, "agents about") && drawn(cx, "agents save"));
+        // Crew: one row each, with what it is doing.
+        click_on(cx, "settings section crew");
+        wait(cx, "the crew read", |cx| {
+            view.read_with(cx, |v, _| v.crew_read)
+        });
+        assert!(drawn(cx, "crew row assembly"));
+        assert!(drawn(cx, "crew row yardmaster"));
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .crew
+                .iter()
+                .map(|member| (member.name.clone(), model::state_of(member).to_string()))
+                .collect::<Vec<_>>()),
+            [
+                ("assembly".to_string(), "not running".to_string()),
+                ("yardmaster".to_string(), "idle".to_string()),
+            ]
+        );
+        // Notifications: the switch. Switching it on asks the system,
+        // which the notification tests stand in for.
+        click_on(cx, "settings section notifications");
+        assert!(drawn(cx, "notify off") && drawn(cx, "notify on"));
+        // Connection: the web view's address and the run base.
+        click_on(cx, "settings section connection");
+        assert!(drawn(cx, "view address") && drawn(cx, "run address"));
+
+        // The open section is kept: closing and opening shows it still,
+        // and so does a restart.
+        click_on(cx, "settings section crew");
+        assert_eq!(settings_of(&view, cx).section, Section::Crew);
+        assert_eq!(Settings::read(&file).section, Section::Crew);
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "crew row yardmaster"));
+        let (again, cx) = opened_kept(&yard, &file, cx);
+        assert_eq!(settings_of(&again, cx).section, Section::Crew);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&again, cx));
+        wait(cx, "the crew read again", |cx| {
+            again.read_with(cx, |v, _| v.crew_read)
+        });
+        assert!(drawn(cx, "crew row assembly"));
+        // Back to the first, the file says nothing of the section.
+        click_on(cx, "settings section appearance");
+        assert!(drawn(cx, "text size"));
+        assert!(!std::fs::read_to_string(&file).unwrap().contains("section"));
     }
 
     /// The layout at the smallest and the largest text: the rows of the
@@ -19353,6 +19688,7 @@ mod tests {
         // it refuses is said there in its words.
         *told.answer.borrow_mut() = Permission::Refused("The system says no.".into());
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section notifications");
         assert!(!drawn(cx, "notify mail"));
         click_on(cx, "notify on");
         assert!(settings_of(&view, cx).notifications.on);
@@ -19418,6 +19754,7 @@ mod tests {
             unread_of(&view, cx, "assembly") == 2
         });
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section notifications");
         click_on(cx, "notify off");
         assert_eq!(told.shown(cx), []);
         click_on(cx, "notify on");
@@ -20307,11 +20644,12 @@ mod tests {
         assert_eq!(open_yard(&view, cx), "this machine");
         assert!(drawn(cx, "switch tile"));
         assert_eq!(far.requests(), 0);
-        let before_pairing = Settings::read(&file);
 
         // The settings list it, say what a pairing gives over a peer link,
         // and ask for nothing until a yard is added.
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
+        let before_pairing = Settings::read(&file);
         assert!(drawn(cx, "yard row this machine"));
         assert!(drawn(cx, "pairing gives"));
         assert_eq!(
@@ -21007,8 +21345,9 @@ mod tests {
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
-        let set = Settings::read(&file);
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
+        let set = Settings::read(&file);
 
         // A second home's yard, by its socket: no code, and it is opened.
         click_on(cx, "add near");
@@ -21141,6 +21480,7 @@ mod tests {
             texts(&view, cx) == ["Shall I land it?"]
         });
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
         click_on(cx, "add far");
         type_in(&view, cx, "far", far.address(), "K7QM-2XPD");
         click_on(cx, "yard pair");
@@ -21291,6 +21631,7 @@ mod tests {
             texts(&view, cx) == ["Shall I land it?"]
         });
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
         click_on(cx, "add far");
         type_in(&view, cx, "far", far.address(), "K7QM-2XPD");
 
@@ -21338,7 +21679,6 @@ mod tests {
         wait(cx, "the environment's yard", |cx| {
             texts(&view, cx) == ["From afar."]
         });
-        let kept = std::fs::read_to_string(&file).unwrap();
         assert_eq!(near.requests(), 0);
         assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
         // No switcher: no tile, and no key opens another yard.
@@ -21351,6 +21691,8 @@ mod tests {
         assert_eq!((near.requests(), second.requests()), (0, 0));
         // Nor do the settings list the yards they keep.
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
+        let kept = std::fs::read_to_string(&file).unwrap();
         assert!(drawn(cx, "yard again"));
         view.update_in(cx, |v, window, cx| {
             v.add_yard(Adding::Far, window, cx);
@@ -21429,6 +21771,7 @@ mod tests {
         // Pairing again there is refused the same way: the code is not
         // spent, and the listed yard's token is untouched.
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
         click_on(cx, "yard again");
         far_b.pair("K7QM-2XPD");
         view.update(cx, |v, cx| {
@@ -21490,6 +21833,7 @@ mod tests {
         assert!(drawn(cx, "settings"));
         assert!(!drawn(cx, "pair again"));
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
         assert!(drawn(cx, "yard again"));
 
         // The token's file is readable by others: refused before anything
@@ -21535,6 +21879,7 @@ mod tests {
         });
         // And back to it, as the one that still cannot be opened.
         cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
         click_on(cx, "yard open far");
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.down.is_some()));
@@ -23186,6 +23531,7 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
         // "Start at login" is a switch of the settings, off here.
         click_on(cx, "settings");
+        click_on(cx, "settings section yards");
         assert!(drawn(cx, "login off"));
         assert!(drawn(cx, "login on"));
         click_on(cx, "settings");
@@ -23433,6 +23779,7 @@ mod tests {
         assert!(!drawn(cx, "switch start"));
         assert!(!drawn(cx, "switch no home"));
         click_on(cx, "settings");
+        click_on(cx, "settings section yards");
         assert!(!drawn(cx, "login on"));
         assert!(!drawn(cx, "login off"));
         assert!(standin::calls(&program).is_empty());
@@ -23467,6 +23814,7 @@ mod tests {
         assert!(!drawn(cx, "switch start"), "{socket}");
         assert!(!drawn(cx, "switch stop"), "{socket}");
         click_on(cx, "settings");
+        click_on(cx, "settings section yards");
         assert!(!drawn(cx, "login on"), "{socket}");
         assert!(!drawn(cx, "login off"), "{socket}");
         assert!(standin::calls(&program).is_empty());
@@ -23552,6 +23900,7 @@ mod tests {
             settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
         });
         click_on(cx, "settings");
+        click_on(cx, "settings section yards");
         assert!(drawn(cx, "login off"));
         assert!(drawn(cx, "login on"));
         assert!(view.read_with(cx, |v, _| {
@@ -23963,6 +24312,7 @@ mod tests {
                 })
         });
         click_on(cx, "settings");
+        click_on(cx, "settings section yards");
         click_on(cx, "login off");
         wait(cx, "the daemon started again", |cx| {
             settled(&view, cx)

@@ -17,7 +17,7 @@ use crate::yard::Env;
 /// the conversation with the yardmaster, an open decision card of a plain
 /// ask, that card with the timetable's dot lit, an open card of a run ask,
 /// a yard that is stopped, a yard at an
-/// address, the settings with the start-at-login switch, a running
+/// address, the settings on each of their sections, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page, an image and a file, a
 /// mail with a page and an image, that mail's image open full size over
@@ -37,7 +37,8 @@ use crate::yard::Env;
 /// an address is opened from the settings the shot script writes; the
 /// signed-out yard from settings the state writes itself, against a
 /// throwaway config, with a session the edge no longer knows; the
-/// settings open over a running yard; the page's card stands expanded at
+/// settings open over a running yard, each state on its section;
+/// the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
 /// and run. The mail's conversation opens on the mail, with the web view
 /// taken as answering, so the row carries Open; a click on its image
@@ -57,6 +58,11 @@ pub const STATES: &[&str] = &[
     "stopped",
     "far",
     "settings",
+    "settings-yards",
+    "settings-agents",
+    "settings-crew",
+    "settings-notifications",
+    "settings-connection",
     "reconnecting",
     "page",
     "mail",
@@ -414,15 +420,27 @@ fn populate(yard: &Yard, state: &str) {
     );
     match state {
         // The yard at an address is opened from the settings, not from
-        // this yard, and the settings open over a running one: both
-        // serve the yardmaster's conversation, as does the yard that is
-        // stopped once it is read, the one that answers under the
-        // first screen's open fields, the signed-out yard's, which
-        // the window never reaches past the edge, and the timetable
-        // states', which the window opens on the board, the bead and
-        // the flow.
-        "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout"
-        | "arrivals" | "arrival" | "flow" => {
+        // this yard, and the settings open over a running one, each
+        // state on its section: both serve the yardmaster's
+        // conversation, as does the yard that is stopped once it is
+        // read, the one that answers under the first screen's open
+        // fields, the signed-out yard's, which the window never reaches
+        // past the edge, and the timetable states', which the window
+        // opens on the board, the bead and the flow.
+        "yardmaster"
+        | "far"
+        | "settings"
+        | "settings-yards"
+        | "settings-agents"
+        | "settings-crew"
+        | "settings-notifications"
+        | "settings-connection"
+        | "reconnecting"
+        | "answered"
+        | "signedout"
+        | "arrivals"
+        | "arrival"
+        | "flow" => {
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
@@ -766,7 +784,17 @@ mod tests {
             assert_eq!(loaded.me, "jo", "{state}");
             assert_eq!(loaded.asks.decided.len(), 0, "{state}");
             match *state {
-                "yardmaster" | "far" | "settings" | "reconnecting" | "answered" | "signedout" => {
+                "yardmaster"
+                | "far"
+                | "settings"
+                | "settings-yards"
+                | "settings-agents"
+                | "settings-crew"
+                | "settings-notifications"
+                | "settings-connection"
+                | "reconnecting"
+                | "answered"
+                | "signedout" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 3, "{state}");

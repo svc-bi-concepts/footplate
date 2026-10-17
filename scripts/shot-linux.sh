@@ -14,8 +14,10 @@
 # a page and an image), `image` (that mail's image open full size over
 # the window), `run` (an
 # open card of a run ask), `stopped` (a stopped yard), `far`
-# (a yard at an address, away), `settings` (the settings with the
-# start-at-login switch), `reconnecting` (a running yard whose server
+# (a yard at an address, away), `settings` (the settings on each of
+# their sections: `settings` is appearance, and `settings-yards`,
+# `settings-agents`, `settings-crew`, `settings-notifications` and
+# `settings-connection` the rest), `reconnecting` (a running yard whose server
 # is then stopped, with a draft in the composer), `refusal` (the
 # first screen's way to a yard at an address, with a pairing's http
 # address refused under its fields), `undelivered` (the conversation
@@ -47,7 +49,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain dot run stopped far settings reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow"
+states="yardmaster plain dot run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

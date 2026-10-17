@@ -171,7 +171,10 @@ the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
-with the start-at-login switch), `reconnecting` (a running yard whose
+on each of their sections: `settings` is appearance, and
+`settings-yards`, `settings-agents`, `settings-crew`,
+`settings-notifications` and `settings-connection` the rest),
+`reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
 first screen's way to a yard at an address, with a pairing's http address
 refused under its fields), `undelivered` (the conversation with one of

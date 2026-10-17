@@ -210,6 +210,53 @@ pub fn host_of(address: &str) -> String {
     host.to_string()
 }
 
+/// One of the settings' six sections, as the side list shows them: how
+/// the window looks, the yards it shows, how this yard's agents work
+/// with the operator, who works the yard, what the system tells of, and
+/// the addresses a note's pages go through. Kept as the open one,
+/// appearance where none was chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Section {
+    #[default]
+    Appearance,
+    Yards,
+    Agents,
+    Crew,
+    Notifications,
+    Connection,
+}
+
+impl Section {
+    /// The six, as the side list shows them.
+    pub const ALL: [Section; 6] = [
+        Section::Appearance,
+        Section::Yards,
+        Section::Agents,
+        Section::Crew,
+        Section::Notifications,
+        Section::Connection,
+    ];
+
+    /// The section's name, as the side list says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Section::Appearance => "appearance",
+            Section::Yards => "yards",
+            Section::Agents => "agents",
+            Section::Crew => "crew",
+            Section::Notifications => "notifications",
+            Section::Connection => "connection",
+        }
+    }
+
+    /// Whether the section is the first: the settings say nothing while
+    /// it is.
+    pub fn is_first(&self) -> bool {
+        matches!(*self, Section::Appearance)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "Kept")]
 pub struct Settings {
@@ -255,6 +302,10 @@ pub struct Settings {
     /// file while it is auto, as the look is.
     #[serde(skip_serializing_if = "Look::is_auto")]
     pub tray: Look,
+    /// The settings' open section: the one the side list shows. Left out
+    /// of the file while it is the first, as the modes are.
+    #[serde(skip_serializing_if = "Section::is_first")]
+    pub section: Section,
 }
 
 fn is_on(on: &bool) -> bool {
@@ -283,6 +334,7 @@ struct Kept {
     notifications: Notify,
     menu_bar: bool,
     tray: Look,
+    section: Section,
     web_view: String,
     run_base: String,
 }
@@ -301,6 +353,7 @@ impl Default for Kept {
             notifications: Notify::default(),
             menu_bar: true,
             tray: Look::Auto,
+            section: Section::default(),
             web_view: String::new(),
             run_base: String::new(),
         }
@@ -375,6 +428,7 @@ impl From<Kept> for Settings {
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
             tray: kept.tray,
+            section: kept.section,
         }
     }
 }
@@ -471,6 +525,7 @@ impl Default for Settings {
             notifications: Notify::default(),
             menu_bar: true,
             tray: Look::Auto,
+            section: Section::default(),
         }
     }
 }
@@ -1332,6 +1387,24 @@ mod tests {
         // Removing a yard drops its mode.
         let (less, _, _) = set.without("shop", Some(&file));
         assert_eq!(less.mode_of("shop"), Mode::Chat);
+    }
+
+    #[test]
+    fn the_open_section_is_appearance_until_picked_and_left_out_while_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let set = Settings::default();
+        assert_eq!(set.section, Section::Appearance);
+        set.write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("section"));
+        // A file from before sections opens the first.
+        assert_eq!(Settings::read(&file).section, Section::Appearance);
+        let set = Settings {
+            section: Section::Crew,
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        assert_eq!(Settings::read(&file).section, Section::Crew);
     }
 
     #[test]
