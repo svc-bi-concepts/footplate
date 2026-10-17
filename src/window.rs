@@ -2698,8 +2698,13 @@ impl Footplate {
                 if fresh {
                     // A held yard is never looked at: the dot starts from
                     // when Timetable was last open, caught up to the head.
-                    let looked =
-                        model.adopt_timetable_seen(self.settings.timetable_seen_of(&yard), head);
+                    let seen = self.settings.timetable_seen_of(&yard);
+                    let looked = model.adopt_timetable_seen(seen, head);
+                    if seen.is_none() {
+                        // Keep the first-run baseline so a later restart
+                        // can still find changes that arrive while held.
+                        self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
+                    }
                     if looked < head {
                         effects.push(Effect::Timetable {
                             from: looked,
@@ -2791,10 +2796,14 @@ impl Footplate {
                         let yard = self.yard.clone();
                         self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
                     } else {
-                        let looked = model.adopt_timetable_seen(
-                            self.settings.timetable_seen_of(&self.yard),
-                            head,
-                        );
+                        let yard = self.yard.clone();
+                        let seen = self.settings.timetable_seen_of(&yard);
+                        let looked = model.adopt_timetable_seen(seen, head);
+                        if seen.is_none() {
+                            // The first-run baseline must survive a restart
+                            // before the person first opens Timetable.
+                            self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
+                        }
                         if looked < head {
                             effects.push(Effect::Timetable {
                                 from: looked,
@@ -19072,6 +19081,45 @@ mod tests {
             Settings::read(&file).timetable_seen_of("this machine"),
             Some(20)
         );
+    }
+
+    /// The first read of a yard saves its baseline even when it opens in
+    /// Chat, so a restart can catch a bead added while Timetable was shut.
+    #[gpui::test]
+    fn the_first_read_keeps_a_timetable_baseline_for_a_restart(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let file = dir.path().join("footplate/settings.json");
+        let env = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (first, cx) = opened_at(env.clone(), &file, cx);
+        wait(cx, "the first yard read", |cx| {
+            first.read_with(cx, |v, _| v.model.is_some())
+        });
+        assert_eq!(
+            Settings::read(&file).timetable_seen_of("this machine"),
+            Some(20)
+        );
+
+        yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
+        wait(cx, "the first window's dot", |cx| {
+            first.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(Model::timetable_dot)
+            })
+        });
+
+        // The next process reads a head that includes that event. The
+        // saved first-run baseline lets its catch-up still find it.
+        yard.answer("Head", r#"{"result": 21}"#);
+        let (second, cx) = opened_at(env, &file, cx);
+        wait(cx, "the restarted window's dot", |cx| {
+            second.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(Model::timetable_dot)
+            })
+        });
     }
 
     /// Each yard reopens in its remembered mode, and each mode on the row

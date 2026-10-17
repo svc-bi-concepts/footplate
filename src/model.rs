@@ -1421,6 +1421,12 @@ impl Model {
     /// beads added or closed (`changed`): the dot, unless Timetable is
     /// open, which saw it instead.
     pub fn timetable_seeded(&mut self, changed: bool, until: u64) {
+        // Timetable may have opened while this answer was in flight. Its
+        // visit advanced the watermark through the same gap, so a late
+        // answer must not bring those changes back as a new dot.
+        if until <= self.timetable_looked {
+            return;
+        }
         match self.looking() {
             true => self.timetable_looked = self.timetable_looked.max(until),
             false => self.timetable_dot |= changed,
@@ -7107,6 +7113,18 @@ mod tests {
             "yd-shed",
             json!({"originator": "jo"}),
         ));
+        assert!(!m.timetable_dot());
+    }
+
+    #[test]
+    fn a_late_catch_up_answer_does_not_relight_changes_already_seen() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(Some(18), 20), 18);
+        // The window opened Timetable after asking for the gap; the late
+        // answer belongs to changes it has already seen.
+        assert_eq!(m.timetable_visited(true), 20);
+        let _ = m.show(Mode::Chat, None);
+        m.timetable_seeded(true, 20);
         assert!(!m.timetable_dot());
     }
 
