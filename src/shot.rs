@@ -15,7 +15,8 @@ use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
 /// the conversation with the yardmaster, an open decision card of a plain
-/// ask, an open card of a run ask, a yard that is stopped, a yard at an
+/// ask, that card with the timetable's dot lit, an open card of a run ask,
+/// a yard that is stopped, a yard at an
 /// address, the settings with the start-at-login switch, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page, an image and a file, a
@@ -51,6 +52,7 @@ use crate::yard::Env;
 pub const STATES: &[&str] = &[
     "yardmaster",
     "plain",
+    "dot",
     "run",
     "stopped",
     "far",
@@ -447,7 +449,7 @@ fn populate(yard: &Yard, state: &str) {
                 yard.answer("Bead", &bead_zulu());
             }
         }
-        "plain" => {
+        "plain" | "dot" => {
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
@@ -493,6 +495,11 @@ fn populate(yard: &Yard, state: &str) {
                 }})
                 .to_string(),
             );
+            // The dot's bead: one of jo's added past the head, so the
+            // rail's timetable carries its dot beside the badges.
+            if state == "dot" {
+                yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"title": "Paint the barn", "stage": "new", "type": "task", "originator": "jo"}}"#);
+            }
         }
         "page" => {
             // The plain ask above, whose note carries a page, an image and
@@ -828,12 +835,19 @@ mod tests {
                         );
                     }
                 }
-                "plain" => {
+                "plain" | "dot" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
                     let bead = yard.client().bead("bead-a").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].options.len(), 3, "{state}");
                     assert_eq!(bead.asks[0].recommend, 1, "{state}");
+                    // The dot's bead, added past the head: one of jo's.
+                    if *state == "dot" {
+                        let mut events = yard.client().events(20).unwrap();
+                        let added = events.next().unwrap().unwrap();
+                        assert_eq!(added.kind.as_str(), "created", "{state}");
+                        assert_eq!(added.text("originator"), "jo", "{state}");
+                    }
                 }
                 "run" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

@@ -1288,6 +1288,14 @@ fn rail_counts(model: Option<&Model>, away: bool) -> Option<Counts> {
     if away { None } else { model.map(Counts::of) }
 }
 
+/// Whether the open yard's rail carries the timetable's dot: one of the
+/// person's beads changed since they last had Timetable open. As the
+/// counts, nothing while the yard is away, even where its model stays on
+/// screen.
+fn rail_dot(model: Option<&Model>, away: bool) -> bool {
+    !away && model.is_some_and(Model::timetable_dot)
+}
+
 impl Counts {
     fn of(model: &Model) -> Counts {
         Counts {
@@ -2517,10 +2525,16 @@ impl Footplate {
         let effects = model.back_to(mode, kept.row(mode), kept.decided_expanded);
         model.expand(&kept.expanded);
         model.show_texts(&kept.texts);
+        // Back on Timetable: it is looked at again, and the dot clears.
+        let looked = (mode == Mode::Timetable).then(|| model.timetable_visited(true));
         if let Some(late) = self.late.take() {
             model.notice = late;
         }
         let to = model.selected().cloned();
+        if let Some(looked) = looked {
+            let yard = self.yard.clone();
+            self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
+        }
         self.returning = kept
             .row(mode)
             .filter(|row| to.as_ref() == Some(row))
@@ -2665,10 +2679,12 @@ impl Footplate {
         match update {
             Update::Up(state) => {
                 let mut state = *state;
+                let head = state.head;
+                let fresh = held.model.is_none();
                 held.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
                 let flows_notice = state.flows_notice.take();
-                let (mut model, effects) = match held.model.as_ref() {
+                let (mut model, mut effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state, self.settings.mode_of(&yard)),
                     None => (Model::new_aside(state), Vec::new()),
                 };
@@ -2678,6 +2694,18 @@ impl Footplate {
                     .collect();
                 if !notices.is_empty() {
                     model.notice = notices.join("; ");
+                }
+                if fresh {
+                    // A held yard is never looked at: the dot starts from
+                    // when Timetable was last open, caught up to the head.
+                    let looked =
+                        model.adopt_timetable_seen(self.settings.timetable_seen_of(&yard), head);
+                    if looked < head {
+                        effects.push(Effect::Timetable {
+                            from: looked,
+                            until: head,
+                        });
+                    }
                 }
                 let news = model.take_news();
                 held.model = Some(model);
@@ -2714,6 +2742,7 @@ impl Footplate {
         match update {
             Update::Up(state) => {
                 let mut state = *state;
+                let head = state.head;
                 self.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
                 let flows_notice = state.flows_notice.take();
@@ -2737,7 +2766,7 @@ impl Footplate {
                     .filter(|_| fresh)
                     .cloned()
                     .unwrap_or_default();
-                let (mut model, effects) = match self.model.as_ref() {
+                let (mut model, mut effects) = match self.model.as_ref() {
                     Some(before) => before.resumed(state, mode),
                     None => Model::new_returning(
                         state,
@@ -2754,6 +2783,25 @@ impl Footplate {
                     model.notice = notices.join("; ");
                 }
                 if fresh {
+                    // The dot starts from when Timetable was last open,
+                    // caught up to the head. Opened looking, what is
+                    // read is seen.
+                    if mode == Mode::Timetable {
+                        let looked = model.timetable_visited(true);
+                        let yard = self.yard.clone();
+                        self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
+                    } else {
+                        let looked = model.adopt_timetable_seen(
+                            self.settings.timetable_seen_of(&self.yard),
+                            head,
+                        );
+                        if looked < head {
+                            effects.push(Effect::Timetable {
+                                from: looked,
+                                until: head,
+                            });
+                        }
+                    }
                     model.expand(&kept.expanded);
                     model.show_texts(&kept.texts);
                     // The page shot opens the card, so the note's page row
@@ -4195,6 +4243,22 @@ impl Footplate {
                         ),
                     },
                 ),
+                Effect::Timetable { from, until } => self.ask_in(
+                    session,
+                    cx,
+                    move |client, me| client.timetable_changed(me, from, until),
+                    move |this, changed, cx| match changed {
+                        Ok(changed) => this.change_in(session, cx, |m| {
+                            m.timetable_seeded(changed, until);
+                            Vec::new()
+                        }),
+                        Err(err) => this.notice_in(
+                            session,
+                            format!("the timetable's changes could not be read: {err}"),
+                            cx,
+                        ),
+                    },
+                ),
                 Effect::Asks => self.ask_in(
                     session,
                     cx,
@@ -5046,7 +5110,16 @@ impl Footplate {
             self.places.insert(self.yard.clone(), kept);
         }
         let yard = self.yard.clone();
-        self.set(self.settings.clone().with_mode(&yard, mode), cx);
+        let mut settings = self.settings.clone().with_mode(&yard, mode);
+        // Timetable opened or left: what was seen is kept, per yard.
+        // Opening clears the dot.
+        if (from == Mode::Timetable) != (mode == Mode::Timetable)
+            && let Some(model) = self.model.as_mut()
+        {
+            let looked = model.timetable_visited(mode == Mode::Timetable);
+            settings = settings.with_timetable_seen(&yard, looked);
+        }
+        self.set(settings, cx);
         let row = self.places.get(&yard).and_then(|kept| kept.row(mode));
         self.settings_open = false;
         self.change(cx, |m| m.show(mode, row));
@@ -8399,20 +8472,21 @@ impl Footplate {
     /// mode's icon stands in the accent on the open ground, as the open
     /// row does; the others stand quiet and brighten on hover, as quiet
     /// text does. The chat and decisions icons carry what waits in them
-    /// as a badge, and in words in their tooltips. While the yard is
-    /// away the modes stand dimmed and inert, and the foot stays alive,
-    /// because leaving is its job.
+    /// as a badge, and in words in their tooltips; the timetable's
+    /// carries a dot where one of the person's beads changed since they
+    /// last had Timetable open. While the yard is away the modes stand
+    /// dimmed and inert, and the foot stays alive, because leaving is
+    /// its job.
     fn rail(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.mode();
         // The modes answer where a yard's rows are there to show.
         let live = self.model.is_some();
-        // What waits in the open yard, for the glyphs' badges. A
-        // reconnecting yard keeps its model for its rows, but it is away
-        // and has no current count to show.
-        let counts = rail_counts(
-            self.model.as_ref(),
-            self.down.is_some() && !self.answers_under_adding(),
-        );
+        // What waits in the open yard, for the glyphs' badges and the
+        // timetable's dot. A reconnecting yard keeps its model for its
+        // rows, but it is away and has nothing current to show.
+        let away = self.down.is_some() && !self.answers_under_adding();
+        let counts = rail_counts(self.model.as_ref(), away);
+        let dot = rail_dot(self.model.as_ref(), away);
         let mut rail = div()
             .debug_selector(|| "rail".to_string())
             .w(px(RAIL))
@@ -8457,15 +8531,19 @@ impl Footplate {
                 Mode::Timetable => track_glyph(color).into_any_element(),
             };
             // The glyph's badge: the count's label at its top right,
-            // and the count in words in its tooltip.
+            // and the count in words in its tooltip. The timetable
+            // carries no count; its dot says in words that the person's
+            // beads changed.
             let badge = counts.and_then(|counts| counts.rail(m));
+            let dot = dot && m == Mode::Timetable;
             let tip = match live {
                 true => format!("{} ({}+[ or {}+])", m.name(), SECONDARY, SECONDARY),
                 false => "the yard is away".to_string(),
             };
-            let tip = match badge.as_ref() {
-                Some((_, words)) => format!("{tip} — {words}"),
-                None => tip,
+            let tip = match (badge.as_ref(), dot) {
+                (Some((_, words)), _) => format!("{tip} — {words}"),
+                (None, true) => format!("{tip} — your beads changed"),
+                (None, false) => tip,
             };
             let id = format!("rail {}", m.name());
             rail =
@@ -8524,6 +8602,19 @@ impl Footplate {
                                 .items_center()
                                 .justify_center()
                                 .child(label)
+                        }))
+                        // The timetable's dot: no number, on the same
+                        // corner as the badges, in the accent. It neither
+                        // blinks nor moves.
+                        .children(dot.then(|| {
+                            div()
+                                .debug_selector(|| "rail dot timetable".to_string())
+                                .absolute()
+                                .top(px(4.))
+                                .right(px(4.))
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(palette.accent)
                         })),
                 );
         }
@@ -18851,6 +18942,138 @@ mod tests {
         );
     }
 
+    /// The rail's timetable glyph carries a dot where one of the person's
+    /// beads was added or closed since they last had Timetable open: at
+    /// its glyph's top right corner, as the badges. Another person's bead
+    /// lights nothing, and opening Timetable clears it.
+    #[gpui::test]
+    fn the_rail_s_timetable_carries_a_dot_for_the_person_s_beads(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        assert!(!drawn(cx, "rail dot timetable"));
+        // Another person's bead, added: no dot. The arrivals are read
+        // again for it, so their second read says it was applied.
+        yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "ada"}}"#);
+        wait(cx, "the other bead's arrival", |_| {
+            yard.asked("Arrivals").len() >= 2
+        });
+        assert!(!drawn(cx, "rail dot timetable"));
+        // One of the person's, added: the dot, on its glyph's corner.
+        yard.emit(r#"{"seq": 22, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
+        wait(cx, "the timetable's dot", |cx| {
+            drawn(cx, "rail dot timetable")
+        });
+        let tile = bounds_of(cx, "rail timetable");
+        let dot = bounds_of(cx, "rail dot timetable");
+        assert!(
+            (dot.top() - (tile.top() + px(4.))).abs() < px(1.)
+                && ((tile.right() - px(4.)) - dot.right()).abs() < px(1.),
+            "the dot stands off its glyph's corner: {dot:?} {tile:?}"
+        );
+        // Opening Timetable clears it, and keeps what was seen. A
+        // painted element's selector stays in the test frame, so the
+        // clearing is read from the model, as the reconnecting counts
+        // are.
+        to_timetable(&view, cx);
+        wait(cx, "timetable open", |cx| {
+            rail_mode(&view, cx) == Mode::Timetable
+        });
+        assert_eq!(
+            view.read_with(cx, |v, _| (
+                v.model.as_ref().map(|m| m.timetable_dot()),
+                v.settings.timetable_seen_of(&v.yard),
+            )),
+            (Some(false), Some(22))
+        );
+        // One of the person's, closed: the dot again.
+        to_chat(&view, cx);
+        yard.emit(r#"{"seq": 23, "kind": "closed", "actor": "yardmaster", "bead": "yd-barn", "data": {"reason": "merged", "originator": "jo"}}"#);
+        wait(cx, "the timetable's dot again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.timetable_dot())
+            })
+        });
+    }
+
+    /// While the yard is away the rail carries no dot, as it carries
+    /// no count: the model keeps the dot as last seen, but nothing shown
+    /// implies it is current.
+    #[gpui::test]
+    fn the_rail_carries_no_dot_while_the_yard_is_away(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
+        wait(cx, "the timetable's dot", |cx| {
+            drawn(cx, "rail dot timetable")
+        });
+        yard.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.down.is_some())
+        });
+        wait(cx, "the switch read after the yard went away", |cx| {
+            settled(&view, cx)
+        });
+        let (down, reconnecting, answers_under_adding, kept, carried) =
+            view.read_with(cx, |v, _| {
+                (
+                    v.down.is_some(),
+                    v.reconnecting(),
+                    v.answers_under_adding(),
+                    v.model.as_ref().map(|m| m.timetable_dot()),
+                    rail_dot(
+                        v.model.as_ref(),
+                        v.down.is_some() && !v.answers_under_adding(),
+                    ),
+                )
+            });
+        assert!(
+            down && reconnecting && !answers_under_adding && kept == Some(true) && !carried,
+            "away state: down={down}, reconnecting={reconnecting}, answers_under_adding={answers_under_adding}, kept={kept:?}, carried={carried}"
+        );
+    }
+
+    /// A yard opened with Timetable last open behind its head lights the
+    /// dot where the gap added or closed one of the person's beads: what
+    /// changed while the window was shut.
+    #[gpui::test]
+    fn the_dot_lights_for_what_changed_while_the_window_was_shut(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The head is 20; Timetable was last open at 18; the gap closed
+        // one of jo's beads.
+        yard.emit(r#"{"seq": 19, "kind": "closed", "actor": "yardmaster", "bead": "yd-barn", "data": {"reason": "merged", "originator": "jo"}}"#);
+        yard.emit(r#"{"seq": 20, "kind": "noted", "actor": "yardmaster", "bead": "yd-barn", "data": {"note": 1}}"#);
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default()
+            .with_timetable_seen("this machine", 18)
+            .write(&file)
+            .unwrap();
+        let env = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the timetable's dot", |cx| {
+            drawn(cx, "rail dot timetable")
+        });
+        // Opening Timetable clears it, and the file keeps the head.
+        to_timetable(&view, cx);
+        wait(cx, "timetable open", |cx| {
+            rail_mode(&view, cx) == Mode::Timetable
+        });
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().map(|m| m.timetable_dot())),
+            Some(false)
+        );
+        assert_eq!(
+            Settings::read(&file).timetable_seen_of("this machine"),
+            Some(20)
+        );
+    }
+
     /// Each yard reopens in its remembered mode, and each mode on the row
     /// it was left on: stepping modes keeps each mode's row, switching
     /// yards keeps each yard's mode, and the settings keep both.
@@ -19908,6 +20131,31 @@ mod tests {
         assert_eq!(counts(0, 0, 5).rail(Mode::Chat), None);
         assert_eq!(counts(0, 0, 5).rail(Mode::Decisions), None);
         assert_eq!(counts(3, 2, 9).rail(Mode::Timetable), None);
+    }
+
+    #[test]
+    fn the_rail_s_dot_is_the_model_s_unless_the_yard_is_away() {
+        let state = model::State {
+            me: "jo".into(),
+            head: 20,
+            ..model::State::default()
+        };
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        m.adopt_timetable_seen(None, 20);
+        // Nothing lit, nothing carried, whatever answers.
+        assert!(!rail_dot(Some(&m), false));
+        assert!(!rail_dot(Some(&m), true));
+        assert!(!rail_dot(None, false));
+        // Lit: carried while the yard answers, hidden while it is away.
+        let created: api::Event = serde_json::from_value(json!({
+            "seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn",
+            "data": {"originator": "jo"},
+        }))
+        .unwrap();
+        let _ = m.event(&created);
+        assert!(m.timetable_dot());
+        assert!(rail_dot(Some(&m), false));
+        assert!(!rail_dot(Some(&m), true));
     }
 
     /// The yards in the settings: this machine's, as before, and one at an

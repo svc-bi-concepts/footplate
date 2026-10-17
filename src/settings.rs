@@ -232,6 +232,12 @@ pub struct Settings {
     /// named, as the yards are.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub modes: BTreeMap<String, Mode>,
+    /// The newest change seen when Timetable was last open in each yard,
+    /// by yard: an event seq. A yard not named was never looked at, and
+    /// starts from the head it is read at, with no dot. Left out of the
+    /// file while none is named, as the modes are.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub timetable_seen: BTreeMap<String, u64>,
     /// What the system tells of. Left out of the file while nothing was
     /// chosen, as the yards are.
     #[serde(skip_serializing_if = "Notify::is_usual")]
@@ -264,6 +270,7 @@ struct Kept {
     yards: Vec<Yard>,
     open: String,
     modes: BTreeMap<String, Mode>,
+    timetable_seen: BTreeMap<String, u64>,
     remote: bool,
     address: String,
     notifications: Notify,
@@ -280,6 +287,7 @@ impl Default for Kept {
             yards: Vec::new(),
             open: String::new(),
             modes: BTreeMap::new(),
+            timetable_seen: BTreeMap::new(),
             remote: false,
             address: String::new(),
             notifications: Notify::default(),
@@ -354,6 +362,7 @@ impl From<Kept> for Settings {
             look: kept.look,
             open,
             modes: kept.modes,
+            timetable_seen: kept.timetable_seen,
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
         }
@@ -448,6 +457,7 @@ impl Default for Settings {
             yards: vec![Yard::near(HERE, "")],
             open: String::new(),
             modes: BTreeMap::new(),
+            timetable_seen: BTreeMap::new(),
             notifications: Notify::default(),
             menu_bar: true,
         }
@@ -522,6 +532,19 @@ impl Settings {
             Mode::Chat => self.modes.remove(name),
             _ => self.modes.insert(name.to_string(), mode),
         };
+        self
+    }
+
+    /// When Timetable was last open in the yard called `yard`: the newest
+    /// change seen then, an event seq. None where it never was.
+    pub fn timetable_seen_of(&self, yard: &str) -> Option<u64> {
+        self.timetable_seen.get(yard).copied()
+    }
+
+    /// With Timetable in the yard called `name` last open at the change
+    /// `seq`.
+    pub fn with_timetable_seen(mut self, name: &str, seq: u64) -> Settings {
+        self.timetable_seen.insert(name.to_string(), seq);
         self
     }
 
@@ -662,6 +685,13 @@ impl Settings {
                 {
                     self.modes.insert(name.clone(), mode);
                 }
+                // And when its Timetable was last open, as its mode.
+                if let Some(from) = at
+                    && from != name
+                    && let Some(seen) = self.timetable_seen.remove(from)
+                {
+                    self.timetable_seen.insert(name.clone(), seen);
+                }
                 self.yards[place] = yard;
             }
             None => {
@@ -789,6 +819,7 @@ impl Settings {
             self.open.clear();
         }
         self.modes.remove(name);
+        self.timetable_seen.remove(name);
         (self, token, session)
     }
 
@@ -1290,6 +1321,41 @@ mod tests {
         // Removing a yard drops its mode.
         let (less, _, _) = set.without("shop", Some(&file));
         assert_eq!(less.mode_of("shop"), Mode::Chat);
+    }
+
+    #[test]
+    fn each_yard_s_timetable_seen_is_kept_over_a_rename_and_gone_with_the_yard() {
+        let set = Settings::default();
+        assert_eq!(set.timetable_seen_of("mac"), None);
+        let set = set.with_timetable_seen("mac", 21);
+        assert_eq!(set.timetable_seen_of("mac"), Some(21));
+        assert_eq!(set.timetable_seen_of("shop"), None);
+
+        // A yard that is renamed keeps its seq under its new name.
+        let set = Settings::default()
+            .with_yard(None, Yard::near("mac", ""), None)
+            .unwrap()
+            .with_timetable_seen("mac", 21);
+        let set = set
+            .with_yard(Some("mac"), Yard::near("shop", ""), None)
+            .unwrap();
+        assert_eq!(set.timetable_seen_of("shop"), Some(21));
+        assert_eq!(set.timetable_seen_of("mac"), None);
+        // The file keeps what is named, and leaves the map out while
+        // none is.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        set.clone().write(&file).unwrap();
+        assert_eq!(Settings::read(&file).timetable_seen_of("shop"), Some(21));
+        Settings::default().write(&file).unwrap();
+        assert!(
+            !fs::read_to_string(&file)
+                .unwrap()
+                .contains("timetable_seen")
+        );
+        // Removing a yard drops its seq.
+        let (less, _, _) = set.without("shop", Some(&file));
+        assert_eq!(less.timetable_seen_of("shop"), None);
     }
 
     fn two_far(file: &Path) -> Settings {

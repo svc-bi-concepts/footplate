@@ -526,6 +526,9 @@ pub enum Effect {
     Arrivals,
     /// `Flows`; answered to [`Model::flows`].
     Flows,
+    /// Whether any of the person's beads was added or closed after
+    /// `from` through `until`; answered to [`Model::timetable_seeded`].
+    Timetable { from: u64, until: u64 },
     /// `Bead` with `bead`; answered to [`Model::bead_loaded`] or
     /// [`Model::bead_failed`].
     Bead { bead: String },
@@ -678,6 +681,14 @@ pub struct Model {
     /// The seq of the last `crew_status` applied to each crew member: a
     /// read of the yard that is older does not put an older status back.
     status_at: HashMap<String, u64>,
+    /// The newest event seq applied, from the head the yard was read at.
+    events_seen: u64,
+    /// Whether one of the person's beads was added or closed since they
+    /// last had Timetable open: the rail's dot.
+    timetable_dot: bool,
+    /// The newest change seen when Timetable was last open, an event
+    /// seq, kept per yard in the settings.
+    timetable_looked: u64,
     /// What arrived and the window has not taken yet, oldest first.
     news: Vec<News>,
     /// The window shows another yard: no row of this one is open, and none
@@ -738,6 +749,7 @@ impl Model {
             open: state.asks.open,
             decided: state.asks.decided,
             decided_expanded,
+            events_seen: state.head,
             ..Model::default()
         };
         m.set_users(state.users);
@@ -827,6 +839,7 @@ impl Model {
     /// open stays open as in [`Model::new`], and the conversation to come
     /// back to from a decision stays that one.
     pub fn resumed(&self, state: State, mode: Mode) -> (Model, Vec<Effect>) {
+        let head = state.head;
         let unread = state.unread.clone();
         // Of a yard the window does not show, no row is open afterwards
         // either.
@@ -839,6 +852,16 @@ impl Model {
         }
         if m.bead_from.is_none() {
             m.bead_from = self.bead_from.clone();
+        }
+        // The timetable's dot and when it was last looked at carry over,
+        // and what changed meanwhile is caught up with.
+        m.timetable_dot = self.timetable_dot;
+        m.timetable_looked = self.timetable_looked;
+        if self.events_seen < head {
+            effects.push(Effect::Timetable {
+                from: self.events_seen,
+                until: head,
+            });
         }
         // What was shown before the yard was lost is not unseen again.
         for (seq, w) in m.unread.iter_mut() {
@@ -1359,6 +1382,49 @@ impl Model {
     /// The beads travelling with no line, newest change first, as served.
     pub fn unassigned(&self) -> &[FlowBead] {
         &self.flows.unassigned
+    }
+
+    /// Whether the rail's Timetable glyph carries the dot: one of the
+    /// person's beads was added or closed since they last had Timetable
+    /// open.
+    pub fn timetable_dot(&self) -> bool {
+        self.timetable_dot
+    }
+
+    /// Whether the person looks at Timetable now: its mode open on the
+    /// shown yard.
+    fn looking(&self) -> bool {
+        !self.aside && self.mode == Mode::Timetable
+    }
+
+    /// The yard was read at `head`, Timetable last open at `seen`: what
+    /// the dot starts from. A yard never looked at starts from the head,
+    /// with no dot: the first run lights nothing. The answer is what the
+    /// catch-up reads from, where it is behind the head.
+    pub fn adopt_timetable_seen(&mut self, seen: Option<u64>, head: u64) -> u64 {
+        self.timetable_looked = seen.map_or(head, |looked| looked.min(head));
+        self.timetable_looked
+    }
+
+    /// Timetable was opened or left: what was seen is the newest event
+    /// applied. Opening clears the dot; the answer is kept in the
+    /// settings, per yard.
+    pub fn timetable_visited(&mut self, open: bool) -> u64 {
+        if open {
+            self.timetable_dot = false;
+        }
+        self.timetable_looked = self.events_seen;
+        self.timetable_looked
+    }
+
+    /// The catch-up over the gap to `until` found one of the person's
+    /// beads added or closed (`changed`): the dot, unless Timetable is
+    /// open, which saw it instead.
+    pub fn timetable_seeded(&mut self, changed: bool, until: u64) {
+        match self.looking() {
+            true => self.timetable_looked = self.timetable_looked.max(until),
+            false => self.timetable_dot |= changed,
+        }
     }
 
     /// The timetable row a travelling bead was opened from: the board, a
@@ -2712,6 +2778,16 @@ impl Model {
         // An event that became a notification for the user carries less
         // than what changed: the notices are read again.
         let mut effects = Vec::new();
+        self.events_seen = self.events_seen.max(e.seq);
+        // One of the person's beads added or closed since they last had
+        // Timetable open lights its dot, unless Timetable is open, which
+        // saw it instead.
+        if e.timetable_news(&self.me) && e.seq > self.timetable_looked {
+            match self.looking() {
+                true => self.timetable_looked = self.timetable_looked.max(e.seq),
+                false => self.timetable_dot = true,
+            }
+        }
         if e.notified(&self.me) {
             effects.push(Effect::Notifications);
         }
@@ -6874,6 +6950,193 @@ mod tests {
                 json!({"note": 2, "notified": {"jo": "all"}})
             )),
             [Effect::Notifications, Effect::Asks]
+        );
+    }
+
+    /// One of the person's beads added or closed lights the timetable's
+    /// dot: a created or closed event whose originator is the window's
+    /// user, newer than when Timetable was last open.
+    #[test]
+    fn one_of_the_person_s_beads_added_or_closed_lights_the_dot() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(Some(20), 20), 20);
+        assert!(!m.timetable_dot());
+        // Added.
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(m.timetable_dot());
+        // Opening Timetable clears it.
+        assert_eq!(m.timetable_visited(true), 21);
+        assert!(!m.timetable_dot());
+        // Closed.
+        let _ = m.event(&bead_event(
+            22,
+            "closed",
+            "yd-shed",
+            json!({"reason": "merged", "originator": "jo"}),
+        ));
+        assert!(m.timetable_dot());
+    }
+
+    /// Another person's beads and a bead's other news light nothing: not
+    /// their added and closed, not a close that names no originator, not
+    /// a move or a note, and not what is about no bead at all.
+    #[test]
+    fn another_person_s_beads_and_other_news_light_nothing() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(Some(20), 20), 20);
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "ada"}),
+        ));
+        let _ = m.event(&bead_event(
+            22,
+            "closed",
+            "yd-shed",
+            json!({"reason": "merged", "originator": "ada"}),
+        ));
+        let _ = m.event(&bead_event(
+            23,
+            "closed",
+            "yd-shed",
+            json!({"reason": "merged"}),
+        ));
+        let _ = m.event(&bead_event(
+            24,
+            "advanced",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        let _ = m.event(&bead_event(25, "noted", "yd-shed", json!({"note": 1})));
+        let _ = m.event(&event(26, "created", "yard", json!({"originator": "jo"})));
+        assert!(!m.timetable_dot());
+    }
+
+    /// What Timetable saw needs no dot: open on it, one of the person's
+    /// beads added is seen where it happened, and leaving keeps what was
+    /// seen, so nothing older lights it afterwards.
+    #[test]
+    fn what_timetable_saw_needs_no_dot() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert_eq!(m.adopt_timetable_seen(Some(20), 20), 20);
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(!m.timetable_dot());
+        assert_eq!(m.timetable_visited(false), 21);
+        let _ = m.show(Mode::Chat, None);
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(!m.timetable_dot());
+        let _ = m.event(&bead_event(
+            22,
+            "closed",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(m.timetable_dot());
+    }
+
+    /// A yard the window does not show lights its dot although Timetable
+    /// is its mode: nobody looks at it there.
+    #[test]
+    fn a_held_yard_lights_its_dot_although_timetable_is_its_mode() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert_eq!(m.adopt_timetable_seen(Some(20), 20), 20);
+        m.leave();
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(m.timetable_dot());
+    }
+
+    /// A yard never looked at starts from the head it is read at, with no
+    /// dot: the first run lights nothing, and what is live still does. A
+    /// kept seq past the head is the head.
+    #[test]
+    fn a_yard_never_looked_at_starts_from_its_head_with_no_dot() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(None, 20), 20);
+        assert!(!m.timetable_dot());
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(m.timetable_dot());
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(Some(99), 20), 20);
+        assert!(!m.timetable_dot());
+    }
+
+    /// The catch-up over the gap to the head lights the dot where it
+    /// found one of the person's beads added or closed, unless Timetable
+    /// is open, which saw the gap instead.
+    #[test]
+    fn the_catch_up_lights_the_dot_unless_timetable_is_open() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(Some(18), 20), 18);
+        m.timetable_seeded(false, 20);
+        assert!(!m.timetable_dot());
+        m.timetable_seeded(true, 20);
+        assert!(m.timetable_dot());
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert_eq!(m.adopt_timetable_seen(Some(18), 20), 18);
+        m.timetable_seeded(true, 20);
+        assert!(!m.timetable_dot());
+        let _ = m.event(&bead_event(
+            20,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(!m.timetable_dot());
+    }
+
+    /// A yard read again keeps its dot, and what changed meanwhile is
+    /// caught up with; with no gap nothing is asked.
+    #[test]
+    fn a_yard_read_again_keeps_its_dot_and_catches_its_gap_up() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.adopt_timetable_seen(Some(20), 20), 20);
+        let _ = m.event(&bead_event(
+            21,
+            "created",
+            "yd-shed",
+            json!({"originator": "jo"}),
+        ));
+        assert!(m.timetable_dot());
+        let mut back = yard(&[]);
+        back.head = 24;
+        let (m, effects) = m.resumed(back, Mode::Chat);
+        assert!(m.timetable_dot());
+        assert!(effects.contains(&Effect::Timetable {
+            from: 21,
+            until: 24
+        }));
+        let (m, effects) = m.resumed(yard(&[]), Mode::Chat);
+        assert!(m.timetable_dot());
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Timetable { .. }))
         );
     }
 

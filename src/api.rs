@@ -972,6 +972,19 @@ impl Event {
             .and_then(Value::as_object)
             .is_some_and(|n| n.contains_key(user))
     }
+
+    /// Whether the event is one of `me`'s beads added or closed: a
+    /// created or closed event about a bead whose originator is `me`.
+    /// What lights the timetable's dot, live and in the catch-up after
+    /// a restart. A yard from before closed carried its originator
+    /// lights nothing for its closes: the field reads empty, as for
+    /// another person's bead.
+    pub fn timetable_news(&self, me: &str) -> bool {
+        matches!(self.kind.as_str(), "created" | "closed")
+            && !self.bead.is_empty()
+            && !me.is_empty()
+            && self.text("originator") == me
+    }
 }
 
 /// The reply to a call: a result, nothing, or an error.
@@ -2360,6 +2373,35 @@ impl Client {
         })
     }
 
+    /// Whether any of `me`'s beads was added or closed after `after`
+    /// through `until`: the created and closed events with them as
+    /// originator. The timetable's catch-up reads it for what changed
+    /// while nobody followed: `after` is when Timetable was last open,
+    /// `until` the head it was read at. Nothing is asked where there is
+    /// no gap: a stream past the head would wait for what happens next.
+    /// Past `until` the stream is left: what happens next comes down the
+    /// follower's own. What the yard no longer has is quietly missed, as
+    /// is what stands past [`TIMETABLE_CATCHUP_MOST`].
+    pub fn timetable_changed(&self, me: &str, after: u64, until: u64) -> Result<bool> {
+        if after >= until {
+            return Ok(false);
+        }
+        let events = self.events(after)?;
+        for event in events.take(TIMETABLE_CATCHUP_MOST) {
+            let event = event?;
+            if event.seq > until {
+                break;
+            }
+            if event.timetable_news(me) {
+                return Ok(true);
+            }
+            if event.seq == until {
+                break;
+            }
+        }
+        Ok(false)
+    }
+
     fn answer<T: DeserializeOwned>(&self, method: &str, args: Value) -> Result<T> {
         let result = self.call(method, args)?.unwrap_or(Value::Null);
         serde_json::from_value(result).map_err(|err| Error::Protocol(format!("{method}: {err}")))
@@ -2431,6 +2473,11 @@ impl Client {
         Ok(reply)
     }
 }
+
+/// How many events the timetable's catch-up reads at most: past this
+/// many the rest of the gap is quietly missed, as what the yard no
+/// longer has is.
+const TIMETABLE_CATCHUP_MOST: usize = 10_000;
 
 /// The events of a stream, one a line, until it ends.
 pub struct Events {
@@ -5073,5 +5120,66 @@ mod tests {
         yard.emit(r#"{"seq": 4, "kind": "mail"}"#);
         let mut events = yard.client().events(3).unwrap();
         assert_eq!(events.next().unwrap().unwrap().seq, 4);
+    }
+
+    fn bead_news(seq: u64, kind: &str, bead: &str, originator: &str) -> Event {
+        serde_json::from_value(json!({
+            "seq": seq, "kind": kind, "actor": "yardmaster", "bead": bead,
+            "data": {"originator": originator},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn timetable_news_is_one_of_mine_added_or_closed() {
+        assert!(bead_news(21, "created", "yd-shed", "jo").timetable_news("jo"));
+        assert!(bead_news(22, "closed", "yd-shed", "jo").timetable_news("jo"));
+        assert!(!bead_news(21, "created", "yd-shed", "ada").timetable_news("jo"));
+        assert!(!bead_news(22, "closed", "yd-shed", "ada").timetable_news("jo"));
+        assert!(!bead_news(23, "advanced", "yd-shed", "jo").timetable_news("jo"));
+        assert!(!bead_news(24, "noted", "yd-shed", "jo").timetable_news("jo"));
+        assert!(!bead_news(25, "created", "", "jo").timetable_news("jo"));
+        assert!(!bead_news(26, "created", "yd-shed", "jo").timetable_news(""));
+        // A close that names no originator is nobody's.
+        let bare: Event = serde_json::from_value(json!({
+            "seq": 27, "kind": "closed", "actor": "yardmaster", "bead": "yd-shed",
+            "data": {"reason": "merged"},
+        }))
+        .unwrap();
+        assert!(!bare.timetable_news("jo"));
+    }
+
+    #[test]
+    fn timetable_changed_reads_the_gap_for_mine_added_or_closed() {
+        let yard = Yard::start();
+        yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "ada"}}"#);
+        yard.emit(r#"{"seq": 22, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
+        yard.emit(r#"{"seq": 23, "kind": "noted", "actor": "yardmaster", "bead": "yd-barn", "data": {"note": 1}}"#);
+        yard.emit(r#"{"seq": 24, "kind": "closed", "actor": "yardmaster", "bead": "yd-barn", "data": {"reason": "merged", "originator": "jo"}}"#);
+        let client = yard.client();
+        assert!(client.timetable_changed("jo", 20, 24).unwrap());
+        assert!(client.timetable_changed("jo", 20, 22).unwrap());
+        assert!(client.timetable_changed("ada", 20, 21).unwrap());
+        assert!(!client.timetable_changed("jo", 20, 21).unwrap());
+        assert!(!client.timetable_changed("jo", 22, 23).unwrap());
+        assert!(client.timetable_changed("jo", 20, 24).unwrap());
+    }
+
+    #[test]
+    fn timetable_changed_asks_nothing_where_there_is_no_gap() {
+        let yard = Yard::start();
+        assert!(!yard.client().timetable_changed("jo", 20, 20).unwrap());
+        assert!(!yard.client().timetable_changed("jo", 21, 20).unwrap());
+        assert!(yard.streams_asked().is_empty());
+    }
+
+    #[test]
+    fn timetable_changed_leaves_the_stream_past_its_seq() {
+        let yard = Yard::start();
+        // Past `until` the stream is left, not waited on: what happens
+        // next comes down the follower's own.
+        yard.emit(r#"{"seq": 30, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "jo"}}"#);
+        assert!(!yard.client().timetable_changed("jo", 20, 25).unwrap());
+        assert_eq!(yard.streams_asked(), vec![20]);
     }
 }
