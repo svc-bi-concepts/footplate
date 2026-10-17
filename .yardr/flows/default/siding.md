@@ -9,7 +9,6 @@ one bead or they go as a train whose wagons are these beads.
 The stage has no outcomes; the yardmaster (or mckean) moves the bead
 (`yardr bead advance <id> --to <stage>`):
 
-- to `new`, when it is the bundle's carrier, or when it goes alone after
-  all;
+- to `new`, when it is the bundle's carrier or goes alone;
 - to `backlog`, when it is folded into another bead (then closed as
   `folded into <id>`) or needs reshaping.
