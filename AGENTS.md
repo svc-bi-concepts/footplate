@@ -69,9 +69,11 @@ checksums plus signature the built-in key is held to.
 
 ## Conventions
 
-- Every module opens with a `//!` comment saying what it is and what it
-  is not; functions carry `///` comments. Comments explain why, in plain
-  words; the code says what.
+- Rust modules open with `//!` comments describing their role. `///`
+  comments are common on public types, fields and functions, and on private
+  behavior that needs explanation; small helpers, trait methods and tests
+  are not all documented. Comments explain why, in plain words; the code
+  says what.
 - Logic lives in plain functions tested on any system; what needs the
   OS sits behind `cfg(target_os)` in the same file. Keep that split:
   a new system call arrives with its rule beside it, tested.
@@ -91,7 +93,7 @@ checksums plus signature the built-in key is held to.
 
 ## Do not touch
 
-- `target/`, `dist/`: build output (see `.gitignore`).
+- Build output ignored by `.gitignore`: generated files, not source to edit.
 - `Cargo.lock`: committed; cargo owns it, never hand-edit.
 - `src/fixtures/yardr-v0.10.0/`: published checksums the built-in key
   must keep verifying; do not regenerate.
