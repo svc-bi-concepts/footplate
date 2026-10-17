@@ -17436,17 +17436,17 @@ mod tests {
             bind_keys(cx);
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
-        // No file yet: today's look, and nothing is written for looking.
+        // The first read keeps a watermark as well as today's look.
         let today = Settings {
             text: 14,
             look: Look::Auto,
-            ..Settings::default()
+            ..Settings::default().with_timetable_seen("this machine", 20)
         };
         assert_eq!(settings_of(&view, cx), today);
         let desktop = cx.update(|window, _| window.appearance());
         assert_eq!(palette(cx), Palette::of(Look::Auto, desktop));
         assert_eq!(cx.update(|window, _| window.rem_size()), px(16.));
-        assert!(!file.exists());
+        assert_eq!(Settings::read(&file), today);
 
         // One key shows the settings where the conversation was. What is
         // typed then is not for the line, which is out of view.
@@ -17521,7 +17521,7 @@ mod tests {
         let set = Settings {
             text: settings::TEXT_MIN,
             look: Look::Dark,
-            ..Settings::default()
+            ..Settings::default().with_timetable_seen("this machine", 20)
         };
         assert_eq!(Settings::read(&file), set);
         assert_eq!(view.read_with(cx, |v, _| v.unkept.clone()), None);
@@ -17575,7 +17575,10 @@ mod tests {
             bind_keys(cx);
         });
         let (view, cx) = opened_kept(&yard, &in_the_way.join("settings.json"), cx);
-        assert_eq!(settings_of(&view, cx), Settings::default());
+        assert_eq!(
+            settings_of(&view, cx),
+            Settings::default().with_timetable_seen("this machine", 20)
+        );
         cx.simulate_keystrokes("secondary-=");
         assert_eq!(settings_of(&view, cx).text, 15);
         assert!(view.read_with(cx, |v, _| v.unkept.is_some()));
@@ -20236,6 +20239,7 @@ mod tests {
         assert_eq!(open_yard(&view, cx), "this machine");
         assert!(drawn(cx, "switch tile"));
         assert_eq!(far.requests(), 0);
+        let before_pairing = Settings::read(&file);
 
         // The settings list it, say what a pairing gives over a peer link,
         // and ask for nothing until a yard is added.
@@ -20270,7 +20274,7 @@ mod tests {
         // the fields stay filled for the fix.
         assert!(drawn(cx, "yard said"));
         assert_eq!(far.requests(), 0);
-        assert!(!file.exists());
+        assert_eq!(Settings::read(&file), before_pairing);
         view.read_with(cx, |v, cx| {
             assert_eq!(
                 v.address.read(cx).text().to_string(),
@@ -20298,7 +20302,7 @@ mod tests {
             yard_said(&view, cx).starts_with("That is not the code.")
         });
         assert!(!token.exists());
-        assert!(!file.exists());
+        assert_eq!(Settings::read(&file), before_pairing);
         assert_eq!(which_yard(&view, cx), "this machine's yard");
         assert_eq!(far.devices(), [crate::fake::TOKEN]);
         assert!(drawn(cx, "yard said"));
@@ -20457,8 +20461,10 @@ mod tests {
             far.last_request()
                 .contains(&format!("Authorization: Bearer {}\r\n", crate::fake::TOKEN))
         );
-        // Reading it changed nothing; the next change keeps the list.
-        assert!(std::fs::read_to_string(&file).unwrap().contains("remote"));
+        // The first-run watermark writes the migrated settings; the next
+        // change keeps the list the same way.
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("remote") && text.contains("\"timetable_seen\""));
         cx.simulate_keystrokes("secondary-=");
         let kept = Settings::read(&file);
         assert_eq!(
@@ -20933,6 +20939,7 @@ mod tests {
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
         });
+        let set = Settings::read(&file);
         cx.simulate_keystrokes("secondary-,");
 
         // A second home's yard, by its socket: no code, and it is opened.
@@ -21254,7 +21261,6 @@ mod tests {
         let far = Yard::start_tcp();
         a_far_yard_of_jo(&far);
         let file = three_yards(dir.path(), &second, &far);
-        let kept = std::fs::read_to_string(&file).unwrap();
         let env = Env {
             yard: Some(far.address().to_string()),
             token_file: Some(token.clone()),
@@ -21264,6 +21270,7 @@ mod tests {
         wait(cx, "the environment's yard", |cx| {
             texts(&view, cx) == ["From afar."]
         });
+        let kept = std::fs::read_to_string(&file).unwrap();
         assert_eq!(near.requests(), 0);
         assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
         // No switcher: no tile, and no key opens another yard.
