@@ -248,6 +248,22 @@ pub fn label(says: &str) -> String {
     says.replace('_', "__")
 }
 
+/// The icon's pixels as a host draws them: alpha first, and red, green
+/// and blue premultiplied by it. A host draws ARGB32 premultiplied —
+/// swaybar hands the bytes to Cairo as they are — so straight white
+/// with no alpha would draw as white. Straight black never showed it:
+/// no colour where there is no alpha is premultiplied already.
+#[cfg(any(target_os = "linux", test))]
+fn premultiply(rgba: &mut [u8]) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        for color in &mut pixel[..3] {
+            *color = (u16::from(*color) * alpha / 255) as u8;
+        }
+        pixel.rotate_right(1);
+    }
+}
+
 /// What a yard's row says: its name, and what the switcher says of it
 /// (`state`: what waits in it, or that it is not reached and why).
 pub fn row(yard: &str, state: &str) -> String {
@@ -623,10 +639,7 @@ mod linux {
                 .map(|(size, mark)| {
                     let mut data = mark.clone();
                     super::draw(&super::sign(self.said.waiting, *size), *size, &mut data);
-                    // A host takes alpha first.
-                    for pixel in data.as_chunks_mut::<4>().0 {
-                        pixel.rotate_right(1);
-                    }
+                    super::premultiply(&mut data);
                     ksni::Icon {
                         width: *size as i32,
                         height: *size as i32,
@@ -1035,6 +1048,30 @@ mod tests {
     fn a_menu_row_keeps_its_underscores() {
         assert_eq!(label("mac · 1 mail"), "mac · 1 mail");
         assert_eq!(label("my_yard · 1 mail"), "my__yard · 1 mail");
+    }
+
+    #[test]
+    fn the_host_s_bytes_are_alpha_first_with_the_colours_premultiplied() {
+        let mut rgba = vec![
+            0xe5, 0x39, 0x35, 0xff, // the badge's red, opaque
+            0x00, 0x00, 0x00, 0xff, // the black mark, opaque
+            0xff, 0xff, 0xff, 0xff, // the white mark, opaque
+            0xff, 0xff, 0xff, 0x00, // white with no alpha: nothing
+            0x00, 0x00, 0x00, 0x00, // black with no alpha: nothing
+            0xff, 0xff, 0xff, 0x80, // a white edge, half alpha
+        ];
+        premultiply(&mut rgba);
+        assert_eq!(
+            rgba,
+            [
+                0xff, 0xe5, 0x39, 0x35, //
+                0xff, 0x00, 0x00, 0x00, //
+                0xff, 0xff, 0xff, 0xff, //
+                0x00, 0x00, 0x00, 0x00, //
+                0x00, 0x00, 0x00, 0x00, //
+                0x80, 0x80, 0x80, 0x80, //
+            ]
+        );
     }
 
     #[test]
