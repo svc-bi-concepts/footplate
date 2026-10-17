@@ -1,9 +1,10 @@
 # The depot's flow, written by yardr depot init. yardr reads it from the base
 # branch; see docs/flows.md.
-backlog -> new | decide
+backlog -> new | siding | decide
+siding -> new | backlog
 new -> review on done | decide on question | backlog
 review -> review-security on done | approved on done-safe | new on changes | decide on question
 review-security -> approved on done | new on changes | decide on question
 approved -> merged on done | new on failed | decide on question
-decide -> backlog | new
+decide -> backlog | new | siding
 merged terminal
