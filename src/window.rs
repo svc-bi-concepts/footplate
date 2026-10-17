@@ -1666,7 +1666,7 @@ fn shot_selected() -> Option<Selected> {
     #[cfg(debug_assertions)]
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
-        Ok("plain") | Ok("page") => return Some(Selected::Decision("bead-a".into())),
+        Ok("plain") | Ok("page") | Ok("dot") => return Some(Selected::Decision("bead-a".into())),
         Ok("run") => return Some(Selected::Decision("bead-s".into())),
         Ok("arrivals") => return Some(Selected::Arrivals),
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
