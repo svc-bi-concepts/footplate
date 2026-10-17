@@ -1271,6 +1271,17 @@ impl PartialEq for YardIdentity {
     }
 }
 
+/// How many things wait, in words: none where none do, one numbered
+/// with its single word, more with their many. What [`Counts::line`]
+/// and the rail's tooltips say.
+fn count_words(n: usize, one: &str, more: &str) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        n => Some(format!("{n} {more}")),
+    }
+}
+
 impl Counts {
     fn of(model: &Model) -> Counts {
         Counts {
@@ -1289,15 +1300,10 @@ impl Counts {
 
     /// In words.
     fn line(&self) -> String {
-        let some = |n: usize, one: &str, more: &str| match n {
-            0 => None,
-            1 => Some(format!("1 {one}")),
-            n => Some(format!("{n} {more}")),
-        };
         let parts: Vec<String> = [
-            some(self.mail, "mail", "mail"),
-            some(self.decisions, "decision", "decisions"),
-            some(self.notices, "notice", "notices"),
+            count_words(self.mail, "mail", "mail"),
+            count_words(self.decisions, "decision", "decisions"),
+            count_words(self.notices, "notice", "notices"),
         ]
         .into_iter()
         .flatten()
@@ -1306,6 +1312,25 @@ impl Counts {
             true => "nothing waiting".to_string(),
             false => parts.join(", "),
         }
+    }
+
+    /// What the rail's glyph of `mode` carries of these counts: the
+    /// badge's label with the tooltip's words, or none where the glyph
+    /// carries nothing. Chat carries the unread mail, decisions the open
+    /// asks, and the timetable nothing; nothing is carried where nothing
+    /// waits, and the notices are no glyph's. Above nine the badge says
+    /// 9+, and the tooltip still says the number.
+    fn rail(&self, mode: Mode) -> Option<(String, String)> {
+        let (n, one, more) = match mode {
+            Mode::Chat => (self.mail, "mail", "mail"),
+            Mode::Decisions => (self.decisions, "decision", "decisions"),
+            Mode::Timetable => return None,
+        };
+        let label = match n > 9 {
+            true => "9+".to_string(),
+            false => n.to_string(),
+        };
+        count_words(n, one, more).map(|words| (label, words))
     }
 }
 
@@ -8367,12 +8392,17 @@ impl Footplate {
     /// open yard's first two letters and the settings' gear. The open
     /// mode's icon stands in the accent on the open ground, as the open
     /// row does; the others stand quiet and brighten on hover, as quiet
-    /// text does. While the yard is away the modes stand dimmed and
-    /// inert, and the foot stays alive, because leaving is its job.
+    /// text does. The chat and decisions icons carry what waits in them
+    /// as a badge, and in words in their tooltips. While the yard is
+    /// away the modes stand dimmed and inert, and the foot stays alive,
+    /// because leaving is its job.
     fn rail(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.mode();
         // The modes answer where a yard's rows are there to show.
         let live = self.model.is_some();
+        // What waits in the open yard, for the glyphs' badges. None
+        // while the yard is away, when there is no model to count.
+        let counts = self.model.as_ref().map(Counts::of);
         let mut rail = div()
             .debug_selector(|| "rail".to_string())
             .w(px(RAIL))
@@ -8416,9 +8446,16 @@ impl Footplate {
                 Mode::Decisions => semaphore_glyph(color).into_any_element(),
                 Mode::Timetable => track_glyph(color).into_any_element(),
             };
+            // The glyph's badge: the count's label at its top right,
+            // and the count in words in its tooltip.
+            let badge = counts.and_then(|counts| counts.rail(m));
             let tip = match live {
                 true => format!("{} ({}+[ or {}+])", m.name(), SECONDARY, SECONDARY),
                 false => "the yard is away".to_string(),
+            };
+            let tip = match badge.as_ref() {
+                Some((_, words)) => format!("{tip} — {words}"),
+                None => tip,
             };
             let id = format!("rail {}", m.name());
             rail =
@@ -8428,6 +8465,7 @@ impl Footplate {
                         .debug_selector(move || id.clone())
                         .size(px(32.))
                         .rounded_md()
+                        .relative()
                         .flex()
                         .items_center()
                         .justify_center()
@@ -8451,7 +8489,32 @@ impl Footplate {
                                 }))
                         })
                         .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
-                        .child(glyph),
+                        .child(glyph)
+                        // The badge stands centered on the glyph's top
+                        // right corner: the glyph is 16 in the tile's
+                        // 32, so its corner stands at (24, 8), and the
+                        // badge from (32 - 16, 0) stands centered on
+                        // it. In the accent, as the jump button's
+                        // count is.
+                        .children(badge.map(|(label, _)| {
+                            div()
+                                .debug_selector(move || format!("rail badge {}", m.name()))
+                                .absolute()
+                                .top(px(0.))
+                                .right(px(0.))
+                                .h(px(16.))
+                                .min_w(px(16.))
+                                .px(px(4.))
+                                .rounded_full()
+                                .bg(palette.accent)
+                                .text_color(palette.on_accent)
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(label)
+                        })),
                 );
         }
         rail = rail.child(div().flex_1().min_h_0());
@@ -18690,6 +18753,52 @@ mod tests {
         assert!(!settings_open(&view, cx));
     }
 
+    /// The rail's chat and decisions glyphs carry what waits in the open
+    /// yard: its unread mail and its open asks, each at its glyph's top
+    /// right. The timetable carries none.
+    #[gpui::test]
+    fn the_rail_s_chat_and_decisions_carry_what_waits(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        // Mail unread in a conversation that is not open, and one open
+        // ask: the open conversation's own mail is read as shown.
+        a_second_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_words_only());
+        let (view, cx) = opened(&yard, &["From the second home."], cx);
+        wait(cx, "what waits in the open yard", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    let counts = Counts::of(m);
+                    counts.mail == 1 && counts.decisions == 1
+                })
+            })
+        });
+        assert!(drawn(cx, "rail badge chat"));
+        assert!(drawn(cx, "rail badge decisions"));
+        assert!(!drawn(cx, "rail badge timetable"));
+        // Each badge stands at its tile's top right, on the glyph's
+        // corner.
+        for mode in ["chat", "decisions"] {
+            let tile = bounds_of(cx, &format!("rail {mode}"));
+            let badge = bounds_of(cx, &format!("rail badge {mode}"));
+            assert!(
+                (badge.top() - tile.top()).abs() < px(1.)
+                    && (tile.right() - badge.right()).abs() < px(1.),
+                "the {mode} badge stands off its glyph's corner: {badge:?} {tile:?}"
+            );
+        }
+    }
+
+    /// While the yard is away the rail's glyphs carry no count: there
+    /// is no model to count.
+    #[gpui::test]
+    fn the_rail_carries_no_count_while_the_yard_is_away(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        assert!(view.read_with(cx, |v, _| v.model.is_none()));
+        assert!(drawn(cx, "rail chat") && drawn(cx, "rail decisions"));
+        assert!(!drawn(cx, "rail badge chat") && !drawn(cx, "rail badge decisions"));
+    }
+
     /// Each yard reopens in its remembered mode, and each mode on the row
     /// it was left on: stepping modes keeps each mode's row, switching
     /// yards keeps each yard's mode, and the settings keep both.
@@ -19709,6 +19818,44 @@ mod tests {
         assert_eq!(counts(2, 1, 0).line(), "2 mail, 1 decision");
         assert_eq!(counts(1, 0, 1).line(), "1 mail, 1 notice");
         assert_eq!(counts(0, 3, 12).line(), "3 decisions, 12 notices");
+    }
+
+    #[test]
+    fn the_rail_s_glyphs_carry_the_mail_and_the_decisions() {
+        let counts = |mail, decisions, notices| Counts {
+            mail,
+            decisions,
+            notices,
+        };
+        // Chat carries the unread mail, decisions the open asks: the
+        // badge's label with the tooltip's words. None at 0, and each
+        // glyph none of the other's.
+        assert_eq!(counts(0, 0, 0).rail(Mode::Chat), None);
+        assert_eq!(counts(0, 0, 0).rail(Mode::Decisions), None);
+        assert_eq!(
+            counts(1, 0, 0).rail(Mode::Chat),
+            Some(("1".to_string(), "1 mail".to_string()))
+        );
+        assert_eq!(
+            counts(0, 1, 0).rail(Mode::Decisions),
+            Some(("1".to_string(), "1 decision".to_string()))
+        );
+        assert_eq!(counts(1, 0, 0).rail(Mode::Decisions), None);
+        assert_eq!(counts(0, 1, 0).rail(Mode::Chat), None);
+        // Above nine the badge says 9+, and the tooltip the number.
+        assert_eq!(
+            counts(10, 0, 0).rail(Mode::Chat),
+            Some(("9+".to_string(), "10 mail".to_string()))
+        );
+        assert_eq!(
+            counts(0, 12, 0).rail(Mode::Decisions),
+            Some(("9+".to_string(), "12 decisions".to_string()))
+        );
+        // The notices are no glyph's, and the timetable carries none
+        // whatever waits.
+        assert_eq!(counts(0, 0, 5).rail(Mode::Chat), None);
+        assert_eq!(counts(0, 0, 5).rail(Mode::Decisions), None);
+        assert_eq!(counts(3, 2, 9).rail(Mode::Timetable), None);
     }
 
     /// The yards in the settings: this machine's, as before, and one at an
