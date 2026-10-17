@@ -2676,6 +2676,7 @@ impl Footplate {
             return;
         };
         let yard = yard.clone();
+        let mut baseline_to_save = None;
         match update {
             Update::Up(state) => {
                 let mut state = *state;
@@ -2703,7 +2704,7 @@ impl Footplate {
                     if seen.is_none() {
                         // Keep the first-run baseline so a later restart
                         // can still find changes that arrive while held.
-                        self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
+                        baseline_to_save = Some((yard.clone(), looked));
                     }
                     if looked < head {
                         effects.push(Effect::Timetable {
@@ -2737,6 +2738,9 @@ impl Footplate {
                 held.away = Away::SignedOut;
                 self.unreached.insert(yard, session::SIGN_IN_AGAIN);
             }
+        }
+        if let Some((yard, looked)) = baseline_to_save {
+            self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
         }
         cx.notify();
     }
