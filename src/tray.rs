@@ -1,4 +1,4 @@
-//! footplate's item in the Mac's menu bar: the application's mark, always
+//! footplate's item in the Mac's menu bar: the track glyph, always
 //! there, with the number of things that wait beside it while any do, the
 //! number the dock's icon says (dock.rs). A click opens a menu of the yards
 //! that are followed, each with what waits in it, and under them "Show
@@ -17,6 +17,12 @@
 //!
 //! What the item says is in plain functions, tested on any system; the
 //! items are each for their own system.
+
+/// The tray's mark: the track glyph, `tray-icon.svg` from yardr-design's
+/// assets rendered at 128 pixels a side, single black on transparent. On
+/// macOS it is a template image, drawn in the menu bar's foreground; on
+/// Linux it is scaled to the sizes a tray draws.
+pub const ICON: &[u8] = include_bytes!("../assets/tray-icon.png");
 
 /// One row of the menu: the yard it opens, and what it says.
 #[derive(Clone, Debug, PartialEq)]
@@ -373,17 +379,18 @@ mod mac {
     }
 
     impl Item {
-        /// Puts the item in the menu bar, with the application's mark and
+        /// Puts the item in the menu bar, with the track glyph and
         /// no title yet. What is chosen in its menu goes to `chosen`.
         pub fn new(chosen: async_channel::Sender<Chosen>) -> Option<Item> {
             let main_thread = MainThreadMarker::new()?;
             let item =
                 NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
             if let Some(button) = item.button(main_thread) {
-                // The mark as it is in the dock, small, and not a template:
-                // masked to one colour the icon would be a filled square.
-                let data = NSData::with_bytes(crate::window::ICON);
+                // The track glyph, a template: the menu bar draws it in
+                // its own foreground, light or dark.
+                let data = NSData::with_bytes(super::ICON);
                 if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                    image.setTemplate(true);
                     image.setSize(NSSize::new(MARK, MARK));
                     button.setImage(Some(&image));
                 }
@@ -557,8 +564,8 @@ mod linux {
     }
 
     impl Item {
-        /// Offers the item to the desktop's tray, with the application's
-        /// mark and nothing said yet. What is chosen in its menu goes to
+        /// Offers the item to the desktop's tray, with the track glyph
+        /// and nothing said yet. What is chosen in its menu goes to
         /// `chosen`. A desktop without a tray shows none, until it has one:
         /// a bar that starts later, or again, gets the item then. Without
         /// a session bus there is none to offer it on, and no item.
@@ -567,12 +574,10 @@ mod linux {
                 return None;
             }
             let shown = || {
-                let mark = image::load_from_memory_with_format(
-                    crate::taskbar::ICON,
-                    image::ImageFormat::Png,
-                )
-                .map_err(|err| err.to_string())?
-                .to_rgba8();
+                let mark =
+                    image::load_from_memory_with_format(super::ICON, image::ImageFormat::Png)
+                        .map_err(|err| err.to_string())?
+                        .to_rgba8();
                 let marks = SIZES
                     .into_iter()
                     .map(|size| {
@@ -626,6 +631,14 @@ mod tests {
             .iter()
             .map(|row| (row.yard.as_str(), row.says.as_str()))
             .collect()
+    }
+
+    #[test]
+    fn the_tray_icon_is_the_rendered_track_glyph() {
+        // The PNG's header: its width and height after the IHDR chunk's name.
+        let number = |at: usize| u32::from_be_bytes(ICON[at..at + 4].try_into().unwrap());
+        assert_eq!(&ICON[12..16], b"IHDR");
+        assert_eq!((number(16), number(20)), (128, 128));
     }
 
     #[test]

@@ -114,7 +114,7 @@ const IMAGE_MARGIN: f32 = 2.;
 const ATTACHMENT: f32 = 3.5;
 
 /// The rail's width in pixels, fixed: the kit's minimum target with its
-/// sidebar padding on both sides, 12 + 32 + 12.
+/// sidebar padding on both sides, 8 + 40 + 8.
 const RAIL: f32 = 56.;
 
 /// The key that is cmd on macOS and ctrl elsewhere, as the hints name it.
@@ -813,7 +813,7 @@ fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
 /// The switcher's mark beside the yard's line: a chevron drawn with two
 /// strokes, in the line's own colour. A character would draw on one
 /// desktop and stand in for a missing glyph on the next.
-/// A rail glyph's canvas: 16 pixels, drawn from the mock's geometry
+/// A rail glyph's canvas: 24 pixels, drawn from the mock's geometry
 /// (docs/design/2026-10-16-footplate-zj5f-rail-mock.html), a 24-grid with
 /// its strokes. Fixed pixels, not rems: the rail carries no reading text.
 fn glyph_canvas(
@@ -825,7 +825,7 @@ fn glyph_canvas(
             paint(bounds.origin, f32::from(bounds.size.width) / 24., window);
         },
     )
-    .size(px(16.))
+    .size(px(24.))
     .flex_none()
 }
 
@@ -8512,23 +8512,18 @@ impl Footplate {
             .bg(palette.side)
             .border_r_1()
             .border_color(palette.line);
-        // The footplate mark, doing nothing: orientation, as the logo was.
+        // The vivid app icon, doing nothing: orientation at the rail's
+        // head, as the mark was.
         rail = rail.child(
             div()
                 .id("rail mark")
                 .debug_selector(|| "rail mark".to_string())
-                .size(px(32.))
-                .rounded_lg()
-                // The kit's graphite tile with the track glyph's light
-                // stroke, as the small app icon: dark in both themes.
-                .bg(rgba(0x101112ff))
-                .border_1()
-                .border_color(palette.line)
+                .size(px(40.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .tooltip(|_, cx| cx.new(|_| RailTip("footplate".to_string())).into())
-                .child(track_glyph(rgba(0xf5f5f5ff))),
+                .child(img(self.icon.clone()).size(px(40.))),
         );
         for (n, m) in Mode::ALL.into_iter().enumerate() {
             let open = live && m == mode;
@@ -8564,7 +8559,7 @@ impl Footplate {
                     div()
                         .id(SharedString::from(id.clone()))
                         .debug_selector(move || id.clone())
-                        .size(px(32.))
+                        .size(px(40.))
                         .rounded_md()
                         .relative()
                         .flex()
@@ -8592,9 +8587,9 @@ impl Footplate {
                         .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
                         .child(glyph)
                         // The badge stands centered on the glyph's top
-                        // right corner: the glyph is 16 in the tile's
-                        // 32, so its corner stands at (24, 8), and the
-                        // badge from (32 - 16, 0) stands centered on
+                        // right corner: the glyph is 24 in the tile's
+                        // 40, so its corner stands at (32, 8), and the
+                        // badge from (40 - 16, 0) stands centered on
                         // it. In the accent, as the jump button's
                         // count is.
                         .children(badge.map(|(label, _)| {
@@ -8642,7 +8637,7 @@ impl Footplate {
                 div()
                     .id("switch tile")
                     .debug_selector(|| "switch tile".to_string())
-                    .size(px(32.))
+                    .size(px(40.))
                     .rounded_md()
                     .border_1()
                     .border_color(palette.line)
@@ -8663,7 +8658,7 @@ impl Footplate {
             div()
                 .id("settings")
                 .debug_selector(|| "settings".to_string())
-                .size(px(32.))
+                .size(px(40.))
                 .rounded_md()
                 .flex()
                 .items_center()
@@ -17984,7 +17979,7 @@ mod tests {
                 short.size.width, long.size.width,
                 "at {text} px the head's column hugs its content"
             );
-            // The rail stays 56 pixels wide with its 32-pixel targets,
+            // The rail stays 56 pixels wide with its 40-pixel targets,
             // whatever the text.
             let rail = bounds_of(cx, "rail");
             assert!(
@@ -17994,9 +17989,9 @@ mod tests {
             for target in ["rail mark", "rail chat", "switch tile", "settings"] {
                 let at = bounds_of(cx, target);
                 assert!(
-                    (at.size.width - px(32.)).abs() < px(1.)
-                        && (at.size.height - px(32.)).abs() < px(1.),
-                    "at {text} px {target} is {at:?}, not 32 a side"
+                    (at.size.width - px(40.)).abs() < px(1.)
+                        && (at.size.height - px(40.)).abs() < px(1.),
+                    "at {text} px {target} is {at:?}, not 40 a side"
                 );
                 assert!(
                     rail.left() <= at.left() && at.right() <= rail.right() + px(1.),
@@ -18824,9 +18819,9 @@ mod tests {
         ] {
             let at = bounds_of(cx, target);
             assert!(
-                (at.size.width - px(32.)).abs() < px(1.)
-                    && (at.size.height - px(32.)).abs() < px(1.),
-                "{target} is {at:?}, not 32 a side"
+                (at.size.width - px(40.)).abs() < px(1.)
+                    && (at.size.height - px(40.)).abs() < px(1.),
+                "{target} is {at:?}, not 40 a side"
             );
             assert!(
                 rail.left() <= at.left() && at.right() <= rail.right() + px(1.),
