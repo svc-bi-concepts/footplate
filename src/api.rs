@@ -2380,16 +2380,23 @@ impl Client {
     /// `until` the head it was read at. Nothing is asked where there is
     /// no gap: a stream past the head would wait for what happens next.
     /// Past `until` the stream is left: what happens next comes down the
-    /// follower's own. What the yard no longer has is quietly missed, as
-    /// is what stands past [`TIMETABLE_CATCHUP_MOST`].
+    /// follower's own. What the yard no longer has is quietly missed. A
+    /// stream that sends more events than the gap holds seqs is not
+    /// describing the gap, and is left where it outruns it: the gap
+    /// holds one event of each seq after `after` through `until`, and
+    /// no more, so the catch-up cannot be held open for ever by a yard
+    /// replaying a seq it has already sent.
     pub fn timetable_changed(&self, me: &str, after: u64, until: u64) -> Result<bool> {
         if after >= until {
             return Ok(false);
         }
         let events = self.events(after)?;
+        let most = until - after;
+        let mut read = 0;
         for event in events {
             let event = event?;
-            if event.seq > until {
+            read += 1;
+            if event.seq > until || read > most {
                 break;
             }
             if event.timetable_news(me) {
@@ -5176,6 +5183,20 @@ mod tests {
         yard.emit(r#"{"seq": 30, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "jo"}}"#);
         assert!(!yard.client().timetable_changed("jo", 20, 25).unwrap());
         assert_eq!(yard.streams_asked(), vec![20]);
+    }
+
+    #[test]
+    fn timetable_changed_leaves_a_stream_that_outruns_its_gap() {
+        let yard = Yard::start();
+        // The gap 20..22 holds two seqs at most. A stream that sends
+        // more events than that is not describing the gap — it replays
+        // one seq and holds the catch-up open — and is left unread past
+        // the gap's width, so the match it dangles later never lands.
+        for _ in 0..3 {
+            yard.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "yd-shed", "data": {}}"#);
+        }
+        yard.emit(r#"{"seq": 22, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "jo"}}"#);
+        assert!(!yard.client().timetable_changed("jo", 20, 22).unwrap());
     }
 
     #[test]
