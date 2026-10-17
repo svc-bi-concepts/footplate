@@ -813,9 +813,10 @@ fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
 /// The switcher's mark beside the yard's line: a chevron drawn with two
 /// strokes, in the line's own colour. A character would draw on one
 /// desktop and stand in for a missing glyph on the next.
-/// A rail glyph's canvas: 24 pixels, drawn from the mock's geometry
+/// A rail glyph's canvas: 28 pixels, drawn from the mock's geometry
 /// (docs/design/2026-10-16-footplate-zj5f-rail-mock.html), a 24-grid with
-/// its strokes. Fixed pixels, not rems: the rail carries no reading text.
+/// its strokes, scaled to the canvas. Fixed pixels, not rems: the rail
+/// carries no reading text.
 fn glyph_canvas(
     paint: impl Fn(gpui::Point<Pixels>, f32, &mut Window) + 'static,
 ) -> impl IntoElement {
@@ -825,7 +826,7 @@ fn glyph_canvas(
             paint(bounds.origin, f32::from(bounds.size.width) / 24., window);
         },
     )
-    .size(px(24.))
+    .size(px(28.))
     .flex_none()
 }
 
@@ -2059,9 +2060,13 @@ impl Footplate {
     /// have the item there: the number the dock's icon was just told
     /// ([`Footplate::badge`] goes first), what it is of in words, and each
     /// yard that is followed with what the switcher says of it. With the
-    /// item switched off there is none.
+    /// item switched off there is none. The mark is the settings' choice
+    /// either way, drawn without a restart.
     #[cfg(any(target_os = "macos", target_os = "linux", test))]
     fn tray(&mut self) {
+        // Before what it says: an item that is yet to be has its mark
+        // from the start.
+        self.tray.set_mark(self.settings.tray);
         let said = self.settings.menu_bar.then(|| {
             // A yard the environment names is the one that is followed.
             let named = self.env.yard.as_deref().map(|_| self.yard.as_str());
@@ -5622,6 +5627,19 @@ impl Footplate {
         );
     }
 
+    /// The item's mark in the menu bar or the tray is the choice's:
+    /// white, black, or as the system draws it. The item draws it
+    /// without a restart.
+    fn tray_mark(&mut self, mark: Look, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                tray: mark,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
     /// Keeps the web view's base address that is typed, on the yard
     /// the window shows: its pages open in the browser through it. What
     /// is no address is said, and nothing changed.
@@ -7126,6 +7144,26 @@ impl Footplate {
                     })),
             )
         };
+        // The item's mark, beside its switch: white, black, or as the
+        // system draws it.
+        let marked = self.settings.tray;
+        let mark = setting(
+            "tray mark".to_string(),
+            "auto is the menu bar's on a mac, black in the tray".to_string(),
+        )
+        .child(div().flex().flex_wrap().items_center().gap_2().children(
+            Look::ALL.into_iter().map(|mark| {
+                small_button(mark.name().to_string(), palette)
+                    .id(SharedString::from(format!("tray {}", mark.name())))
+                    .debug_selector(|| format!("tray {}", mark.name()))
+                    .when(mark == marked, |el| {
+                        el.bg(palette.open)
+                            .text_color(palette.text)
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.tray_mark(mark, cx)))
+            }),
+        ));
         pane.children(self.reconnect_strip(palette))
             .child(head)
             .child(
@@ -7146,6 +7184,7 @@ impl Footplate {
                     .child(login)
                     .child(notifications)
                     .child(menu_bar)
+                    .child(mark)
                     .child(agents),
             )
             .when_some(self.unkept.clone(), |el, why| {
@@ -8587,8 +8626,8 @@ impl Footplate {
                         .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
                         .child(glyph)
                         // The badge stands centered on the glyph's top
-                        // right corner: the glyph is 24 in the tile's
-                        // 40, so its corner stands at (32, 8), and the
+                        // right corner: the glyph is 28 in the tile's
+                        // 40, so its corner stands at (34, 6), and the
                         // badge from (40 - 16, 0) stands centered on
                         // it. In the accent, as the jump button's
                         // count is.
@@ -19851,6 +19890,40 @@ mod tests {
         view.update(cx, |v, cx| v.menu_bar_on(true, cx));
         cx.run_until_parked();
         assert_eq!(tray_of(&view, cx), Some((title, rows)));
+    }
+
+    /// The item's mark is the tray setting's choice, drawn without a
+    /// restart: white, black, or as the system draws it. The settings'
+    /// buttons choose it, and the file keeps it while it is not auto.
+    #[gpui::test]
+    fn the_menu_bar_item_s_mark_is_the_tray_setting_s_without_a_restart(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        // The control stands low in the settings: the window is tall
+        // enough to hold every section, so its buttons take clicks.
+        cx.simulate_resize(gpui::size(px(1200.), px(1800.)));
+        let marked_of = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.tray.marked());
+        // Nobody chose: the system's, and the file says nothing of it.
+        assert_eq!(marked_of(cx), Look::Auto);
+        assert_eq!(settings_of(&view, cx).tray, Look::Auto);
+        // The buttons choose it, and the item draws it without a restart.
+        click_on(cx, "settings");
+        assert!(drawn(cx, "tray auto"));
+        click_on(cx, "tray light");
+        assert_eq!(settings_of(&view, cx).tray, Look::Light);
+        assert_eq!(marked_of(cx), Look::Light);
+        assert_eq!(Settings::read(&file).tray, Look::Light);
+        click_on(cx, "tray dark");
+        assert_eq!(marked_of(cx), Look::Dark);
+        click_on(cx, "tray auto");
+        assert_eq!(marked_of(cx), Look::Auto);
+        assert!(
+            !std::fs::read_to_string(&file).unwrap().contains("tray"),
+            "auto is left out of the file"
+        );
     }
 
     /// One yard that goes away changes nothing of the others: the stream,

@@ -30,6 +30,12 @@ impl Look {
         }
     }
 
+    /// Whether the choice is none: what the system has, as it is now and
+    /// as it changes. The settings say nothing while it is.
+    pub fn is_auto(&self) -> bool {
+        matches!(*self, Look::Auto)
+    }
+
     /// The one after this, around the end: what the one key steps through.
     pub fn next(self) -> Look {
         match self {

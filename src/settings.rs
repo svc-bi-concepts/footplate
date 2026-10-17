@@ -248,6 +248,13 @@ pub struct Settings {
     /// window does ([`Settings::closing_hides`]).
     #[serde(skip_serializing_if = "is_on")]
     pub menu_bar: bool,
+    /// The item's mark: white, black, or as the system draws it — a
+    /// template in the Mac's menu bar, black in a Linux tray. The Linux
+    /// panel's own theme is not told reliably, so auto there is black,
+    /// and a person with a dark panel chooses white. Left out of the
+    /// file while it is auto, as the look is.
+    #[serde(skip_serializing_if = "Look::is_auto")]
+    pub tray: Look,
 }
 
 fn is_on(on: &bool) -> bool {
@@ -275,6 +282,7 @@ struct Kept {
     address: String,
     notifications: Notify,
     menu_bar: bool,
+    tray: Look,
     web_view: String,
     run_base: String,
 }
@@ -292,6 +300,7 @@ impl Default for Kept {
             address: String::new(),
             notifications: Notify::default(),
             menu_bar: true,
+            tray: Look::Auto,
             web_view: String::new(),
             run_base: String::new(),
         }
@@ -365,6 +374,7 @@ impl From<Kept> for Settings {
             timetable_seen: kept.timetable_seen,
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
+            tray: kept.tray,
         }
     }
 }
@@ -460,6 +470,7 @@ impl Default for Settings {
             timetable_seen: BTreeMap::new(),
             notifications: Notify::default(),
             menu_bar: true,
+            tray: Look::Auto,
         }
     }
 }
@@ -2061,6 +2072,38 @@ mod tests {
         assert_eq!(Settings::read(&file), off);
         assert!(!off.closing_hides(true));
         assert!(!off.closing_hides(false));
+    }
+
+    #[test]
+    fn the_tray_s_mark_is_the_system_s_until_white_or_black_is_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Nobody chose: it is auto, a file from before it says nothing of
+        // it and has it auto, and the file of a person who changes
+        // something else still says nothing.
+        let usual = Settings::default();
+        assert_eq!(usual.tray, Look::Auto);
+        fs::write(&file, "{\"text\": 15}").unwrap();
+        assert_eq!(Settings::read(&file).tray, Look::Auto);
+        usual.write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("tray"));
+
+        // White and black are kept, and read back as chosen.
+        for mark in [Look::Light, Look::Dark] {
+            let set = Settings {
+                tray: mark,
+                ..Settings::default()
+            };
+            set.write(&file).unwrap();
+            assert_eq!(
+                fs::read_to_string(&file).unwrap(),
+                format!(
+                    "{{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"tray\": \"{}\"\n}}\n",
+                    mark.name()
+                )
+            );
+            assert_eq!(Settings::read(&file), set);
+        }
     }
 
     #[test]

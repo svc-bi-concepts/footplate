@@ -18,11 +18,53 @@
 //! What the item says is in plain functions, tested on any system; the
 //! items are each for their own system.
 
+use crate::theme::Look;
+
 /// The tray's mark: the track glyph, `tray-icon.svg` from yardr-design's
 /// assets rendered at 128 pixels a side, single black on transparent. On
 /// macOS it is a template image, drawn in the menu bar's foreground; on
-/// Linux it is scaled to the sizes a tray draws.
+/// Linux it is scaled to the sizes a tray draws. White, where that is
+/// chosen, is this mark turned ([`invert`]): yardr-design draws the one
+/// mark, in black.
 pub const ICON: &[u8] = include_bytes!("../assets/tray-icon.png");
+
+/// The mark decoded from its PNG: 128 pixels a side, four bytes a pixel
+/// with red first.
+fn decoded() -> Result<image::RgbaImage, String> {
+    image::load_from_memory_with_format(ICON, image::ImageFormat::Png)
+        .map(|mark| mark.to_rgba8())
+        .map_err(|err| err.to_string())
+}
+
+/// With the mark white: every pixel's red, green and blue turned, its
+/// alpha as it was. The black mark turns white, and its antialiased
+/// edges turn with it.
+fn invert(mark: &mut image::RgbaImage) {
+    for pixel in mark.pixels_mut() {
+        pixel[0] = 255 - pixel[0];
+        pixel[1] = 255 - pixel[1];
+        pixel[2] = 255 - pixel[2];
+    }
+}
+
+/// The mark's PNG for a light choice: the black mark turned white. Where
+/// black is drawn, the mark's own PNG is the answer, and none is made.
+fn white() -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+
+    let mut mark = decoded()?;
+    invert(&mut mark);
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            mark.as_raw(),
+            mark.width(),
+            mark.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(png)
+}
 
 /// One row of the menu: the yard it opens, and what it says.
 #[derive(Clone, Debug, PartialEq)]
@@ -248,6 +290,7 @@ pub struct Tray {
         async_channel::Receiver<Chosen>,
     ),
     said: Option<Said>,
+    mark: Look,
     /// A test shows none: it runs where a person works, and the menu bar
     /// is theirs.
     #[cfg(not(test))]
@@ -259,6 +302,7 @@ impl Default for Tray {
         Tray {
             chosen: async_channel::unbounded(),
             said: None,
+            mark: Look::Auto,
             #[cfg(not(test))]
             item: None,
         }
@@ -281,7 +325,7 @@ impl Tray {
         match &said {
             Some(said) => {
                 if self.item.is_none() {
-                    self.item = Item::new(self.chosen.0.clone());
+                    self.item = Item::new(self.chosen.0.clone(), self.mark);
                 }
                 if let Some(item) = &self.item {
                     item.say(said);
@@ -292,10 +336,30 @@ impl Tray {
         self.said = said;
     }
 
+    /// Draws the item's mark for the choice `mark`, where that is another
+    /// than it draws now: white, black, or as the system draws it. An
+    /// item that is yet to be has it from the start.
+    pub fn set_mark(&mut self, mark: Look) {
+        if mark == self.mark {
+            return;
+        }
+        #[cfg(not(test))]
+        if let Some(item) = &self.item {
+            item.set_mark(mark);
+        }
+        self.mark = mark;
+    }
+
     /// What the item was last told to say.
     #[cfg(test)]
     pub fn told(&self) -> Option<&Said> {
         self.said.as_ref()
+    }
+
+    /// The mark the item was last told to draw.
+    #[cfg(test)]
+    pub fn marked(&self) -> Look {
+        self.mark
     }
 
     /// A person chooses `chosen` in the menu.
@@ -318,7 +382,7 @@ mod mac {
     };
     use objc2_foundation::{NSData, NSSize, NSString};
 
-    use super::{Chosen, Said};
+    use super::{Chosen, Look, Said};
 
     /// The mark's side in the menu bar, in points: what the bar's own
     /// items have.
@@ -379,31 +443,59 @@ mod mac {
     }
 
     impl Item {
-        /// Puts the item in the menu bar, with the track glyph and
-        /// no title yet. What is chosen in its menu goes to `chosen`.
-        pub fn new(chosen: async_channel::Sender<Chosen>) -> Option<Item> {
+        /// Puts the item in the menu bar, with the track glyph for the
+        /// choice `mark` and no title yet. What is chosen in its menu
+        /// goes to `chosen`.
+        pub fn new(chosen: async_channel::Sender<Chosen>, mark: Look) -> Option<Item> {
             let main_thread = MainThreadMarker::new()?;
             let item =
                 NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
             if let Some(button) = item.button(main_thread) {
-                // The track glyph, a template: the menu bar draws it in
-                // its own foreground, light or dark.
-                let data = NSData::with_bytes(super::ICON);
-                if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
-                    image.setTemplate(true);
-                    image.setSize(NSSize::new(MARK, MARK));
-                    button.setImage(Some(&image));
-                }
                 button.setImagePosition(NSCellImagePosition::ImageLeading);
             }
             let menu = NSMenu::new(main_thread);
             item.setMenu(Some(&menu));
-            Some(Item {
+            let shown = Item {
                 item,
                 menu,
                 target: Target::new(chosen, main_thread),
                 main_thread,
-            })
+            };
+            shown.show(mark);
+            Some(shown)
+        }
+
+        /// Draws the mark for the choice `mark`: the template as ever for
+        /// auto, and black or white with the template off for dark and
+        /// light, so the choice wins over the menu bar's own.
+        pub fn set_mark(&self, mark: Look) {
+            self.show(mark);
+        }
+
+        /// Draws the mark for the choice `mark` on the item's button.
+        /// White is the black mark turned; black is the mark's own PNG.
+        /// Where white cannot be made, the mark stands as it was.
+        fn show(&self, mark: Look) {
+            let Some(button) = self.item.button(self.main_thread) else {
+                return;
+            };
+            let white;
+            let bytes: &[u8] = match mark {
+                Look::Light => match super::white() {
+                    Ok(turned) => {
+                        white = turned;
+                        &white
+                    }
+                    Err(_) => return,
+                },
+                Look::Auto | Look::Dark => super::ICON,
+            };
+            let data = NSData::with_bytes(bytes);
+            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                image.setTemplate(mark == Look::Auto);
+                image.setSize(NSSize::new(MARK, MARK));
+                button.setImage(Some(&image));
+            }
         }
 
         /// Has the item say `said`: the title beside the mark, and the
@@ -462,7 +554,7 @@ mod linux {
     use ksni::blocking::{Handle, TrayMethods};
     use ksni::menu::StandardItem;
 
-    use super::{Chosen, Said};
+    use super::{Chosen, Look, Said};
 
     /// The sizes the mark is given in, for a host to take the one it
     /// draws: what a bar's tray and a panel's have, at one and two device
@@ -477,8 +569,12 @@ mod linux {
     struct Shown {
         said: Said,
         chosen: async_channel::Sender<Chosen>,
-        /// The mark in each of [`SIZES`], four bytes a pixel, red first.
+        /// The mark in each of [`SIZES`], four bytes a pixel, red first:
+        /// black, and white for a light choice.
         marks: Vec<(u32, Vec<u8>)>,
+        light_marks: Vec<(u32, Vec<u8>)>,
+        /// Whether the white mark is drawn.
+        light: bool,
     }
 
     impl Shown {
@@ -518,7 +614,11 @@ mod linux {
         /// waits. No icon is named: a host would take a named one from
         /// the desktop's theme, which has the mark and no number.
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-            self.marks
+            let marks = match self.light {
+                true => &self.light_marks,
+                false => &self.marks,
+            };
+            marks
                 .iter()
                 .map(|(size, mark)| {
                     let mut data = mark.clone();
@@ -565,30 +665,37 @@ mod linux {
 
     impl Item {
         /// Offers the item to the desktop's tray, with the track glyph
-        /// and nothing said yet. What is chosen in its menu goes to
-        /// `chosen`. A desktop without a tray shows none, until it has one:
-        /// a bar that starts later, or again, gets the item then. Without
-        /// a session bus there is none to offer it on, and no item.
-        pub fn new(chosen: async_channel::Sender<Chosen>) -> Option<Item> {
+        /// for the choice `mark` and nothing said yet. What is chosen in
+        /// its menu goes to `chosen`. A desktop without a tray shows none,
+        /// until it has one: a bar that starts later, or again, gets the
+        /// item then. Without a session bus there is none to offer it on,
+        /// and no item.
+        pub fn new(chosen: async_channel::Sender<Chosen>, mark: Look) -> Option<Item> {
             if NONE.load(Ordering::Relaxed) {
                 return None;
             }
             let shown = || {
-                let mark =
-                    image::load_from_memory_with_format(super::ICON, image::ImageFormat::Png)
-                        .map_err(|err| err.to_string())?
-                        .to_rgba8();
-                let marks = SIZES
-                    .into_iter()
-                    .map(|size| {
-                        let scaled = imageops::resize(&mark, size, size, FilterType::Lanczos3);
-                        (size, scaled.into_raw())
-                    })
-                    .collect();
+                // Both marks are scaled from the start, so a choice
+                // between them hands the host new pixmaps and nothing
+                // is decoded while the item stands.
+                let black = super::decoded()?;
+                let mut white = black.clone();
+                super::invert(&mut white);
+                let scaled = |mark: &image::RgbaImage| {
+                    SIZES
+                        .into_iter()
+                        .map(|size| {
+                            let scaled = imageops::resize(mark, size, size, FilterType::Lanczos3);
+                            (size, scaled.into_raw())
+                        })
+                        .collect()
+                };
                 let shown = Shown {
                     said: Said::default(),
                     chosen,
-                    marks,
+                    marks: scaled(&black),
+                    light_marks: scaled(&white),
+                    light: mark == Look::Light,
                 };
                 shown
                     .assume_sni_available(true)
@@ -610,6 +717,14 @@ mod linux {
         pub fn say(&self, said: &Said) {
             let said = said.clone();
             self.handle.update(move |shown| shown.said = said);
+        }
+
+        /// Draws the mark for the choice `mark`: white where white is
+        /// chosen, black as ever elsewhere. The host is told the icon
+        /// changed, and draws it where the item stands.
+        pub fn set_mark(&self, mark: Look) {
+            let light = mark == Look::Light;
+            self.handle.update(move |shown| shown.light = light);
         }
     }
 
@@ -760,13 +875,47 @@ mod tests {
         assert_eq!(tip(3, "2 mail, 1 decision"), "3 wait: 2 mail, 1 decision");
     }
 
+    /// The white mark is the black one turned, with its alpha as it
+    /// was: black to white, and the antialiased edges with it. What is
+    /// drawn from it is the turned mark's own PNG.
+    #[test]
+    fn the_white_mark_is_the_black_one_turned() {
+        let mut mark = decoded().unwrap();
+        assert_eq!((mark.width(), mark.height()), (128, 128));
+        // The mark has black in it, and transparency around it.
+        assert!(mark.pixels().any(|pixel| pixel.0 == [0, 0, 0, 255]));
+        assert!(mark.pixels().any(|pixel| pixel[3] == 0));
+        let before = mark.clone();
+        invert(&mut mark);
+        assert!(mark.pixels().zip(before.pixels()).all(|(after, before)| {
+            after[3] == before[3]
+                && after[0] == 255 - before[0]
+                && after[1] == 255 - before[1]
+                && after[2] == 255 - before[2]
+        }));
+        assert!(mark.pixels().any(|pixel| pixel.0 == [255, 255, 255, 255]));
+        // The white PNG decodes to the turned mark.
+        let png = white().unwrap();
+        let turned = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(turned, mark);
+    }
+
+    /// An icon of `size` pixels a side, all `ground`, with `sign` drawn
+    /// on it: four bytes a pixel, row by row.
+    fn painted(sign: &Sign, size: u32, ground: [u8; 4]) -> Vec<u8> {
+        let mut rgba = ground.repeat((size * size) as usize);
+        draw(sign, size, &mut rgba);
+        rgba
+    }
+
     /// An icon of `size` pixels a side, all of one colour that no sign is
     /// drawn in, with `sign` drawn on it: a letter a pixel, row by row,
     /// `.` what was there, `#` the badge and `o` the number.
     fn drawn(sign: &Sign, size: u32) -> Vec<String> {
         let mark = [1, 2, 3, 4];
-        let mut rgba = mark.repeat((size * size) as usize);
-        draw(sign, size, &mut rgba);
+        let rgba = painted(sign, size, mark);
         let pixels: Vec<char> = rgba
             .as_chunks::<4>()
             .0
@@ -858,6 +1007,31 @@ mod tests {
     }
 
     #[test]
+    fn the_sign_is_the_same_on_a_black_mark_and_a_white_one() {
+        // The badge and its number are opaque, and cover the mark where
+        // they stand: where either mark is painted over, both show the
+        // sign's own pixels, and where neither is, each shows its own.
+        for size in [16, 22, 24, 32, 48, 64] {
+            for waiting in [0, 1, 7, 42, 128, 1000] {
+                let sign = sign(waiting, size);
+                let black = painted(&sign, size, [0, 0, 0, 255]);
+                let white = painted(&sign, size, [255, 255, 255, 255]);
+                let pixels = black
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(white.as_chunks::<4>().0);
+                for (b, w) in pixels {
+                    assert!(
+                        b == w || (*b == [0, 0, 0, 255] && *w == [255, 255, 255, 255]),
+                        "size {size}, {waiting} waiting: {b:?} on black, {w:?} on white"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_menu_row_keeps_its_underscores() {
         assert_eq!(label("mac · 1 mail"), "mac · 1 mail");
         assert_eq!(label("my_yard · 1 mail"), "my__yard · 1 mail");
@@ -881,5 +1055,20 @@ mod tests {
         assert_eq!(chosen.try_recv(), Ok(Chosen::Show));
         assert_eq!(chosen.try_recv(), Ok(Chosen::Quit));
         assert!(chosen.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_item_is_marked_only_what_is_new() {
+        let mut tray = Tray::default();
+        assert_eq!(tray.marked(), Look::Auto);
+        tray.set_mark(Look::Light);
+        assert_eq!(tray.marked(), Look::Light);
+        // Choosing it twice is choosing it once.
+        tray.set_mark(Look::Light);
+        assert_eq!(tray.marked(), Look::Light);
+        tray.set_mark(Look::Dark);
+        assert_eq!(tray.marked(), Look::Dark);
+        tray.set_mark(Look::Auto);
+        assert_eq!(tray.marked(), Look::Auto);
     }
 }

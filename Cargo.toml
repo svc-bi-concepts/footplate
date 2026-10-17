@@ -45,6 +45,10 @@ flate2 = "1"
 # an entry in another method is a marked row, not an error. flate2 is in
 # the tree already, with its pure-Rust backend, so this adds no C.
 zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2"] }
+# The tray's mark is its PNG decoded and, where white is chosen, turned
+# (tray.rs); on Linux it is scaled to a panel's sizes, and the window's
+# icon too (taskbar.rs). In gpui's tree already.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on. So is the number
@@ -63,10 +67,9 @@ block2 = "0.6"
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "bitflags", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 # On Linux the icon is also a property of the X11 window, set on a
-# connection of our own: gpui hands out no handle to its X11 window. Both
-# crates are in gpui's tree already; image scales the icon to a panel's sizes.
+# connection of our own: gpui hands out no handle to its X11 window. In
+# gpui's tree already.
 [target.'cfg(target_os = "linux")'.dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
 x11rb = "0.13"
 # Not used by footplate: this holds libc back for gpui's tree. gpui 0.2.2
 # unpacks archives with zed-async-tar, whose xattr 0.2 wants libc::ENOATTR,
