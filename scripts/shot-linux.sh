@@ -10,7 +10,9 @@
 # `yardmaster` (the conversation with the
 # yardmaster), `crew` (chat with the sidebar's groups full), `thread`
 # (a long wrapped thread from alternating senders,
-# the newest mail with an image), `plain` (an open decision card of a plain ask), `lines` (that
+# the newest mail with an image), `column` (a long conversation over
+# three days, grouped, with short links and a correction),
+# `plain` (an open decision card of a plain ask), `lines` (that
 # card with one of jo's beads changed, so Lines carries its badge), `page` (an
 # open card whose note carries a page, an image and a file), `mail` (a mail with
 # a page and an image), `image` (that mail's image open full size over
@@ -61,7 +63,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread plain lines run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered"
+states="yardmaster crew thread column plain lines run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

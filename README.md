@@ -166,7 +166,9 @@ The states are `yardmaster` (the conversation with the yardmaster, with a
 few mails), `crew` (chat with the sidebar's groups full: crew working
 and stopped, a linked yard's people, this yard's people, and unread
 notices), `thread` (a long wrapped thread from alternating senders,
-the newest mail with an image), `plain` (an open decision card of a plain ask), `lines` (that
+the newest mail with an image), `column` (a long conversation over
+three days, grouped by sender, with short links and a correction),
+`plain` (an open decision card of a plain ask), `lines` (that
 card with one of jo's beads changed, so Lines carries its badge), `page` (an
 open card whose note carries a page, an image and a file), `mail` (a mail with
 a page and an image), `image` (that mail's image open full size over

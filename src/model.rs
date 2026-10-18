@@ -268,9 +268,12 @@ pub struct Entry {
     /// Whether the name and the time stand above it: the first of its
     /// sender's mails within five minutes does, and the rest read under it.
     pub head: bool,
-    /// The day's separator above it, where the day changes: `Today`, or
-    /// the weekday with the day and the month.
+    /// The day's separator above it, where the day changes: `Today`,
+    /// `Yesterday`, or the weekday with the day and the month.
     pub day: Option<String>,
+    /// The mail amends what came before: its first word is `correction`,
+    /// and it carries the label, so it reads as no new thought.
+    pub correction: bool,
     /// The asks and bead ids its text names that the yard said, each
     /// where it stands in its block: the chips, and what opening one
     /// shows.
@@ -1412,6 +1415,14 @@ impl Model {
 
     fn member(&self, name: &str) -> Option<&CrewMember> {
         self.crew.iter().find(|r| r.name == name)
+    }
+
+    /// What the open conversation's header says beside the name, for a
+    /// crew member of this yard: what its session does. None for anyone
+    /// else: people and a linked yard's people have no state, as the
+    /// rows have it.
+    pub fn crew_state(&self, name: &str) -> Option<&'static str> {
+        self.member(name).map(state_of)
     }
 
     /// The one of a linked yard with the address, when a peer exposes it.
@@ -3168,6 +3179,7 @@ impl Model {
                 seq: l.seq,
                 at: l.at.clone(),
                 from: l.from.clone(),
+                correction: correction(&text),
                 text,
                 files: l.files.clone(),
                 mine,
@@ -4125,6 +4137,17 @@ fn grouped<Tz: TimeZone>(before: &Letter, after: &Letter, zone: &Tz) -> bool {
     first.with_timezone(zone).date_naive() == next.with_timezone(zone).date_naive()
 }
 
+/// Whether the mail amends what came before: its first word is
+/// `correction`, however it is capitalized, and whatever follows it.
+/// A longer word that starts that way is none: `correctional` is no
+/// correction.
+fn correction(text: &str) -> bool {
+    text.trim_start()
+        .split(|c: char| !c.is_alphanumeric())
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case("correction"))
+}
+
 /// The day `at` (RFC 3339, as the yard gives it) falls on in the zone of
 /// the person reading. Nothing for a time that cannot be read.
 fn day_of<Tz: TimeZone>(at: &str, zone: &Tz) -> Option<NaiveDate> {
@@ -4133,11 +4156,15 @@ fn day_of<Tz: TimeZone>(at: &str, zone: &Tz) -> Option<NaiveDate> {
         .map(|t| t.with_timezone(zone).date_naive())
 }
 
-/// The day's separator: `Today`, or the weekday with the day and the
-/// month (`Saturday 17 Oct`), as the review's sketch has it.
+/// The day's separator: `Today`, `Yesterday`, or the weekday with
+/// the day and the month (`Saturday 17 Oct`), as the review's sketch
+/// has it.
 fn day_words(day: NaiveDate, today: NaiveDate) -> String {
     if day == today {
         return "Today".to_string();
+    }
+    if day == today - chrono::Duration::days(1) {
+        return "Yesterday".to_string();
     }
     format!("{} {} {}", day.format("%A"), day.day(), day.format("%b"))
 }
@@ -5909,13 +5936,54 @@ mod tests {
     }
 
     #[test]
-    fn a_day_s_separator_is_today_or_the_weekday_with_the_day_and_the_month() {
+    fn a_day_s_separator_is_today_yesterday_or_the_weekday_with_the_day_and_the_month() {
         let today = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
         assert_eq!(day_words(today, today), "Today");
-        let saturday = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
-        assert_eq!(day_words(saturday, today), "Saturday 17 Oct");
+        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        assert_eq!(day_words(yesterday, today), "Yesterday");
+        let saturday = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+        assert_eq!(day_words(saturday, today), "Saturday 10 Oct");
         let friday = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
         assert_eq!(day_words(friday, today), "Friday 9 Oct");
+    }
+
+    #[test]
+    fn a_mail_whose_first_word_is_correction_carries_the_label() {
+        for text in [
+            "correction the edit card is ask 6893, not 6891",
+            "Correction: the card is ask 6893",
+            "  CORRECTION - ask 6893",
+        ] {
+            assert!(correction(text), "{text:?}");
+        }
+        for text in [
+            "",
+            "the edit card is ask 6893",
+            "correctional facilities",
+            "a correction follows",
+        ] {
+            assert!(!correction(text), "{text:?}");
+        }
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.conversation(
+            "yardmaster",
+            vec![
+                letter(12, "yardmaster", "jo", "the card is ask 6891"),
+                letter(13, "yardmaster", "jo", "correction the card is ask 6893"),
+            ],
+        );
+        let corrections: Vec<bool> = m.entries().into_iter().map(|e| e.correction).collect();
+        assert_eq!(corrections, [false, true]);
+    }
+
+    #[test]
+    fn the_header_says_what_a_crew_member_does_and_nothing_for_anyone_else() {
+        let (m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(m.crew_state("yardmaster"), Some("working"));
+        assert_eq!(m.crew_state("assembly"), Some("idle"));
+        assert_eq!(m.crew_state("jo"), None);
+        assert_eq!(m.crew_state("clerk@north"), None);
+        assert_eq!(m.crew_state("nobody"), None);
     }
 
     /// A yard whose yardmaster wrote `texts` to jo, with the asks given

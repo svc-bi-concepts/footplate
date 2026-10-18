@@ -18,7 +18,8 @@ use crate::yard::Env;
 /// the conversation with the yardmaster, chat with the sidebar's groups
 /// full: crew working and stopped, a linked yard's people, this yard's
 /// people, and unread notices, a long wrapped thread with an
-/// image, an open decision card of a plain
+/// image, a long conversation over three days, grouped by sender, with
+/// short links and a correction, an open decision card of a plain
 /// ask, that card with one of jo's beads changed, so Lines carries its
 /// badge, an open card of a run ask,
 /// a yard that is stopped, a yard at an
@@ -66,6 +67,7 @@ pub const STATES: &[&str] = &[
     "yardmaster",
     "crew",
     "thread",
+    "column",
     "plain",
     "lines",
     "run",
@@ -845,6 +847,62 @@ fn populate(yard: &Yard, state: &str) {
                      "text": "The three screenshots from the builder's note: the editor with the override typed in and the reset button, the list and header after saving, and after reset.",
                      "files": [{"hash": IMAGE_HASH, "type": "image/png",
                                 "bytes": IMAGE.len()}],
+                     "read": true},
+                ]})
+                .to_string(),
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        }
+        "column" => {
+            // A long conversation over three days, grouped by sender, with
+            // a call link, a calendar link and a correction: the shot shows
+            // the reading column, the grouping, the separators and the
+            // short links. The days count back from today, so the
+            // separators read Today, Yesterday and the weekday.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            let zone = chrono::Local::now().format("%:z").to_string();
+            let day = |ago: i64, at: &str| {
+                let date = chrono::Local::now().date_naive() - chrono::Duration::days(ago);
+                format!("{date}T{at}{zone}")
+            };
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": day(2, "20:14:00"), "from": "yardmaster", "to": "jo",
+                     "text": "The evening's work is shaped: three beads, one question each.",
+                     "read": true},
+                    {"seq": 13, "at": day(2, "20:16:00"), "from": "yardmaster", "to": "jo",
+                     "text": "The first is ready to land.",
+                     "read": true},
+                    {"seq": 14, "at": day(2, "20:17:00"), "from": "jo", "to": "yardmaster",
+                     "text": "here's the teams link for the video call: https://teams.microsoft.com/l/meetup-join/19%3ameeting_N2Q4YzQefBDwL/0?context=chat",
+                     "read": true},
+                    {"seq": 15, "at": day(2, "20:19:00"), "from": "yardmaster", "to": "jo",
+                     "text": "I'll put it on the event as its location.",
+                     "read": true},
+                    {"seq": 16, "at": day(2, "20:21:00"), "from": "yardmaster", "to": "jo",
+                     "text": "correction the edit card is ask 6893, not 6891",
+                     "read": true},
+                    {"seq": 17, "at": day(1, "09:30:00"), "from": "jo", "to": "yardmaster",
+                     "text": "applied the docs pack",
+                     "read": true},
+                    {"seq": 18, "at": day(1, "09:33:00"), "from": "yardmaster", "to": "jo",
+                     "text": "Thanks, google-docs now has replace. The invite moved: https://calendar.google.com/calendar/event?action=TEMPLATE&tmeid=abc123&dates=20261019",
+                     "read": true},
+                    {"seq": 19, "at": day(1, "09:35:00"), "from": "yardmaster", "to": "jo",
+                     "text": "Once you approve the grant I read it and make the edits.",
+                     "read": true},
+                    {"seq": 20, "at": day(0, "08:05:00"), "from": "jo", "to": "yardmaster",
+                     "text": "approved",
+                     "read": true},
+                    {"seq": 21, "at": day(0, "08:07:00"), "from": "yardmaster", "to": "jo",
+                     "text": "Done: the Teams link is on Monday's call with Liana, as the location and in the description.",
+                     "read": true},
+                    {"seq": 22, "at": day(0, "08:09:00"), "from": "yardmaster", "to": "jo",
+                     "text": "The second lands behind it.",
                      "read": true},
                 ]})
                 .to_string(),
@@ -1631,6 +1689,16 @@ mod tests {
                     assert_eq!(letters[1].from, "jo", "{state}");
                     assert_eq!(letters[6].files.len(), 1, "{state}");
                     assert!(crate::model::is_image(&letters[6].files[0]), "{state}");
+                }
+                "column" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    // Eleven mails over three days, grouped by sender,
+                    // with a call link, a calendar link and a correction.
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 11, "{state}");
+                    assert!(letters[2].text.contains("teams.microsoft.com"), "{state}");
+                    assert!(letters[6].text.contains("calendar.google.com"), "{state}");
+                    assert!(letters[4].text.starts_with("correction"), "{state}");
                 }
                 "mail" | "image" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

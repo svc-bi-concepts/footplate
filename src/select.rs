@@ -17,16 +17,17 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity,
-    FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, SharedString, Style, StyledText, TextLayout, TextRun, TextStyle, TextStyleRefinement,
-    UnderlineStyle, Window, fill, point, px, rems, size,
+    AnyTooltip, AnyView, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, Element, ElementId, Entity, FontStyle, FontWeight, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Style,
+    Styled, StyledText, TextLayout, TextRun, TextStyle, TextStyleRefinement, UnderlineStyle,
+    Window, div, fill, point, px, rems, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::input::next_boundary;
-use crate::markdown::{self, Block, Kind};
+use crate::markdown::{self, Block, Kind, Marks};
 use crate::theme::Palette;
 
 /// What is selected in the talk, if anything is.
@@ -280,6 +281,105 @@ pub fn links(text: &str) -> Vec<Range<usize>> {
     links
 }
 
+/// A link as it is drawn: `from` is where the full link stands in the
+/// block's text, `shown` where its form stands in what gpui lays out,
+/// and `url` what a click opens. A long link's form is its short one,
+/// and the tooltip names it whole; a short link draws as written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShownLink {
+    from: Range<usize>,
+    shown: Range<usize>,
+    url: SharedString,
+    /// Whether the link draws in its short form: only then does the
+    /// tooltip stand over it, since a short link already shows its
+    /// whole URL, and only then do its bounds round out to it.
+    short: bool,
+}
+
+/// What gpui lays out for the block's `text`, whose links are `links`:
+/// the text with every long link in its short form, and each link's
+/// spans in both. The spans stand in order, and never overlap.
+fn shrink(text: &str, links: &[Range<usize>]) -> (String, Vec<ShownLink>) {
+    let mut display = String::with_capacity(text.len());
+    let mut shown = Vec::with_capacity(links.len());
+    let mut at = 0;
+    for link in links {
+        display.push_str(&text[at..link.start]);
+        let url = &text[link.clone()];
+        let short = markdown::short_link(url);
+        let start = display.len();
+        display.push_str(&short);
+        shown.push(ShownLink {
+            from: link.clone(),
+            shown: start..display.len(),
+            short: short != url,
+            url: url.to_string().into(),
+        });
+        at = link.end;
+    }
+    display.push_str(&text[at..]);
+    (display, shown)
+}
+
+/// Where the display boundary `at` stands in the block's text. Inside
+/// a shortened link at its start, and at its end where the boundary is
+/// the link's end, so that selecting the short form selects the whole
+/// link. Everywhere else the shift the shorter links before it made.
+fn to_src(links: &[ShownLink], at: usize) -> usize {
+    for link in links {
+        // Ahead of the link, or in one that draws whole: the shift the
+        // shorter links before it made.
+        if at <= link.shown.start || !link.short && at < link.shown.end {
+            return at + (link.from.start - link.shown.start);
+        }
+        // In a shortened link at its start, and at its end on its end.
+        if at < link.shown.end {
+            return link.from.start;
+        }
+        if at == link.shown.end {
+            return link.from.end;
+        }
+    }
+    match links.last() {
+        Some(link) => at + (link.from.end - link.shown.end),
+        None => at,
+    }
+}
+
+/// Where the block-text range stands in what is drawn. A bound inside
+/// a shortened link rounds out to the link's short form, so that what
+/// is selected of a link highlights it whole. References never stand
+/// inside a link, so theirs only shift.
+fn to_display(links: &[ShownLink], range: Range<usize>) -> Range<usize> {
+    // The shift before the link `at` stands ahead of: what the
+    // shorter links before it took.
+    let shift = |at: usize| {
+        links.iter().find(|link| at < link.from.end).map_or_else(
+            || {
+                links
+                    .last()
+                    .map_or(0, |link| link.from.end - link.shown.end)
+            },
+            |link| link.from.start - link.shown.start,
+        )
+    };
+    let start = match links
+        .iter()
+        .find(|link| link.short && link.from.start <= range.start && range.start < link.from.end)
+    {
+        Some(link) => link.shown.start,
+        None => range.start - shift(range.start),
+    };
+    let end = match links
+        .iter()
+        .find(|link| link.short && link.from.start < range.end && range.end <= link.from.end)
+    {
+        Some(link) => link.shown.end,
+        None => range.end - shift(range.end),
+    };
+    start..end
+}
+
 /// What opening a resolved reference shows: an ask's card, or a bead
 /// whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -530,10 +630,13 @@ fn index_at(layout: &TextLayout, text: &str, position: Point<Pixels>) -> usize {
 /// A block of a text, as it is drawn.
 struct Shown {
     block: Block,
-    /// The block's text, as gpui takes it, and the links in it.
-    text: SharedString,
-    links: Vec<Range<usize>>,
-    /// The resolved references in it, each with what opening it shows.
+    /// What gpui lays out: the block's text with every long link in its
+    /// short form.
+    display: SharedString,
+    /// The links in both, each with the URL a click opens.
+    links: Vec<ShownLink>,
+    /// The resolved references in what is drawn, each with what opening
+    /// it shows.
     refs: Vec<(Range<usize>, RefTarget)>,
     /// An exact copy payload for a code block whose displayed form was
     /// sanitized before it reached the markdown reader.
@@ -588,20 +691,23 @@ fn text_inner(
     let blocks = markdown::blocks(&text)
         .into_iter()
         .enumerate()
-        .map(|(ix, block)| Shown {
-            copy_override: if block.kind == Kind::Code {
-                code_copy.take()
-            } else {
-                None
-            },
-            text: block.text.clone().into(),
-            links: links(&block.text),
-            refs: refs
-                .iter()
-                .filter(|span| span.block == ix)
-                .map(|span| (span.range.clone(), span.target.clone()))
-                .collect(),
-            block,
+        .map(|(ix, block)| {
+            let (display, links) = shrink(&block.text, &links(&block.text));
+            Shown {
+                copy_override: if block.kind == Kind::Code {
+                    code_copy.take()
+                } else {
+                    None
+                },
+                display: display.into(),
+                refs: refs
+                    .iter()
+                    .filter(|span| span.block == ix)
+                    .map(|span| (to_display(&links, span.range.clone()), span.target.clone()))
+                    .collect(),
+                links,
+                block,
+            }
         })
         .collect();
     Text {
@@ -610,6 +716,7 @@ fn text_inner(
         blocks,
         on_ref,
         selection: selection.clone(),
+        tip: None,
     }
 }
 
@@ -697,25 +804,36 @@ fn face(kind: &Kind, base: &TextStyle, mono: Option<&SharedString>, rem: Pixels)
     face
 }
 
-/// The runs `block` is drawn in, in the face `face` of its kind: bold,
-/// italic and inline code as its marks say, with a quiet ground under the
-/// code; a link as one; a reference as a chip, in the code's face on its
-/// ground but in the accent, with no underline; and `selected` of it on
-/// the selection's ground. A selection may begin or end inside a link or
-/// a mark: the runs do not overlap.
+/// The runs `shown` is drawn in, in the face `face` of its kind:
+/// bold, italic and inline code as its marks say, with a quiet ground
+/// under the code; a link as one; a reference as a chip, in the code's
+/// face on its ground but in the accent, with no underline; and
+/// `selected` of it on the selection's ground. `selected` stands in
+/// the text as it was written, as the selection keeps it; every other
+/// range stands in what gpui lays out, the long links shortened. A
+/// selection may begin or end inside a link or a mark: the runs do not
+/// overlap.
 fn runs(
-    block: &Block,
+    shown: &Shown,
     face: &TextStyle,
     palette: &Palette,
     mono: Option<&SharedString>,
-    links: &[Range<usize>],
     refs: &[Range<usize>],
     selected: Option<Range<usize>>,
 ) -> Vec<TextRun> {
-    let selected = selected.filter(|selected| !selected.is_empty());
-    let mut cuts = vec![0, block.text.len()];
-    let marked = block.marks.iter().map(|(range, _)| range);
-    for range in marked.chain(links).chain(refs).chain(&selected) {
+    let block = &shown.block;
+    let selected = selected
+        .map(|selected| to_display(&shown.links, block.shown(selected)))
+        .filter(|selected| !selected.is_empty());
+    let marks: Vec<(Range<usize>, Marks)> = block
+        .marks
+        .iter()
+        .map(|(range, marks)| (to_display(&shown.links, range.clone()), *marks))
+        .collect();
+    let links: Vec<Range<usize>> = shown.links.iter().map(|link| link.shown.clone()).collect();
+    let mut cuts = vec![0, shown.display.len()];
+    let marked = marks.iter().map(|(range, _)| range);
+    for range in marked.chain(&links).chain(refs).chain(&selected) {
         cuts.extend([range.start, range.end]);
     }
     cuts.sort_unstable();
@@ -725,7 +843,7 @@ fn runs(
     for cut in cuts.windows(2) {
         let (start, end) = (cut[0], cut[1]);
         let mut run = face.to_run(end - start);
-        if let Some((_, marks)) = block.marks.iter().find(|(range, _)| within(range, start)) {
+        if let Some((_, marks)) = marks.iter().find(|(range, _)| within(range, start)) {
             if marks.bold {
                 run.font.weight = FontWeight::BOLD;
             }
@@ -851,14 +969,29 @@ impl Drawn {
     }
 
     /// Where in the text as it was written the pointer is: a place, with
-    /// the marks that stand there and are not drawn.
+    /// the marks that stand there and are not drawn. A shortened link's
+    /// short form stands for the whole link.
     fn place_at(&self, position: Point<Pixels>) -> Range<usize> {
         let Some(ix) = self.block_at(position) else {
             return 0..0;
         };
         let shown = &self.blocks[ix];
-        let index = index_at(&self.layouts[ix], &shown.text, position);
-        shown.block.source_at(index)
+        let index = index_at(&self.layouts[ix], &shown.display, position);
+        shown.block.source_at(to_src(&shown.links, index))
+    }
+
+    /// The full link under the pointer, where it draws shortened:
+    /// what the tooltip names. The character under the pointer counts
+    /// here, not the closest boundary.
+    fn short_link_at(&self, position: Point<Pixels>) -> Option<SharedString> {
+        let ix = self.block_at(position)?;
+        let shown = &self.blocks[ix];
+        let index = self.layouts[ix].index_for_position(position).ok()?;
+        shown
+            .links
+            .iter()
+            .find(|link| link.short && link.shown.contains(&index))
+            .map(|link| link.url.clone())
     }
 
     /// The link or reference the pointer is over: the character under
@@ -867,8 +1000,8 @@ impl Drawn {
         let ix = self.block_at(position)?;
         let shown = &self.blocks[ix];
         let index = self.layouts[ix].index_for_position(position).ok()?;
-        if let Some(link) = shown.links.iter().find(|link| link.contains(&index)) {
-            return Some(Clicked::Link(shown.text[link.clone()].to_string().into()));
+        if let Some(link) = shown.links.iter().find(|link| link.shown.contains(&index)) {
+            return Some(Clicked::Link(link.url.clone()));
         }
         shown
             .refs
@@ -894,6 +1027,28 @@ impl Drawn {
     }
 }
 
+/// The full link under the pointer, where it draws shortened: one
+/// line in the tooltip's own style, wrapped where it runs longer than
+/// the tooltip may.
+struct LinkTip(SharedString);
+
+impl Render for LinkTip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::now(window, cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.ground)
+            .text_sm()
+            .text_color(palette.text)
+            .max_w(rems(30.))
+            .child(self.0.clone())
+    }
+}
+
 pub struct Text {
     key: u64,
     /// The text as it was written: what is selected is a stretch of this.
@@ -901,6 +1056,9 @@ pub struct Text {
     blocks: Rc<[Shown]>,
     on_ref: Option<RefClick>,
     selection: Entity<Selection>,
+    /// The tooltip of the link under the pointer, by its URL: made once,
+    /// and shown while the pointer stays over that link.
+    tip: Option<(SharedString, AnyView)>,
 }
 
 /// A block of a text where it is laid out.
@@ -918,6 +1076,27 @@ impl IntoElement for Text {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+impl Text {
+    /// The blocks where they are drawn: what the mouse goes by.
+    fn drawn(&self, laid: &[Laid], rem: Pixels) -> Drawn {
+        Drawn {
+            blocks: self.blocks.clone(),
+            layouts: laid
+                .iter()
+                .map(|laid| laid.styled.layout().clone())
+                .collect(),
+            frames: laid.iter().map(|laid| laid.bounds).collect(),
+            chips: laid
+                .iter()
+                .zip(self.blocks.iter())
+                .enumerate()
+                .filter(|(_, (_, shown))| shown.block.kind == Kind::Code)
+                .map(|(ix, (laid, _))| (ix, copy_chip(laid.bounds, rem)))
+                .collect(),
+        }
     }
 }
 
@@ -948,19 +1127,17 @@ impl Element for Text {
         for shown in self.blocks.iter() {
             let block = &shown.block;
             let face = face(&block.kind, &base, mono.as_ref(), rem);
-            let selected = selected.clone().map(|selected| block.shown(selected));
             let refs: Vec<Range<usize>> =
                 shown.refs.iter().map(|(range, _)| range.clone()).collect();
             let runs = runs(
-                block,
+                shown,
                 &face,
                 &palette,
                 mono.as_ref(),
-                &shown.links,
                 &refs,
-                selected,
+                selected.clone(),
             );
-            let mut styled = StyledText::new(shown.text.clone()).with_runs(runs);
+            let mut styled = StyledText::new(shown.display.clone()).with_runs(runs);
             // gpui takes the size of the lines from the window, not from
             // the runs.
             let size = TextStyleRefinement {
@@ -997,7 +1174,39 @@ impl Element for Text {
             laid.styled.prepaint(None, None, text, &mut (), window, cx);
             laid.bounds = window.layout_bounds(laid.frame);
         }
-        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        // The full link under the pointer, where it draws shortened.
+        // Asked here and not when painting: the window takes tooltips
+        // in prepaint alone.
+        let drawn = self.drawn(laid, window.rem_size());
+        let selecting = self.selection.read(cx).selecting(self.key);
+        if !selecting
+            && let Some(url) = hitbox
+                .is_hovered(window)
+                .then(|| drawn.short_link_at(window.mouse_position()))
+                .flatten()
+        {
+            let view = match &self.tip {
+                Some((at, view)) if at == &url => view.clone(),
+                _ => {
+                    let view: AnyView = cx.new(|_| LinkTip(url.clone())).into();
+                    self.tip = Some((url.clone(), view.clone()));
+                    view
+                }
+            };
+            let (drawn, hitbox) = (drawn.clone(), hitbox.clone());
+            window.set_tooltip(AnyTooltip {
+                view,
+                mouse_position: window.mouse_position(),
+                check_visible_and_update: Rc::new(move |_, window, _| {
+                    hitbox.is_hovered(window)
+                        && drawn
+                            .short_link_at(window.mouse_position())
+                            .is_some_and(|at| at == url)
+                }),
+            });
+        }
+        hitbox
     }
 
     fn paint(
@@ -1023,21 +1232,7 @@ impl Element for Text {
                 .text_system()
                 .shape_line(text.into(), size, &[run], None)
         };
-        let drawn = Drawn {
-            blocks: self.blocks.clone(),
-            layouts: laid
-                .iter()
-                .map(|laid| laid.styled.layout().clone())
-                .collect(),
-            frames: laid.iter().map(|laid| laid.bounds).collect(),
-            chips: laid
-                .iter()
-                .zip(self.blocks.iter())
-                .enumerate()
-                .filter(|(_, (_, shown))| shown.block.kind == Kind::Code)
-                .map(|(ix, (laid, _))| (ix, copy_chip(laid.bounds, rem)))
-                .collect(),
-        };
+        let drawn = self.drawn(laid, rem);
         // Where the copy controls stand, for clicks anywhere in the talk:
         // a click on one copies and selects nothing, in any text.
         self.selection.update(cx, |selection, _| {
@@ -1049,7 +1244,7 @@ impl Element for Text {
             match &shown.block.kind {
                 Kind::Code => {
                     window.paint_quad(fill(laid.bounds, palette.code).corner_radii(rem * 0.25));
-                    let rows = wrapped_rows(&layout, &shown.text);
+                    let rows = wrapped_rows(&layout, &shown.display);
                     if !rows.is_empty() {
                         let mark = beside(WRAPPED, palette.faint, window);
                         let left = text.left() - (rem * CODE_LEFT + mark.width) / 2.;
@@ -1273,23 +1468,40 @@ mod tests {
         drawn_refs(text, selected, &[])
     }
 
+    /// The block as it is drawn, with no resolved references.
+    fn shown_block(block: Block) -> Shown {
+        let (display, links) = shrink(&block.text, &links(&block.text));
+        Shown {
+            block,
+            display: display.into(),
+            links,
+            refs: Vec::new(),
+            copy_override: None,
+        }
+    }
+
+    /// The one block of `text` as it is drawn, with no resolved
+    /// references.
+    fn shown_of(text: &str) -> Shown {
+        shown_block(one(text))
+    }
+
     /// The runs of the one block of `text` with resolved references at
-    /// `refs`, as (what is drawn, the run).
+    /// `refs`, as (what is drawn, the run). `selected` stands in the
+    /// text as it was written, as the selection keeps it.
     fn drawn_refs(
         text: &str,
         selected: Option<Range<usize>>,
         refs: &[Range<usize>],
     ) -> Vec<(String, TextRun)> {
-        let block = one(text);
+        let shown = shown_of(text);
         let (base, mono) = (base(), mono_face());
-        let face = face(&block.kind, &base, Some(&mono), px(16.));
-        let links = links(&block.text);
-        let selected = selected.map(|selected| block.shown(selected));
+        let face = face(&shown.block.kind, &base, Some(&mono), px(16.));
         let mut at = 0;
-        runs(&block, &face, &dark(), Some(&mono), &links, refs, selected)
+        runs(&shown, &face, &dark(), Some(&mono), refs, selected)
             .into_iter()
             .map(|run| {
-                let words = block.text[at..at + run.len].to_string();
+                let words = shown.display[at..at + run.len].to_string();
                 at += run.len;
                 (words, run)
             })
@@ -1299,7 +1511,9 @@ mod tests {
     #[test]
     fn a_text_without_a_mark_has_the_runs_it_had_before_there_were_marks() {
         let text = "see https://example.org/a now";
-        let (block, base, palette) = (one(text), base(), dark());
+        let (base, palette) = (base(), dark());
+        let shown = shown_of(text);
+        let block = &shown.block;
         assert_eq!((&block.kind, block.text.as_str()), (&Kind::Text, text));
         let face = face(&block.kind, &base, Some(&mono_face()), px(16.));
         assert_eq!(face, base);
@@ -1334,7 +1548,7 @@ mod tests {
             }
             runs
         };
-        let now = |selected| runs(&block, &face, &palette, None, &links(text), &[], selected);
+        let now = |selected| runs(&shown, &face, &palette, None, &[], selected);
 
         assert_eq!(now(None), before(vec![(4..25, link)]));
         assert_eq!(now(None).len(), 3);
@@ -1345,13 +1559,14 @@ mod tests {
         );
         assert_eq!(now(Some(2..10)).len(), 5);
         // Nothing in it: one run, the text's own.
-        let plain = one("Land it today.");
+        let plain = shown_of("Land it today.");
         assert_eq!(
-            runs(&plain, &base, &palette, None, &[], &[], None),
+            runs(&plain, &base, &palette, None, &[], None),
             [base.to_run(14)]
         );
+        let empty = shown_of("");
         assert_eq!(
-            runs(&one(""), &base, &palette, None, &[], &[], None),
+            runs(&empty, &base, &palette, None, &[], None),
             [base.to_run(0)]
         );
     }
@@ -1364,7 +1579,8 @@ mod tests {
         // A block: the face is the block's, and its ground is drawn under
         // all of it, not under each run.
         let mut blocks = markdown::blocks("Run:\n```sh\n  ls -la\n1. kept\n```");
-        let code = blocks.remove(1);
+        let shown = shown_block(blocks.remove(1));
+        let code = &shown.block;
         assert_eq!(
             (&code.kind, code.text.as_str()),
             (&Kind::Code, "  ls -la\n1. kept")
@@ -1373,13 +1589,13 @@ mod tests {
         assert_eq!(face.font_family, mono);
         assert_eq!(face.font_size, base.font_size);
         assert_eq!(face.font_weight, base.font_weight);
-        let all = runs(&code, &face, &palette, Some(&mono), &[], &[], None);
+        let all = runs(&shown, &face, &palette, Some(&mono), &[], None);
         assert_eq!(all, [face.to_run(code.text.len())]);
         assert_eq!(
             (&all[0].font.family, all[0].background_color),
             (&mono, None)
         );
-        let inside = frame(&code, Some(&Kind::Text)).padding;
+        let inside = frame(code, Some(&Kind::Text)).padding;
         assert_eq!(inside.left, rems(CODE_LEFT).into());
         assert_eq!(inside.top, rems(CODE_ABOVE).into());
 
@@ -1395,8 +1611,8 @@ mod tests {
         assert_eq!(all[2].1, base.to_run(4));
 
         // A machine without one of the faces has the ground alone.
-        let block = one("run `yardr prime` now");
-        let all = runs(&block, &base, &palette, None, &[], &[], None);
+        let shown = shown_of("run `yardr prime` now");
+        let all = runs(&shown, &base, &palette, None, &[], None);
         assert_eq!(all[1].font, base.to_run(0).font);
         assert_eq!(all[1].background_color, quiet);
     }
@@ -1417,12 +1633,13 @@ mod tests {
         let (base, mono) = (base(), mono_face());
         let mut larger = Vec::new();
         for (text, level) in [("# One", 1), ("## Two", 2), ("### Three", 3)] {
-            let block = one(text);
+            let shown = shown_of(text);
+            let block = &shown.block;
             assert_eq!(block.kind, Kind::Heading(level));
             let face = face(&block.kind, &base, Some(&mono), px(16.));
             assert_eq!(face.font_weight, FontWeight::BOLD);
             assert_eq!(face.font_family, base.font_family);
-            let all = runs(&block, &face, &dark(), Some(&mono), &[], &[], None);
+            let all = runs(&shown, &face, &dark(), Some(&mono), &[], None);
             assert_eq!(all, [face.to_run(block.text.len())]);
             assert_eq!(all[0].font.weight, FontWeight::BOLD);
             larger.push(face.font_size.to_pixels(px(16.)));
@@ -1616,6 +1833,97 @@ mod tests {
         // The scheme alone names nothing.
         assert!(linked("https:// and (http://).").is_empty());
         assert_eq!(linked("httpx http://a.example"), ["http://a.example"]);
+    }
+
+    /// A long link for the shortening: past the length that draws whole.
+    const LONG: &str =
+        "https://teams.microsoft.com/l/meetup-join/19%3ameeting_N2Q4YzQefBDwL/0?context=chat";
+
+    #[test]
+    fn a_long_link_draws_short_and_maps_to_the_whole_link() {
+        let text = format!("call: {LONG} now");
+        let (display, spans) = shrink(&text, &links(&text));
+        assert_eq!(spans.len(), 1);
+        let link = &spans[0];
+        assert_eq!(&text[link.from.clone()], LONG);
+        assert_eq!(&display[link.shown.clone()], markdown::short_link(LONG));
+        assert_eq!(link.url.as_ref(), LONG);
+        assert!(link.short);
+        assert_eq!(display, format!("call: {} now", markdown::short_link(LONG)));
+        // A short link draws as written, and carries no tooltip.
+        let text = "see https://example.org/a now";
+        let (display, spans) = shrink(text, &links(text));
+        assert_eq!(display, text);
+        assert_eq!(spans.len(), 1);
+        assert!(!spans[0].short);
+        // None at all: the text draws as it is.
+        let (display, spans) = shrink("no link in this", &[]);
+        assert_eq!(display, "no link in this");
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn display_and_text_boundaries_map_past_shortened_links() {
+        let text = format!("call: {LONG} now, and https://example.org/a too");
+        let (display, spans) = shrink(&text, &links(&text));
+        assert_eq!(spans.len(), 2);
+        let short = &spans[0];
+        assert!(short.short);
+        let plain = &spans[1];
+        assert!(!plain.short);
+        // Before the short link the two stand alike.
+        assert_eq!(to_src(&spans, 0), 0);
+        assert_eq!(to_src(&spans, short.shown.start), short.from.start);
+        // Inside its short form at its start, and at its end on its end:
+        // selecting the short form selects the whole link.
+        assert_eq!(to_src(&spans, short.shown.start + 1), short.from.start);
+        assert_eq!(to_src(&spans, short.shown.end - 1), short.from.start);
+        assert_eq!(to_src(&spans, short.shown.end), short.from.end);
+        // Past it the shift it made, and the short link after it stands
+        // whole in both.
+        let after = short.shown.end + 1;
+        assert_eq!(
+            &display[after..after + 1],
+            &text[to_src(&spans, after)..][..1]
+        );
+        assert_eq!(to_src(&spans, plain.shown.start), plain.from.start);
+        assert_eq!(to_src(&spans, plain.shown.end), plain.from.end);
+        assert_eq!(to_src(&spans, display.len()), text.len());
+        // Inside a link that draws whole the same character, shifted
+        // past the shortened one.
+        assert_eq!(to_src(&spans, plain.shown.start + 1), plain.from.start + 1);
+        assert_eq!(
+            to_display(&spans, plain.from.start + 1..plain.from.end - 1),
+            plain.shown.start + 1..plain.shown.end - 1
+        );
+        // The other way: a bound inside the long link rounds out to its
+        // short form, and every other bound only shifts.
+        assert_eq!(to_display(&spans, short.from.clone()), short.shown.clone());
+        assert_eq!(
+            to_display(&spans, short.from.start + 1..short.from.end - 1),
+            short.shown.clone()
+        );
+        assert_eq!(
+            to_display(&spans, 0..short.from.start),
+            0..short.shown.start
+        );
+        assert_eq!(to_display(&spans, plain.from.clone()), plain.shown.clone());
+        assert_eq!(
+            to_display(&spans, text.len()..text.len()),
+            display.len()..display.len()
+        );
+        // A round trip past the links stands where it began.
+        for at in [
+            0,
+            short.from.start,
+            short.from.end,
+            plain.from.start,
+            text.len(),
+        ] {
+            let there = to_display(&spans, at..at);
+            assert_eq!(there.start, there.end);
+            assert_eq!(to_src(&spans, there.start), at, "{at}");
+        }
     }
 
     /// What `refs` names in `text`: each where it stands, with what it is.

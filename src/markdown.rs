@@ -310,6 +310,43 @@ fn item(line: &str) -> Option<(usize, Range<usize>, usize)> {
         .then(|| (indent, indent..indent + marker, line.len() - words.len()))
 }
 
+/// A link this long or shorter is drawn as it was written. A longer
+/// one draws shortened, as [`short_link`] has it: raw calendar and call
+/// links run to two lines in the reading column, and the shortened form
+/// stays on one.
+const LONG_LINK: usize = 60;
+
+/// The last characters of a shortened link's path: its end, after the
+/// ellipsis.
+const LINK_TAIL: usize = 24;
+
+/// How a link is drawn: a short one as it was written, and a longer one
+/// as its domain and the end of its path, the scheme gone
+/// (`teams.microsoft.com/…QefBDwL`). The end is the last characters of
+/// whatever follows the host, the query and the fragment included. The
+/// full link still opens on a click, and stands in the tooltip.
+pub fn short_link(url: &str) -> String {
+    if url.len() <= LONG_LINK {
+        return url.to_string();
+    }
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return url.to_string();
+    };
+    let (host, path) = match rest.find('/') {
+        Some(at) => rest.split_at(at),
+        None => return rest.to_string(),
+    };
+    let chars = path.chars().count();
+    if chars <= LINK_TAIL + 1 {
+        return rest.to_string();
+    }
+    let tail: String = path.chars().skip(chars - LINK_TAIL).collect();
+    format!("{host}/…{}", tail.trim_start_matches('/'))
+}
+
 /// The blocks `text` is drawn as, from top to bottom. A text without a mark
 /// is one block with the text as it is.
 pub fn blocks(text: &str) -> Vec<Block> {
@@ -671,6 +708,43 @@ mod tests {
         );
         // Emphasis does not go over a line break.
         untouched("*one\ntwo*");
+    }
+
+    #[test]
+    fn a_long_link_draws_as_its_domain_and_the_end_of_its_path() {
+        // A short link draws as it was written, the scheme included.
+        assert_eq!(short_link("https://example.org/a"), "https://example.org/a");
+        assert_eq!(short_link("http://a.example"), "http://a.example");
+        let sixty = format!("https://example.org/{}", "a".repeat(40));
+        assert_eq!(sixty.len(), 60);
+        assert_eq!(short_link(&sixty), sixty);
+        // A longer one draws as its domain and the end of its path, the
+        // scheme gone.
+        let long = format!("https://example.org/{}", "a".repeat(41));
+        assert_eq!(
+            short_link(&long),
+            format!("example.org/…{}", "a".repeat(24))
+        );
+        // The end is the last characters of whatever follows the host: a
+        // call link keeps its id, a calendar link its query.
+        assert_eq!(
+            short_link(
+                "https://teams.microsoft.com/l/meetup-join/19%3ameeting_N2Q4YzQefBDwL/0?context=chat"
+            ),
+            "teams.microsoft.com/…YzQefBDwL/0?context=chat"
+        );
+        assert_eq!(
+            short_link(
+                "https://calendar.google.com/calendar/event?action=TEMPLATE&tmeid=abc123&dates=20261019"
+            ),
+            "calendar.google.com/…id=abc123&dates=20261019"
+        );
+        // A long host with no path, or with a short one, loses the scheme
+        // alone.
+        let host = format!("https://{}.example.org", "a".repeat(50));
+        assert_eq!(short_link(&host), host.trim_start_matches("https://"));
+        // What is no link draws as it was written.
+        assert_eq!(short_link("ftp://example.org/a"), "ftp://example.org/a");
     }
 
     #[test]

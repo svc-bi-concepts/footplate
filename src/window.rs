@@ -11000,6 +11000,18 @@ impl Footplate {
             .w_full()
             .flex()
             .flex_col()
+            // A correction carries its label above its text, so it reads
+            // as no new thought.
+            .when(entry.correction, |el| {
+                el.child(
+                    div()
+                        .ml_4()
+                        .debug_selector(|| format!("correction {seq}"))
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child("correction"),
+                )
+            })
             .when(!entry.text.is_empty(), |el| {
                 // The margin is outside the text's bounds, so that these
                 // are where the text is.
@@ -11216,8 +11228,23 @@ impl Footplate {
             .flex_col()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(with.to_string()),
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(with.to_string()),
+                    )
+                    // What the agent is doing, beside its name, so the
+                    // reader looks no further than the header. People and
+                    // a linked yard's people have no state.
+                    .children(model.crew_state(with).map(|state| {
+                        div()
+                            .debug_selector(|| "conversation state".to_string())
+                            .text_color(palette.faint)
+                            .child(format!("· {state}"))
+                    })),
             )
             .children(about.into_iter().enumerate().map(|(i, line)| {
                 // The first says who that is; what follows keeps mail from
@@ -15158,6 +15185,59 @@ mod tests {
             selected(&view, cx).as_deref(),
             Some("https://example.org/a")
         );
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_shortened_link_opens_the_whole_link(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let url =
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_N2Q4YzQefBDwL/0?context=chat";
+        let mail = format!("call: {url} now");
+        mails(&yard, &[&mail]);
+        let (view, cx) = opened(&yard, &[&mail], cx);
+        // The link draws in its short form: the pointer goes by what is
+        // drawn.
+        let shown = format!("call: {} now", crate::markdown::short_link(url));
+        assert!(shown.len() < mail.len());
+
+        // A click on the short form opens the whole link, and selects
+        // nothing.
+        click(cx, 12, &shown, 8, 1.);
+        assert_eq!(cx.opened_url().as_deref(), Some(url));
+        assert_eq!(selected(&view, cx), None);
+
+        // A drag over the short form selects the whole link to copy.
+        let (from, to) = (
+            place(cx, 12, &shown, 6, 1.),
+            place(cx, 12, &shown, shown.len() - 4, -1.),
+        );
+        drag(cx, from, to);
+        assert_eq!(selected(&view, cx).as_deref(), Some(url));
+        cx.simulate_keystrokes("secondary-c");
+        assert_eq!(clipboard(cx).as_deref(), Some(url));
+    }
+
+    #[gpui::test]
+    fn a_correction_carries_its_label_and_the_header_names_the_state(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(
+            &yard,
+            &["the grant is ready", "correction the grant is not ready"],
+        );
+        let (_, cx) = opened(
+            &yard,
+            &["the grant is ready", "correction the grant is not ready"],
+            cx,
+        );
+        // The correction carries its label above its text; the plain mail
+        // carries none.
+        assert!(!drawn(cx, "correction 12"));
+        assert!(drawn(cx, "correction 13"));
+        // The yardmaster idles in jo's yard: the header says so beside
+        // the name.
+        assert!(drawn(cx, "conversation state"));
     }
 
     #[gpui::test]
