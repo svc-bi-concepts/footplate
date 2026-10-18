@@ -49,6 +49,7 @@ fn invert(mark: &mut image::RgbaImage) {
 
 /// The mark's PNG for a light choice: the black mark turned white. Where
 /// black is drawn, the mark's own PNG is the answer, and none is made.
+#[cfg(any(target_os = "macos", test))]
 fn white() -> Result<Vec<u8>, String> {
     use image::ImageEncoder;
 
