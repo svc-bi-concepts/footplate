@@ -30,7 +30,8 @@
 # `hosted` (the first screen with the hosted way's fields open and
 # filled), `signedout` (the away screen of a hosted yard that is
 # signed out), `arrivals` (the arrivals board open on the arrivals
-# row), `arrival` (one arrival's bead open from the board), `flow`
+# row, with a late bead, a bead waiting on you and quiet lines),
+# `arrival` (one arrival's bead open from the board), `flow`
 # (yardr's line open on its flow), `secret` (an open card of a secret
 # ask, posed with a value typed and hidden), `secret-shown` (that
 # card where the yard marks the value no secret: typed and shown),

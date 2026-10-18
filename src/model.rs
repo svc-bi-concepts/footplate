@@ -151,6 +151,51 @@ fn line_transit_words(transit: usize) -> String {
     }
 }
 
+/// The remark where it is a late mark: `late`, or `late by <overrun>`
+/// where the yard prints the overrun. None for any other remark. The
+/// board draws the late mark under the ETA, in red, apart from the
+/// rest, which stay in the row.
+pub fn late_line(remark: &str) -> Option<&str> {
+    match remark == "late" || remark.starts_with("late by ") {
+        true => Some(remark),
+        false => None,
+    }
+}
+
+/// Whether the remark is a wait that names `me`: `waits for` with `me`
+/// among the comma-separated names. Nobody where `me` is empty.
+pub fn waits_on_you(remark: &str, me: &str) -> bool {
+    waits_names(remark).is_some_and(|names| !me.is_empty() && names.contains(&me))
+}
+
+/// The remark with `you` first among whom it waits for, where it waits
+/// for `me`: `waits for mckean, yardmaster` reads `waits for you,
+/// yardmaster`. Any other remark stands as the yard printed it.
+pub fn you_first(remark: &str, me: &str) -> String {
+    let Some(names) = waits_names(remark) else {
+        return remark.to_string();
+    };
+    if me.is_empty() || !names.contains(&me) {
+        return remark.to_string();
+    }
+    let others: Vec<&str> = names.into_iter().filter(|n| *n != me).collect();
+    match others.is_empty() {
+        true => "waits for you".to_string(),
+        false => format!("waits for you, {}", others.join(", ")),
+    }
+}
+
+/// The names a `waits for` remark waits on, None for any other remark.
+fn waits_names(remark: &str) -> Option<Vec<&str>> {
+    remark.strip_prefix("waits for ").map(|names| {
+        names
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .collect()
+    })
+}
+
 /// What a crew member's session does, in the words of `yardr chat`.
 pub fn state_of(member: &CrewMember) -> &'static str {
     match (member.state.as_str(), member.status.as_str()) {
@@ -360,6 +405,23 @@ pub struct DecidedRow {
 pub struct ArrivalGroup {
     pub platform: String,
     pub rows: Vec<Arrival>,
+}
+
+/// One bead's route, as the board's strip shows it: its flow's stages
+/// in travel order, each with whether a bead there waits on a person,
+/// and which one the bead stands at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Route {
+    pub stages: Vec<RouteStage>,
+    pub current: usize,
+}
+
+/// One stage of a route: the stage with whether its group is a manual
+/// one, whose turn is a person's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteStage {
+    pub name: String,
+    pub human: bool,
 }
 
 /// One arrival's bead whole, as the details pane shows it: what the
@@ -673,6 +735,8 @@ pub struct Model {
     decided: Vec<DecidedAsk>,
     /// Whether the folded "Decided" stands open.
     decided_expanded: bool,
+    /// Whether the timetable's quiet lines stand unfolded.
+    quiet_expanded: bool,
     /// One bead whole, by id, as the cards show it: read when a decision
     /// row opens, and again on every event whose bead is one shown.
     beads: HashMap<String, Bead>,
@@ -711,19 +775,21 @@ impl Model {
     /// the yard was lost, if any: it stays open when its row is still
     /// there. Else the mode's own default is.
     pub fn new(state: State, mode: Mode, selected: Option<Selected>) -> (Model, Vec<Effect>) {
-        Self::new_returning(state, mode, selected, false)
+        Self::new_returning(state, mode, selected, false, false)
     }
 
     /// The model of a state read when returning to a yard. The folded
-    /// "Decided" list must be open before `selected` is checked, since its
-    /// rows do not exist in the order while it is folded.
+    /// "Decided" list and the quiet lines must be open before `selected`
+    /// is checked, since their rows do not exist in the order while
+    /// folded.
     pub fn new_returning(
         state: State,
         mode: Mode,
         selected: Option<Selected>,
         decided_expanded: bool,
+        quiet_expanded: bool,
     ) -> (Model, Vec<Effect>) {
-        let mut m = Self::of(state, decided_expanded);
+        let mut m = Self::of(state, decided_expanded, quiet_expanded);
         m.mode = mode;
         m.selected = m.row_in(mode, selected);
         m.opened();
@@ -736,12 +802,12 @@ impl Model {
     pub fn new_aside(state: State) -> Model {
         Model {
             aside: true,
-            ..Self::of(state, false)
+            ..Self::of(state, false, false)
         }
     }
 
     /// What a state just read has, with no row open yet.
-    fn of(state: State, decided_expanded: bool) -> Model {
+    fn of(state: State, decided_expanded: bool, quiet_expanded: bool) -> Model {
         let mut m = Model {
             me: state.me,
             parties: parties(&state.peers),
@@ -756,6 +822,7 @@ impl Model {
             open: state.asks.open,
             decided: state.asks.decided,
             decided_expanded,
+            quiet_expanded,
             events_seen: state.head,
             ..Model::default()
         };
@@ -822,10 +889,12 @@ impl Model {
         mode: Mode,
         selected: Option<Selected>,
         decided_expanded: bool,
+        quiet_expanded: bool,
     ) -> Vec<Effect> {
         self.aside = false;
         self.mode = mode;
         self.decided_expanded |= decided_expanded;
+        self.quiet_expanded |= quiet_expanded;
         self.selected = self.row_in(mode, selected);
         self.opened();
         self.open()
@@ -1152,10 +1221,20 @@ impl Model {
                     self.flows
                         .depots
                         .iter()
+                        .filter(|depot| depot.travelling > 0)
                         .map(|depot| Selected::Line(depot.name.clone())),
                 );
                 if !self.flows.unassigned.is_empty() {
                     out.push(Selected::NoLine);
+                }
+                if self.quiet_expanded {
+                    out.extend(
+                        self.flows
+                            .depots
+                            .iter()
+                            .filter(|depot| depot.travelling == 0)
+                            .map(|depot| Selected::Line(depot.name.clone())),
+                    );
                 }
             }
         }
@@ -1328,6 +1407,15 @@ impl Model {
         self.decided_expanded = !self.decided_expanded;
     }
 
+    /// Whether the timetable's quiet lines stand unfolded.
+    pub fn quiet_expanded(&self) -> bool {
+        self.quiet_expanded
+    }
+
+    pub fn toggle_quiet(&mut self) {
+        self.quiet_expanded = !self.quiet_expanded;
+    }
+
     /// The arrivals board as read: the rows as served, ordered and
     /// remarked.
     pub fn arrival_rows(&self) -> &[Arrival] {
@@ -1366,6 +1454,67 @@ impl Model {
                 .unwrap_or(usize::MAX)
         });
         groups
+    }
+
+    /// One bead's route, as the board's strip shows it: the stages in
+    /// travel order of the served flow the bead stands in, with which
+    /// one it stands at. None where the bead stands in no stage of a
+    /// served flow: Elsewhere, No line, or a flow the yard reads no
+    /// longer. The arrivals answer carries no stages of its own, so the
+    /// strip reads them here, where every arrival row is placed.
+    pub fn route_for(&self, bead: &str) -> Option<Route> {
+        for depot in &self.flows.depots {
+            for flow in &depot.flows {
+                let at = flow
+                    .stages
+                    .iter()
+                    .position(|s| s.beads.iter().any(|b| b.bead == bead));
+                if let Some(current) = at {
+                    return Some(Route {
+                        stages: flow
+                            .stages
+                            .iter()
+                            .map(|s| RouteStage {
+                                name: s.stage.clone(),
+                                human: s.human,
+                            })
+                            .collect(),
+                        current,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// The board's rows that wait on the person reading: the banner's
+    /// beads, in the served order.
+    pub fn waiting_on_you(&self) -> Vec<&Arrival> {
+        self.arrivals
+            .iter()
+            .filter(|row| waits_on_you(&row.remark, &self.me))
+            .collect()
+    }
+
+    /// One line on what the platform `stage` is: whose turn a bead
+    /// there is, from the first served flow that names the stage. None
+    /// where no served flow names it: the board says nothing it cannot
+    /// know.
+    pub fn platform_tip(&self, stage: &str) -> Option<String> {
+        for depot in &self.flows.depots {
+            for flow in &depot.flows {
+                if let Some(found) = flow.stages.iter().find(|s| s.stage == stage) {
+                    if found.human {
+                        return Some(format!("{stage}: waiting on a person"));
+                    }
+                    if found.group.is_empty() {
+                        return Some(format!("{stage}: no route matches"));
+                    }
+                    return Some(format!("{stage}: routed to the {} group", found.group));
+                }
+            }
+        }
+        None
     }
 
     /// The yard-wide travelling total the Flows call serves: the open
@@ -1476,17 +1625,44 @@ impl Model {
         self.flows
             .depots
             .iter()
-            .map(|depot| {
-                let back = Selected::Line(depot.name.clone());
-                Row {
-                    name: depot.name.clone(),
-                    line: line_transit_words(depot.travelling),
-                    unread: 0,
-                    selected: self.selected.as_ref() == Some(&back)
-                        || matches!(self.selected.as_ref(), Some(Selected::Bead(_)))
-                            && self.bead_back() == back,
-                }
-            })
+            .map(|depot| self.line_row(depot))
+            .collect()
+    }
+
+    /// One line's row: its served travelling total, standing open for a
+    /// travelling bead from its flows or its Elsewhere too.
+    fn line_row(&self, depot: &FlowDepot) -> Row {
+        let back = Selected::Line(depot.name.clone());
+        Row {
+            name: depot.name.clone(),
+            line: line_transit_words(depot.travelling),
+            unread: 0,
+            selected: self.selected.as_ref() == Some(&back)
+                || matches!(self.selected.as_ref(), Some(Selected::Bead(_)))
+                    && self.bead_back() == back,
+        }
+    }
+
+    /// The timetable's active lines in the served order: those with
+    /// beads in transit, each with its count. The quiet ones stand
+    /// folded under Quiet.
+    pub fn active_line_rows(&self) -> Vec<Row> {
+        self.flows
+            .depots
+            .iter()
+            .filter(|depot| depot.travelling > 0)
+            .map(|depot| self.line_row(depot))
+            .collect()
+    }
+
+    /// The timetable's quiet lines in the served order: those with
+    /// nothing in transit. They stand under Quiet while it is unfolded.
+    pub fn quiet_rows(&self) -> Vec<Row> {
+        self.flows
+            .depots
+            .iter()
+            .filter(|depot| depot.travelling == 0)
+            .map(|depot| self.line_row(depot))
             .collect()
     }
 
@@ -4043,6 +4219,7 @@ mod tests {
             m.back_to(
                 Mode::Chat,
                 Some(Selected::Conversation("assembly".into())),
+                false,
                 false
             ),
             [page("assembly", 0)]
@@ -4061,7 +4238,7 @@ mod tests {
             [Effect::Ack { through: 21 }]
         );
         // With no row kept it opens as a yard opened for the first time.
-        assert!(!fresh.back_to(Mode::Chat, None, false).is_empty());
+        assert!(!fresh.back_to(Mode::Chat, None, false, false).is_empty());
         assert_eq!(
             fresh.selected(),
             Some(&Selected::Conversation("yardmaster".into()))
@@ -4081,6 +4258,7 @@ mod tests {
             Mode::Decisions,
             Some(Selected::Decided("gone".into(), 1)),
             true,
+            false,
         );
         // No open decision to fall back to: the mode opens on nothing,
         // and not on a dealt with, as before that list was kept.
@@ -5691,8 +5869,10 @@ mod tests {
         // The line is gone: the board.
         m.flows(Flows::default());
         assert_eq!(m.bead_back(), Selected::Arrivals);
-        // Over a yard lost the row comes back too.
+        // Over a yard lost the row comes back too. footplate is quiet,
+        // so Quiet is unfolded first, as Decided is for a dealt with.
         m.flows(flow_view());
+        m.toggle_quiet();
         m.select(Selected::Line("footplate".into()));
         m.select(Selected::Bead("yd-zulu".into()));
         let (again, _) = m.resumed(
@@ -5707,7 +5887,8 @@ mod tests {
     }
 
     /// From a line's bead Tab steps from the line's row, as from the
-    /// board's for a bead from there.
+    /// board's for a bead from there. footplate is quiet, so folded it
+    /// is stepped over; unfolded it stands after No line.
     #[test]
     fn stepping_from_a_line_s_bead_uses_the_line_s_row() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
@@ -5715,11 +5896,198 @@ mod tests {
         m.select(Selected::Line("yardr".into()));
         m.select(Selected::Bead("yd-zulu".into()));
         m.step_in(Mode::Timetable, 1);
-        assert_eq!(m.selected(), Some(&Selected::Line("footplate".into())));
+        assert_eq!(m.selected(), Some(&Selected::NoLine));
         m.select(Selected::Line("yardr".into()));
         m.select(Selected::Bead("yd-zulu".into()));
         m.step_in(Mode::Timetable, -1);
         assert_eq!(m.selected(), Some(&Selected::Arrivals));
+        m.toggle_quiet();
+        m.select(Selected::NoLine);
+        m.step_in(Mode::Timetable, 1);
+        assert_eq!(m.selected(), Some(&Selected::Line("footplate".into())));
+    }
+
+    /// A bead's route is its flow's stages in travel order, each with
+    /// whether a bead there waits on a person, with which one the bead
+    /// stands at. A bead in Elsewhere, with no line or unknown has no
+    /// route.
+    #[test]
+    fn a_bead_s_route_is_its_flow_s_stages_with_where_it_stands() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.flows(flow_view());
+        let route = m.route_for("yd-alpha").unwrap();
+        assert_eq!(
+            route
+                .stages
+                .iter()
+                .map(|s| (s.name.as_str(), s.human))
+                .collect::<Vec<_>>(),
+            [("new", false), ("review", true)]
+        );
+        assert_eq!(route.current, 1);
+        assert_eq!(m.route_for("yd-zulu").unwrap().current, 0);
+        assert_eq!(m.route_for("yardr-pinned"), None);
+        assert_eq!(m.route_for("yd-shed"), None);
+        assert_eq!(m.route_for("yd-unknown"), None);
+    }
+
+    /// A waits remark names you first where it names you; any other
+    /// remark, and a wait for nobody you are, stands as printed.
+    #[test]
+    fn a_waits_remark_names_you_first_where_it_names_you() {
+        assert_eq!(
+            you_first("waits for yardmaster, jo", "jo"),
+            "waits for you, yardmaster"
+        );
+        assert_eq!(you_first("waits for jo", "jo"), "waits for you");
+        assert_eq!(
+            you_first("waits for yardmaster", "jo"),
+            "waits for yardmaster"
+        );
+        assert_eq!(you_first("held", "jo"), "held");
+        assert_eq!(you_first("", "jo"), "");
+        assert_eq!(you_first("waits for jo", ""), "waits for jo");
+    }
+
+    /// A wait names you where you are among its names, and only then.
+    #[test]
+    fn a_wait_names_you_where_you_are_among_its_names() {
+        assert!(waits_on_you("waits for yardmaster, jo", "jo"));
+        assert!(waits_on_you("waits for jo", "jo"));
+        assert!(!waits_on_you("waits for yardmaster", "jo"));
+        assert!(!waits_on_you("held", "jo"));
+        assert!(!waits_on_you("", "jo"));
+        assert!(!waits_on_you("waits for jo", ""));
+    }
+
+    /// A late mark is `late`, with its overrun where the yard prints
+    /// one. Nothing else remarks late.
+    #[test]
+    fn a_late_mark_is_late_with_its_overrun_where_the_yard_prints_it() {
+        assert_eq!(late_line("late"), Some("late"));
+        assert_eq!(late_line("late by 40m"), Some("late by 40m"));
+        assert_eq!(late_line("held"), None);
+        assert_eq!(late_line("waits for jo"), None);
+        assert_eq!(late_line(""), None);
+    }
+
+    /// The quiet lines fold under Quiet: folded they are not in the
+    /// order and open nothing; unfolded they stand after No line. The
+    /// active lines always stand, with their counts.
+    #[test]
+    fn the_quiet_lines_fold_under_quiet_until_unfolded() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.flows(flow_view());
+        assert_eq!(
+            m.active_line_rows()
+                .iter()
+                .map(|r| (r.name.as_str(), r.line.as_str()))
+                .collect::<Vec<_>>(),
+            [("yardr", "2 in transit")]
+        );
+        assert_eq!(
+            m.quiet_rows()
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["footplate"]
+        );
+        assert!(!m.quiet_expanded());
+        assert!(!m.has_row(&Selected::Line("footplate".into())));
+        assert_eq!(m.select(Selected::Line("footplate".into())), []);
+        m.toggle_quiet();
+        assert!(m.quiet_expanded());
+        assert!(m.has_row(&Selected::Line("footplate".into())));
+        m.select(Selected::Line("footplate".into()));
+        assert_eq!(m.selected(), Some(&Selected::Line("footplate".into())));
+    }
+
+    /// Returning to a yard with Quiet unfolded keeps a quiet line's
+    /// row; folded it falls back to the board, as Decided does.
+    #[test]
+    fn a_quiet_line_kept_stands_where_quiet_is_unfolded() {
+        let mut state = yard(&[]);
+        state.flows = flow_view();
+        let (model, _) = Model::new_returning(
+            state.clone(),
+            Mode::Timetable,
+            Some(Selected::Line("footplate".into())),
+            false,
+            true,
+        );
+        assert_eq!(model.selected(), Some(&Selected::Line("footplate".into())));
+        let (model, _) = Model::new_returning(
+            state,
+            Mode::Timetable,
+            Some(Selected::Line("footplate".into())),
+            false,
+            false,
+        );
+        assert_eq!(model.selected(), Some(&Selected::Arrivals));
+    }
+
+    /// The banner's beads are the board's rows that wait on the
+    /// person reading, in the served order.
+    #[test]
+    fn the_banner_s_beads_are_the_board_s_rows_that_wait_on_you() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.arrivals(board(
+            vec![
+                arrival("yd-a", "new", "yardr", "1h–2h", "waits for jo", "amber"),
+                arrival(
+                    "yd-b",
+                    "new",
+                    "yardr",
+                    "1h–2h",
+                    "waits for yardmaster",
+                    "amber",
+                ),
+                arrival("yd-c", "new", "yardr", "—", "held", "red"),
+                arrival("yd-d", "new", "yardr", "1h–2h", "late", "amber"),
+                arrival("yd-e", "new", "yardr", "1h–2h", "", "none"),
+                arrival(
+                    "yd-f",
+                    "new",
+                    "yardr",
+                    "1h–2h",
+                    "waits for yardmaster, jo",
+                    "amber",
+                ),
+            ],
+            &["new"],
+        ));
+        assert_eq!(
+            m.waiting_on_you()
+                .iter()
+                .map(|r| r.bead.as_str())
+                .collect::<Vec<_>>(),
+            ["yd-a", "yd-f"]
+        );
+    }
+
+    /// A platform's line says whose turn a bead there is: waiting on
+    /// a person at a manual stage, the group routed there, or that no
+    /// route matches. A stage no served flow names says nothing.
+    #[test]
+    fn a_platform_s_line_says_whose_turn_a_bead_there_is() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.flows(flow_view());
+        assert_eq!(
+            m.platform_tip("review").as_deref(),
+            Some("review: waiting on a person")
+        );
+        assert_eq!(
+            m.platform_tip("new").as_deref(),
+            Some("new: routed to the muse-builders group")
+        );
+        assert_eq!(m.platform_tip("siding"), None);
+        let mut view = flow_view();
+        view.depots[0].flows[0].stages[0].group = String::new();
+        m.flows(view);
+        assert_eq!(
+            m.platform_tip("new").as_deref(),
+            Some("new: no route matches")
+        );
     }
 
     /// A bead the board no longer serves — beyond its cap — is detailed

@@ -31,7 +31,8 @@ use crate::yard::Env;
 /// canned doctor of two providers and their model offers, the first
 /// screen with the hosted way's fields open and filled, and the away
 /// screen of a hosted yard that is signed out, the arrivals board open
-/// on the arrivals row, one arrival's bead open from the board, one
+/// on the arrivals row with a late bead, a bead waiting on you and
+/// quiet lines, one arrival's bead open from the board, one
 /// line's flow open on its row, an open card of a secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, and the switcher's list open over two yards.
@@ -798,6 +799,70 @@ fn populate(yard: &Yard, state: &str) {
             yard.answer("Bead", &bead_run(question, &context));
         }
     }
+    if state == "arrivals" {
+        // The board this state shoots answers over the shared one: a
+        // late bead with the overrun the yard will print, a bead that
+        // waits on jo, and a held one, on yardr's five-stage route, with
+        // footplate and drafts quiet. The window banners the wait, draws
+        // each row's strip, and folds the quiet lines.
+        yard.answer(
+            "Arrivals",
+            &json!({"result": {"rows": [
+                {"bead": "yd-zulu", "title": "Zulu's late turn",
+                 "platform": "review", "line": "yardr", "expected": "5h–8h",
+                 "remark": "late by 40m", "tone": "amber"},
+                {"bead": "yd-alpha", "title": "Alpha moves first",
+                 "platform": "review-security", "line": "yardr", "expected": "20m–35m",
+                 "remark": "waits for jo, yardmaster", "tone": "amber"},
+                {"bead": "footplate-p512", "title": "The sign-in's password label",
+                 "platform": "new", "line": "yardr", "expected": "—",
+                 "remark": "held", "tone": "red"},
+            ], "platforms": ["new", "review", "review-security"]}})
+            .to_string(),
+        );
+        yard.answer(
+            "Flows",
+            &json!({"result": {
+                "travelling": 3,
+                "depots": [
+                    {"name": "yardr", "kind": "git", "travelling": 3, "flows": [
+                        {"name": "default", "type": "", "source": "store", "stages": [
+                            {"stage": "new", "group": "muse-builders", "human": false,
+                             "lamp": "fault", "beads": [
+                                {"bead": "footplate-p512",
+                                 "title": "The sign-in's password label",
+                                 "expected": "—", "remark": "held",
+                                 "tone": "red", "working": false}]},
+                            {"stage": "decide", "group": "decisions", "human": true,
+                             "lamp": "none", "beads": []},
+                            {"stage": "review", "group": "muse-reviewers", "human": false,
+                             "lamp": "none", "beads": [
+                                {"bead": "yd-zulu", "title": "Zulu's late turn",
+                                 "expected": "5h–8h", "remark": "late by 40m",
+                                 "tone": "amber", "working": false}]},
+                            {"stage": "review-security", "group": "mckean", "human": true,
+                             "lamp": "turn", "beads": [
+                                {"bead": "yd-alpha", "title": "Alpha moves first",
+                                 "expected": "20m–35m", "remark": "waits for jo, yardmaster",
+                                 "tone": "amber", "working": false}]},
+                            {"stage": "approved", "group": "shippers", "human": false,
+                             "lamp": "none", "beads": []},
+                        ]},
+                    ], "elsewhere": []},
+                    {"name": "footplate", "kind": "git", "travelling": 0, "flows": [
+                        {"name": "default", "type": "", "source": "store", "stages": [
+                            {"stage": "new", "group": "muse-builders", "human": false,
+                             "lamp": "none", "beads": []},
+                        ]},
+                    ], "elsewhere": []},
+                    {"name": "drafts", "kind": "dir", "travelling": 0,
+                     "flows": [], "elsewhere": []},
+                ],
+                "unassigned": [],
+            }})
+            .to_string(),
+        );
+    }
 }
 
 /// The command of the run ask: longer than the window is wide.
@@ -974,18 +1039,33 @@ mod tests {
                     assert_eq!(letters[1].from, "jo", "{state}");
                     // The board the window opens: three rows, with an
                     // amber remark, none, and a red one, beside the
-                    // platforms in travel order.
+                    // platforms in travel order. The arrivals state
+                    // shoots its own board over that one: a late bead
+                    // with its overrun, a bead that waits on jo, and a
+                    // held one, on yardr's five-stage route, with two
+                    // quiet lines.
                     assert_eq!(loaded.arrivals.rows.len(), 3, "{state}");
                     assert_eq!(loaded.arrivals.rows[0].bead, "yd-zulu", "{state}");
+                    let overrun = *state == "arrivals";
                     assert_eq!(
                         (
                             loaded.arrivals.rows[0].remark.as_str(),
                             loaded.arrivals.rows[0].tone.as_str()
                         ),
-                        ("late", "amber"),
+                        match overrun {
+                            true => ("late by 40m", "amber"),
+                            false => ("late", "amber"),
+                        },
                         "{state}"
                     );
-                    assert_eq!(loaded.arrivals.rows[1].remark.as_str(), "", "{state}");
+                    assert_eq!(
+                        loaded.arrivals.rows[1].remark.as_str(),
+                        match overrun {
+                            true => "waits for jo, yardmaster",
+                            false => "",
+                        },
+                        "{state}"
+                    );
                     assert_eq!(
                         (
                             loaded.arrivals.rows[2].expected.as_str(),
@@ -997,18 +1077,63 @@ mod tests {
                     );
                     assert_eq!(
                         loaded.arrivals.platforms,
-                        ["new", "review", "draft"],
+                        match overrun {
+                            true => vec!["new", "review", "review-security"],
+                            false => vec!["new", "review", "draft"],
+                        },
                         "{state}"
                     );
                     // The flows view beside the board: three travelling,
                     // yardr's two on a turn and a quiet stage, footplate's
                     // one on a fault stage, and nothing without a line.
+                    // The arrivals state shoots yardr's three on its
+                    // five-stage route instead, with footplate and drafts
+                    // quiet.
                     assert_eq!(loaded.flows.travelling, 3, "{state}");
-                    assert_eq!(loaded.flows.depots.len(), 2, "{state}");
                     assert_eq!(loaded.flows.depots[0].name, "yardr", "{state}");
-                    assert_eq!(loaded.flows.depots[0].travelling, 2, "{state}");
                     assert_eq!(
-                        loaded.flows.depots[0].flows[0].stages[0].lamp, "turn",
+                        loaded.flows.depots[0].travelling,
+                        match overrun {
+                            true => 3,
+                            false => 2,
+                        },
+                        "{state}"
+                    );
+                    assert_eq!(
+                        loaded.flows.depots.len(),
+                        match overrun {
+                            true => 3,
+                            false => 2,
+                        },
+                        "{state}"
+                    );
+                    if overrun {
+                        let stages = &loaded.flows.depots[0].flows[0].stages;
+                        assert_eq!(
+                            stages
+                                .iter()
+                                .map(|s| (s.stage.as_str(), s.human))
+                                .collect::<Vec<_>>(),
+                            [
+                                ("new", false),
+                                ("decide", true),
+                                ("review", false),
+                                ("review-security", true),
+                                ("approved", false),
+                            ],
+                            "{state}"
+                        );
+                        assert_eq!(stages[0].lamp, "fault", "{state}");
+                        assert_eq!(stages[3].lamp, "turn", "{state}");
+                        assert_eq!(loaded.flows.depots[1].travelling, 0, "{state}");
+                        assert_eq!(loaded.flows.depots[2].travelling, 0, "{state}");
+                    }
+                    assert_eq!(
+                        loaded.flows.depots[0].flows[0].stages[0].lamp,
+                        match overrun {
+                            true => "fault",
+                            false => "turn",
+                        },
                         "{state}"
                     );
                     assert!(loaded.flows.unassigned.is_empty(), "{state}");

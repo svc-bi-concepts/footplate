@@ -22,8 +22,8 @@ use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedRow, DecisionAsk,
-    DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model, News, Row,
-    Selected, Target, Top, state_of,
+    DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model, News, Route,
+    Row, Selected, Target, Top, late_line, state_of, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -180,7 +180,8 @@ impl Render for OpenTip {
     }
 }
 
-/// A rail icon's tooltip: its name, and what answers it.
+/// One line under the pointer: a rail icon's name and what answers
+/// it, or what a word of the timetable says.
 struct RailTip(String);
 
 impl Render for RailTip {
@@ -441,6 +442,21 @@ fn arriving_words(arriving: usize) -> String {
         1 => "1 arriving".to_string(),
         arriving => format!("{arriving} arriving"),
     }
+}
+
+/// What the board's banner says waits on the person reading: `1 waits
+/// on you`, `2 wait on you`.
+fn waits_head(waiting: usize) -> String {
+    match waiting {
+        1 => "1 waits on you".to_string(),
+        waiting => format!("{waiting} wait on you"),
+    }
+}
+
+/// What the timetable's Quiet fold says: folded or open, with how many
+/// quiet lines stand under it.
+fn quiet_head(open: bool, quiet: usize) -> String {
+    format!("{} Quiet · {}", if open { "▾" } else { "▸" }, quiet)
 }
 
 /// What a stage's head says stands on it: the number with "bead".
@@ -1188,6 +1204,7 @@ struct Place {
     expanded: HashSet<(String, u64)>,
     texts: HashSet<(String, u64)>,
     decided_expanded: bool,
+    quiet_expanded: bool,
 }
 
 impl Place {
@@ -2665,7 +2682,12 @@ impl Footplate {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let effects = model.back_to(mode, kept.row(mode), kept.decided_expanded);
+        let effects = model.back_to(
+            mode,
+            kept.row(mode),
+            kept.decided_expanded,
+            kept.quiet_expanded,
+        );
         model.expand(&kept.expanded);
         model.show_texts(&kept.texts);
         // Back on Timetable: it is looked at again, and the dot clears.
@@ -2925,6 +2947,7 @@ impl Footplate {
                         mode,
                         kept.row(mode).or(shot),
                         kept.decided_expanded,
+                        kept.quiet_expanded,
                     ),
                 };
                 let notices: Vec<String> = [arrivals_notice, flows_notice]
@@ -3429,6 +3452,7 @@ impl Footplate {
         kept.expanded = model.map(|m| m.expanded().clone()).unwrap_or_default();
         kept.texts = model.map(|m| m.texts().clone()).unwrap_or_default();
         kept.decided_expanded = model.is_some_and(Model::decided_expanded);
+        kept.quiet_expanded = model.is_some_and(Model::quiet_expanded);
         kept
     }
 
@@ -8660,6 +8684,13 @@ impl Footplate {
         });
     }
 
+    fn toggle_quiet(&mut self, cx: &mut Context<Self>) {
+        self.change(cx, |m| {
+            m.toggle_quiet();
+            Vec::new()
+        });
+    }
+
     /// The away screen's first line where the yard was reached before and
     /// is not now: which yard, and why in a word or two.
     fn away_why(&self) -> Option<String> {
@@ -9283,8 +9314,9 @@ impl Footplate {
     }
 
     /// The timetable's list: the arrivals row with the yard-wide
-    /// travelling total, the lines in the served order with their own,
-    /// and No line last while beads travel with none.
+    /// travelling total, the active lines in the served order with
+    /// their own, No line while beads travel with none, and the quiet
+    /// lines folded under Quiet.
     fn list_timetable(
         &self,
         model: &Model,
@@ -9295,23 +9327,59 @@ impl Footplate {
         let arrivals = model.arrivals_row();
         body = body.child(section_head("Timetable", arrivals.line.clone(), palette));
         body = body.child(self.row(arrivals, Selected::Arrivals, palette, cx));
-        for row in model.line_rows() {
+        for row in model.active_line_rows() {
             let sel = Selected::Line(row.name.clone());
             body = body.child(self.row(row, sel, palette, cx));
         }
         if let Some(row) = model.no_line_row() {
             body = body.child(self.row(row, Selected::NoLine, palette, cx));
         }
+        let quiet = model.quiet_rows();
+        if !quiet.is_empty() {
+            let open = model.quiet_expanded();
+            body = body.child(
+                div()
+                    .id("quiet")
+                    .mx_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .hover(|style| style.bg(palette.hover))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_quiet(cx)))
+                    .child(
+                        div()
+                            .debug_selector(|| "quiet".to_string())
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(quiet_head(open, quiet.len())),
+                    ),
+            );
+            if open {
+                for row in quiet {
+                    let sel = Selected::Line(row.name.clone());
+                    body = body.child(self.row(row, sel, palette, cx));
+                }
+            }
+        }
         self.column(body, palette, cx)
     }
 
-    /// One arrival of the board: the title, the expected arrival in mono
-    /// at the row's end, and faint the id, line and remark on the second
-    /// line. A red remark in the warn colour, amber in the accent. The
-    /// platform stands over the row, as its group's head, and not in it.
-    /// A click opens the bead's details.
+    /// One arrival of the board: the title, the bead's route as a
+    /// strip of one dot per stage, and faint the id, line and remark on
+    /// the last line. The expected arrival stands in mono at the row's
+    /// end, right-aligned, with a late mark in red beneath it instead
+    /// of beside the row; any other remark stays in the row, a red one
+    /// in the warn colour, amber in the accent, with `you` first among
+    /// whom it waits for. The platform stands over the row, as its
+    /// group's head, and not in it. A click opens the bead's details.
     fn arrival_row(
         &self,
+        model: &Model,
         row: &Arrival,
         mono: Option<SharedString>,
         palette: Palette,
@@ -9334,7 +9402,9 @@ impl Footplate {
             .justify_between()
             .gap_2()
             .cursor_pointer()
-            .hover(|style| style.bg(palette.hover))
+            .border_1()
+            .border_color(rgba(0x00000000))
+            .hover(|style| style.border_color(palette.line))
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
         let faint = [row.bead.as_str(), row.line.as_str()]
             .into_iter()
@@ -9346,8 +9416,12 @@ impl Footplate {
             "amber" => palette.accent,
             _ => palette.faint,
         };
+        let late = late_line(&row.remark);
         let mut time = div()
             .flex_none()
+            .flex()
+            .flex_col()
+            .items_end()
             .debug_selector({
                 let bead = bead.clone();
                 move || format!("arrival time {bead}")
@@ -9356,10 +9430,24 @@ impl Footplate {
                 "—" => palette.faint,
                 _ => palette.text,
             })
-            .child(row.expected.clone());
+            .child(row.expected.clone())
+            .children(late.map(|late| {
+                div()
+                    .text_color(palette.warn)
+                    .debug_selector({
+                        let bead = bead.clone();
+                        move || format!("arrival late {bead}")
+                    })
+                    .child(late.to_string())
+            }));
         if let Some(mono) = mono {
             time = time.font_family(mono);
         }
+        // A late mark stands under the ETA; the row keeps the rest.
+        let shown = match late {
+            Some(_) => String::new(),
+            None => you_first(&row.remark, model.me()),
+        };
         el.child(
             div()
                 .flex()
@@ -9376,6 +9464,11 @@ impl Footplate {
                             move || format!("arrival title {bead}")
                         })
                         .child(row.title.clone()),
+                )
+                .children(
+                    model
+                        .route_for(&row.bead)
+                        .map(|route| self.route_strip(&route, &bead, palette)),
                 )
                 .child(
                     div()
@@ -9395,7 +9488,7 @@ impl Footplate {
                                 })
                                 .child(faint),
                         )
-                        .children((!row.remark.is_empty()).then(|| {
+                        .children((!shown.is_empty()).then(|| {
                             div()
                                 .flex_none()
                                 .text_xs()
@@ -9404,13 +9497,74 @@ impl Footplate {
                                     let bead = bead.clone();
                                     move || format!("arrival remark {bead}")
                                 })
-                                .child(format!("· {}", row.remark))
+                                .child(format!("· {shown}"))
                         })),
                 ),
         )
         .child(time)
     }
 
+    /// One bead's route as a strip: one dot per stage of its flow in
+    /// travel order, each with the stage's name. The stages behind the
+    /// bead read done, the bead's own reads current, and a stage ahead
+    /// whose turn is a person's reads waiting, apart from the rest.
+    fn route_strip(&self, route: &Route, bead: &str, palette: Palette) -> impl IntoElement + use<> {
+        let mut strip = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .debug_selector({
+                let bead = bead.to_string();
+                move || format!("arrival strip {bead}")
+            });
+        for (n, stage) in route.stages.iter().enumerate() {
+            if n > 0 {
+                strip = strip.child(div().h_px().w_3().flex_none().bg(palette.line));
+            }
+            let (fill, edge, label) = match n == route.current {
+                true => (palette.accent, palette.accent, palette.text),
+                false if n < route.current => (palette.faint, palette.faint, palette.faint),
+                false if stage.human => (rgba(0x00000000), palette.accent, palette.faint),
+                false => (rgba(0x00000000), palette.faint, palette.faint),
+            };
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .debug_selector({
+                                let (bead, stage) = (bead.to_string(), stage.name.clone());
+                                move || format!("arrival stop {bead} {stage}")
+                            })
+                            .size(rems(0.5))
+                            .rounded_full()
+                            .flex_none()
+                            .bg(fill)
+                            .border_1()
+                            .border_color(edge),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(label)
+                            .when(n == route.current, |el| {
+                                el.font_weight(FontWeight::SEMIBOLD)
+                            })
+                            .child(stage.name.clone()),
+                    ),
+            );
+        }
+        strip
+    }
+
+    /// One row of a list on the left. The open row keeps its fill, and
+    /// a row under the pointer a hairline instead: hover drawn apart
+    /// from selection, so exactly one row ever reads open.
     fn row(
         &self,
         row: Row,
@@ -9435,9 +9589,11 @@ impl Footplate {
             .justify_between()
             .gap_2()
             .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
             .when(row.selected, |el| el.bg(palette.open))
             .when(!row.selected, |el| {
-                el.hover(|style| style.bg(palette.hover))
+                el.hover(|style| style.border_color(palette.line))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
             .child(
@@ -9537,9 +9693,11 @@ impl Footplate {
             .justify_between()
             .gap_2()
             .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
             .when(row.selected, |el| el.bg(palette.open))
             .when(!row.selected, |el| {
-                el.hover(|style| style.bg(palette.hover))
+                el.hover(|style| style.border_color(palette.line))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
             .child(col)
@@ -9615,9 +9773,11 @@ impl Footplate {
             .justify_between()
             .gap_2()
             .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
             .when(row.selected, |el| el.bg(palette.open))
             .when(!row.selected, |el| {
-                el.hover(|style| style.bg(palette.hover))
+                el.hover(|style| style.border_color(palette.line))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
             .child(
@@ -10629,11 +10789,15 @@ impl Footplate {
             )
     }
 
-    /// The arrivals board: the served rows under their platform, each
-    /// group headed by the platform name and its count, each row opening
-    /// the bead's details. The head carries the complete travelling
-    /// total, and where the board's rows are capped a quiet last line
-    /// says how many of them show.
+    /// What the board's head says `arrivals` is, in one line.
+    const ARRIVALS_TIP: &str = "arrivals: the beads still travelling, in arrival order";
+
+    /// The arrivals board: the rows that wait on the person reading as
+    /// a banner above the table, then the served rows under their
+    /// platform, each group headed by the platform name and its count,
+    /// each row opening the bead's details. The head carries the
+    /// complete travelling total, and where the board's rows are capped
+    /// a quiet last line says how many of them show.
     fn talk_arrivals(
         &self,
         model: &Model,
@@ -10649,8 +10813,10 @@ impl Footplate {
             .flex_col()
             .child(
                 div()
+                    .id("arrivals head")
                     .debug_selector(|| "arrivals head".to_string())
                     .font_weight(FontWeight::SEMIBOLD)
+                    .tooltip(|_, cx| cx.new(|_| RailTip(Self::ARRIVALS_TIP.to_string())).into())
                     .child("arrivals"),
             )
             .child(
@@ -10670,12 +10836,16 @@ impl Footplate {
             .flex()
             .flex_col()
             .gap_3();
+        let waiting = model.waiting_on_you();
+        if !waiting.is_empty() {
+            list = list.child(self.waits_banner(&waiting, palette, cx));
+        }
         let groups = model.arrival_groups();
         if groups.is_empty() {
             list = list.child(div().text_color(palette.faint).child("None in transit."));
         } else {
             for group in groups {
-                list = list.child(self.arrival_group(group, mono.clone(), palette, cx));
+                list = list.child(self.arrival_group(model, group, mono.clone(), palette, cx));
             }
         }
         // The board caps at 15 rows; the total is complete.
@@ -10705,16 +10875,93 @@ impl Footplate {
             })
     }
 
+    /// The beads that wait on the person reading, above the table:
+    /// how many, then each with its title and an Open card button. A
+    /// click opens the bead's details, as its row does.
+    fn waits_banner(
+        &self,
+        waiting: &[&Arrival],
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut banner = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.side)
+            .debug_selector(|| "waits banner".to_string())
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette.accent)
+                    .child(waits_head(waiting.len())),
+            );
+        for row in waiting {
+            let bead = row.bead.clone();
+            let sel = Selected::Bead(row.bead.clone());
+            banner = banner.child(
+                div()
+                    .id(SharedString::from(format!("waits {bead}")))
+                    .debug_selector({
+                        let bead = bead.clone();
+                        move || format!("waits {bead}")
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .debug_selector({
+                                let bead = bead.clone();
+                                move || format!("waits title {bead}")
+                            })
+                            .child(row.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(palette.faint)
+                            .child(bead.clone()),
+                    )
+                    .child(
+                        small_button("Open card".to_string(), palette)
+                            .id(SharedString::from(format!("waits open {bead}")))
+                            .debug_selector({
+                                let bead = bead.clone();
+                                move || format!("waits open {bead}")
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select(sel.clone(), window, cx)
+                            })),
+                    ),
+            );
+        }
+        banner
+    }
+
     /// One platform's arrivals: the platform name and its count in the
-    /// section style, then the served rows as they came.
+    /// section style, then the served rows as they came. The name says
+    /// in one line whose turn a bead there is.
     fn arrival_group(
         &self,
+        model: &Model,
         group: ArrivalGroup,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let platform = group.platform.clone();
+        let tip = model.platform_tip(&group.platform);
         div()
             .flex()
             .flex_col()
@@ -10726,12 +10973,16 @@ impl Footplate {
                     .gap_2()
                     .child(
                         div()
+                            .id(SharedString::from(format!("arrival group head {platform}")))
                             .debug_selector({
                                 let platform = platform.clone();
                                 move || format!("arrival group {platform}")
                             })
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
+                            .when_some(tip, |el, tip| {
+                                el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+                            })
                             .child(group.platform),
                     )
                     .child(
@@ -10750,7 +11001,7 @@ impl Footplate {
                 group
                     .rows
                     .iter()
-                    .map(|row| self.arrival_row(row, mono.clone(), palette, cx)),
+                    .map(|row| self.arrival_row(model, row, mono.clone(), palette, cx)),
             )
     }
 
@@ -11033,7 +11284,9 @@ impl Footplate {
             .justify_between()
             .gap_2()
             .cursor_pointer()
-            .hover(|style| style.bg(palette.hover))
+            .border_1()
+            .border_color(rgba(0x00000000))
+            .hover(|style| style.border_color(palette.line))
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
         let remark = match row.tone.as_str() {
             "red" => palette.warn,
@@ -14530,6 +14783,65 @@ mod tests {
                  "expected": "2h–3h", "remark": "", "tone": "none",
                  "working": false},
             ],
+        }})
+        .to_string()
+    }
+
+    /// The board with a bead that waits on jo: one row remarked
+    /// `waits for yardmaster, jo`, one plain, at the one platform.
+    fn arrivals_waits() -> String {
+        json!({"result": {
+            "rows": [
+                {"bead": "yd-zulu", "title": "Zulu's late turn",
+                 "platform": "new", "line": "yardr", "expected": "5h–8h",
+                 "remark": "waits for yardmaster, jo", "tone": "amber"},
+                {"bead": "yd-alpha", "title": "Alpha moves first",
+                 "platform": "new", "line": "yardr", "expected": "20m–35m",
+                 "remark": "", "tone": "none"},
+            ],
+            "platforms": ["new"],
+        }})
+        .to_string()
+    }
+
+    /// The board with a late bead the yard prints the overrun of: one
+    /// row remarked `late by 40m`.
+    fn arrivals_overrun() -> String {
+        json!({"result": {
+            "rows": [
+                {"bead": "yd-zulu", "title": "Zulu's late turn",
+                 "platform": "new", "line": "yardr", "expected": "5h–8h",
+                 "remark": "late by 40m", "tone": "amber"},
+            ],
+            "platforms": ["new"],
+        }})
+        .to_string()
+    }
+
+    /// The flows view with a quiet line: yardr's two travelling as
+    /// beside the board, and drafts with nothing in transit.
+    fn flows_quiet() -> String {
+        json!({"result": {
+            "travelling": 2,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yd-zulu", "title": "Zulu's late turn",
+                             "expected": "5h–8h", "remark": "late", "tone": "amber",
+                             "working": false}]},
+                        {"stage": "review", "group": "mckean", "human": true,
+                         "lamp": "none", "beads": [
+                            {"bead": "yd-alpha", "title": "Alpha moves first",
+                             "expected": "20m–35m", "remark": "", "tone": "none",
+                             "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+                {"name": "drafts", "kind": "dir", "travelling": 0,
+                 "flows": [], "elsewhere": []},
+            ],
+            "unassigned": [],
         }})
         .to_string()
     }
@@ -18853,11 +19165,14 @@ mod tests {
             review < alpha && alpha < draft && draft < zulu && zulu < p512,
             "the groups stand out of the served order: {review:?} {alpha:?} {draft:?} {zulu:?} {p512:?}"
         );
-        // The rows as served: late, none, and held, with their tones,
-        // and no sorting or remarking of the window's own.
-        assert!(drawn(cx, "arrival remark yd-zulu"));
+        // The rows as served: held in the row, nothing where none is,
+        // and the late mark under the ETA instead of beside the row.
+        assert!(!drawn(cx, "arrival remark yd-zulu"));
+        assert!(drawn(cx, "arrival late yd-zulu"));
         assert!(!drawn(cx, "arrival remark yd-alpha"));
+        assert!(!drawn(cx, "arrival late yd-alpha"));
         assert!(drawn(cx, "arrival remark footplate-p512"));
+        assert!(!drawn(cx, "arrival late footplate-p512"));
         view.read_with(cx, |v, _| {
             let model = v.model.as_ref().unwrap();
             assert_eq!(
@@ -18922,6 +19237,188 @@ mod tests {
             assert_eq!(groups[0].platform, "draft");
             assert_eq!(groups[1].platform, "review");
         });
+    }
+
+    /// Each board row carries its route as a strip: one stop per
+    /// stage of its served flow, with the bead's own among them. A bead
+    /// in no served stage carries no strip.
+    #[gpui::test]
+    fn each_board_row_carries_its_route_as_a_strip(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
+        let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&_view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
+            assert!(drawn(cx, &format!("arrival strip {bead}")), "{bead}");
+        }
+        for stop in ["new", "review"] {
+            assert!(drawn(cx, &format!("arrival stop yd-zulu {stop}")), "{stop}");
+            assert!(
+                drawn(cx, &format!("arrival stop yd-alpha {stop}")),
+                "{stop}"
+            );
+        }
+        assert!(drawn(cx, "arrival stop footplate-p512 new"));
+
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_elsewhere());
+        let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&_view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(drawn(cx, "arrival strip yd-zulu"));
+        assert!(!drawn(cx, "arrival strip yd-alpha"));
+        assert!(!drawn(cx, "arrival strip footplate-p512"));
+    }
+
+    /// The board banners the beads that wait on the person reading:
+    /// how many above the table, each with its title and an Open card
+    /// button that opens the bead's details, as its row does. In the
+    /// row `you` stands first among whom it waits for.
+    #[gpui::test]
+    fn the_board_banners_the_beads_that_wait_on_you(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_waits());
+        yard.answer("Flows", &flows_board());
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(drawn(cx, "waits banner"));
+        assert!(drawn(cx, "waits yd-zulu"));
+        assert!(drawn(cx, "waits title yd-zulu"));
+        assert!(drawn(cx, "waits open yd-zulu"));
+        assert!(!drawn(cx, "waits yd-alpha"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model
+                    .as_ref()
+                    .unwrap()
+                    .waiting_on_you()
+                    .iter()
+                    .map(|row| row.bead.as_str())
+                    .collect::<Vec<_>>(),
+                ["yd-zulu"]
+            );
+        });
+        let banner = bounds_of(cx, "waits banner").bottom();
+        let group = bounds_of(cx, "arrival group new").top();
+        assert!(
+            banner <= group,
+            "the banner stands below the table: {banner:?} {group:?}"
+        );
+        click_on(cx, "waits open yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead asks yd-zulu"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Bead("yd-zulu".into()))
+            );
+        });
+    }
+
+    /// The banner counts what waits: one waits, two wait. Quiet
+    /// says folded or open with how many lines stand under it.
+    #[test]
+    fn the_banner_counts_what_waits_on_you() {
+        assert_eq!(waits_head(1), "1 waits on you");
+        assert_eq!(waits_head(2), "2 wait on you");
+        assert_eq!(quiet_head(false, 1), "▸ Quiet · 1");
+        assert_eq!(quiet_head(true, 5), "▾ Quiet · 5");
+    }
+
+    /// A late overrun stands under the ETA: `late by 40m` where the
+    /// yard prints it, and nothing of it in the row.
+    #[gpui::test]
+    fn a_late_overrun_stands_under_the_eta(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_overrun());
+        yard.answer("Flows", &flows_board());
+        let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&_view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(drawn(cx, "arrival late yd-zulu"));
+        assert!(!drawn(cx, "arrival remark yd-zulu"));
+        let late = bounds_of(cx, "arrival late yd-zulu");
+        let time = bounds_of(cx, "arrival time yd-zulu");
+        assert!(
+            late.top() >= time.top() && late.bottom() <= time.bottom() + px(1.),
+            "the overrun stands off the ETA: {time:?} {late:?}"
+        );
+    }
+
+    /// The quiet lines fold under Quiet with their count: folded the
+    /// active lines alone stand, unfolded the quiet ones stand under
+    /// the fold, and exactly one row of the list ever stands open. A
+    /// quiet line opens from under the fold, and folding again takes
+    /// its row away: a click where it stood opens nothing.
+    #[gpui::test]
+    fn the_quiet_lines_fold_under_quiet(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_quiet());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row arrivals"));
+        assert!(drawn(cx, "row yardr"));
+        assert!(!drawn(cx, "row drafts"));
+        assert!(drawn(cx, "quiet"));
+        let selected = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                let model = v.model.as_ref().unwrap();
+                [model.arrivals_row()]
+                    .into_iter()
+                    .chain(model.active_line_rows())
+                    .chain(model.quiet_rows())
+                    .chain(model.no_line_row())
+                    .filter(|row| row.selected)
+                    .count()
+            })
+        };
+        assert_eq!(selected(&view, cx), 1);
+        click_on(cx, "quiet");
+        wait(cx, "the quiet lines", |cx| drawn(cx, "row drafts"));
+        assert_eq!(selected(&view, cx), 1);
+        click_on(cx, "row drafts");
+        wait(cx, "the drafts line", |cx| drawn(cx, "flow head drafts"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Line("drafts".into()))
+            );
+        });
+        assert_eq!(selected(&view, cx), 1);
+        // Folded again the row is gone: gpui's test bounds keep what
+        // was ever drawn, so the proof is a click where the row stood,
+        // which opens nothing.
+        let stood = bounds_of(cx, "row drafts").center();
+        click_on(cx, "quiet");
+        wait(cx, "the fold again", |cx| {
+            view.read_with(cx, |v, _| !v.model.as_ref().unwrap().quiet_expanded())
+        });
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        cx.simulate_click(stood, gpui::Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Arrivals)
+            );
+        });
+        assert_eq!(selected(&view, cx), 1);
     }
 
     /// A board row's click opens the bead's details: the title, id,
@@ -19537,11 +20034,12 @@ mod tests {
             row.right() <= edge,
             "the arrivals row runs past the column: {row:?} past {rows:?}"
         );
-        // The board: the groups over their rows, each row two lines high
-        // with time and title on the first and the faint line on the
-        // second, all of it inside the window. The row stands below the
-        // fold at this height, so the board is opened as a click opens
-        // it, and the click itself is the wider window's test.
+        // The board: the groups over their rows, each row three lines
+        // high with time and title on the first, the strip on the
+        // second and the faint line on the third, all of it inside the
+        // window. The row stands below the fold at this height, so the
+        // board is opened as a click opens it, and the click itself is
+        // the wider window's test.
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
         let right = px(616.);
@@ -19565,26 +20063,31 @@ mod tests {
             let row = bounds_of(cx, &format!("arrival {bead}"));
             let title = bounds_of(cx, &format!("arrival title {bead}"));
             let time = bounds_of(cx, &format!("arrival time {bead}"));
+            let strip = bounds_of(cx, &format!("arrival strip {bead}"));
             let sub = bounds_of(cx, &format!("arrival sub {bead}"));
             assert!(
                 title.top() <= time.bottom() && time.top() <= title.bottom(),
                 "time stands off the title's row: {title:?} {time:?}"
             );
             assert!(
-                sub.top() >= title.bottom() - px(1.),
-                "the faint line stands on the title's row: {title:?} {sub:?}"
+                strip.top() >= title.bottom() - px(1.),
+                "the strip stands on the title's row: {title:?} {strip:?}"
+            );
+            assert!(
+                sub.top() >= strip.bottom() - px(1.),
+                "the faint line stands on the strip's row: {strip:?} {sub:?}"
             );
             assert!(
                 sub.bottom() <= row.bottom() + px(1.),
                 "the faint line stands below the row: {sub:?} {row:?}"
             );
-            for part in [&title, &time, &sub] {
+            for part in [&title, &time, &strip, &sub] {
                 assert!(
                     part.right() <= right,
                     "the row runs past the pane: {part:?}"
                 );
             }
-            if bead != "yd-alpha" {
+            if bead == "footplate-p512" {
                 let remark = bounds_of(cx, &format!("arrival remark {bead}"));
                 assert!(
                     sub.top() <= remark.bottom() && remark.top() <= sub.bottom(),
@@ -19593,6 +20096,17 @@ mod tests {
                 assert!(
                     remark.right() <= right,
                     "the remark runs past the pane: {remark:?}"
+                );
+            }
+            if bead == "yd-zulu" {
+                let late = bounds_of(cx, &format!("arrival late {bead}"));
+                assert!(
+                    late.top() >= time.top() && late.bottom() <= time.bottom() + px(1.),
+                    "the late mark stands off the ETA: {time:?} {late:?}"
+                );
+                assert!(
+                    late.right() <= right,
+                    "the late mark runs past the pane: {late:?}"
                 );
             }
         }
