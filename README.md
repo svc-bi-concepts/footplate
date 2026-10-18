@@ -188,9 +188,10 @@ screen of a hosted yard that is signed out), `arrivals` (the
 arrivals board open on the arrivals row), `arrival` (one
 arrival's bead open from the board), `flow` (yardr's line open on
 its flow), `secret` (an open card of a
-secret ask, posed with a value typed and hidden) and `secret-shown`
+secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
-shown). With no state the first
+shown) and `secret-refused` (that card with the yard's refusal of
+its answer). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read

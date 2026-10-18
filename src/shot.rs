@@ -31,8 +31,9 @@ use crate::yard::Env;
 /// screen with the hosted way's fields open and filled, and the away
 /// screen of a hosted yard that is signed out, the arrivals board open
 /// on the arrivals row, one arrival's bead open from the board, one
-/// line's flow open on its row, and an open card of a secret ask posed
-/// with a value typed, hidden and shown.
+/// line's flow open on its row, an open card of a secret ask posed
+/// with a value typed, hidden and shown, and that card with the yard's
+/// refusal of its answer.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -79,6 +80,7 @@ pub const STATES: &[&str] = &[
     "flow",
     "secret",
     "secret-shown",
+    "secret-refused",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -660,10 +662,12 @@ fn populate(yard: &Yard, state: &str) {
             yard.emit(r#"{"seq": 21, "kind": "peer_message_failed", "actor": "yard", "data": {"peer": "north", "kind": "mail", "id": "m1", "attempts": 1, "reason": "peer north: refused by the peer: it takes 30 mails an hour from this yard; send again after 21:00"}}"#);
             yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "yard", "at": "2026-10-13T20:31:00Z", "data": {"to": "jo", "to_user": true, "undelivered": "m1", "limit": 30, "until": "2026-10-13T21:00:00Z", "text": "your mail to clerk@north of 10-13 20:31 was not delivered: refused by the peer: it takes 30 mails an hour from this yard; send again after 21:00"}}"#);
         }
-        "secret" | "secret-shown" => {
+        "secret" | "secret-shown" | "secret-refused" => {
             // An open card of a secret ask, posed with a value typed:
             // hidden, with the toggle to Show, or shown where the yard
-            // marks the value no secret, with the toggle to Hide.
+            // marks the value no secret, with the toggle to Hide. The
+            // refused shot poses the same ask with the yard's refusal
+            // of its answer on the card instead, the field empty.
             let unconcealed = state == "secret-shown";
             yard.answer(
                 "UserInbox",
@@ -955,14 +959,18 @@ mod tests {
                     assert_eq!(bead.asks[0].question.lines().count(), 3, "{state}");
                     assert!(bead.asks[0].run.is_some(), "{state}");
                 }
-                "secret" | "secret-shown" => {
+                "secret" | "secret-shown" | "secret-refused" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
                     assert!(loaded.asks.open[0].secret.is_some(), "{state}");
-                    assert_eq!(loaded.asks.open[0].concealed, *state == "secret", "{state}");
+                    assert_eq!(
+                        loaded.asks.open[0].concealed,
+                        *state != "secret-shown",
+                        "{state}"
+                    );
                     let bead = yard.client().bead("bead-s").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert!(bead.asks[0].secret.is_some(), "{state}");
-                    assert_eq!(bead.asks[0].concealed, *state == "secret", "{state}");
+                    assert_eq!(bead.asks[0].concealed, *state != "secret-shown", "{state}");
                 }
                 "page" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

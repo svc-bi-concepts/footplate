@@ -1431,6 +1431,7 @@ struct Held {
     said: Option<api::Me>,
     approving: Option<(String, u64)>,
     approve_elsewhere: HashSet<(String, u64)>,
+    refused: HashMap<(String, u64), String>,
     ask_generation: u64,
     returns_read: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -1601,6 +1602,9 @@ pub struct Footplate {
     /// The run asks this yard took no approval of from this window, having
     /// no such call for it: their cards say where to approve instead.
     approve_elsewhere: HashSet<(String, u64)>,
+    /// Why the yard did not take an ask's answer, by ask, as its card
+    /// says it in place. A new answer for the ask clears it.
+    refused: HashMap<(String, u64), String>,
     /// The attachments that are images, by id, as they are drawn.
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
@@ -1736,9 +1740,10 @@ fn shot_section() -> Option<Section> {
 
 /// The row a screenshot state opens on instead of the yard's own: the
 /// refused mail's conversation for the undelivered shot, the open card
-/// for the plain, page, run and secret shots, the board for the arrivals
-/// shot, one arrival's bead for the arrival shot and yardr's line for
-/// the flow shot, else none. A debug build's alone.
+/// for the plain, page, run and secret shots (the refused shot's with
+/// its refusal), the board for the arrivals shot, one arrival's bead
+/// for the arrival shot and yardr's line for the flow shot, else none.
+/// A debug build's alone.
 fn shot_selected() -> Option<Selected> {
     // The card shots open their cards, in decisions: a debug build's
     // alone, as the settings and the draft of Footplate::opened.
@@ -1746,7 +1751,7 @@ fn shot_selected() -> Option<Selected> {
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
         Ok("plain") | Ok("page") | Ok("dot") => return Some(Selected::Decision("bead-a".into())),
-        Ok("run") | Ok("secret") | Ok("secret-shown") => {
+        Ok("run") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
             return Some(Selected::Decision("bead-s".into()));
         }
         Ok("arrivals") => return Some(Selected::Arrivals),
@@ -2070,6 +2075,7 @@ impl Footplate {
             secret_shown: false,
             approving: None,
             approve_elsewhere: HashSet::new(),
+            refused: HashMap::new(),
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
             handle: window.window_handle(),
@@ -2468,6 +2474,7 @@ impl Footplate {
             said: None,
             approving: None,
             approve_elsewhere: HashSet::new(),
+            refused: HashMap::new(),
             ask_generation: 0,
             returns_read: None,
         };
@@ -2563,6 +2570,7 @@ impl Footplate {
             said: self.said.take(),
             approving: self.approving.take(),
             approve_elsewhere: std::mem::take(&mut self.approve_elsewhere),
+            refused: std::mem::take(&mut self.refused),
             ask_generation: self.ask_generation,
             returns_read: self.returns_read.take(),
         };
@@ -2601,6 +2609,7 @@ impl Footplate {
         self.said = held.said.take();
         self.approving = held.approving.take();
         self.approve_elsewhere = std::mem::take(&mut held.approve_elsewhere);
+        self.refused = std::mem::take(&mut held.refused);
         self.ask_generation = held.ask_generation;
         self.returns_read = held.returns_read.take();
     }
@@ -3976,6 +3985,20 @@ impl Footplate {
                 self.secret
                     .update(cx, |field, cx| field.set_text("bk-live-3f9a-7Qx", cx));
             }
+            // The refused shot poses the yard's refusal of the answer
+            // on the card, the field empty as a refused giving leaves
+            // it: a debug build's alone, as above.
+            #[cfg(debug_assertions)]
+            if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("secret-refused") {
+                let refused = api::Error::Refused {
+                    code: "error".to_string(),
+                    message: "ask 7 asks for BOOKS_TOKEN: BOOKS_TOKEN was not given".to_string(),
+                };
+                self.refused.insert(
+                    ("bead-s".to_string(), 7),
+                    model::not_given(&refused, "bead-s", 7),
+                );
+            }
         }
         // A secret ask's card draws no line for words, nor does the card
         // of an ask taken back. A focus left in
@@ -4234,6 +4257,19 @@ impl Footplate {
             // did not go in the one before is said when this one shows.
             None if !notice.is_empty() => self.late = Some(notice),
             None => {}
+        }
+        cx.notify();
+    }
+
+    /// Says why the ask's answer did not go on its card, in the yard of
+    /// the following `session`: on the open one's card at once, and on
+    /// one that is held when the window shows it. A yard followed no
+    /// longer has no card to say it on.
+    fn refused_in(&mut self, session: u64, at: (String, u64), why: String, cx: &mut Context<Self>) {
+        if session == self.session {
+            self.refused.insert(at, why);
+        } else if let Some(held) = self.held.values_mut().find(|h| h.session == session) {
+            held.refused.insert(at, why);
         }
         cx.notify();
     }
@@ -4589,20 +4625,24 @@ impl Footplate {
     /// still the open one, as it was opened then, and else with the ask
     /// they were typed for, in its own yard. `what` did not happen, and
     /// `err` is why.
+    /// Words for the ask `at` of `yard` that the yard did not take are
+    /// back with what was typed since: in the line while that yard is
+    /// still the open one, as it was opened then, which is answered, and
+    /// else with the ask they were written for, in its own yard. Why
+    /// they are back is the caller's to say.
     fn words_back(
         &mut self,
         (yard, opening): (&str, u64),
         at: (String, u64),
         words: String,
-        (what, err): (&str, String),
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if opening == self.opening {
             self.line.update(cx, |line, cx| {
                 let back = draft::rejoin(words, line.text().to_string());
                 line.set_text(&back, cx);
             });
-            return self.notice(format!("{what}: {err}"), cx);
+            return true;
         }
         let kept = match yard == self.yard {
             true => &mut self.ask_words,
@@ -4610,7 +4650,7 @@ impl Footplate {
         };
         let typed = kept.remove(&at).unwrap_or_default();
         kept.insert(at, draft::rejoin(words, typed));
-        self.notice(format!("{what} in {yard}: {err}"), cx);
+        false
     }
 
     /// The open card's ask: the current one of a decision, or the dealt
@@ -4636,9 +4676,9 @@ impl Footplate {
     /// Enter in the field of a secret ask: the value goes to the yard in
     /// its own call and in nothing else. The field is emptied here, before
     /// the yard is asked and whatever it answers, and what the window says
-    /// afterwards is the yard's words or footplate's, never the value. An
-    /// ask of several names takes them one after the other and sends them
-    /// together.
+    /// afterwards is the yard's words or footplate's, on the card, never
+    /// the value. An ask of several names takes them one after the other
+    /// and sends them together.
     fn give(&mut self, cx: &mut Context<Self>) {
         // Held as a conversation's sends are: the value stays in the
         // field, with the reason beside Give.
@@ -4666,6 +4706,7 @@ impl Footplate {
         }
         self.secret_typed.push(value);
         self.notice(String::new(), cx);
+        self.refused.remove(&(bead.clone(), ask));
         if self.secret_typed.len() < secret.env.len() {
             return self.shown(cx);
         }
@@ -4701,7 +4742,7 @@ impl Footplate {
                     this.schedule_return_in(session, cx);
                     this.notice_in(session, model::given_line(&given), cx);
                 }
-                Err(why) => this.notice_in(session, why, cx),
+                Err(why) => this.refused_in(session, (bead.clone(), ask), why, cx),
             },
         );
     }
@@ -4709,10 +4750,10 @@ impl Footplate {
     /// Approves the open card's run ask: its key and its button. The call
     /// names the ask and nothing of the command, which the yard runs as it
     /// stored it. What the window says afterwards is the yard's: the
-    /// command as it ran with what it printed, or the refusal whole. A call
-    /// that ended without an answer is never said to be approved or not,
-    /// and a yard without the call for this window has its card say where
-    /// to approve.
+    /// command as it ran with what it printed, or the refusal whole, on
+    /// the card. A call that ended without an answer is never said to be
+    /// approved or not, and a yard without the call for this window has
+    /// its card say where to approve.
     fn approve(&mut self, cx: &mut Context<Self>) {
         let Some((bead, ask)) = self.card() else {
             return;
@@ -4730,6 +4771,7 @@ impl Footplate {
         self.approving = Some(at.clone());
         self.shown(cx);
         self.notice(String::new(), cx);
+        self.refused.remove(&at);
         // The approval is the yard's it was pressed in: what came of it is
         // that yard's, and is said there, wherever the window is by then.
         let session = self.session;
@@ -4758,7 +4800,9 @@ impl Footplate {
                         elsewhere.insert(at);
                         this.notice_in(session, String::new(), cx);
                     }
-                    Err(err) => this.notice_in(session, model::not_approved(&err), cx),
+                    Err(err) => {
+                        this.refused_in(session, (bead.clone(), ask), model::not_approved(&err), cx)
+                    }
                 }
             },
         );
@@ -4829,7 +4873,8 @@ impl Footplate {
 
     /// Picks an option with words alongside: the ask moves to "Decided" at
     /// once, and the queue and the bead are read again for what the yard
-    /// says. What the yard refuses is back in the line, with its words.
+    /// says. What the yard refuses is back in the line, with its words,
+    /// and why is on the card.
     fn send_answer(
         &mut self,
         bead: String,
@@ -4841,6 +4886,7 @@ impl Footplate {
         self.line.update(cx, |line, cx| line.set_text("", cx));
         self.ask_words.remove(&(bead.clone(), ask));
         self.notice(String::new(), cx);
+        self.refused.remove(&(bead.clone(), ask));
         let (call_bead, call_words) = (bead.clone(), words.clone());
         let (yard, opening, session) = (self.yard.clone(), self.opening, self.session);
         let identity = self.yard_identity(&yard);
@@ -4855,7 +4901,6 @@ impl Footplate {
                     this.schedule_return_in(session, cx);
                 }
                 Err(err) => {
-                    let said = ("not answered", err.to_string());
                     if this.yard_identity(&yard) != identity {
                         return this.notice(
                             format!(
@@ -4864,7 +4909,8 @@ impl Footplate {
                             cx,
                         );
                     }
-                    this.words_back((&yard, opening), (bead, ask), words, said, cx);
+                    this.words_back((&yard, opening), (bead.clone(), ask), words, cx);
+                    this.refused_in(session, (bead, ask), format!("not answered: {err}"), cx);
                 }
             },
         );
@@ -4944,13 +4990,11 @@ impl Footplate {
                 file.refused = Some(unsent.why.clone());
             }
         }
-        self.words_back(
-            (yard, opening),
-            at,
-            unsent.words,
-            ("not noted", unsent.why),
-            cx,
-        );
+        let in_line = self.words_back((yard, opening), at, unsent.words, cx);
+        match in_line {
+            true => self.notice(format!("not noted: {}", unsent.why), cx),
+            false => self.notice(format!("not noted in {yard}: {}", unsent.why), cx),
+        }
     }
 
     /// Puts the ask aside with `x`: it leaves the list and returns as the
@@ -5001,7 +5045,6 @@ impl Footplate {
                     this.schedule_return_in(session, cx);
                 }
                 Err(err) => {
-                    let said = ("not declined", err.to_string());
                     if this.yard_identity(&yard) != identity {
                         return this.notice(
                             format!(
@@ -5010,7 +5053,12 @@ impl Footplate {
                             cx,
                         );
                     }
-                    this.words_back((&yard, opening), (bead, ask), words, said, cx);
+                    let in_line =
+                        this.words_back((&yard, opening), (bead, ask), words, cx);
+                    match in_line {
+                        true => this.notice(format!("not declined: {err}"), cx),
+                        false => this.notice(format!("not declined in {yard}: {err}"), cx),
+                    }
                 }
             },
         );
@@ -11624,6 +11672,18 @@ impl Footplate {
                             .child(format!("! {why}"))
                     }));
             }
+            // Why the yard did not take the card's answer, in place: its
+            // refusal or footplate's words for what else went wrong, as
+            // other refusals are said. A new answer clears it.
+            if let Some(why) = self.refused.get(&(bead_id.clone(), ask_seq)) {
+                card = card.child(
+                    div()
+                        .debug_selector(|| format!("refused {bead_id} {ask_seq}"))
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {why}")),
+                );
+            }
             // Under it the button that sends the field, exactly as Enter
             // does, with Later, Decline and ask-about-this beside it. An
             // asker with no conversation has the reason in place of that
@@ -12973,6 +13033,22 @@ mod tests {
 
     fn notice(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.model.as_ref().unwrap().notice.clone())
+    }
+
+    /// Why the yard did not take the ask's answer, as its card says it,
+    /// or nothing where the card says nothing.
+    fn refused_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+        bead: &str,
+        ask: u64,
+    ) -> String {
+        view.read_with(cx, |v, _| {
+            v.refused
+                .get(&(bead.to_string(), ask))
+                .cloned()
+                .unwrap_or_default()
+        })
     }
 
     /// The hash of the image open over the window, if one is. The
@@ -21524,6 +21600,7 @@ mod tests {
     /// The words of an answer that is on its way when another yard is
     /// opened, and that its yard refuses, are back with the ask they were
     /// typed for, in its own yard: never in the line of the open one.
+    /// Why is on that ask's card when its yard is open again.
     #[gpui::test]
     fn words_a_yard_refused_are_back_with_their_ask_and_not_in_another_yard_s_line(
         cx: &mut TestAppContext,
@@ -21566,23 +21643,40 @@ mod tests {
             texts(&view, cx) == ["From the second home."]
         });
         wait(cx, "that it was not answered", |cx| {
-            notice(&view, cx) == "not answered in this machine: bead-a: the ask is closed"
+            view.read_with(cx, |v, _| {
+                v.kept_words
+                    .get("this machine")
+                    .is_some_and(|kept| kept.contains_key(&("bead-a".to_string(), 3)))
+            })
         });
         assert_eq!(near.asked("AnswerAsk").len(), 1);
         assert_eq!(second.asked("AnswerAsk").len(), 0);
         assert_eq!(typed(&view, cx), "");
+        assert_eq!(notice(&view, cx), "");
         view.read_with(cx, |v, _| {
             assert!(v.ask_words.is_empty());
+            assert!(v.refused.is_empty());
             let kept = &v.kept_words["this machine"];
             assert_eq!(
                 kept.get(&("bead-a".to_string(), 3)).map(String::as_str),
                 Some("because")
             );
+            let refused = &v.held["this machine"].refused;
+            assert_eq!(
+                refused.get(&("bead-a".to_string(), 3)).map(String::as_str),
+                Some("not answered: bead-a: the ask is closed")
+            );
         });
-        // Its own yard has them in the line again, on its card.
+        // Its own yard has them in the line again, on its card, with why.
         cx.simulate_keystrokes("secondary-1");
         wait(cx, "the decision again", on_the_card);
         assert_eq!(typed(&view, cx), "because");
+        assert_eq!(
+            refused_of(&view, cx, "bead-a", 3),
+            "not answered: bead-a: the ask is closed"
+        );
+        assert!(drawn(cx, "refused bead-a 3"));
+        assert_eq!(notice(&view, cx), "");
     }
 
     /// Yards are added and removed in the settings. A name that is taken
@@ -25046,7 +25140,7 @@ mod tests {
 
     /// Everything the window keeps or says that is not the field of a
     /// secret: the line, the drafts, the words of the asks, the notice,
-    /// the settings and every file beside them.
+    /// the cards' refusals, the settings and every file beside them.
     fn kept_outside_the_field(
         view: &Entity<Footplate>,
         cx: &mut VisualTestContext,
@@ -25064,12 +25158,13 @@ mod tests {
         }
         let mut kept = view.read_with(cx, |v, cx| {
             format!(
-                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
                 v.line.read(cx).text(),
                 v.line.read(cx).drawn(),
                 v.drafts,
                 v.ask_words,
                 v.model.as_ref().map(|m| m.notice.clone()),
+                v.refused,
                 v.settings,
                 v.yard_said,
                 v.down,
@@ -25083,9 +25178,10 @@ mod tests {
     /// A secret ask's card: the yard's line and a field that shows marks
     /// in place of the words line. Paste works and nothing copies out;
     /// Enter calls `GiveSecret` and the field is emptied whatever is
-    /// answered; a call that ends without an answer says the value may be
-    /// written; a yard without the call sends the person to a terminal.
-    /// The value is in no draft, no setting and no notice at any point.
+    /// answered; what the yard did not take is said on the card, and a
+    /// call that ends without an answer says the value may be written; a
+    /// yard without the call sends the person to a terminal. The value is
+    /// in no draft, no setting, no notice and no refusal at any point.
     #[gpui::test]
     fn a_secret_is_typed_as_marks_given_in_its_call_and_kept_nowhere(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -25164,9 +25260,11 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert_eq!(secret_field(&view, cx).0, "");
         wait(cx, "the yard without the call", |cx| {
-            notice(&view, cx)
+            refused_of(&view, cx, "bead-s", 7)
                 == "this yard takes no secret from footplate. Answer in a terminal on the yard's machine: yardr bead answer bead-s 7 --secret"
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         assert_eq!(
             yard.asked("GiveSecret"),
             [json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})]
@@ -25181,8 +25279,11 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert_eq!(secret_field(&view, cx).0, "");
         wait(cx, "no answer", |cx| {
-            notice(&view, cx) == "the yard did not answer. The value may be written. Give it again."
+            refused_of(&view, cx, "bead-s", 7)
+                == "the yard did not answer. The value may be written. Give it again."
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         assert_eq!(yard.asked("GiveSecret").len(), 2);
         nowhere(&view, cx, "no answer");
 
@@ -25195,8 +25296,10 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert_eq!(secret_field(&view, cx).0, "");
         wait(cx, "refused", |cx| {
-            notice(&view, cx) == "not given: GiveSecret is the operator's to give"
+            refused_of(&view, cx, "bead-s", 7) == "not given: GiveSecret is the operator's to give"
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         nowhere(&view, cx, "refused");
 
         // A refusal that repeated the value, which the yard's never does,
@@ -25209,8 +25312,10 @@ mod tests {
         cx.simulate_input(VALUE);
         cx.simulate_keystrokes("enter");
         wait(cx, "a refusal with the value", |cx| {
-            notice(&view, cx) == "not given: the yard refused it"
+            refused_of(&view, cx, "bead-s", 7) == "not given: the yard refused it"
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         nowhere(&view, cx, "a refusal with the value");
 
         // Given: the yard's words for where it is set, and the ask among
@@ -25234,6 +25339,8 @@ mod tests {
             notice(&view, cx)
                 == "gave BOOKS_TOKEN · BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"
         });
+        // The new answer cleared the refusal the last one left.
+        assert_eq!(refused_of(&view, cx, "bead-s", 7), "");
         assert_eq!(yard.asked("GiveSecret").len(), 5);
         let detail = decided_detail_of(&view, cx, "bead-s", 7);
         assert_eq!(detail.state_line, "you gave BOOKS_TOKEN");
@@ -25247,6 +25354,37 @@ mod tests {
                 assert!(!asked.contains(VALUE), "{call}: {asked}");
             }
         }
+    }
+
+    /// A refused answer says why on its card, in place: the yard's
+    /// refusal of a secret giving, answered with a status, is the card's
+    /// line under its field, and the field is empty after, the value
+    /// kept nowhere.
+    #[gpui::test]
+    fn a_refused_answer_says_why_on_its_card_and_keeps_no_secret(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
+        // The yard refuses the giving: fewer names than the ask asks for.
+        yard.answer_status(
+            "GiveSecret",
+            409,
+            r#"{"error": {"code": "error", "message": "ask 7 asks for BOOKS_TOKEN: BOOKS_TOKEN was not given"}}"#,
+        );
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "the refusal on the card", |cx| {
+            refused_of(&view, cx, "bead-s", 7)
+                == "not given: ask 7 asks for BOOKS_TOKEN: BOOKS_TOKEN was not given"
+        });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
+        assert_eq!(secret_field(&view, cx).0, "");
+        let kept = kept_outside_the_field(&view, cx, dir.path());
+        assert!(!kept.contains(VALUE), "{kept}");
     }
 
     /// The command of the run ask in these tests: longer than the window
@@ -25743,8 +25881,10 @@ mod tests {
         yard.answer_nothing("ApproveAsk");
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "no answer", |cx| {
-            notice(&view, cx) == "the yard did not answer; read the card again"
+            refused_of(&view, cx, "bead-s", 7) == "the yard did not answer; read the card again"
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo"])]);
         assert!(drawn(cx, "approve bead-s 7"));
 
@@ -25757,9 +25897,11 @@ mod tests {
         );
         click_on(cx, "approve bead-s 7");
         wait(cx, "refused", |cx| {
-            notice(&view, cx) == format!("not approved: {stale}")
+            refused_of(&view, cx, "bead-s", 7) == format!("not approved: {stale}")
         });
+        assert!(drawn(cx, "refused bead-s 7"));
         assert!(drawn(cx, "approve bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
 
         // Approved: the command as it ran and what it printed, and the
         // ask among the decided, which reads the same.
@@ -26253,8 +26395,10 @@ mod tests {
         assert!(names(&view, cx, "this machine"));
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "this machine's refusal", |cx| {
-            notice(&view, cx) == "not approved: this machine refuses"
+            refused_of(&view, cx, "bead-s", 7) == "not approved: this machine refuses"
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         assert_eq!(approvals(cx), [1, 0, 0]);
 
         // After a switch the card names the other yard, and its key and
@@ -26271,8 +26415,9 @@ mod tests {
             });
             cx.simulate_keystrokes("secondary-enter");
             wait(cx, "that yard's refusal", |cx| {
-                notice(&view, cx) == format!("not approved: {name} refuses")
+                refused_of(&view, cx, "bead-s", 7) == format!("not approved: {name} refuses")
             });
+            assert_eq!(notice(&view, cx), "");
             assert_eq!(approvals(cx), asked);
         }
         click_on(cx, "approve bead-s 7");
@@ -26289,7 +26434,7 @@ mod tests {
         });
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "this machine's refusal again", |cx| {
-            notice(&view, cx) == "not approved: this machine refuses"
+            refused_of(&view, cx, "bead-s", 7) == "not approved: this machine refuses"
         });
         assert_eq!(approvals(cx), [2, 1, 2]);
     }
@@ -26702,9 +26847,11 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert_eq!(secret_field(&view, cx).0, "");
         wait(cx, "the yard that takes none from this device", |cx| {
-            notice(&view, cx)
+            refused_of(&view, cx, "bead-s", 7)
                 == "this yard takes no secret from footplate. Answer in a terminal on the yard's machine: yardr bead answer bead-s 7 --secret"
         });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
         assert_eq!(
             far.asked("GiveSecret"),
             [json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})]
