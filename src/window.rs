@@ -23,9 +23,8 @@ use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, ArrivalGroup, AskPreview, DecidedDetail, DecidedEntry,
-    DecidedFold, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, DecisionRowAsk, Effect,
-    Entry, Kind, Mode, Model, News, Outcome, Route, Row, Selected, Target, Top, late_line,
-    state_of, you_first,
+    DecidedFold, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode,
+    Model, News, Outcome, Route, Row, Selected, Target, Top, late_line, state_of, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
