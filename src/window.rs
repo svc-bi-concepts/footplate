@@ -127,13 +127,16 @@ const SECONDARY: &str = if cfg!(target_os = "macos") {
 };
 
 /// A yard's number key, as the switcher's rows show it: ⌘1 opens the
-/// first yard on macOS, ctrl+1 elsewhere.
-fn number_key(place: usize) -> String {
-    if cfg!(target_os = "macos") {
-        format!("⌘{}", place + 1)
-    } else {
-        format!("ctrl+{}", place + 1)
-    }
+/// first yard on macOS, ctrl+1 elsewhere. Only the first nine yards have
+/// number bindings.
+fn number_key(place: usize) -> Option<String> {
+    (place < 9).then(|| {
+        if cfg!(target_os = "macos") {
+            format!("⌘{}", place + 1)
+        } else {
+            format!("ctrl+{}", place + 1)
+        }
+    })
 }
 
 /// An image a mail or a note names, by its hash.
@@ -1442,10 +1445,10 @@ impl Counts {
     }
 
     /// What the switcher's row carries of these counts: the waiting
-    /// number with the tooltip's words, or none where the row carries no
-    /// count. The tooltip numbers each waiting kind, decisions first; a
-    /// notice asks nothing, so none alone carries a count.
-    fn switcher(&self) -> Option<(String, String)> {
+    /// number with the tooltip's words. The tooltip numbers each kind,
+    /// decisions first; a notice asks nothing, so it does not add to the
+    /// waiting number.
+    fn switcher(&self) -> (String, String) {
         let words = [
             count_words(self.decisions, "decision", "decisions"),
             count_words(self.mail, "mail", "mail"),
@@ -1455,10 +1458,11 @@ impl Counts {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
-        match self.waiting() {
-            0 => None,
-            n => Some((n.to_string(), words)),
-        }
+        let words = match words.is_empty() {
+            true => "nothing waiting".to_string(),
+            false => words,
+        };
+        (self.waiting().to_string(), words)
     }
 
     /// What the rail's glyph of `mode` carries of these counts: the
@@ -8670,10 +8674,10 @@ impl Footplate {
                 false => self.held.get(&name).and_then(|held| held.model.as_ref()),
             }
             .map(Counts::of);
-            // The count the row carries: the open yard says open, and a
-            // yard that is not reached carries none, since its second
-            // line says why. The waiting number's tooltip says it in
-            // words. The number keys stand last, all of a width, so the
+            // A yard that is not reached carries no count, since its
+            // second line says why. Every reached yard carries its
+            // waiting number, including the open one; its tooltip says
+            // the kinds in words. The number keys stand last, so the
             // counts' right edges stand in one column.
             let count = div()
                 .id(SharedString::from(format!("switch count {name}")))
@@ -8684,9 +8688,8 @@ impl Footplate {
                 .flex_none()
                 .text_right()
                 .text_color(palette.faint);
-            let count = match (why, open, counts.and_then(|counts| counts.switcher())) {
-                (None, true, _) => count.child("open"),
-                (None, false, Some((number, words))) => count
+            let count = match (why, counts.map(|counts| counts.switcher())) {
+                (None, Some((number, words))) => count
                     .tooltip(move |_, cx| cx.new(|_| RailTip(words.clone())).into())
                     .child(number),
                 _ => count,
@@ -8834,7 +8837,7 @@ impl Footplate {
                                     .flex_none()
                                     .text_xs()
                                     .text_color(palette.faint)
-                                    .child(number_key(place)),
+                                    .child(number_key(place).unwrap_or_default()),
                             ),
                     )
                     .child(second),
@@ -21793,26 +21796,39 @@ mod tests {
             decisions,
             notices,
         };
-        // None where the row carries no count: nothing waiting, or
-        // notices alone, which ask nothing.
-        assert_eq!(counts(0, 0, 0).switcher(), None);
-        assert_eq!(counts(0, 0, 4).switcher(), None);
+        // Every reached yard has a number, including zero. Notices do not
+        // add to the waiting count, but remain in the tooltip.
+        assert_eq!(
+            counts(0, 0, 0).switcher(),
+            ("0".to_string(), "nothing waiting".to_string())
+        );
+        assert_eq!(
+            counts(0, 0, 4).switcher(),
+            ("0".to_string(), "4 notices".to_string())
+        );
         // The number with the tooltip's words, decisions first.
         assert_eq!(
             counts(2, 1, 0).switcher(),
-            Some(("3".to_string(), "1 decision · 2 mail".to_string()))
+            ("3".to_string(), "1 decision · 2 mail".to_string())
         );
         assert_eq!(
             counts(12, 0, 0).switcher(),
-            Some(("12".to_string(), "12 mail".to_string()))
+            ("12".to_string(), "12 mail".to_string())
         );
         assert_eq!(
             counts(1, 1, 1).switcher(),
-            Some((
+            (
                 "2".to_string(),
                 "1 decision · 1 mail · 1 notice".to_string()
-            ))
+            )
         );
+    }
+
+    #[test]
+    fn the_switcher_shows_only_number_keys_it_can_open() {
+        assert!(number_key(0).is_some());
+        assert!(number_key(8).is_some());
+        assert!(number_key(9).is_none());
     }
 
     #[test]
@@ -22339,6 +22355,11 @@ mod tests {
             assert!(drawn(cx, &format!("switch count {row}")), "{row}");
             assert!(drawn(cx, &format!("switch key {row}")), "{row}");
         }
+        let open_count = bounds_of(cx, "switch count this machine");
+        assert!(
+            f32::from(open_count.size.width) > 0.0,
+            "the open yard carries its zero waiting count"
+        );
         let one = bounds_of(cx, "switch count second home");
         let two = bounds_of(cx, "switch count far");
         assert!(
