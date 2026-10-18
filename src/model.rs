@@ -4144,7 +4144,7 @@ fn grouped<Tz: TimeZone>(before: &Letter, after: &Letter, zone: &Tz) -> bool {
 fn correction(text: &str) -> bool {
     text.trim_start()
         .split(|c: char| !c.is_alphanumeric())
-        .next()
+        .find(|word| !word.is_empty())
         .is_some_and(|first| first.eq_ignore_ascii_case("correction"))
 }
 
@@ -5953,6 +5953,8 @@ mod tests {
             "correction the edit card is ask 6893, not 6891",
             "Correction: the card is ask 6893",
             "  CORRECTION - ask 6893",
+            "**correction**: the card is ask 6893",
+            "(correction) the card is ask 6893",
         ] {
             assert!(correction(text), "{text:?}");
         }
