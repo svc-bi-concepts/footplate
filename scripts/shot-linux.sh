@@ -8,7 +8,8 @@
 # A state opens the window against a fake yard serving it (src/shot.rs),
 # in the debug build alone, or with no yard where the state says none:
 # `yardmaster` (the conversation with the
-# yardmaster), `plain` (an open decision card of a plain ask), `dot` (that
+# yardmaster), `thread` (a long wrapped thread from alternating senders,
+# the newest mail with an image), `plain` (an open decision card of a plain ask), `dot` (that
 # card with the timetable's dot lit), `page` (an
 # open card whose note carries a page, an image and a file), `mail` (a mail with
 # a page and an image), `image` (that mail's image open full size over
@@ -52,7 +53,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster plain dot run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused"
+states="yardmaster thread plain dot run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

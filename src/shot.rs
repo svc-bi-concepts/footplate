@@ -14,7 +14,8 @@ use crate::fake::{Router, Yard};
 use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
-/// the conversation with the yardmaster, an open decision card of a plain
+/// the conversation with the yardmaster, a long wrapped thread with an
+/// image, an open decision card of a plain
 /// ask, that card with the timetable's dot lit, an open card of a run ask,
 /// a yard that is stopped, a yard at an
 /// address, the settings on each of their sections, a running
@@ -54,6 +55,7 @@ use crate::yard::Env;
 /// draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
+    "thread",
     "plain",
     "dot",
     "run",
@@ -604,6 +606,45 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
+        "thread" => {
+            // A long wrapped thread from alternating senders, the
+            // newest mail with an image: the window opens on it, so
+            // the shot shows the reading column with wrapped mail. The
+            // yard holds the image, as in the mail state.
+            yard.blob(IMAGE_HASH, IMAGE);
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "New draft is in Gmail on Shai's thread: it says managers cannot change names today, people can edit their own, a manager option is coming with no date promised, and I'll let him know.",
+                     "read": true},
+                    {"seq": 13, "at": "2026-10-13T09:40:00Z", "from": "jo", "to": "yardmaster",
+                     "text": "Can we get permission to edit?", "read": true},
+                    {"seq": 14, "at": "2026-10-13T09:50:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "Not with the Gmail pack as it is: it has four calls, and by design no edit, delete, send or labels. To allow draft edits I'd write a second source file for Gmail, and you'd approve it as a new source plus a grant.",
+                     "read": true},
+                    {"seq": 15, "at": "2026-10-13T10:00:00Z", "from": "jo", "to": "yardmaster",
+                     "text": "Write it, and send Shai the new draft once the grant lands. Tell him the manager option is coming.",
+                     "read": true},
+                    {"seq": 16, "at": "2026-10-13T10:10:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "The grant is in: the second source is merged to main, reviewed with screenshots, check:all passed. Shai's draft still says 'coming'; you can now tell him it's live once deployed.",
+                     "read": true},
+                    {"seq": 17, "at": "2026-10-13T10:20:00Z", "from": "jo", "to": "yardmaster",
+                     "text": "Can I see the screenshot?", "read": true},
+                    {"seq": 18, "at": "2026-10-13T10:30:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "The three screenshots from the builder's note: the editor with the override typed in and the reset button, the list and header after saving, and after reset.",
+                     "files": [{"hash": IMAGE_HASH, "type": "image/png",
+                                "bytes": IMAGE.len()}],
+                     "read": true},
+                ]})
+                .to_string(),
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        }
         "mail" | "image" => {
             // The yardmaster's mail carries a page and an image, as the
             // bead's note does in the page state: the yard holds the
@@ -990,6 +1031,18 @@ mod tests {
                     assert_eq!(letters.len(), 1, "{state}");
                     assert_eq!(letters[0].files.len(), 1, "{state}");
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
+                }
+                "thread" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    // Seven mails from alternating senders, the newest
+                    // with the image the yard holds.
+                    let image = yard.client().blob(IMAGE_HASH).unwrap().unwrap();
+                    assert_eq!(image.len(), IMAGE.len(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 7, "{state}");
+                    assert_eq!(letters[1].from, "jo", "{state}");
+                    assert_eq!(letters[6].files.len(), 1, "{state}");
+                    assert!(crate::model::is_image(&letters[6].files[0]), "{state}");
                 }
                 "mail" | "image" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
