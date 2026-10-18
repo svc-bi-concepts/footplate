@@ -2741,30 +2741,21 @@ impl Model {
     }
 
     /// The card the number `ask` opens as, when one ask of that number is
-    /// the viewer's: the open one where any is open, else the dealt-with
-    /// one. None where none is, or where several beads' are.
+    /// the viewer's. None where none is, or where several beads' are.
     fn resolve_ask(&self, ask: u64) -> Option<(String, bool)> {
-        let open: Vec<&str> = self
+        let mut matches = self
             .open
             .iter()
             .filter(|a| a.ask == ask)
-            .map(|a| a.bead.as_str())
-            .collect();
-        match open.as_slice() {
-            [bead] => return Some((bead.to_string(), true)),
-            [] => {}
-            _ => return None,
-        }
-        let decided: Vec<&str> = self
-            .decided
-            .iter()
-            .filter(|a| a.ask == ask)
-            .map(|a| a.bead.as_str())
-            .collect();
-        match decided.as_slice() {
-            [bead] => Some((bead.to_string(), false)),
-            _ => None,
-        }
+            .map(|a| (a.bead.as_str(), true))
+            .chain(
+                self.decided
+                    .iter()
+                    .filter(|a| a.ask == ask)
+                    .map(|a| (a.bead.as_str(), false)),
+            );
+        let (bead, open) = matches.next()?;
+        matches.next().is_none().then(|| (bead.to_string(), open))
     }
 
     /// The open ask's preview, as it stands under a mail that names it.
@@ -5696,6 +5687,49 @@ mod tests {
             "ask 3 on yardr-n8ta"
         );
         assert_eq!(entries[0].asks.len(), 1);
+    }
+
+    #[test]
+    fn a_bare_ask_is_ambiguous_across_open_and_dealt_with_beads() {
+        let m = refs_model(
+            &["ask 3"],
+            vec![refs_open("yardr-n8ta", 3)],
+            vec![decided_ask(
+                "yardr-3msx",
+                3,
+                "Move them?",
+                "answered",
+                "",
+                "",
+                "",
+            )],
+        );
+        assert!(m.entries()[0].refs.is_empty());
+        assert!(m.entries()[0].asks.is_empty());
+
+        // Naming the bead makes the open ask unambiguous again.
+        let m = refs_model(
+            &["ask 3 on yardr-n8ta"],
+            vec![refs_open("yardr-n8ta", 3)],
+            vec![decided_ask(
+                "yardr-3msx",
+                3,
+                "Move them?",
+                "answered",
+                "",
+                "",
+                "",
+            )],
+        );
+        assert_eq!(
+            m.entries()[0].refs[0].target,
+            select::RefTarget::Ask {
+                bead: "yardr-n8ta".into(),
+                ask: 3,
+                open: true,
+            }
+        );
+        assert_eq!(m.entries()[0].asks.len(), 1);
     }
 
     #[test]
