@@ -215,50 +215,86 @@ pub fn host_of(address: &str) -> String {
     host.split('.').next().unwrap_or_default().to_string()
 }
 
-/// One of the settings' six sections, as the side list shows them: how
-/// the window looks, the yards it shows, how this yard's agents work
-/// with the operator, who works the yard, what the system tells of, and
-/// the addresses a note's pages go through. Kept as the open one,
-/// appearance where none was chosen.
+/// One of the settings' six sections, as the sheet's side list shows
+/// them: this window, how it looks, what the system tells of, the yards
+/// it shows, how this yard's agents work with the operator, and the
+/// addresses a note's pages go through. Kept as the open one, this
+/// window where none was chosen. A file naming one that is gone (the
+/// crew's, from before it went) opens the first: the rest of the file is
+/// still read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(from = "String")]
 pub enum Section {
     #[default]
+    #[serde(rename = "this window")]
+    ThisWindow,
+    #[serde(rename = "appearance")]
     Appearance,
-    Yards,
-    Agents,
-    Crew,
+    #[serde(rename = "notifications")]
     Notifications,
+    #[serde(rename = "yards")]
+    Yards,
+    #[serde(rename = "agents")]
+    Agents,
+    #[serde(rename = "connection")]
     Connection,
+}
+
+impl From<String> for Section {
+    /// The section a file names, the first for a name that is none: one
+    /// that was removed, or that a newer footplate keeps.
+    fn from(name: String) -> Section {
+        match name.as_str() {
+            "this window" => Section::ThisWindow,
+            "appearance" => Section::Appearance,
+            "notifications" => Section::Notifications,
+            "yards" => Section::Yards,
+            "agents" => Section::Agents,
+            "connection" => Section::Connection,
+            _ => Section::default(),
+        }
+    }
 }
 
 impl Section {
     /// The six, as the side list shows them.
     pub const ALL: [Section; 6] = [
+        Section::ThisWindow,
         Section::Appearance,
+        Section::Notifications,
         Section::Yards,
         Section::Agents,
-        Section::Crew,
-        Section::Notifications,
         Section::Connection,
     ];
 
-    /// The section's name, as the side list says it.
+    /// The section's name, as the side list and the file say it.
     pub fn name(self) -> &'static str {
         match self {
+            Section::ThisWindow => "this window",
             Section::Appearance => "appearance",
+            Section::Notifications => "notifications",
             Section::Yards => "yards",
             Section::Agents => "agents",
-            Section::Crew => "crew",
-            Section::Notifications => "notifications",
             Section::Connection => "connection",
+        }
+    }
+
+    /// The section's name, as the side list shows it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::ThisWindow => "This window",
+            Section::Appearance => "Appearance",
+            Section::Notifications => "Notifications",
+            Section::Yards => "Yards",
+            Section::Agents => "Agents & you",
+            Section::Connection => "Connection",
         }
     }
 
     /// Whether the section is the first: the settings say nothing while
     /// it is.
     pub fn is_first(&self) -> bool {
-        matches!(*self, Section::Appearance)
+        matches!(*self, Section::ThisWindow)
     }
 }
 
@@ -1401,21 +1437,35 @@ mod tests {
     }
 
     #[test]
-    fn the_open_section_is_appearance_until_picked_and_left_out_while_it_is() {
+    fn the_open_section_is_this_window_until_picked_and_left_out_while_it_is() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         let set = Settings::default();
-        assert_eq!(set.section, Section::Appearance);
+        assert_eq!(set.section, Section::ThisWindow);
         set.write(&file).unwrap();
         assert!(!fs::read_to_string(&file).unwrap().contains("section"));
         // A file from before sections opens the first.
-        assert_eq!(Settings::read(&file).section, Section::Appearance);
+        assert_eq!(Settings::read(&file).section, Section::ThisWindow);
         let set = Settings {
-            section: Section::Crew,
+            section: Section::Connection,
             ..Settings::default()
         };
         set.write(&file).unwrap();
-        assert_eq!(Settings::read(&file).section, Section::Crew);
+        assert_eq!(Settings::read(&file).section, Section::Connection);
+    }
+
+    #[test]
+    fn a_file_naming_a_section_that_is_gone_opens_the_first_and_reads_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // The crew's section went, and a file kept open on it still reads:
+        // its section is the first, and the rest stands.
+        fs::write(&file, r#"{"text": 17, "section": "crew"}"#).unwrap();
+        let set = Settings::read(&file);
+        assert_eq!(set.section, Section::ThisWindow);
+        assert_eq!(set.text, 17);
+        fs::write(&file, r#"{"section": "this window"}"#).unwrap();
+        assert_eq!(Settings::read(&file).section, Section::ThisWindow);
     }
 
     #[test]

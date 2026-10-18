@@ -18,7 +18,7 @@ use gpui::{
 };
 
 use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
-use crate::api::{CrewMember, Flow, FlowBead, FlowStage};
+use crate::api::{Flow, FlowBead, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
@@ -1112,6 +1112,91 @@ fn small_button(text: String, palette: Palette) -> Div {
         .child(text)
 }
 
+/// One segment of a segmented control: the choice `label`, filled with
+/// the accent where it is chosen, quiet text otherwise. The caller joins
+/// the segments with [`segmented`] and puts the clicks on them.
+fn segment(label: String, chosen: bool, palette: Palette) -> Div {
+    div()
+        .px_3()
+        .py_1()
+        .text_sm()
+        .cursor_pointer()
+        .when(chosen, |el| {
+            el.bg(palette.accent)
+                .text_color(palette.on_accent)
+                .font_weight(FontWeight::SEMIBOLD)
+        })
+        .when(!chosen, |el| {
+            el.text_color(palette.faint)
+                .hover(|style| style.bg(palette.hover).text_color(palette.text))
+        })
+        .child(label)
+}
+
+/// Joins `segments` into one segmented control: a single bordered row
+/// with a hairline between each two, rounded at its ends.
+fn segmented(segments: Vec<gpui::Stateful<Div>>, palette: Palette) -> Div {
+    let mut row = div()
+        .flex()
+        .rounded_md()
+        .border_1()
+        .border_color(palette.line)
+        .overflow_hidden();
+    for (at, segment) in segments.into_iter().enumerate() {
+        row = row.child(segment.when(at > 0, |el| el.border_l_1().border_color(palette.line)));
+    }
+    row
+}
+
+/// A checkbox: a box with a tick where `checked`, beside its label. The
+/// caller puts the click on.
+fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .child(
+            div()
+                .size(rems(1.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(palette.line)
+                .text_xs()
+                .when(checked, |el| {
+                    el.bg(palette.accent)
+                        .border_color(palette.accent)
+                        .text_color(palette.on_accent)
+                        .font_weight(FontWeight::SEMIBOLD)
+                })
+                .child(match checked {
+                    true => "✓",
+                    false => "",
+                }),
+        )
+        .child(div().text_sm().child(label))
+}
+
+/// The directory `dir` as a `file:` URL, for the settings footer's
+/// reveal: what the opener is handed. A space in it (macOS's
+/// "Application Support") is encoded, so it still opens.
+fn dir_url(dir: &Path) -> String {
+    let mut url = "file://".to_string();
+    for byte in dir.to_string_lossy().bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                url.push(byte as char)
+            }
+            _ => url.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    url
+}
+
 /// The keys of the window, as `yardr chat` has them, with the card's:
 /// a number key or the arrows choose an option, Enter sends the pick with
 /// the line's words, `x` puts aside, `d` declines, `a` asks about this,
@@ -1294,7 +1379,7 @@ enum Away {
 }
 
 /// What is typed in the settings for a yard: one to add, a sign-in for
-/// a hosted one, or a code for one that is listed.
+/// a hosted one, a code for one that is listed, or another name for one.
 #[derive(Clone, Debug, PartialEq)]
 enum Adding {
     /// A yard of this machine: its name and its socket.
@@ -1311,6 +1396,9 @@ enum Adding {
     /// The Kratos account's email and password for the hosted yard of
     /// this name, whose session is signed in again.
     SignInAgain(String),
+    /// Another name for the yard of this name, which keeps its reach,
+    /// its files and what was written for it.
+    Rename(String),
 }
 
 /// What a pairing failure says, with its next step. Refusals already say
@@ -1807,13 +1895,10 @@ pub struct Footplate {
     agents_busy: Option<AgentsBusy>,
     agents_read: bool,
     agents_said: Option<String>,
-    /// "Crew" in the settings: the open yard's crew as read, whether a
-    /// read is underway or one went through, and what came of the last
-    /// read instead.
-    crew: Vec<CrewMember>,
-    crew_reading: bool,
-    crew_read: bool,
-    crew_said: Option<String>,
+    /// The yard whose ⋯ menu stands open on its card, if one does:
+    /// pair again, rename and remove, and the sign-in again of a hosted
+    /// yard.
+    yard_menu: Option<String>,
     /// The row to open once the yard has it: the yardmaster's, after the
     /// first run, whose yard may not have answered yet.
     wanted_row: Option<Selected>,
@@ -1843,16 +1928,16 @@ pub struct Footplate {
     _tray_heeding: Task<()>,
 }
 
-/// The settings' section a screenshot state opens on: appearance for
+/// The settings' section a screenshot state opens on: this window for
 /// the `settings` shot, the named one for a `settings-<section>` shot,
 /// else none. A debug build's alone.
 #[cfg(debug_assertions)]
 fn shot_section() -> Option<Section> {
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
-        Ok("settings") => Some(Section::Appearance),
+        Ok("settings") => Some(Section::ThisWindow),
+        Ok("settings-appearance") => Some(Section::Appearance),
         Ok("settings-yards") => Some(Section::Yards),
         Ok("settings-agents") => Some(Section::Agents),
-        Ok("settings-crew") => Some(Section::Crew),
         Ok("settings-notifications") => Some(Section::Notifications),
         Ok("settings-connection") => Some(Section::Connection),
         _ => None,
@@ -2272,10 +2357,7 @@ impl Footplate {
             agents_busy: None,
             agents_read: false,
             agents_said: None,
-            crew: Vec::new(),
-            crew_reading: false,
-            crew_read: false,
-            crew_said: None,
+            yard_menu: None,
             wanted_row: None,
             system,
             permission: None,
@@ -2560,7 +2642,6 @@ impl Footplate {
         self.put(held);
         self.switch_reset();
         self.agents_reset(cx);
-        self.crew_reset();
         self.refresh_switch(cx);
     }
 
@@ -2578,7 +2659,6 @@ impl Footplate {
         self.retarget_addresses(cx);
         self.switch_reset();
         self.agents_reset(cx);
-        self.crew_reset();
         self.refresh_switch(cx);
     }
 
@@ -2591,7 +2671,7 @@ impl Footplate {
             Some(yard) => (
                 yard.web_view.clone(),
                 yard.run_base.clone(),
-                yard.usual_view(&self.env.socket).unwrap_or("").to_string(),
+                yard.view(&self.env.socket).unwrap_or("").to_string(),
             ),
             None => (String::new(), String::new(), String::new()),
         };
@@ -2874,7 +2954,7 @@ impl Footplate {
             .update(cx, |line, cx| line.set_text(&entry.web_view, cx));
         self.run
             .update(cx, |line, cx| line.set_text(&entry.run_base, cx));
-        let usual = entry.usual_view(&self.env.socket).unwrap_or("").to_string();
+        let usual = entry.view(&self.env.socket).unwrap_or("").to_string();
         self.view
             .update(cx, |line, cx| line.set_placeholder(&usual, cx));
         let run_usual = entry
@@ -5775,6 +5855,11 @@ impl Footplate {
         if self.switching.is_some() {
             return self.toggle_switcher(window, cx);
         }
+        if self.yard_menu.is_some() {
+            self.shut_menu();
+            cx.notify();
+            return;
+        }
         if self.settings_open {
             return self.toggle_settings(window, cx);
         }
@@ -5909,10 +5994,8 @@ impl Footplate {
         // field: nothing typed of a secret waits there.
         self.forget_secret(cx);
         self.shown(cx);
-        // "Agents and you" reads once the settings show, and the crew
-        // where its section is the open one.
+        // "Agents and you" reads once the settings show.
         self.read_agents(cx);
-        self.read_crew(cx);
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
             Some(_) if !self.settings_open => self.line.focus_handle(cx),
@@ -5970,18 +6053,26 @@ impl Footplate {
             // switch said is gone, and read anew.
             self.switch_reset();
             self.agents_reset(cx);
-            self.crew_reset();
             self.refresh_switch(cx);
         }
         if view_moved {
-            // The address the field holds is the yard's again, and a
-            // note's pages go by whether the view answers at it.
+            // The address the field holds is the yard's again, its hint
+            // the address in effect, and a note's pages go by whether
+            // the view answers at it.
             let base = self
                 .settings
                 .yard(&shown)
                 .map(|yard| yard.web_view.clone())
                 .unwrap_or_default();
             self.view.update(cx, |line, cx| line.set_text(&base, cx));
+            let effect = self
+                .settings
+                .yard(&shown)
+                .and_then(|yard| yard.view(&self.env.socket))
+                .unwrap_or("")
+                .to_string();
+            self.view
+                .update(cx, |line, cx| line.set_placeholder(&effect, cx));
             self.view_probe(cx);
         }
         if run_moved {
@@ -6187,6 +6278,7 @@ impl Footplate {
     /// tried again.
     fn switch_to(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.switching = None;
+        self.shut_menu();
         cx.notify();
         if self.pairing || self.env.yard.is_some() || self.settings.yard(name).is_none() {
             return;
@@ -6432,11 +6524,9 @@ impl Footplate {
             }
         }
         // The settings stand open on the yard this read: its operator
-        // settings are read now that yardr is there to run, and the crew
-        // where its section shows.
+        // settings are read now that yardr is there to run.
         if self.settings_open {
             self.read_agents(cx);
-            self.read_crew(cx);
         }
         cx.notify();
     }
@@ -6818,9 +6908,10 @@ impl Footplate {
         self.agents_said = None;
     }
 
-    /// The settings show `section` alone, and keep it the open one. The
-    /// crew reads where its section is picked.
+    /// The settings show `section` alone, and keep it the open one. A
+    /// yard's menu shuts: it is of the yards section.
     fn pick_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.shut_menu();
         self.set(
             Settings {
                 section,
@@ -6828,66 +6919,6 @@ impl Footplate {
             },
             cx,
         );
-        self.read_crew(cx);
-    }
-
-    /// Reads the open yard's crew for the settings' crew section, once it
-    /// shows. A yard that is not reached is said where the list would
-    /// stand, and nothing is read.
-    fn read_crew(&mut self, cx: &mut Context<Self>) {
-        if !self.settings_open
-            || self.settings.section != Section::Crew
-            || self.crew_reading
-            || self.crew_read
-        {
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        self.crew_reading = true;
-        self.crew_said = None;
-        cx.notify();
-        let opening = self.opening;
-        cx.spawn(async move |this, cx| {
-            let read = cx
-                .background_executor()
-                .spawn(async move { client.crew() })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.opening != opening {
-                    return;
-                }
-                this.crew_reading = false;
-                match read {
-                    Ok(crew) => {
-                        this.crew = crew;
-                        this.crew_read = true;
-                    }
-                    Err(why) => this.crew_said = Some(why.to_string()),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Tries the crew again, after it could not be read.
-    fn crew_retry(&mut self, cx: &mut Context<Self>) {
-        self.crew_said = None;
-        self.read_crew(cx);
-        cx.notify();
-    }
-
-    /// The open yard is another: what the crew section said of the last
-    /// is gone, and the yard's own crew is read anew once the section
-    /// shows.
-    fn crew_reset(&mut self) {
-        self.crew = Vec::new();
-        self.crew_reading = false;
-        self.crew_read = false;
-        self.crew_said = None;
     }
 
     /// A yard is to be added, in the settings or from where there is no
@@ -6898,6 +6929,7 @@ impl Footplate {
         if self.pairing || self.signing_in || self.env.yard.is_some() {
             return;
         }
+        self.shut_menu();
         let near = adding == Adding::Near;
         self.adding = Some(adding);
         self.yard_said = None;
@@ -6932,10 +6964,42 @@ impl Footplate {
         }
         // The code is typed in the yards section, whatever stood open.
         self.pick_section(Section::Yards, cx);
+        self.shut_menu();
         self.adding = Some(Adding::Again(name.unwrap_or_else(|| self.yard.clone())));
         self.yard_said = None;
         self.code.update(cx, |line, cx| line.set_text("", cx));
         window.focus(&self.code.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// The ⋯ menu of the yard called `name` stands open on its card, or
+    /// shuts again: one menu at a time.
+    fn toggle_menu(&mut self, name: &str, cx: &mut Context<Self>) {
+        match self.yard_menu.as_deref() == Some(name) {
+            true => self.yard_menu = None,
+            false => self.yard_menu = Some(name.to_string()),
+        }
+        cx.notify();
+    }
+
+    /// No yard's ⋯ menu stands open.
+    fn shut_menu(&mut self) {
+        self.yard_menu = None;
+    }
+
+    /// The yard called `name` is to be renamed: its card's menu shuts,
+    /// and its new name is typed under the cards, with the old one
+    /// standing.
+    fn rename_start(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
+            return;
+        }
+        self.shut_menu();
+        self.adding = Some(Adding::Rename(name.to_string()));
+        self.yard_said = None;
+        self.yard_name
+            .update(cx, |line, cx| line.set_text(name, cx));
+        window.focus(&self.yard_name.focus_handle(cx));
         cx.notify();
     }
 
@@ -6953,6 +7017,7 @@ impl Footplate {
         }
         // The account is typed in the yards section, whatever stood open.
         self.pick_section(Section::Yards, cx);
+        self.shut_menu();
         self.adding = Some(Adding::SignInAgain(name.to_string()));
         self.yard_said = None;
         let account = self
@@ -6975,6 +7040,7 @@ impl Footplate {
             Some(Adding::Near) => self.add_near(cx),
             Some(Adding::Far) | Some(Adding::Again(_)) => self.pair(cx),
             Some(Adding::Hosted) | Some(Adding::SignInAgain(_)) => self.sign_in(cx),
+            Some(Adding::Rename(_)) => self.rename_yard(cx),
             None => {}
         }
     }
@@ -6994,6 +7060,76 @@ impl Footplate {
                 self.shut_adding(cx);
                 self.set(settings.opening(&name), cx);
                 self.reopen(cx);
+            }
+            Err(why) => self.yard_said = Some(why),
+        }
+    }
+
+    /// Gives the yard the typed name, and keeps it: its reach and its files
+    /// stay, what was written for it stays written, and where it was the
+    /// open one it still is. A name another yard has is said, and nothing
+    /// changed.
+    fn rename_yard(&mut self, cx: &mut Context<Self>) {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
+            return;
+        }
+        let Some(Adding::Rename(from)) = self.adding.clone() else {
+            return;
+        };
+        let name = self.yard_name.read(cx).text().trim().to_string();
+        cx.notify();
+        let Some(mut yard) = self.settings.yard(&from).cloned() else {
+            self.yard_said = Some(format!("The yard {from} is no longer one of the list."));
+            return;
+        };
+        yard.name = name.clone();
+        match self
+            .settings
+            .clone()
+            .with_yard(Some(&from), yard, self.kept.as_deref())
+        {
+            Ok(settings) => {
+                self.yard_said = None;
+                self.shut_adding(cx);
+                // What the window kept under the old name is the new
+                // name's: the followed yard, which goes on as it is, the
+                // drafts, the places, the kept words and files, the
+                // unreached mark and the waiting notifications.
+                if let Some(mut held) = self.held.remove(&from) {
+                    if let Some(entry) = held.entry.as_mut() {
+                        entry.name = name.clone();
+                    }
+                    self.held.insert(name.clone(), held);
+                }
+                if self.yard == from {
+                    self.yard = name.clone();
+                    match self.entry.as_mut() {
+                        Some(entry) => entry.name = name.clone(),
+                        // Opened as this yard from the start, never left:
+                        // it goes on as the yard it is listed as now.
+                        None => self.entry = settings.yard(&name).cloned(),
+                    }
+                }
+                self.drafts.rename(&from, &name);
+                if let Some(place) = self.places.remove(&from) {
+                    self.places.insert(name.clone(), place);
+                }
+                if let Some(words) = self.kept_words.remove(&from) {
+                    self.kept_words.insert(name.clone(), words);
+                }
+                if let Some(files) = self.kept_note_files.remove(&from) {
+                    self.kept_note_files.insert(name.clone(), files);
+                }
+                if let Some(short) = self.unreached.remove(&from) {
+                    self.unreached.insert(name.clone(), short);
+                }
+                self.burst.rename(&from, &name);
+                self.set(settings, cx);
+                self.reopen(cx);
+                // Only the name moved, so the switch reads for the yard
+                // again: the read in set() ran while the settings still
+                // kept the old name.
+                self.refresh_switch(cx);
             }
             Err(why) => self.yard_said = Some(why),
         }
@@ -7021,7 +7157,10 @@ impl Footplate {
         // The yard's address, the code, the file its token goes in, and
         // the settings once it is paired.
         let asked = match (&self.env.yard, &adding) {
-            (_, Adding::Near) | (_, Adding::Hosted) | (_, Adding::SignInAgain(_)) => return,
+            (_, Adding::Near)
+            | (_, Adding::Hosted)
+            | (_, Adding::SignInAgain(_))
+            | (_, Adding::Rename(_)) => return,
             // The environment's yard is the one there is, and its token's
             // file the environment's.
             (Some(address), _) => self
@@ -7159,7 +7298,8 @@ impl Footplate {
                                 .map(|_| this.settings.clone().opening(name)),
                             (None, Adding::Near)
                             | (None, Adding::Hosted)
-                            | (None, Adding::SignInAgain(_)) => None,
+                            | (None, Adding::SignInAgain(_))
+                            | (None, Adding::Rename(_)) => None,
                         };
                         if let Some(settings) = next {
                             this.set(settings, cx);
@@ -7204,7 +7344,10 @@ impl Footplate {
         // The yard's name and address, the file its session goes in, and
         // the settings once it is signed in.
         let asked = match (&self.env.yard, &adding) {
-            (_, Adding::Near) | (_, Adding::Far) | (_, Adding::Again(_)) => return,
+            (_, Adding::Near)
+            | (_, Adding::Far)
+            | (_, Adding::Again(_))
+            | (_, Adding::Rename(_)) => return,
             // The environment's yard is reached direct, and is signed in
             // nowhere: its fields are never asked for.
             (Some(_), _) => return,
@@ -7420,6 +7563,7 @@ impl Footplate {
         if self.pairing || self.signing_in || self.env.yard.is_some() {
             return;
         }
+        self.shut_menu();
         // Who the device is there is what the yard said when it was read.
         let (model, said) = match self.held.get(name) {
             _ if name == self.yard => (self.model.as_ref(), self.said.as_ref()),
@@ -7439,7 +7583,8 @@ impl Footplate {
             said.push_str(&sessions);
         }
         self.yard_said = Some(said);
-        if matches!(&self.adding, Some(Adding::Again(at) | Adding::SignInAgain(at)) if at == name) {
+        if matches!(&self.adding, Some(Adding::Again(at) | Adding::SignInAgain(at) | Adding::Rename(at)) if at == name)
+        {
             self.shut_adding(cx);
         }
         self.set(settings, cx);
@@ -7461,17 +7606,12 @@ impl Footplate {
         cx.notify();
     }
 
-    /// The control that opens the settings, and shuts them: at the foot
-    /// of the left column, and under the words when the yard is away.
-    /// The settings: the text size, the look, the yard and what the system
-    /// tells of, each with its buttons and its keys, and where they are
-    /// kept.
+    /// The settings' sheet, over whatever stood open: this window, how
+    /// it looks, what the system tells of, the yards it shows, how this
+    /// yard's agents work with the operator, and the addresses a note's
+    /// pages go through, each with its controls, with its own sections
+    /// down the left side and the file they are kept in as a footer.
     fn talk_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
-        let kept = match &self.kept {
-            Some(file) => format!("Kept in {}", file.display()),
-            None => "Not kept: there is no home directory to keep them in.".to_string(),
-        };
         let head = div()
             .p_3()
             .border_b_1()
@@ -7480,24 +7620,7 @@ impl Footplate {
             .items_center()
             .justify_between()
             .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    // Resolve the available head width before measuring the
-                    // kept path, so truncate() can draw its ellipsis.
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("settings"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(palette.faint)
-                            .truncate()
-                            .debug_selector(|| "settings kept".to_string())
-                            .child(kept),
-                    ),
-            )
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
             .child(
                 small_button("back (esc)".to_string(), palette)
                     .id("settings back")
@@ -7554,37 +7677,29 @@ impl Footplate {
                         .on_click(cx.listener(|this, _, _, cx| this.usual_size(cx))),
                 ),
         );
-        let chosen = self.settings.look;
+        let picked = self.settings.look;
         let look = setting(
             "light or dark".to_string(),
             format!("{SECONDARY}+shift+l the next of auto, light, dark · auto is the desktop's"),
         )
-        .child(div().flex().flex_wrap().items_center().gap_2().children(
-            Look::ALL.into_iter().map(|look| {
-                small_button(look.name().to_string(), palette)
-                    .id(SharedString::from(format!("look {}", look.name())))
-                    .debug_selector(|| format!("look {}", look.name()))
-                    .when(look == chosen, |el| {
-                        el.bg(palette.open)
-                            .text_color(palette.text)
-                            .font_weight(FontWeight::SEMIBOLD)
+        .child(
+            div().flex().child(segmented(
+                Look::ALL
+                    .into_iter()
+                    .map(|look| {
+                        segment(look.name().to_string(), look == picked, palette)
+                            .id(SharedString::from(format!("look {}", look.name())))
+                            .debug_selector(move || format!("look {}", look.name()))
+                            .on_click(cx.listener(move |this, _, _, cx| this.look(look, cx)))
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.look(look, cx)))
-            }),
-        ));
-        let chosen = |el: gpui::Stateful<Div>, is: bool| {
-            el.when(is, |el| {
-                el.bg(palette.open)
-                    .text_color(palette.text)
-                    .font_weight(FontWeight::SEMIBOLD)
-            })
-        };
+                    .collect(),
+                palette,
+            )),
+        );
         let yard = self.talk_yards(setting, palette, cx);
         let view = self.view_setting(setting, palette, cx);
         let run = self.run_setting(setting, palette, cx);
-        let login = self.login_setting(setting, palette, cx);
         let agents = self.agents_setting(setting, palette, cx);
-        let crew = self.crew_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
         let notify = self.settings.notifications;
@@ -7593,46 +7708,33 @@ impl Footplate {
             "the system tells of what arrives while the window is behind another or shows another row"
                 .to_string(),
         )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .children([("off", false), ("on", true)].map(|(name, on)| {
-                    chosen(
-                        small_button(name.to_string(), palette)
-                            .id(SharedString::from(format!("notify {name}"))),
-                        on == notify.on,
-                    )
-                    .debug_selector(move || format!("notify {name}"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.notify_on(on, cx)))
-                })),
-        );
+        .child(div().flex().child(segmented(
+            [("off", false), ("on", true)]
+                .map(|(name, on)| {
+                    segment(name.to_string(), on == notify.on, palette)
+                        .id(SharedString::from(format!("notify {name}")))
+                        .debug_selector(move || format!("notify {name}"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.notify_on(on, cx)))
+                })
+                .into_iter()
+                .collect(),
+            palette,
+        )));
         if notify.on {
             notifications = notifications.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_color(palette.faint).child("of"))
-                    .children(
-                        [
-                            ("mail", Kind::Mail),
-                            ("decisions", Kind::Decision),
-                            ("the yard's notices", Kind::Notice),
-                        ]
-                        .map(|(name, kind)| {
-                            chosen(
-                                small_button(name.to_string(), palette)
-                                    .id(SharedString::from(format!("notify {name}"))),
-                                notify.chosen(kind),
-                            )
+                div().flex().flex_col().gap_2().children(
+                    [
+                        ("mail", Kind::Mail),
+                        ("decisions", Kind::Decision),
+                        ("the yard's notices", Kind::Notice),
+                    ]
+                    .map(|(name, kind)| {
+                        checkbox(name.to_string(), notify.chosen(kind), palette)
+                            .id(SharedString::from(format!("notify {name}")))
                             .debug_selector(move || format!("notify {name}"))
                             .on_click(cx.listener(move |this, _, _, cx| this.notify_of(kind, cx)))
-                        }),
-                    ),
+                    }),
+                ),
             );
             if let Some(Permission::Refused(why)) = &self.permission {
                 notifications = notifications.child(
@@ -7656,45 +7758,42 @@ impl Footplate {
                     false => "while it is on, footplate has an item in the desktop's tray, where a bar or a panel draws one: its icon says how many things wait, a click on it shows the window, and its menu lists the yards · off, there is no item".to_string(),
                 },
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .children([("off", false), ("on", true)].map(|(name, on)| {
-                        chosen(
-                            small_button(name.to_string(), palette)
-                                .id(SharedString::from(format!("menu bar {name}"))),
-                            on == self.settings.menu_bar,
-                        )
-                        .debug_selector(move || format!("menu bar {name}"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.menu_bar_on(on, cx)))
-                    })),
-            )
+            .child(div().flex().child(segmented(
+                [("off", false), ("on", true)]
+                    .map(|(name, on)| {
+                        segment(name.to_string(), on == self.settings.menu_bar, palette)
+                            .id(SharedString::from(format!("menu bar {name}")))
+                            .debug_selector(move || format!("menu bar {name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.menu_bar_on(on, cx)))
+                    })
+                    .into_iter()
+                    .collect(),
+                palette,
+            )))
         };
         // The item's mark, beside its switch: white, black, or as the
         // system draws it.
-        let marked = self.settings.tray;
+        let picked = self.settings.tray;
         let mark = setting(
             "tray mark".to_string(),
             "auto is the menu bar's on a mac, black in the tray".to_string(),
         )
-        .child(div().flex().flex_wrap().items_center().gap_2().children(
-            Look::ALL.into_iter().map(|mark| {
-                small_button(mark.name().to_string(), palette)
-                    .id(SharedString::from(format!("tray {}", mark.name())))
-                    .debug_selector(|| format!("tray {}", mark.name()))
-                    .when(mark == marked, |el| {
-                        el.bg(palette.open)
-                            .text_color(palette.text)
-                            .font_weight(FontWeight::SEMIBOLD)
+        .child(
+            div().flex().child(segmented(
+                Look::ALL
+                    .into_iter()
+                    .map(|mark| {
+                        segment(mark.name().to_string(), mark == picked, palette)
+                            .id(SharedString::from(format!("tray {}", mark.name())))
+                            .debug_selector(move || format!("tray {}", mark.name()))
+                            .on_click(cx.listener(move |this, _, _, cx| this.tray_mark(mark, cx)))
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.tray_mark(mark, cx)))
-            }),
-        ));
-        // The sections down the left side, as chat's rows are: the open
-        // one stands out, and a click shows that section alone.
+                    .collect(),
+                palette,
+            )),
+        );
+        // The sheet's own sections down the left side, as chat's rows are:
+        // the open one stands out, and a click shows that section alone.
         let open = self.settings.section;
         let mut list = div()
             .id("settings sections")
@@ -7721,51 +7820,134 @@ impl Footplate {
                     .when(section != open, |el| {
                         el.hover(|style| style.bg(palette.hover))
                     })
-                    .child(section.name())
+                    .child(section.title())
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_section(section, cx))),
             );
         }
-        pane.children(self.reconnect_strip(palette))
-            .child(head)
-            .child(
-                div().flex().flex_1().min_h_0().child(list).child(
-                    div()
-                        .id("settings pane")
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .overflow_y_scroll()
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .children(match open {
-                            Section::Appearance => vec![size, look, menu_bar, mark],
-                            Section::Yards => vec![yard, login],
-                            Section::Agents => vec![agents],
-                            Section::Crew => vec![crew],
-                            Section::Notifications => vec![notifications],
-                            Section::Connection => vec![view, run],
-                        }),
-                ),
-            )
-            .when_some(self.unkept.clone(), |el, why| {
-                el.child(
-                    div()
-                        .px_4()
-                        .py_1()
-                        .text_sm()
-                        .text_color(palette.warn)
-                        .child(format!("! not kept: {why}")),
-                )
-            })
+        // The file they are kept in, as the footer's line, with what
+        // opens its folder: no longer the head's subtitle.
+        let saved = match &self.kept {
+            Some(file) => format!("Saved to {}", file.display()),
+            None => "Not kept: there is no home directory to keep them in.".to_string(),
+        };
+        let reveal = self
+            .kept
+            .as_ref()
+            .and_then(|file| file.parent())
+            .map(dir_url);
+        let foot = div()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(palette.line)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
             .child(
                 div()
-                    .px_4()
-                    .py_2()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            // Resolve the available footer width before
+                            // measuring the path, so truncate() can draw
+                            // its ellipsis.
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .debug_selector(|| "settings saved".to_string())
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(saved),
+                    )
+                    .children(reveal.map(|url| {
+                        let open = self.means.open.clone();
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().text_sm().text_color(palette.faint).child("·"))
+                            .child(
+                                div()
+                                    .id("settings reveal")
+                                    .debug_selector(|| "settings reveal".to_string())
+                                    .text_sm()
+                                    .text_color(palette.accent)
+                                    .cursor_pointer()
+                                    .on_click(move |_, _, cx| (open)(&url, cx))
+                                    .child("reveal"),
+                            )
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
                     .text_sm()
                     .text_color(palette.faint)
                     .child(format!("{SECONDARY}+, or esc goes back")),
+            );
+        // The sheet stands centred in the window, over whatever stood
+        // open: its own sections, not the timetable's rows beside them.
+        div()
+            .debug_selector(|| "settings sheet".to_string())
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .justify_center()
+            .bg(palette.side)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .max_w(rems(56.))
+                    .flex()
+                    .flex_col()
+                    .bg(palette.ground)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(palette.line)
+                    .children(self.reconnect_strip(palette))
+                    .child(head)
+                    .child(
+                        div().flex().flex_1().min_h_0().child(list).child(
+                            div()
+                                .id("settings pane")
+                                .flex_1()
+                                .min_h_0()
+                                .min_w_0()
+                                .overflow_y_scroll()
+                                .p_4()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .children(match open {
+                                    Section::ThisWindow => vec![size, menu_bar, mark],
+                                    Section::Appearance => vec![look],
+                                    Section::Notifications => vec![notifications],
+                                    Section::Yards => vec![yard],
+                                    Section::Agents => vec![agents],
+                                    Section::Connection => vec![view, run],
+                                }),
+                        ),
+                    )
+                    .when_some(self.unkept.clone(), |el, why| {
+                        el.child(
+                            div()
+                                .px_4()
+                                .py_1()
+                                .text_sm()
+                                .text_color(palette.warn)
+                                .child(format!("! not kept: {why}")),
+                        )
+                    })
+                    .child(foot),
             )
     }
 
@@ -7811,11 +7993,10 @@ impl Footplate {
         }
     }
 
-    /// The yards in the settings: what a pairing is for, every yard of the
-    /// list with its kind, its reach and its state and with the buttons
-    /// that open it, pair its device again and remove it, and the fields
-    /// of one that is added. With a yard named by the environment there is
-    /// that one alone, to pair again.
+    /// The yards in the settings: what a pairing is for, every yard of
+    /// the list as a card with its name, its kind, its reach and what
+    /// waits in it, and the fields of one that is added. With a yard
+    /// named by the environment there is that one alone, to pair again.
     fn talk_yards(
         &self,
         setting: impl Fn(String, String) -> Div,
@@ -7855,61 +8036,7 @@ impl Footplate {
             }
             None => {
                 for listed in &self.settings.yards {
-                    let name = listed.name.clone();
-                    let reach = Self::yard_reach(listed);
-                    let open = name == self.yard;
-                    let button = |what: &str, text: &str| {
-                        let at = format!("yard {what} {name}");
-                        small_button(text.to_string(), palette)
-                            .id(SharedString::from(at.clone()))
-                            .debug_selector(move || at.clone())
-                            .flex_none()
-                    };
-                    let mut row = div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .debug_selector({
-                            let name = name.clone();
-                            move || format!("yard row {name}")
-                        })
-                        .child(
-                            div()
-                                .when(open, |el| el.font_weight(FontWeight::SEMIBOLD))
-                                .child(format!(
-                                    "{name} · {} · {}",
-                                    listed.kind(),
-                                    self.yard_state(listed)
-                                )),
-                        )
-                        .child(faint(reach));
-                    if !open {
-                        row = row.child(button("open", "open").on_click(cx.listener({
-                            let name = name.clone();
-                            move |this, _, window, cx| this.switch_to(&name, window, cx)
-                        })));
-                    }
-                    if listed.is_far() {
-                        row = row.child(button("again", "pair again").on_click(cx.listener({
-                            let name = name.clone();
-                            move |this, _, window, cx| {
-                                this.pair_again(Some(name.clone()), window, cx)
-                            }
-                        })));
-                    }
-                    if listed.is_hosted() {
-                        row =
-                            row.child(button("sign in", "sign in again").on_click(cx.listener({
-                                let name = name.clone();
-                                move |this, _, window, cx| this.sign_in_again(&name, window, cx)
-                            })));
-                    }
-                    row = row.child(button("remove", "remove").on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, _, cx| this.remove_yard(&name, cx)
-                    })));
-                    yard = yard.child(row);
+                    yard = yard.child(self.yard_card(listed, palette, cx));
                 }
                 yard = yard.child(
                     div()
@@ -7952,71 +8079,198 @@ impl Footplate {
         yard.children(self.yard_asked(palette, cx))
     }
 
-    /// "Start at login" for the open yard, which the setting names: the
-    /// yard's daemon starts at login, and herdr's server with it, by the
-    /// one service every yard on this machine shares. On is the yard
-    /// starting at login, both halves. A yard at an address starts
-    /// nothing on this machine, and says so instead of the switch; so
-    /// does an entry that names no yard home, and a system whose
-    /// services yardr does not write to. Beside the switch, one faint
-    /// line for what came of a switch.
-    fn login_setting(
-        &self,
-        setting: impl Fn(String, String) -> Div,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let title = format!("start {} at login", self.yard);
-        let mut section = match self.switch_for() {
-            SwitchFor::Far => setting(
-                title,
-                "a yard at an address starts nothing on this machine: its processes are elsewhere"
-                    .to_string(),
-            ),
-            SwitchFor::NoHome => setting(
-                title,
-                "this entry names no yard home: nothing is started at login".to_string(),
-            ),
-            SwitchFor::Near(_) => match self.switch_status.as_ref() {
-                Some(status) if status.daemon_service().supported => {
-                    let on = status.starts_at_login();
-                    setting(title, self.login_help(status)).child(
-                        div().flex().flex_wrap().items_center().gap_2().children(
-                            [("off", false), ("on", true)].map(|(name, want)| {
-                                small_button(name.to_string(), palette)
-                                    .id(SharedString::from(format!("login {name}")))
-                                    .debug_selector(move || format!("login {name}"))
-                                    .when(want == on, |el| {
-                                        el.bg(palette.open)
-                                            .text_color(palette.text)
-                                            .font_weight(FontWeight::SEMIBOLD)
+    /// One yard of the list as a card: its name, its kind, its reach and
+    /// its state, with Open where it is not the open one and a ⋯ menu
+    /// holding pair again, rename and remove (and the sign-in again of a
+    /// hosted yard). The open yard's card carries start at login where
+    /// it is a yard of this machine.
+    fn yard_card(&self, listed: &settings::Yard, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let name = listed.name.clone();
+        let open = name == self.yard;
+        let reach = match (listed.is_far(), listed.socket.is_empty()) {
+            (true, _) if listed.is_hosted() && !listed.account.is_empty() => {
+                format!("{} · signed in as {}", listed.address, listed.account)
+            }
+            (true, _) => listed.address.clone(),
+            (false, true) => "by this run's socket".to_string(),
+            (false, false) => listed.socket.clone(),
+        };
+        let mut actions = div().flex_none().flex().items_center().gap_2();
+        if !open {
+            let at = format!("yard open {name}");
+            actions = actions.child(
+                small_button("open".to_string(), palette)
+                    .id(SharedString::from(at.clone()))
+                    .debug_selector(move || at.clone())
+                    .on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, window, cx| this.switch_to(&name, window, cx)
+                    })),
+            );
+        }
+        let at = format!("yard menu {name}");
+        actions = actions.child(
+            small_button("⋯".to_string(), palette)
+                .id(SharedString::from(at.clone()))
+                .debug_selector(move || at.clone())
+                .on_click(cx.listener({
+                    let name = name.clone();
+                    move |this, _, _, cx| this.toggle_menu(&name, cx)
+                })),
+        );
+        let mut card =
+            div()
+                .debug_selector({
+                    let name = name.clone();
+                    move || format!("yard row {name}")
+                })
+                .rounded_lg()
+                .border_1()
+                .border_color(palette.line)
+                .bg(palette.side)
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(name.clone()),
+                                )
+                                .child(div().text_sm().text_color(palette.faint).truncate().child(
+                                    format!("{} · {}", listed.kind(), self.yard_state(listed)),
+                                )),
+                        )
+                        .child(actions),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .truncate()
+                        .child(reach),
+                );
+        if self.yard_menu.as_deref() == Some(name.as_str()) {
+            let item = |what: &str, text: &str| {
+                let at = format!("yard {what} {name}");
+                div()
+                    .id(SharedString::from(at.clone()))
+                    .debug_selector(move || at.clone())
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(palette.hover))
+                    .child(text.to_string())
+            };
+            let mut menu = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .rounded_md()
+                .border_1()
+                .border_color(palette.line)
+                .bg(palette.ground)
+                .p_1();
+            if listed.is_far() {
+                menu = menu.child(item("again", "pair again").on_click(cx.listener({
+                    let name = name.clone();
+                    move |this, _, window, cx| this.pair_again(Some(name.clone()), window, cx)
+                })));
+            }
+            if listed.is_hosted() {
+                menu = menu.child(item("sign in", "sign in again").on_click(cx.listener({
+                    let name = name.clone();
+                    move |this, _, window, cx| this.sign_in_again(&name, window, cx)
+                })));
+            }
+            menu = menu.child(item("rename", "rename").on_click(cx.listener({
+                let name = name.clone();
+                move |this, _, window, cx| this.rename_start(&name, window, cx)
+            })));
+            menu = menu.child(item("remove", "remove").on_click(cx.listener({
+                let name = name.clone();
+                move |this, _, _, cx| this.remove_yard(&name, cx)
+            })));
+            card = card.child(menu);
+        }
+        if let Some(login) = self.login_card(&name, palette, cx) {
+            card = card.child(login);
+        }
+        card
+    }
+
+    /// "Start at login" on the open yard's card, where it is a yard of
+    /// this machine: the yard's daemon starts at login, and herdr's
+    /// server with it, by the one service every yard on this machine
+    /// shares. On is the yard starting at login, both halves. Any other
+    /// card carries nothing: a yard at an address starts nothing on this
+    /// machine, so the switch shows only on the local yard, where it
+    /// applies. Beside the switch, one faint line for what came of a
+    /// switch.
+    fn login_card(&self, name: &str, palette: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        if name != self.yard || !matches!(self.switch_for(), SwitchFor::Near(_)) {
+            return None;
+        }
+        let faint = |text: String| div().text_sm().text_color(palette.faint).child(text);
+        let mut card = div().flex().flex_col().gap_1();
+        match self.switch_status.as_ref() {
+            Some(status) if status.daemon_service().supported => {
+                let on = status.starts_at_login();
+                card = card
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().child("start at login"))
+                            .child(segmented(
+                                [("off", false), ("on", true)]
+                                    .map(|(name, want)| {
+                                        segment(name.to_string(), want == on, palette)
+                                            .id(SharedString::from(format!("login {name}")))
+                                            .debug_selector(move || format!("login {name}"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.set_login(want, cx)
+                                            }))
                                     })
-                                    .when(self.switch_busy.is_some(), |el| el.opacity(0.5))
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| this.set_login(want, cx)),
-                                    )
-                            }),
-                        ),
+                                    .into_iter()
+                                    .collect(),
+                                palette,
+                            ))
+                            .when(self.switch_busy.is_some(), |el| el.opacity(0.5)),
                     )
-                }
-                Some(_) => setting(
-                    title,
+                    .child(faint(self.login_help(status)));
+            }
+            Some(_) => {
+                card = card.child(faint(
                     "this system has no service manager yardr writes to: nothing starts at login"
                         .to_string(),
-                ),
-                None => setting(
-                    title,
-                    match (&self.switch_note, self.switch_reading) {
-                        (Some(_), false) => "yardr could not be read.".to_string(),
-                        _ => "asking yardr what starts at login…".to_string(),
-                    },
-                ),
-            },
-        };
-        if !matches!(self.switch_for(), SwitchFor::Far | SwitchFor::NoHome)
-            && let Some(note) = self.switch_note.as_ref()
-        {
-            section = section.child(
+                ));
+            }
+            None => {
+                card = card.child(faint(match (&self.switch_note, self.switch_reading) {
+                    (Some(_), false) => "yardr could not be read.".to_string(),
+                    _ => "asking yardr what starts at login…".to_string(),
+                }));
+            }
+        }
+        if let Some(note) = self.switch_note.as_ref() {
+            card = card.child(
                 div()
                     .debug_selector(|| "switch note".to_string())
                     .text_sm()
@@ -8025,7 +8279,7 @@ impl Footplate {
                     .child(note.clone()),
             );
         }
-        section
+        Some(card)
     }
 
     /// The one line of help under "start at login". Where the yard is
@@ -8044,8 +8298,9 @@ impl Footplate {
 
     /// "Agents and you" in the settings: how the near yard's agents work
     /// with its operator, and the line they know about them. A yard at
-    /// an address keeps its operator's settings where it runs: they are
-    /// changed on that machine, not from here.
+    /// an address keeps its operator's settings where it runs: the
+    /// section says whose they are, read-only, and where they are
+    /// changed.
     fn agents_setting(
         &self,
         setting: impl Fn(String, String) -> Div,
@@ -8058,9 +8313,16 @@ impl Footplate {
             SwitchFor::Far => setting("Agents and you".to_string(), help.to_string()).child(
                 div()
                     .debug_selector(|| "agents far".to_string())
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child("These are the operator's at that machine: they are changed there, not from here."),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(format!("Set by the operator on {}.", self.yard))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child("They are changed on that machine, with yardr settings set."),
+                    ),
             ),
             SwitchFor::NoHome => setting(
                 "Agents and you".to_string(),
@@ -8072,9 +8334,7 @@ impl Footplate {
                 // yardr is not there to run: either is tried again.
                 let said = match (&self.agents_said, &self.switch_note) {
                     (Some(said), _) => Some(said),
-                    (None, Some(note))
-                        if self.switch_program.is_none() && !self.switch_reading =>
-                    {
+                    (None, Some(note)) if self.switch_program.is_none() && !self.switch_reading => {
                         Some(note)
                     }
                     (None, _) => None,
@@ -8092,9 +8352,9 @@ impl Footplate {
                                     small_button("try again".to_string(), palette)
                                         .id("agents again")
                                         .debug_selector(|| "agents again".to_string())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.agents_retry(cx)
-                                        })),
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.agents_retry(cx)),
+                                        ),
                                 ),
                             );
                     }
@@ -8114,23 +8374,25 @@ impl Footplate {
                 let busy = self.agents_busy.is_some();
                 let mut section = setting("Agents and you".to_string(), help.to_string())
                     .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            setup::STYLES.iter().enumerate().map(|(at, (key, _, _))| {
-                                let name = setup::style_name(at);
-                                small_button(name, palette)
-                                    .id(SharedString::from(format!("agents style {key}")))
-                                    .debug_selector(move || format!("agents style {key}"))
-                                    .when(at == chosen, |el| {
-                                        el.bg(palette.open)
-                                            .text_color(palette.text)
-                                            .font_weight(FontWeight::SEMIBOLD)
+                        div().flex().child(
+                            segmented(
+                                setup::STYLES
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(at, (key, _, _))| {
+                                        let name = setup::style_name(at);
+                                        segment(name, at == chosen, palette)
+                                            .id(SharedString::from(format!("agents style {key}")))
+                                            .debug_selector(move || format!("agents style {key}"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.agents_style = at;
+                                                cx.notify();
+                                            }))
                                     })
-                                    .when(busy, |el| el.opacity(0.5))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.agents_style = at;
-                                        cx.notify();
-                                    }))
-                            }),
+                                    .collect(),
+                                palette,
+                            )
+                            .when(busy, |el| el.opacity(0.5)),
                         ),
                     )
                     .child(
@@ -8165,18 +8427,13 @@ impl Footplate {
                             ),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                small_button("save (enter)".to_string(), palette)
-                                    .id("agents save")
-                                    .debug_selector(|| "agents save".to_string())
-                                    .when(busy, |el| el.opacity(0.5))
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_agents(cx))),
-                            ),
+                        div().flex().flex_wrap().items_center().gap_2().child(
+                            small_button("save (enter)".to_string(), palette)
+                                .id("agents save")
+                                .debug_selector(|| "agents save".to_string())
+                                .when(busy, |el| el.opacity(0.5))
+                                .on_click(cx.listener(|this, _, _, cx| this.save_agents(cx))),
+                        ),
                     );
                 if let Some(said) = &self.agents_said {
                     section = section.child(
@@ -8190,81 +8447,12 @@ impl Footplate {
         }
     }
 
-    /// The open yard's crew in the settings: one row each, with what
-    /// it is doing, in the words of chat's crew list. Read-only: the
-    /// crew is written to from chat, not from here. Where the yard is
-    /// not reached, the section says that instead of the list.
-    fn crew_setting(
-        &self,
-        setting: impl Fn(String, String) -> Div,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut section = setting(
-            "crew".to_string(),
-            "who works this yard, and what each is doing".to_string(),
-        );
-        if self.client.is_none() {
-            return section.child(
-                div()
-                    .debug_selector(|| "crew away".to_string())
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child(self.yard_waits(&self.yard)),
-            );
-        }
-        if let Some(said) = &self.crew_said {
-            return section
-                .child(
-                    div()
-                        .debug_selector(|| "crew said".to_string())
-                        .child(said.clone()),
-                )
-                .child(
-                    div().flex().child(
-                        small_button("try again".to_string(), palette)
-                            .id("crew again")
-                            .debug_selector(|| "crew again".to_string())
-                            .on_click(cx.listener(|this, _, _, cx| this.crew_retry(cx))),
-                    ),
-                );
-        }
-        if !self.crew_read {
-            return section.child(
-                div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child("reading this yard's crew…"),
-            );
-        }
-        if self.crew.is_empty() {
-            return section.child(
-                div()
-                    .debug_selector(|| "crew none".to_string())
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child("This yard has no crew yet."),
-            );
-        }
-        for member in &self.crew {
-            let name = member.name.clone();
-            section = section.child(
-                div()
-                    .debug_selector({
-                        let name = name.clone();
-                        move || format!("crew row {name}")
-                    })
-                    .child(format!("{name} · {}", state_of(member))),
-            );
-        }
-        section
-    }
-
     /// The shown yard's web view in the settings: the field its base
-    /// address is typed in, what keeps it, and what a typed one that is
-    /// none says. A yard reached by pairing opens its pages once this
-    /// names the address that yard's view is reached by. Of the one yard
-    /// the environment names no address is kept.
+    /// address is typed in, the address in effect under it, what keeps
+    /// it, and what a typed one that is none says. A yard reached by
+    /// pairing opens its pages once this names the address that yard's
+    /// view is reached by. Of the one yard the environment names no
+    /// address is kept.
     fn view_setting(
         &self,
         setting: impl Fn(String, String) -> Div,
@@ -8284,6 +8472,15 @@ impl Footplate {
             None => "a note's pages open in the browser through it; empty is no web view",
         };
         let focus = self.view.focus_handle(cx);
+        let overridden = !entry.web_view.trim().is_empty();
+        let effect = match entry.view(&self.env.socket) {
+            Some(base) => format!("in effect: {base}"),
+            None => "in effect: no web view".to_string(),
+        };
+        let effect = match overridden {
+            true => effect,
+            false => format!("{effect} · default"),
+        };
         let mut section = setting(format!("web view of {}", entry.name), help.to_string())
             .child(
                 div()
@@ -8312,6 +8509,13 @@ impl Footplate {
             )
             .child(
                 div()
+                    .debug_selector(|| "view effect".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(effect),
+            )
+            .child(
+                div()
                     .flex()
                     .flex_wrap()
                     .items_center()
@@ -8322,13 +8526,18 @@ impl Footplate {
                             .debug_selector(|| "view save".to_string())
                             .on_click(cx.listener(|this, _, _, cx| this.submit_view(cx))),
                     )
-                    .child(
-                        small_button("the usual address".to_string(), palette)
-                            .id("view usual")
-                            .debug_selector(|| "view usual".to_string())
-                            .when(entry.web_view.trim().is_empty(), |el| el.opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| this.usual_view(cx))),
-                    ),
+                    .when_some(overridden.then_some(()), |el, _| {
+                        el.child(
+                            div()
+                                .id("view reset")
+                                .debug_selector(|| "view reset".to_string())
+                                .text_sm()
+                                .text_color(palette.accent)
+                                .cursor_pointer()
+                                .child("reset")
+                                .on_click(cx.listener(|this, _, _, cx| this.usual_view(cx))),
+                        )
+                    }),
             );
         if let Some(said) = &self.view_said {
             section = section.child(
@@ -8341,8 +8550,9 @@ impl Footplate {
     }
 
     /// The shown yard's run base in the settings: the field it is
-    /// typed in, what keeps it, and what a typed one that is none says.
-    /// Of the one yard the environment names none is kept.
+    /// typed in, the address in effect under it, what keeps it, and what
+    /// a typed one that is none says. Of the one yard the environment
+    /// names none is kept.
     fn run_setting(
         &self,
         setting: impl Fn(String, String) -> Div,
@@ -8358,6 +8568,20 @@ impl Footplate {
             );
         };
         let focus = self.run.focus_handle(cx);
+        let overridden = !entry.run_base.trim().is_empty();
+        let usual = self.run_usual();
+        let base = match overridden {
+            true => entry.run_base.trim().to_string(),
+            false => usual,
+        };
+        let effect = match base.is_empty() {
+            true => "in effect: no run base".to_string(),
+            false => format!("in effect: {base}"),
+        };
+        let effect = match overridden {
+            true => effect,
+            false => format!("{effect} · default"),
+        };
         let mut section = setting(
             format!("run base of {}", entry.name),
             "a note's pages run in the browser through it; empty is the web view's host on the sandbox port"
@@ -8390,6 +8614,13 @@ impl Footplate {
         )
         .child(
             div()
+                .debug_selector(|| "run effect".to_string())
+                .text_sm()
+                .text_color(palette.faint)
+                .child(effect),
+        )
+        .child(
+            div()
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -8400,13 +8631,18 @@ impl Footplate {
                         .debug_selector(|| "run save".to_string())
                         .on_click(cx.listener(|this, _, _, cx| this.submit_run(cx))),
                 )
-                .child(
-                    small_button("the view's host".to_string(), palette)
-                        .id("run usual")
-                        .debug_selector(|| "run usual".to_string())
-                        .when(entry.run_base.trim().is_empty(), |el| el.opacity(0.5))
-                        .on_click(cx.listener(|this, _, _, cx| this.usual_run(cx))),
-                ),
+                .when_some(overridden.then_some(()), |el, _| {
+                    el.child(
+                        div()
+                            .id("run reset")
+                            .debug_selector(|| "run reset".to_string())
+                            .text_sm()
+                            .text_color(palette.accent)
+                            .cursor_pointer()
+                            .child("reset")
+                            .on_click(cx.listener(|this, _, _, cx| this.usual_run(cx))),
+                    )
+                }),
         );
         if let Some(said) = &self.run_said {
             section = section.child(
@@ -8418,10 +8654,10 @@ impl Footplate {
         section
     }
 
-    /// The fields of the yard that is being added, or of the code for one
-    /// that is paired again, with the button under them, what came of the
-    /// last change to the yards under that, and the help under it: under
-    /// the yards in the settings, and under the ways to a yard where there
+    /// The fields of the yard that is being added, renamed, signed in
+    /// or paired again, with the button under them, what came of the last
+    /// change to the yards under that, and the help under it: under the
+    /// yards in the settings, and under the ways to a yard where there
     /// is none.
     fn yard_asked(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let typed = |name: &'static str, line: &Entity<Line>, cx: &mut Context<Self>| {
@@ -8584,6 +8820,23 @@ impl Footplate {
                     faint(format!(
                         "The Kratos account's email and password. {session}"
                     ))
+                    .into_any_element(),
+                );
+            }
+            Some(Adding::Rename(name)) => {
+                asked.extend([
+                    div()
+                        .debug_selector(|| "yard rename for".to_string())
+                        .child(format!("another name for {name}"))
+                        .into_any_element(),
+                    typed("name", &self.yard_name, cx).into_any_element(),
+                    submit("rename (enter)", "yard rename save", cx).into_any_element(),
+                ]);
+                help = Some(
+                    faint(
+                        "Its reach and its files stay, and what was written for it stays written. No two yards share a name."
+                            .to_string(),
+                    )
                     .into_any_element(),
                 );
             }
@@ -13617,9 +13870,11 @@ impl Render for Footplate {
             }
             // A yard that answered in this run and is away now stays as
             // last seen: its rows, and its open row with its sends held.
-            (Some(_), Some(model)) if self.reconnecting() && self.settings_open => root
-                .child(self.list(model, palette, cx))
-                .child(self.talk_settings(palette, cx)),
+            // The settings stand over that as their sheet, with no rows
+            // beside them.
+            (Some(_), Some(_)) if self.reconnecting() && self.settings_open => {
+                root.child(self.talk_settings(palette, cx))
+            }
             (Some(_), Some(model)) if self.reconnecting() && self.first_run.is_some() => root
                 .child(self.list(model, palette, cx))
                 .children(self.first_run.clone()),
@@ -13643,9 +13898,9 @@ impl Render for Footplate {
                     ),
                 )
             }
-            (None, Some(model)) if self.settings_open => root
-                .child(self.list(model, palette, cx))
-                .child(self.talk_settings(palette, cx)),
+            // The settings stand as their sheet, with their own
+            // sections, over whatever stood open: no rows beside them.
+            (None, Some(_)) if self.settings_open => root.child(self.talk_settings(palette, cx)),
             // The yard answers before its first run is over: its rows are
             // there, and the first run where a conversation will be.
             (None, Some(model)) if self.first_run.is_some() => root
@@ -18484,13 +18739,13 @@ mod tests {
     /// content instead, the path is measured full-width first, and
     /// truncate() then cuts it hard, with no ellipsis.
     #[gpui::test]
-    fn a_long_kept_path_ends_before_the_back_button_with_a_gap(cx: &mut TestAppContext) {
+    fn a_long_saved_path_ends_before_the_reveal_with_a_gap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let long = dir
             .path()
             .join(format!("{}/settings.json", "long-".repeat(30)));
-        // Short enough to fit the head at the narrowest window, so its
-        // column hugs it there unless the column fills the head.
+        // Short enough to fit the footer at the narrowest window, so its
+        // column hugs it there unless the column fills the footer.
         let short = std::path::PathBuf::from("s.json");
         let yard = Yard::start();
         a_yard_of_jo(&yard);
@@ -18498,29 +18753,65 @@ mod tests {
         view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
         assert!(settings_open(&view, cx));
         // The narrowest window the application opens (main.rs), and a wide
-        // one: the path overflows the pane at both.
+        // one: the path overflows the footer at both.
         for (wide, high) in [(560., 360.), (1200., 800.)] {
             cx.simulate_resize(gpui::size(px(wide), px(high)));
             view.update(cx, |v, cx| {
                 v.kept = Some(long.clone());
                 cx.notify();
             });
-            let kept = bounds_of(cx, "settings kept");
-            let back = bounds_of(cx, "settings back");
+            let saved = bounds_of(cx, "settings saved");
+            let reveal = bounds_of(cx, "settings reveal");
             assert!(
-                kept.right() < back.left(),
-                "at {wide} px the long path touches the back button: {kept:?} {back:?}"
+                saved.right() < reveal.left(),
+                "at {wide} px the long path touches the reveal: {saved:?} {reveal:?}"
             );
             view.update(cx, |v, cx| {
                 v.kept = Some(short.clone());
                 cx.notify();
             });
-            let brief = bounds_of(cx, "settings kept");
+            let brief = bounds_of(cx, "settings saved");
             assert_eq!(
-                brief.size.width, kept.size.width,
-                "at {wide} px the kept path's column hugs its content instead of filling the head"
+                brief.size.width, saved.size.width,
+                "at {wide} px the saved path's column hugs its content instead of filling the footer"
             );
         }
+    }
+
+    #[test]
+    fn the_reveal_url_encodes_the_settings_directory() {
+        assert_eq!(
+            dir_url(std::path::Path::new(
+                "/Users/jo/Library/Application Support/footplate"
+            )),
+            "file:///Users/jo/Library/Application%20Support/footplate"
+        );
+        assert_eq!(
+            dir_url(std::path::Path::new("/home/jo/.config/footplate")),
+            "file:///home/jo/.config/footplate"
+        );
+    }
+
+    /// The footer's reveal opens the settings' directory: where the file
+    /// it names is kept.
+    #[gpui::test]
+    fn the_footer_s_reveal_opens_the_settings_directory(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let opened = opened_pages(&view, cx);
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings reveal");
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [dir_url(file.parent().unwrap())]
+        );
     }
 
     #[gpui::test]
@@ -19448,7 +19739,9 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         assert!(drawn(cx, "text size"));
+        click_on(cx, "settings section appearance");
         assert!(drawn(cx, "look auto"));
+        click_on(cx, "settings section this window");
         cx.simulate_input("x");
         assert_eq!(typed(&view, cx), "hal");
         // The settings have no text of their own to type: shift and Enter
@@ -19505,6 +19798,7 @@ mod tests {
         );
         cx.simulate_keystrokes("secondary-shift-l");
         assert_eq!(settings_of(&view, cx).look, Look::Auto);
+        click_on(cx, "settings section appearance");
         click_on(cx, "look light");
         assert_eq!(settings_of(&view, cx).look, Look::Light);
         click_on(cx, "look dark");
@@ -19512,6 +19806,7 @@ mod tests {
             palette(cx),
             Palette::of(Look::Dark, WindowAppearance::Light)
         );
+        click_on(cx, "settings section this window");
         let set = Settings {
             text: settings::TEXT_MIN,
             look: Look::Dark,
@@ -19599,7 +19894,9 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         click_on(cx, "settings section connection");
-        assert!(drawn(cx, "view address"));
+        assert!(drawn(cx, "view address") && drawn(cx, "view effect"));
+        // No override, no reset: only the address in effect, the default.
+        assert!(!drawn(cx, "view reset"));
         // What is no address is said, and nothing changed.
         view.update(cx, |v, cx| {
             v.view.update(cx, |line, cx| line.set_text("plantime", cx))
@@ -19607,15 +19904,8 @@ mod tests {
         click_on(cx, "view save");
         assert_eq!(entry_of(&view, cx).web_view, "");
         assert!(drawn(cx, "view said"));
-        // The usual address clears an unsaved invalid value too, even
-        // though the stored setting was already unset.
-        click_on(cx, "view usual");
-        assert_eq!(
-            view.read_with(cx, |v, cx| v.view.read(cx).text().to_string()),
-            ""
-        );
-        assert_eq!(view.read_with(cx, |v, _| v.view_said.clone()), None);
-        // Kept, it is the yard's, and the file has it on its entry.
+        // Kept, it is the yard's, and the file has it on its entry, with
+        // a reset beside the save from now on.
         let base = view_up();
         view.update(cx, |v, cx| {
             v.view.update(cx, |line, cx| line.set_text(&base, cx))
@@ -19626,14 +19916,15 @@ mod tests {
             Settings::read(&file).yard(settings::HERE).unwrap().web_view,
             base
         );
+        assert!(drawn(cx, "view reset"));
         // Said no longer: the test frame's bounds only ever grow, so
         // what is gone is read, not drawn.
         assert_eq!(view.read_with(cx, |v, _| v.view_said.clone()), None);
         wait(cx, "the web view", |cx| {
             view_answered(&view, cx) == Some(true)
         });
-        // The usual address unsets it again: the yard's usual.
-        click_on(cx, "view usual");
+        // Reset unsets it again: the yard's usual.
+        click_on(cx, "view reset");
         assert_eq!(entry_of(&view, cx).web_view, "");
         assert_eq!(
             Settings::read(&file).yard(settings::HERE).unwrap().web_view,
@@ -19663,7 +19954,9 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         click_on(cx, "settings section connection");
-        assert!(drawn(cx, "run address"));
+        assert!(drawn(cx, "run address") && drawn(cx, "run effect"));
+        // No override, no reset: only the address in effect, the default.
+        assert!(!drawn(cx, "run reset"));
         // What is no address is said, and nothing changed.
         view.update(cx, |v, cx| {
             v.run.update(cx, |line, cx| line.set_text("plantime", cx))
@@ -19675,15 +19968,8 @@ mod tests {
             view.read_with(cx, |v, cx| v.run.read(cx).text().to_string()),
             "plantime"
         );
-        // The usual base clears an invalid unsaved value and its error
-        // even though the kept setting was already empty.
-        click_on(cx, "run usual");
-        assert_eq!(
-            view.read_with(cx, |v, cx| v.run.read(cx).text().to_string()),
-            ""
-        );
-        assert_eq!(view.read_with(cx, |v, _| v.run_said.clone()), None);
-        // Kept, it is the yard's, and the file has it on its entry.
+        // Kept, it is the yard's, and the file has it on its entry, with
+        // a reset beside the save from now on.
         let base = view_up();
         view.update(cx, |v, cx| {
             v.run.update(cx, |line, cx| line.set_text(&base, cx))
@@ -19694,14 +19980,15 @@ mod tests {
             Settings::read(&file).yard(settings::HERE).unwrap().run_base,
             base
         );
+        assert!(drawn(cx, "run reset"));
         // Said no longer: the test frame's bounds only ever grow, so
         // what is gone is read, not drawn.
         assert_eq!(view.read_with(cx, |v, _| v.run_said.clone()), None);
         wait(cx, "the run base", |cx| {
             run_answered(&view, cx) == Some(true)
         });
-        // The view's host is empty again.
-        click_on(cx, "run usual");
+        // Reset is the view's host again.
+        click_on(cx, "run reset");
         assert_eq!(entry_of(&view, cx).run_base, "");
         assert_eq!(
             Settings::read(&file).yard(settings::HERE).unwrap().run_base,
@@ -19830,8 +20117,8 @@ mod tests {
     }
 
     /// "Agents and you" at an address is read-only: the section says the
-    /// settings are the operator's at that machine, and nothing of yardr's
-    /// runs for it.
+    /// settings are set by the operator on that yard, and nothing of
+    /// yardr's runs for it.
     #[gpui::test]
     fn agents_and_you_at_an_address_is_read_only(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19894,6 +20181,8 @@ mod tests {
         });
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "text size"));
+        click_on(cx, "settings section appearance");
         assert!(drawn(cx, "look auto"));
         cx.simulate_keystrokes("secondary-shift-l secondary-=");
         assert_eq!(
@@ -19901,6 +20190,7 @@ mod tests {
             Settings {
                 text: 15,
                 look: Look::Light,
+                section: Section::Appearance,
                 ..Settings::default()
             }
         );
@@ -19948,8 +20238,9 @@ mod tests {
 
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
-        // Appearance opens, and alone: the window's look and text size,
-        // its item and the item's mark.
+        // This window opens, and alone: the text size, the item and the
+        // item's mark. The look is its own section's. No rows stand
+        // beside the sheet: the list's status row is gone with it.
         for section in Section::ALL {
             assert!(
                 drawn(cx, &format!("settings section {}", section.name())),
@@ -19958,19 +20249,32 @@ mod tests {
             );
         }
         assert!(drawn(cx, "text size"));
-        assert!(drawn(cx, "look auto"));
         assert!(drawn(cx, "menu bar on"));
         assert!(drawn(cx, "tray auto"));
+        assert!(!drawn(cx, "look auto"));
         assert!(!drawn(cx, "add near"));
         assert!(!drawn(cx, "agents save"));
         assert!(!drawn(cx, "notify on"));
         assert!(!drawn(cx, "view address"));
-        // Yards: the list with its buttons, and the open yard's start at
-        // login.
+        // The sheet starts where the rail ends: no rows stand beside it.
+        assert_eq!(bounds_of(cx, "settings sheet").origin.x, px(RAIL));
+        // Appearance: the look alone.
+        click_on(cx, "settings section appearance");
+        assert!(drawn(cx, "look auto") && drawn(cx, "look light") && drawn(cx, "look dark"));
+        // Yards: the card with Open and its ⋯ menu, and the open yard's
+        // start at login on its card.
         click_on(cx, "settings section yards");
         assert!(drawn(cx, "yard row this machine"));
         assert!(drawn(cx, "add near") && drawn(cx, "add far") && drawn(cx, "add hosted"));
         assert!(drawn(cx, "login off") && drawn(cx, "login on"));
+        assert!(!drawn(cx, "yard rename this machine"));
+        click_on(cx, "yard menu this machine");
+        assert!(drawn(cx, "yard rename this machine"));
+        assert!(drawn(cx, "yard remove this machine"));
+        assert!(!drawn(cx, "yard again this machine"));
+        cx.simulate_keystrokes("escape");
+        assert!(settings_open(&view, cx));
+        assert_eq!(view.read_with(cx, |v, _| v.yard_menu.clone()), None);
         // Agents: the operator's styles, the line about them, and save.
         click_on(cx, "settings section agents");
         wait(cx, "the operator's settings read", |cx| {
@@ -19978,52 +20282,36 @@ mod tests {
         });
         assert!(drawn(cx, "agents style work"));
         assert!(drawn(cx, "agents about") && drawn(cx, "agents save"));
-        // Crew: one row each, with what it is doing.
-        click_on(cx, "settings section crew");
-        wait(cx, "the crew read", |cx| {
-            view.read_with(cx, |v, _| v.crew_read)
-        });
-        assert!(drawn(cx, "crew row assembly"));
-        assert!(drawn(cx, "crew row yardmaster"));
-        assert_eq!(
-            view.read_with(cx, |v, _| v
-                .crew
-                .iter()
-                .map(|member| (member.name.clone(), model::state_of(member).to_string()))
-                .collect::<Vec<_>>()),
-            [
-                ("assembly".to_string(), "not running".to_string()),
-                ("yardmaster".to_string(), "idle".to_string()),
-            ]
-        );
         // Notifications: the switch. Switching it on asks the system,
         // which the notification tests stand in for.
         click_on(cx, "settings section notifications");
         assert!(drawn(cx, "notify off") && drawn(cx, "notify on"));
-        // Connection: the web view's address and the run base.
+        // Connection: the web view's address and the run base, each with
+        // the address in effect, and no reset while neither is overridden.
         click_on(cx, "settings section connection");
         assert!(drawn(cx, "view address") && drawn(cx, "run address"));
+        assert!(drawn(cx, "view effect") && drawn(cx, "run effect"));
+        assert!(!drawn(cx, "view reset") && !drawn(cx, "run reset"));
+        // The footer names where they are kept, with what opens it.
+        assert!(drawn(cx, "settings saved") && drawn(cx, "settings reveal"));
 
         // The open section is kept: closing and opening shows it still,
         // and so does a restart.
-        click_on(cx, "settings section crew");
-        assert_eq!(settings_of(&view, cx).section, Section::Crew);
-        assert_eq!(Settings::read(&file).section, Section::Crew);
+        click_on(cx, "settings section connection");
+        assert_eq!(settings_of(&view, cx).section, Section::Connection);
+        assert_eq!(Settings::read(&file).section, Section::Connection);
         cx.simulate_keystrokes("escape");
         assert!(!settings_open(&view, cx));
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
-        assert!(drawn(cx, "crew row yardmaster"));
+        assert!(drawn(cx, "view address"));
         let (again, cx) = opened_kept(&yard, &file, cx);
-        assert_eq!(settings_of(&again, cx).section, Section::Crew);
+        assert_eq!(settings_of(&again, cx).section, Section::Connection);
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&again, cx));
-        wait(cx, "the crew read again", |cx| {
-            again.read_with(cx, |v, _| v.crew_read)
-        });
-        assert!(drawn(cx, "crew row assembly"));
+        assert!(drawn(cx, "run address"));
         // Back to the first, the file says nothing of the section.
-        click_on(cx, "settings section appearance");
+        click_on(cx, "settings section this window");
         assert!(drawn(cx, "text size"));
         assert!(!std::fs::read_to_string(&file).unwrap().contains("section"));
     }
@@ -23866,6 +24154,7 @@ mod tests {
         // Removing the open yard: its token's file goes with it, the
         // other's stays, the settings say the command that removes the
         // device at the yard, and the first of the list is opened.
+        click_on(cx, "yard menu FAR");
         click_on(cx, "yard remove FAR");
         let said = yard_said(&view, cx);
         assert!(
@@ -23886,6 +24175,7 @@ mod tests {
         assert_eq!(kept.opened().name, settings::HERE);
         // A yard that is not open is removed too, and one of this machine
         // has no token to say anything of.
+        click_on(cx, "yard menu second home");
         click_on(cx, "yard remove second home");
         assert_eq!(
             yard_said(&view, cx),
@@ -23896,6 +24186,7 @@ mod tests {
         wait(cx, "the paired yard to be read", |cx| {
             state_of(&view, cx, "far") == "1 mail"
         });
+        click_on(cx, "yard menu far");
         click_on(cx, "yard remove far");
         let said = yard_said(&view, cx);
         assert!(said.ends_with("yardr user device rm jo laptop"), "{said}");
@@ -23905,6 +24196,92 @@ mod tests {
             [settings::Yard::near(settings::HERE, "")]
         );
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+    }
+
+    /// A yard is renamed from its card's ⋯ menu: its reach stays, what
+    /// was written for it stays written, and where it was the open one
+    /// it still is, as it stands. A name another yard has is refused.
+    #[gpui::test]
+    fn a_yard_is_renamed_from_its_card_s_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        Settings {
+            yards: vec![
+                settings::Yard::near(settings::HERE, ""),
+                settings::Yard::near("second", "/nonexistent/yard.sock"),
+            ],
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        // What is written for the yard, to stay written under its new name.
+        view.update(cx, |v, _| {
+            v.drafts.turn_to(settings::HERE);
+            v.drafts.put_text("yardmaster", "hal".to_string());
+        });
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
+        click_on(cx, "yard menu this machine");
+        click_on(cx, "yard rename this machine");
+        assert!(drawn(cx, "yard rename for"));
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.yard_name.read(cx).text().to_string()),
+            "this machine"
+        );
+        // Another yard's name is refused, and nothing changed.
+        view.update(cx, |v, cx| {
+            v.yard_name
+                .update(cx, |line, cx| line.set_text("second", cx))
+        });
+        click_on(cx, "yard rename save");
+        assert!(
+            yard_said(&view, cx).starts_with("There is a yard called second already,"),
+            "{}",
+            yard_said(&view, cx)
+        );
+        assert_eq!(open_yard(&view, cx), settings::HERE);
+        // Renamed: the list and the file have the new name, the yard that
+        // is open is still open, as it stands, and the draft moved with it.
+        view.update(cx, |v, cx| {
+            v.yard_name.update(cx, |line, cx| line.set_text("shop", cx))
+        });
+        click_on(cx, "yard rename save");
+        assert_eq!(yard_said(&view, cx), "");
+        assert_eq!(
+            Settings::read(&file)
+                .yards
+                .iter()
+                .map(|yard| yard.name.clone())
+                .collect::<Vec<_>>(),
+            ["shop", "second"]
+        );
+        assert_eq!(open_yard(&view, cx), "shop");
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+        assert_eq!(
+            view.update(cx, |v, _| {
+                v.drafts.turn_to("shop");
+                v.drafts.take_text("yardmaster")
+            }),
+            "hal"
+        );
+        // And a restart opens it under its new name.
+        cx.simulate_keystrokes("escape");
+        let env = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (again, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&again, cx) == ["Shall I land it?"]
+        });
+        assert_eq!(open_yard(&again, cx), "shop");
     }
 
     /// A pairing writes the address the code went to under the token: the
@@ -26339,6 +26716,51 @@ mod tests {
         assert!(!drawn(cx, "login on"));
         assert!(!drawn(cx, "login off"));
         assert!(standin::calls(&program).is_empty());
+    }
+
+    /// Start at login stands on the local yard's card alone: with a yard
+    /// at an address open, the yards section has no switch, and opening
+    /// the local yard puts it on its card.
+    #[gpui::test]
+    fn start_at_login_stands_on_the_local_yard_s_card_alone(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        Settings {
+            yards: vec![
+                settings::Yard::near(settings::HERE, ""),
+                settings::Yard::far("remote", "https://yard.example.net", "remote.token"),
+            ],
+            open: "remote".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let env = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the yard at the address away", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_some())
+        });
+        click_on(cx, "settings");
+        click_on(cx, "settings section yards");
+        assert!(drawn(cx, "yard row remote") && drawn(cx, "yard row this machine"));
+        assert!(!drawn(cx, "login on") && !drawn(cx, "login off"));
+        // Opening the local yard puts the switch on its card.
+        let (means, program, _) = stand_in_means(dir.path(), false);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(true, false));
+        view.update(cx, |v, _| v.means = means);
+        click_on(cx, "yard open this machine");
+        wait(cx, "the switch read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+        assert!(drawn(cx, "login off") && drawn(cx, "login on"));
     }
 
     /// The head for a socket that names no yard home: it says so, and

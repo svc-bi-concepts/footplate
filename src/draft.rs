@@ -822,6 +822,17 @@ impl Drafts {
         std::mem::replace(&mut self.open, yard.to_string())
     }
 
+    /// The drafts of `from` are the drafts of `to` now: the yard was
+    /// renamed, and what was written for it stays written.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        if let Some(drafts) = self.yards.remove(from) {
+            self.yards.insert(to.to_string(), drafts);
+        }
+        if self.open == from {
+            self.open = to.to_string();
+        }
+    }
+
     /// Nothing is kept of `yard`: it is no longer among the window's. The
     /// attachment ids let the window release their drawn image previews too.
     pub fn forget(&mut self, yard: &str) -> Vec<u64> {
@@ -1097,6 +1108,27 @@ mod tests {
         assert_eq!(drafts.attachments("yardmaster"), []);
         assert_eq!(drafts.take_text("yardmaster"), "");
         assert!(!drafts.remove(two));
+    }
+
+    #[test]
+    fn a_renamed_yard_keeps_its_drafts_under_its_new_name() {
+        let mut drafts = Drafts::default();
+        drafts.turn_to("mac");
+        let one = drafts.attach("yardmaster", image(PNG));
+        drafts.put_text("yardmaster", "For the mac.".into());
+        drafts.turn_to("plantime");
+        drafts.rename("mac", "shop");
+        assert_eq!(drafts.turn_to("shop"), "plantime");
+        assert_eq!(ids(&drafts, "yardmaster"), [one]);
+        assert_eq!(drafts.take_text("yardmaster"), "For the mac.");
+        // The open yard renamed stays the open one.
+        drafts.turn_to("shop");
+        drafts.rename("shop", "mac");
+        assert_eq!(drafts.take_text("yardmaster"), "");
+        drafts.put_text("yardmaster", "Still here.".into());
+        drafts.turn_to("plantime");
+        assert_eq!(drafts.turn_to("mac"), "plantime");
+        assert_eq!(drafts.take_text("yardmaster"), "Still here.");
     }
 
     #[test]

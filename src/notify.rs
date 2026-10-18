@@ -87,6 +87,14 @@ impl Burst {
         self.0.retain(|(of, _)| of != yard);
     }
 
+    /// What waits of `from` waits of `to` now: the yard was renamed, and
+    /// a notification of it still leads there.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        for (of, _) in self.0.iter_mut().filter(|(of, _)| of == from) {
+            *of = to.to_string();
+        }
+    }
+
     /// All there is as one notification, or none when there is nothing. It
     /// leads to the row of the first, in the yard that arrived in. `named`
     /// is whether it says which yard: where several are followed, a sender
@@ -695,6 +703,20 @@ mod tests {
                 yard: "north".into(),
                 target: Selected::Yard,
             })
+        );
+    }
+
+    #[test]
+    fn a_renamed_yard_s_news_still_leads_there() {
+        let mut burst = Burst::default();
+        burst.add("north", mail("yardmaster@mac", "One."));
+        burst.add("south", mail("yardmaster@mac", "Two."));
+        burst.rename("north", "far");
+        let telling = burst.take(false).unwrap();
+        assert_eq!(telling.yard, "far");
+        assert_eq!(
+            telling.body,
+            "far: 1 from yardmaster@mac; south: 1 from yardmaster@mac"
         );
     }
 

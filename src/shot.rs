@@ -74,9 +74,9 @@ pub const STATES: &[&str] = &[
     "stopped",
     "far",
     "settings",
+    "settings-appearance",
     "settings-yards",
     "settings-agents",
-    "settings-crew",
     "settings-notifications",
     "settings-connection",
     "reconnecting",
@@ -574,9 +574,9 @@ fn populate(yard: &Yard, state: &str) {
         "yardmaster"
         | "far"
         | "settings"
+        | "settings-appearance"
         | "settings-yards"
         | "settings-agents"
-        | "settings-crew"
         | "settings-notifications"
         | "settings-connection"
         | "reconnecting"
@@ -1445,9 +1445,9 @@ mod tests {
                 "yardmaster"
                 | "far"
                 | "settings"
+                | "settings-appearance"
                 | "settings-yards"
                 | "settings-agents"
-                | "settings-crew"
                 | "settings-notifications"
                 | "settings-connection"
                 | "reconnecting"

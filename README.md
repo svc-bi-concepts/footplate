@@ -176,8 +176,8 @@ the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
-on each of their sections: `settings` is appearance, and
-`settings-yards`, `settings-agents`, `settings-crew`,
+on each of their sections: `settings` is this window, and
+`settings-appearance`, `settings-yards`, `settings-agents`,
 `settings-notifications` and `settings-connection` the rest),
 `reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
@@ -429,11 +429,14 @@ the token is. Under your name the head names the open yard as the settings
 list it, and the settings say the whole of it: `this machine's yard`, or
 `the yard south at https://mac.example.net, as its device laptop`.
 
-**The yards in the settings.** The settings list the yards the window
-keeps, each with its kind ("on this machine" or "paired"), how it is
-reached, and whether it is the open one, with "open", "pair again" and
-"remove" beside it. A file that names none has one: `this machine`, the
-yard at this run's socket. "add a yard of this machine" takes a name and a
+**The yards in the settings.** The settings keep the yards the window
+shows, each as a card with its kind ("on this machine" or "paired"), how
+it is reached, and whether it is the open one or what waits in it, with
+"open" and a ⋯ menu holding "pair again", "rename" and "remove" (and the
+sign-in again of a hosted yard). A file that names none has one: `this
+machine`, the yard at this run's socket. A rename keeps the yard's reach,
+its files and what was written for it. "add a yard of this machine" takes
+a name and a
 socket path, for another home's yard (`<its home>/.yardr/yard.sock`), and
 needs no pairing; this run's socket stands in the field to begin with. That socket is trusted as that yard: footplate accepts
 what it says and sends there what you type for that entry, including secret
@@ -829,16 +832,17 @@ they are in is lost. "Stop them" runs `down` again with the flag; "Leave
 running", or Esc, stops nothing. With no agent, Stop stops at once and asks
 nothing.
 
-In the settings, "start at login" for the open yard, which the setting
-names: on, the yard starts at login. Switching on installs the login
-services with `up --login`: the daemon's and herdr's server's. Where the
-yard is stopped, switching on starts it now as well as at every login, so
-the help says that before the click. herdr's is one service for
-every yard on the machine, the user's and not the yard's. Switching off
-removes the daemon's service; herdr's shared service is left, and its
-server still starts at login. Where removing the daemon's service stops the
-daemon it ran, the switch starts it again while the yard runs, so the yard
-runs on. A yard at an address has no switch: its processes are elsewhere.
+On the open yard's card in the settings, where it is a yard of this
+machine, "start at login": on, the yard starts at login. Switching on
+installs the login services with `up --login`: the daemon's and herdr's
+server's. Where the yard is stopped, switching on starts it now as well
+as at every login, so the help says that before the click. herdr's is one
+service for every yard on the machine, the user's and not the yard's.
+Switching off removes the daemon's service; herdr's shared service is
+left, and its server still starts at login. Where removing the daemon's
+service stops the daemon it ran, the switch starts it again while the yard
+runs, so the yard runs on. A yard at an address has no switch: its
+processes are elsewhere, and no other card carries one either.
 
 Every one of the switch's calls names the open yard's home: its socket
 minus `yard.sock` as `--home`. This run's yard, whose socket is empty,
@@ -1011,22 +1015,33 @@ carrying out failed reads `approved, failed:` with the failure under it.
 
 ## Settings
 
-Two things can be set, in the settings or by their own keys, and both are
-drawn at once and kept for the next start; the third is the yards, which
-[A yard at an address](#a-yard-at-an-address) has, the fourth what the
-system tells of, which [Notifications](#notifications) has, and the fifth
-the menu bar item, on Linux the tray's, which
-[Closing the window](#closing-the-window) has:
+`cmd+,` opens the settings as their own sheet, with the sections down the
+left side and the file they are kept in as a footer, with what opens its
+folder. A change is drawn at once and kept for the next start:
 
-- the text size, 11 to 20 pixels, a pixel a step; 14 is the usual size.
-  Everything that goes with the text goes with it: the left column, the
-  rows, the logo.
-- light, dark or auto. Auto is the desktop's look, and follows it when it
-  changes while the window is open.
+- This window: the text size, 11 to 20 pixels, a pixel a step; 14 is the
+  usual size. Everything that goes with the text goes with it: the left
+  column, the rows, the logo. And the menu bar item, on Linux the tray's,
+  which [Closing the window](#closing-the-window) has, with its mark.
+- Appearance: light, dark or auto. Auto is the desktop's look, and follows
+  it when it changes while the window is open.
+- Notifications: what the system tells of, which
+  [Notifications](#notifications) has.
+- Yards: the yards the window keeps, each as a card with its name, its
+  kind, how it is reached and what waits in it, with Open and a ⋯ menu
+  holding pair again, rename and remove; which
+  [A yard at an address](#a-yard-at-an-address) has. The open yard's card
+  carries start at login where it is a yard of this machine.
+- Agents & you: how this yard's agents work with you, and the line they
+  know about you. On a yard at an address they are the operator's there,
+  read-only.
+- Connection: the web view's base address, through which a note's pages
+  open in the browser, and the run base, through which they run. Each
+  names the address in effect, the default where nothing is set, with a
+  reset once it is overridden.
 
-They are kept, with the yards, the notifications that were chosen and the
-menu bar item where it is switched off, in one file footplate writes on
-every change: `$XDG_CONFIG_HOME/footplate/settings.json` when
+They are kept in one file footplate writes on every change:
+`$XDG_CONFIG_HOME/footplate/settings.json` when
 `XDG_CONFIG_HOME` is set, `~/Library/Application Support/footplate/settings.json`
 on macOS otherwise, and `~/.config/footplate/settings.json` on Linux
 otherwise. A relative `XDG_CONFIG_HOME` is ignored. Without the file, or
