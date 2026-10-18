@@ -2002,6 +2002,12 @@ impl Footplate {
             this.settings_open = true;
             this.settings.section = section;
         }
+        // The notifications shot shows the kind checkboxes as well as
+        // the master control, in a state where they apply.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings-notifications") {
+            this.settings.notifications.on = true;
+        }
         // The reconnecting shot has a draft in the composer: the
         // yardmaster's conversation's, which opens first, in the line
         // once the yard is read.
@@ -8080,13 +8086,15 @@ impl Footplate {
     }
 
     /// One yard of the list as a card: its name, its kind, its reach and
-    /// its state, with Open where it is not the open one and a ⋯ menu
-    /// holding pair again, rename and remove (and the sign-in again of a
-    /// hosted yard). The open yard's card carries start at login where
-    /// it is a yard of this machine.
+    /// what waits in it, with Open where it is not the open one and a ⋯
+    /// menu holding pair again, rename and remove (and the sign-in again
+    /// of a hosted yard). The open yard's card carries start at login
+    /// where it is a yard of this machine.
     fn yard_card(&self, listed: &settings::Yard, palette: Palette, cx: &mut Context<Self>) -> Div {
         let name = listed.name.clone();
         let open = name == self.yard;
+        let state = self.yard_state(listed);
+        let count = (state == "open").then(|| self.yard_waits(&name));
         let reach = match (listed.is_far(), listed.socket.is_empty()) {
             (true, _) if listed.is_hosted() && !listed.account.is_empty() => {
                 format!("{} · signed in as {}", listed.address, listed.account)
@@ -8118,51 +8126,66 @@ impl Footplate {
                     move |this, _, _, cx| this.toggle_menu(&name, cx)
                 })),
         );
-        let mut card =
-            div()
-                .debug_selector({
-                    let name = name.clone();
-                    move || format!("yard row {name}")
-                })
-                .rounded_lg()
-                .border_1()
-                .border_color(palette.line)
-                .bg(palette.side)
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .truncate()
-                                        .child(name.clone()),
-                                )
-                                .child(div().text_sm().text_color(palette.faint).truncate().child(
-                                    format!("{} · {}", listed.kind(), self.yard_state(listed)),
-                                )),
-                        )
-                        .child(actions),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(palette.faint)
-                        .truncate()
-                        .child(reach),
-                );
+        let mut card = div()
+            .debug_selector({
+                let name = name.clone();
+                move || format!("yard row {name}")
+            })
+            .rounded_lg()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.side)
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(palette.faint)
+                                    .truncate()
+                                    .child(format!("{} · {state}", listed.kind())),
+                            ),
+                    )
+                    .child(actions),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .truncate()
+                    .child(reach),
+            );
+        if let Some(count) = count {
+            card = card.child(
+                div()
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("yard count {name}")
+                    })
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(count),
+            );
+        }
         if self.yard_menu.as_deref() == Some(name.as_str()) {
             let item = |what: &str, text: &str| {
                 let at = format!("yard {what} {name}");
@@ -8310,7 +8333,7 @@ impl Footplate {
         let focus = self.agents_about.focus_handle(cx);
         let help = "how this yard's agents work with you, and the line they know about you";
         match self.switch_for() {
-            SwitchFor::Far => setting("Agents and you".to_string(), help.to_string()).child(
+            SwitchFor::Far => setting("Agents & you".to_string(), help.to_string()).child(
                 div()
                     .debug_selector(|| "agents far".to_string())
                     .flex()
@@ -8325,11 +8348,11 @@ impl Footplate {
                     ),
             ),
             SwitchFor::NoHome => setting(
-                "Agents and you".to_string(),
+                "Agents & you".to_string(),
                 "this entry names no yard home: nothing is read or changed".to_string(),
             ),
             SwitchFor::Near(_) if !self.agents_read => {
-                let mut section = setting("Agents and you".to_string(), help.to_string());
+                let mut section = setting("Agents & you".to_string(), help.to_string());
                 // What a read came to instead of the yard's own, or why
                 // yardr is not there to run: either is tried again.
                 let said = match (&self.agents_said, &self.switch_note) {
@@ -8372,7 +8395,7 @@ impl Footplate {
             SwitchFor::Near(_) => {
                 let chosen = self.agents_style;
                 let busy = self.agents_busy.is_some();
-                let mut section = setting("Agents and you".to_string(), help.to_string())
+                let mut section = setting("Agents & you".to_string(), help.to_string())
                     .child(
                         div().flex().child(
                             segmented(
@@ -20265,6 +20288,7 @@ mod tests {
         // start at login on its card.
         click_on(cx, "settings section yards");
         assert!(drawn(cx, "yard row this machine"));
+        assert!(drawn(cx, "yard count this machine"));
         assert!(drawn(cx, "add near") && drawn(cx, "add far") && drawn(cx, "add hosted"));
         assert!(drawn(cx, "login off") && drawn(cx, "login on"));
         assert!(!drawn(cx, "yard rename this machine"));
