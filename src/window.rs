@@ -20345,7 +20345,7 @@ mod tests {
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         click_on(cx, "settings section yards");
-        assert!(!drawn(cx, "yard rename this machine"));
+        assert_eq!(view.read_with(cx, |v, _| v.yard_menu.clone()), None);
         // Agents: the operator's styles, the line about them, and save.
         click_on(cx, "settings section agents");
         wait(cx, "the operator's settings read", |cx| {
