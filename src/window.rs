@@ -19350,8 +19350,20 @@ mod tests {
                 Some(&Selected::Bead("yd-zulu".into()))
             );
         });
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals board again", |cx| {
+            drawn(cx, "arrival yd-zulu")
+        });
         yard.answer("Bead", &bead_outside_arrivals());
         click_on(cx, "waits open yd-hidden");
+        wait(cx, "the outside bead selected", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some(&Selected::Bead("yd-hidden".into()))
+            })
+        });
+        wait(cx, "the outside bead read", |_| {
+            yard.asked("Bead").last() == Some(&json!({"bead": "yd-hidden"}))
+        });
         wait(cx, "the bead outside arrivals", |cx| {
             drawn(cx, "bead asks yd-hidden")
         });
