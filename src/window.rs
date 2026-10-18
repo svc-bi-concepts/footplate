@@ -10882,7 +10882,7 @@ impl Footplate {
     /// click opens the bead's details, as its row does.
     fn waits_banner(
         &self,
-        waiting: &[&Arrival],
+        waiting: &[(&str, &str)],
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -10903,9 +10903,9 @@ impl Footplate {
                     .text_color(palette.accent)
                     .child(waits_head(waiting.len())),
             );
-        for row in waiting {
-            let bead = row.bead.clone();
-            let sel = Selected::Bead(row.bead.clone());
+        for &(bead, title) in waiting {
+            let bead = bead.to_string();
+            let sel = Selected::Bead(bead.clone());
             banner = banner.child(
                 div()
                     .id(SharedString::from(format!("waits {bead}")))
@@ -10926,7 +10926,7 @@ impl Footplate {
                                 let bead = bead.clone();
                                 move || format!("waits title {bead}")
                             })
-                            .child(row.title.clone()),
+                            .child(title.to_string()),
                     )
                     .child(
                         div()
@@ -14875,6 +14875,14 @@ mod tests {
             ],
         }})
         .to_string()
+    }
+
+    /// One bead beyond Arrivals' cap, whole, as the Bead call answers it.
+    fn bead_outside_arrivals() -> String {
+        let mut bead: Value = serde_json::from_str(&bead_zulu()).unwrap();
+        bead["result"]["id"] = json!("yd-hidden");
+        bead["result"]["title"] = json!("A wait beyond the table");
+        bead.to_string()
     }
 
     /// One bead travelling with no line whole, as the Bead call
@@ -19288,7 +19296,20 @@ mod tests {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_waits());
-        yard.answer("Flows", &flows_board());
+        let mut flows: Value = serde_json::from_str(&flows_board()).unwrap();
+        flows["result"]["depots"][0]["travelling"] = json!(3);
+        flows["result"]["travelling"] = json!(4);
+        flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"][0]["remark"] =
+            json!("waits for yardmaster, jo");
+        flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "bead": "yd-hidden", "title": "A wait beyond the table",
+                "expected": "1h–2h", "remark": "waits for jo", "tone": "amber",
+                "working": false,
+            }));
+        yard.answer("Flows", &flows.to_string());
         yard.answer("Bead", &bead_zulu());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
@@ -19298,6 +19319,10 @@ mod tests {
         assert!(drawn(cx, "waits yd-zulu"));
         assert!(drawn(cx, "waits title yd-zulu"));
         assert!(drawn(cx, "waits open yd-zulu"));
+        assert!(drawn(cx, "waits yd-hidden"));
+        assert!(drawn(cx, "waits title yd-hidden"));
+        assert!(drawn(cx, "waits open yd-hidden"));
+        assert!(!drawn(cx, "arrival yd-hidden"));
         assert!(!drawn(cx, "waits yd-alpha"));
         view.read_with(cx, |v, _| {
             assert_eq!(
@@ -19306,9 +19331,9 @@ mod tests {
                     .unwrap()
                     .waiting_on_you()
                     .iter()
-                    .map(|row| row.bead.as_str())
+                    .map(|(bead, _)| *bead)
                     .collect::<Vec<_>>(),
-                ["yd-zulu"]
+                ["yd-zulu", "yd-hidden"]
             );
         });
         let banner = bounds_of(cx, "waits banner").bottom();
@@ -19323,6 +19348,17 @@ mod tests {
             assert_eq!(
                 v.model.as_ref().unwrap().selected(),
                 Some(&Selected::Bead("yd-zulu".into()))
+            );
+        });
+        yard.answer("Bead", &bead_outside_arrivals());
+        click_on(cx, "waits open yd-hidden");
+        wait(cx, "the bead outside arrivals", |cx| {
+            drawn(cx, "bead asks yd-hidden")
+        });
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Bead("yd-hidden".into()))
             );
         });
     }

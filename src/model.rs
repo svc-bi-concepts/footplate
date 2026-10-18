@@ -1487,13 +1487,36 @@ impl Model {
         None
     }
 
-    /// The board's rows that wait on the person reading: the banner's
-    /// beads, in the served order.
-    pub fn waiting_on_you(&self) -> Vec<&Arrival> {
-        self.arrivals
-            .iter()
-            .filter(|row| waits_on_you(&row.remark, &self.me))
-            .collect()
+    /// The beads that wait on the person reading, in the board's order
+    /// first and then the complete Flows order. Arrivals is capped, so
+    /// the flows also supply waits beyond the rows the table can show.
+    pub fn waiting_on_you(&self) -> Vec<(&str, &str)> {
+        let mut waiting = Vec::new();
+        let mut seen = HashSet::new();
+        let mut include = |bead: &str, title: &str, remark: &str| {
+            if waits_on_you(remark, &self.me) && seen.insert(bead) {
+                waiting.push((bead, title));
+            }
+        };
+        for row in &self.arrivals {
+            include(&row.bead, &row.title, &row.remark);
+        }
+        for depot in &self.flows.depots {
+            for flow in &depot.flows {
+                for stage in &flow.stages {
+                    for bead in &stage.beads {
+                        include(&bead.bead, &bead.title, &bead.remark);
+                    }
+                }
+            }
+            for bead in &depot.elsewhere {
+                include(&bead.bead, &bead.title, &bead.remark);
+            }
+        }
+        for bead in &self.flows.unassigned {
+            include(&bead.bead, &bead.title, &bead.remark);
+        }
+        waiting
     }
 
     /// One line on what the platform `stage` is: whose turn a bead
@@ -6026,11 +6049,49 @@ mod tests {
         assert_eq!(model.selected(), Some(&Selected::Arrivals));
     }
 
-    /// The banner's beads are the board's rows that wait on the
-    /// person reading, in the served order.
+    /// The banner keeps visible arrivals in their served order, then
+    /// includes waits beyond the arrivals cap from stages, Elsewhere
+    /// and No line, once per bead.
     #[test]
     fn the_banner_s_beads_are_the_board_s_rows_that_wait_on_you() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        let mut flows = flow_view();
+        flows.depots[0].flows[0].stages[0].beads.push(flowed(
+            "yd-a",
+            "A waits",
+            "1h–2h",
+            "waits for jo",
+            "amber",
+        ));
+        flows.depots[0].flows[0].stages[0].beads.push(flowed(
+            "yd-b",
+            "Yardmaster waits",
+            "1h–2h",
+            "waits for yardmaster",
+            "amber",
+        ));
+        flows.depots[0].flows[0].stages[1].beads.push(flowed(
+            "yd-f",
+            "Both wait",
+            "1h–2h",
+            "waits for yardmaster, jo",
+            "amber",
+        ));
+        flows.depots[0].elsewhere.push(flowed(
+            "yd-e",
+            "Elsewhere waits",
+            "1h–2h",
+            "waits for jo",
+            "amber",
+        ));
+        flows.unassigned.push(flowed(
+            "yd-u",
+            "No line waits",
+            "1h–2h",
+            "waits for jo",
+            "amber",
+        ));
+        m.flows(flows);
         m.arrivals(board(
             vec![
                 arrival("yd-a", "new", "yardr", "1h–2h", "waits for jo", "amber"),
@@ -6059,9 +6120,9 @@ mod tests {
         assert_eq!(
             m.waiting_on_you()
                 .iter()
-                .map(|r| r.bead.as_str())
+                .map(|(bead, _)| *bead)
                 .collect::<Vec<_>>(),
-            ["yd-a", "yd-f"]
+            ["yd-a", "yd-f", "yd-e", "yd-u"]
         );
     }
 
