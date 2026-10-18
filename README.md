@@ -246,7 +246,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `Mail` | Enter, in a conversation with a crew member or a user of this yard, your own too |
 | `PutBlob` for each file, then `Mail` with their hashes and names | Enter, when files are attached to the draft |
 | `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
-| `AnswerAsk` | Enter, on a card: the option chosen, with the line's words in the one answer; an ask with no options is answered with words |
+| `AnswerAsk` | Enter, or the Answer button, on a card: the option chosen — the recommendation until another is picked — with the line's words in the one answer; an ask with no options is answered with words |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
 | `PutBlob` for each file, then `AddNote` with their hashes and names | Enter, on a card whose note has files attached |
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
@@ -878,23 +878,25 @@ Unread mail older than what was read stays unread, and counts on the row,
 until its page is shown. A yard built before `Conversation` had pages
 answers the whole conversation at once.
 
-A card shows, in this order: the question; the asker and the recommendation;
-the context; the options numbered, each with its consequence, `you decide`
-last; the recommended one with its why; a line for words; the keys. A number
-key or the arrows choose an option; Enter sends the pick with the line's
-words in the one answer, or the recommended option when none is chosen, as
-the keys say. Words with no option chosen and none recommended go as a plain
-note, and the ask stays open; a file dropped on the card is attached
-to the note, and goes with the words. An ask with no options
-says "words wanted", and Enter sends the words as the answer. `x` puts the
-ask aside, to come back as the yard says. `d` declines it with words,
-which is not a pick and not "you decide". `e` expands the card in place to
-the bead's body, notes
-and about-beads; a design bead's document is named by path and branch, not
-fetched. After a pick the ask moves to "Decided" at once, and a later pick
-on it from there replaces the earlier one. The window holds the card's keys,
-`i` types the words in, `esc` holds the keys again. What is typed stays with
-its ask, as a draft stays with its conversation.
+Above the cards the head names the yard, the bead and the topic once. A
+card shows, in this order: the question, the largest text, with how long it
+waits beside it; the asker; the context, with the bead whole one disclosure
+away; the options numbered, each with its consequence, `you decide` last;
+a line for words; the Answer button with ask-about-this, Later and Decline
+beside it. The recommended option stands preselected, marked with its why
+under its own row, and the Answer button names it (`Answer: 1 · Move them
+now ↵`); Enter answers what the button says. A number key or the arrows
+choose another option instead. Words with no option chosen and none
+recommended go as a plain note, and the ask stays open; a file dropped on
+the card is attached to the note, and goes with the words. An ask with no
+options says "words wanted", and Enter sends the words as the answer. `x`
+puts the ask aside, to come back as the yard says. `d` declines it with
+words, which is not a pick and not "you decide". `e` opens the disclosure
+to the bead's body, notes and about-beads; a design bead's document is named
+by path and branch, not fetched. After a pick the ask moves to "Decided" at
+once, and a later pick on it from there replaces the earlier one. The window
+holds the card's keys, `i` types the words in, `esc` holds the keys again.
+What is typed stays with its ask, as a draft stays with its conversation.
 
 **A secret ask** (`yardr bead ask --secret`) asks for a credential of a
 source, and its card has no options and no line for words. In their place

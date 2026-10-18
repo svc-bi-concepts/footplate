@@ -516,37 +516,49 @@ fn section_head(title: &'static str, count: String, palette: Palette) -> impl In
         )
 }
 
-/// The keys of an open card. Enter with nothing chosen and a recommendation
-/// picks it, and says so. Later and Decline are buttons beside the send
-/// button, and expand its own control below, so their keys are not listed
-/// here; they still work. `foreign` is a bead of another yard: words
-/// alone go as no note there, so Enter promises nothing without a pick.
-/// `writable` is an asker with a conversation: else no key asks about
-/// this.
-fn decision_keys(ask: &DecisionAsk, foreign: bool, writable: bool) -> String {
-    let mut keys: Vec<String> = Vec::new();
-    if ask.options.is_empty() {
-        keys.push("words wanted".to_string());
-    } else if ask.chosen != 0 {
-        keys.push(format!("enter picks {}", ask.chosen));
-    } else if ask.recommend != 0 {
-        keys.push(format!("enter picks {}", ask.recommend));
-    } else if !foreign {
-        keys.push("enter sends words as note".to_string());
-    }
-    if !ask.options.is_empty() {
-        keys.push(format!("1-{} pick", ask.options.len()));
-        keys.push("↑↓ choose".to_string());
-    }
-    keys.push("i words".to_string());
-    if ask.options.is_empty() {
-        keys.push("enter sends the answer".to_string());
-    }
-    if writable {
-        keys.push("a ask about this".to_string());
-    }
-    keys.join(" · ")
+/// What the card's button reads with an option to answer with: the
+/// option it answers, and its key. The option is the pick, else the
+/// recommendation, which stands preselected: Enter does what the button
+/// says.
+fn answer_label(number: u64, label: &str) -> String {
+    format!("Answer: {number} · {label} ↵")
 }
+
+/// What the card's button reads where words alone go: `Answer ↵` where
+/// they are the answer, `Send ↵` where they go as a note and the ask
+/// stays open.
+const ANSWER_WORDS: &str = "Answer ↵";
+const SEND_WORDS: &str = "Send ↵";
+
+/// The recommended option's mark under its own row, with its why: the one
+/// place the card names the recommendation.
+fn recommended_line(why: &str) -> String {
+    match why.is_empty() {
+        true => "recommended".to_string(),
+        false => format!("recommended: {why}"),
+    }
+}
+
+/// How long the ask waits, beside its question: `asked 3d`, `asked now`.
+/// Nothing where the yard's time cannot be read.
+fn asked_age(waits: &str) -> String {
+    match waits.is_empty() {
+        true => String::new(),
+        false => format!("asked {waits}"),
+    }
+}
+
+/// The head of a bead's open asks: the yard, the bead and the topic, once
+/// for every ask of the bead. The yard's dot stands before it, in its
+/// colour. No card is read without its yard.
+fn decision_head(yard: &str, bead: &str, topic: &str) -> String {
+    format!("{yard} · bead {bead} · {topic}")
+}
+
+/// What Decline's tooltip says: declining is not a pick and not "you
+/// decide"; the asker must find another way.
+const DECLINE_IS_NO_PICK: &str =
+    "Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way.";
 
 /// What the settings say over the list of yards: what a pairing gives that
 /// a link between two yards does not.
@@ -775,11 +787,11 @@ fn decided_keys(detail: &DecidedDetail) -> String {
 }
 
 /// The button that sends a card, exactly as Enter does: `Give NAME` on a
-/// secret ask, `Send` where words alone go, `Send: 1 · Move them now` with
-/// a pick (`Change to: 2 · …` on a dealt with). Disabled while its field
-/// is empty: drawn faint, and no click. A pick button is never disabled:
-/// a pick alone sends. The card shows a pick button only once an option is
-/// chosen: never a button that sends the recommendation unasked.
+/// secret ask, `Answer ↵` or `Send ↵` where words alone go, `Answer: 1 ·
+/// Move them now ↵` with an option (`Change to: 2 · …` on a dealt with).
+/// Disabled while its field is empty: drawn faint, and no click. A pick
+/// button is never disabled: a pick alone sends. The option is the pick,
+/// else the recommendation, which stands preselected.
 fn send_button(
     id: String,
     text: String,
@@ -862,11 +874,11 @@ fn show_button(
         .on_click(cx.listener(|this, _, _, cx| this.toggle_secret(cx)))
 }
 
-/// Whether the words of an open ordinary card want their own `Send` button:
+/// Whether the words of an open ordinary card want their own button:
 /// they are the answer where there are no options, or a note where there
 /// is no pick and none recommended. With a pick the pick's button sends
-/// them; with a recommendation and no pick there is no button that would
-/// send it unasked; on another yard's bead words alone go as no note.
+/// them, and with a recommendation and no pick the recommendation's does;
+/// on another yard's bead words alone go as no note.
 fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
     if ask.secret.is_some() || ask.run.is_some() || ask.chosen != 0 {
         return false;
@@ -3974,14 +3986,14 @@ impl Footplate {
                 if asking {
                     "Why decline? Enter sends, esc leaves".to_string()
                 } else if self.current_options_empty() {
-                    "Words wanted: Enter sends the answer".to_string()
+                    "Words wanted: Enter sends the answer (i)".to_string()
                 } else if self.current_foreign() {
                     // The yard refuses a plain note on another yard's
                     // bead: words go with a pick, and talking to the asker
                     // is "ask about this" below.
-                    "Words with the pick".to_string()
+                    "Words with the pick (i)".to_string()
                 } else {
-                    "Words with the pick, or alone as a note".to_string()
+                    "Words with the pick, or alone as a note (i)".to_string()
                 }
             }
             Some(Selected::Decided(_, _)) => "Words with the pick".to_string(),
@@ -11408,12 +11420,11 @@ impl Footplate {
         out
     }
 
-    /// A bead with open asks, as read-only text: the picking is the next
-    /// bead's.
-    /// A bead's open asks, each as its card: the question, the asker and
-    /// the recommendation, the context, the numbered options, the
-    /// recommended one with its why, a line for words, and the keys. One key
-    /// expands the card to the bead whole.
+    /// A bead's open asks, each as its card: the yard, the bead and the
+    /// topic once in the head, then the question, the asker, the context
+    /// with the bead whole one disclosure away, the numbered options with
+    /// the recommended one preselected, a line for words, and the answer
+    /// button with Later, ask-about-this and Decline beside it.
     fn talk_decision(
         &self,
         model: &Model,
@@ -11434,19 +11445,20 @@ impl Footplate {
             .p_3()
             .border_b_1()
             .border_color(palette.line)
+            .debug_selector(|| format!("in {} {}", self.yard, detail.bead))
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_center()
+            .gap_1()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(detail.title.clone()),
+                    .debug_selector(|| format!("in {} {} dot", self.yard, detail.bead))
+                    .flex_none()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(yard_color(&self.yard, palette.dark)),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child(format!("{} · {}", detail.bead, detail.topic)),
-            );
+            .child(decision_head(&self.yard, &detail.bead, &detail.topic));
         let list = div()
             .id("decision")
             .flex_1()
@@ -11482,11 +11494,13 @@ impl Footplate {
             })
     }
 
-    /// One card of an open bead, in the order the bead asks for: the
-    /// question; the asker and the recommendation; the context; the numbered
-    /// options; the recommended one with its why; a line for words; the
-    /// send, later and decline buttons; the keys. Only the current one takes
-    /// the keys, the line and the buttons.
+    /// One card of an open bead: the question, the largest text; the asker
+    /// and how long it waits; the context with the bead whole one
+    /// disclosure away; the numbered options, the recommended one
+    /// preselected and marked with its why under it; a line for words; the
+    /// answer button with Later, ask-about-this and Decline beside it, each
+    /// key on its control. Only the current one takes the keys, the line
+    /// and the buttons.
     fn decision_card(
         &self,
         detail: &DecisionDetail,
@@ -11497,14 +11511,16 @@ impl Footplate {
         let bead_id = detail.bead.clone();
         let ask_seq = ask.ask;
         let current = ask.current;
+        // The option Enter and the button answer: the pick, else the
+        // recommendation, which stands preselected.
+        let answered = if ask.chosen == 0 {
+            ask.recommend
+        } else {
+            ask.chosen
+        };
         let mut card = div().flex().flex_col().gap_2();
-        // The question, with the yard's dot, the bead small and how
-        // long it waits.
-        let short = detail
-            .bead
-            .rsplit('-')
-            .next()
-            .unwrap_or(detail.bead.as_str());
+        // The question, with how long it waits beside it. The yard and the
+        // bead stand once in the head above, not again on every card.
         let question = if ask.run.is_some() {
             Self::marked_question(
                 format!("run question {bead_id} {ask_seq}"),
@@ -11524,44 +11540,25 @@ impl Footplate {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .text_lg()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(question),
                 )
                 .child(
                     div()
-                        .debug_selector(|| format!("in {} {bead_id} {ask_seq}", self.yard))
                         .flex_none()
                         .text_sm()
                         .text_color(palette.faint)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .debug_selector(|| {
-                                    format!("in {} {bead_id} {ask_seq} dot", self.yard)
-                                })
-                                .flex_none()
-                                .size(px(8.))
-                                .rounded_full()
-                                .bg(yard_color(&self.yard, palette.dark)),
-                        )
-                        .child(card_head(&self.yard, short, &ask.waits)),
+                        .child(asked_age(&ask.waits)),
                 ),
         );
-        // The asker and the recommendation.
-        let asker = if ask.secret.is_some() || ask.run.is_some() {
-            format!("asked by {}", ask.asker)
-        } else if ask.recommend_label.is_empty() {
-            format!("asked by {} · no recommendation", ask.asker)
-        } else {
-            format!(
-                "asked by {} · recommends: {}",
-                ask.asker, ask.recommend_label
-            )
-        };
-        card = card.child(div().text_sm().text_color(palette.faint).child(asker));
+        // The asker. The recommendation stands on its own option, below.
+        card = card.child(
+            div()
+                .text_sm()
+                .text_color(palette.faint)
+                .child(format!("asked by {}", ask.asker)),
+        );
         // The context lines: text as it was written, and no block in it. A
         // run ask's each begin with who says them, and wrap under the words.
         for (line, text) in ask.context.iter().enumerate() {
@@ -11574,6 +11571,35 @@ impl Footplate {
             } else {
                 card = card.child(div().child(text.clone()));
             }
+        }
+        // The bead whole, one disclosure away: beside the context it opens
+        // from, not at the card's end.
+        let mark = if ask.expanded { "▾" } else { "▸" };
+        let bead_click = bead_id.clone();
+        card = card.child(
+            div()
+                .id(SharedString::from(format!("expand {bead_id} {ask_seq}")))
+                .debug_selector(|| format!("expand {bead_id} {ask_seq}"))
+                .text_sm()
+                .text_color(palette.faint)
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.expand_for(bead_click.clone(), ask_seq, cx)
+                }))
+                .child(format!("{mark} bead details (e)")),
+        );
+        if ask.expanded {
+            card = card.child(self.expanded_body(
+                select::key((bead_id.clone(), ask_seq)),
+                Expanded {
+                    body: &detail.body,
+                    notes: &detail.notes,
+                    about: &ask.about,
+                    doc: &detail.doc,
+                },
+                palette,
+                cx,
+            ));
         }
         // The options numbered, each with its consequence, `you decide`
         // last as the yard lists it. A secret ask has none and wants no
@@ -11592,8 +11618,9 @@ impl Footplate {
                     .child("words wanted"),
             );
         } else {
+            let mut marked = false;
             for option in &ask.options {
-                let marker = if option.number == ask.chosen {
+                let marker = if option.number == answered {
                     "●"
                 } else {
                     "○"
@@ -11610,8 +11637,8 @@ impl Footplate {
                         .debug_selector(|| format!("pick {bead_id} {ask_seq} {n}"))
                         .cursor_pointer()
                         .rounded_md()
-                        .when(n == ask.chosen, |el| el.bg(palette.open))
-                        .when(n != ask.chosen, |el| {
+                        .when(n == answered, |el| el.bg(palette.open))
+                        .when(n != answered, |el| {
                             el.hover(|style| style.bg(palette.hover))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -11619,26 +11646,19 @@ impl Footplate {
                         }))
                         .child(text),
                 );
+                // The recommended one with its why, under its own row: the
+                // one place the card names the recommendation.
+                if ask.recommend != 0 && n == ask.recommend {
+                    marked = true;
+                    card = card.child(div().text_sm().child(recommended_line(&ask.why)));
+                }
             }
-            // The recommended one with its why.
-            if ask.recommend != 0 {
-                card = card.child(
-                    div()
-                        .text_sm()
-                        .child(format!("recommended: {}, {}", ask.recommend, ask.why)),
-                );
+            // A recommendation the options do not hold stands past them, as
+            // nothing else names it.
+            if ask.recommend != 0 && !marked {
+                card = card.child(div().text_sm().child(recommended_line(&ask.why)));
             }
         }
-        // Decline is not a pick, and not "you decide". A run ask has no
-        // pick to take it for.
-        card = card.when(ask.run.is_none(), |card| {
-            card.child(
-                div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child("Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."),
-            )
-        });
         if current {
             // A line for words, or the field of a secret in its place.
             let field = match ask.secret {
@@ -11728,10 +11748,10 @@ impl Footplate {
                         .child(format!("! {why}")),
                 );
             }
-            // Under it the button that sends the field, exactly as Enter
-            // does, with Later, Decline and ask-about-this beside it. An
-            // asker with no conversation has the reason in place of that
-            // button.
+            // Under it the button that answers, exactly as Enter does,
+            // with ask-about-this, Later and Decline beside it, each key on
+            // its control. An asker with no conversation has the reason in
+            // place of that button.
             let foreign = model::foreign_bead(&detail.bead);
             let send = match (&ask.secret, self.giving()) {
                 (Some(_), Some(secret)) => Some((
@@ -11745,19 +11765,24 @@ impl Footplate {
                 (None, _) => ask
                     .options
                     .iter()
-                    .find(|o| o.number == ask.chosen)
+                    .find(|o| o.number == answered)
                     .map(|o| {
                         (
                             format!("send {bead_id} {ask_seq}"),
-                            format!("Send: {} · {}", o.number, o.label),
+                            answer_label(o.number, &o.label),
                             true,
                         )
                     })
                     .or_else(|| {
                         words_send(ask, foreign).then(|| {
+                            let words_answer = ask.options.is_empty();
                             (
                                 format!("send {bead_id} {ask_seq}"),
-                                "Send".to_string(),
+                                if words_answer {
+                                    ANSWER_WORDS.to_string()
+                                } else {
+                                    SEND_WORDS.to_string()
+                                },
                                 !self.line.read(cx).text().is_empty(),
                             )
                         })
@@ -11801,6 +11826,7 @@ impl Footplate {
                         ))
                     })
                     .when(held, |el| el.child(send_held(palette)))
+                    .child(ask_about)
                     .child(
                         small_button("Later (x)".to_string(), palette)
                             .id(SharedString::from(format!("later {bead_id} {ask_seq}")))
@@ -11811,21 +11837,29 @@ impl Footplate {
                         small_button("Decline (d)".to_string(), palette)
                             .id(SharedString::from(format!("decline {bead_id} {ask_seq}")))
                             .debug_selector(|| format!("decline {bead_id} {ask_seq}"))
+                            // Declining is not a pick, and a run ask has no
+                            // pick to take it for: only another ask's button
+                            // says so.
+                            .when(ask.run.is_none(), |el| {
+                                el.tooltip(move |_, cx| {
+                                    cx.new(|_| RailTip(DECLINE_IS_NO_PICK.to_string())).into()
+                                })
+                            })
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.decline_now(window, cx)),
                             ),
-                    )
-                    .child(ask_about),
+                    ),
             );
-            // The keys. Enter with nothing chosen and a recommendation picks
-            // it, and says so.
-            card = card.child(div().text_sm().text_color(palette.faint).child(
-                match (&ask.secret, &ask.run) {
-                    (Some(_), _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
-                    (None, Some(_)) => run_keys(!elsewhere, unwritable.is_none()),
-                    (None, None) => decision_keys(ask, foreign, unwritable.is_none()),
-                },
-            ));
+            // The keys of a secret or run ask's card: an ordinary card
+            // carries each key on its control, and lists none.
+            let keys = match (&ask.secret, &ask.run) {
+                (Some(_), _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
+                (None, Some(_)) => run_keys(!elsewhere, unwritable.is_none()),
+                (None, None) => String::new(),
+            };
+            card = card.when(!keys.is_empty(), |card| {
+                card.child(div().text_sm().text_color(palette.faint).child(keys))
+            });
         } else {
             let bead_click = bead_id.clone();
             card = card.child(
@@ -11839,33 +11873,6 @@ impl Footplate {
                     }))
                     .child("decide this one"),
             );
-        }
-        // One key expands the card in place.
-        let expand_label = if ask.expanded { "fold" } else { "expand" };
-        let bead_click = bead_id.clone();
-        card = card.child(
-            div()
-                .id(SharedString::from(format!("expand {bead_id} {ask_seq}")))
-                .text_sm()
-                .text_color(palette.faint)
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.expand_for(bead_click.clone(), ask_seq, cx)
-                }))
-                .child(format!("{expand_label} (e)")),
-        );
-        if ask.expanded {
-            card = card.child(self.expanded_body(
-                select::key((bead_id, ask_seq)),
-                Expanded {
-                    body: &detail.body,
-                    notes: &detail.notes,
-                    about: &ask.about,
-                    doc: &detail.doc,
-                },
-                palette,
-                cx,
-            ));
         }
         card
     }
@@ -12746,96 +12753,38 @@ mod tests {
         assert_eq!((number(16), number(20)), (1024, 1024));
     }
 
-    /// The words-wanted keys name expand nowhere: the control under them,
-    /// "expand (e)" and "fold (e)", is where the card names it once.
+    /// The card's button names the option it answers, and its key; words
+    /// alone are the answer or a note, as the button says.
     #[test]
-    fn the_words_wanted_keys_leave_expand_to_the_control() {
-        let ask = DecisionAsk {
-            ask: 3,
-            question: "Name the release?".to_string(),
-            asker: "mayor".to_string(),
-            waits: "2h".to_string(),
-            recommend_label: String::new(),
-            context: Vec::new(),
-            options: Vec::new(),
-            recommend: 0,
-            why: String::new(),
-            chosen: 0,
-            current: true,
-            expanded: false,
-            about: Vec::new(),
-            state: "open".to_string(),
-            secret: None,
-            run: None,
-        };
+    fn the_answer_button_names_the_option_it_answers() {
         assert_eq!(
-            decision_keys(&ask, false, true),
-            "words wanted · i words · enter sends the answer · a ask about this"
+            answer_label(1, "Move them now"),
+            "Answer: 1 · Move them now ↵"
         );
+        assert_eq!(ANSWER_WORDS, "Answer ↵");
+        assert_eq!(SEND_WORDS, "Send ↵");
     }
 
-    /// The card's keys name ask-about-this with the others; a foreign one
-    /// promises nothing of Enter without a pick, and an asker with no
-    /// conversation names no key for it.
+    /// The recommendation stands under its own option with its why, and the
+    /// ask's age beside its question; the head names the yard, the bead and
+    /// the topic once.
     #[test]
-    fn the_card_s_keys_name_ask_about_this_and_nothing_it_cannot_do() {
-        let ask = DecisionAsk {
-            ask: 3,
-            question: "Move them now?".to_string(),
-            asker: "yardmaster".to_string(),
-            waits: "2h".to_string(),
-            recommend_label: "Move them now".to_string(),
-            context: Vec::new(),
-            options: vec![
-                model::CardOption {
-                    number: 1,
-                    label: "Move them now".to_string(),
-                    consequence: "all 64 links point tonight".to_string(),
-                },
-                model::CardOption {
-                    number: 2,
-                    label: "You decide".to_string(),
-                    consequence: "leave it to yardmaster".to_string(),
-                },
-            ],
-            recommend: 1,
-            why: "the test passed".to_string(),
-            chosen: 0,
-            current: true,
-            expanded: false,
-            about: Vec::new(),
-            state: "open".to_string(),
-            secret: None,
-            run: None,
-        };
+    fn the_card_names_the_recommendation_its_age_and_its_head_once() {
         assert_eq!(
-            decision_keys(&ask, false, true),
-            "enter picks 1 · 1-2 pick · ↑↓ choose · i words · a ask about this"
+            recommended_line("the test passed"),
+            "recommended: the test passed"
         );
-        let mut none = ask.clone();
-        none.recommend = 0;
-        none.recommend_label.clear();
+        assert_eq!(recommended_line(""), "recommended");
+        assert_eq!(asked_age("now"), "asked now");
+        assert_eq!(asked_age("2h"), "asked 2h");
+        assert_eq!(asked_age(""), "");
         assert_eq!(
-            decision_keys(&none, false, true),
-            "enter sends words as note · 1-2 pick · ↑↓ choose · i words · a ask about this"
+            decision_head("plantime", "yd-ymkt", "Writing"),
+            "plantime · bead yd-ymkt · Writing"
         );
-        // A foreign card: words alone go as no note, so Enter promises
-        // nothing; asking about this is how to talk instead.
         assert_eq!(
-            decision_keys(&none, true, true),
-            "1-2 pick · ↑↓ choose · i words · a ask about this"
-        );
-        // An asker with no conversation: the control says so, and no key
-        // reaches for it.
-        assert_eq!(
-            decision_keys(&none, false, false),
-            "enter sends words as note · 1-2 pick · ↑↓ choose · i words"
-        );
-        let mut words = none.clone();
-        words.options.clear();
-        assert_eq!(
-            decision_keys(&words, true, false),
-            "words wanted · i words · enter sends the answer"
+            DECLINE_IS_NO_PICK,
+            "Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."
         );
     }
 
@@ -12920,7 +12869,8 @@ mod tests {
         // With a pick the pick's button sends the words with it.
         assert!(!words_send(&ordinary(2, 2, 0), false));
         assert!(!words_send(&ordinary(2, 2, 1), false));
-        // With a recommendation and no pick no button sends it unasked.
+        // With a recommendation and no pick the recommendation's button
+        // sends them.
         assert!(!words_send(&ordinary(2, 0, 1), false));
         // A secret ask has its Give button, never Send.
         let mut secret = ordinary(0, 0, 0);
@@ -17281,27 +17231,6 @@ mod tests {
         })
     }
 
-    fn card_keys_of(
-        view: &Entity<Footplate>,
-        cx: &mut VisualTestContext,
-        bead: &str,
-        ask: u64,
-    ) -> String {
-        view.read_with(cx, |v, _| {
-            let model = v.model.as_ref().unwrap();
-            let now = chrono::Utc::now();
-            let card = model
-                .decision_detail(bead, &now)
-                .unwrap()
-                .asks
-                .into_iter()
-                .find(|a| a.ask == ask)
-                .unwrap();
-            let writable = model.can_write(&card.asker);
-            decision_keys(&card, model::foreign_bead(bead), writable)
-        })
-    }
-
     #[gpui::test]
     fn ask_about_this_opens_the_asker_with_the_card_named_and_the_ask_stays_open(
         cx: &mut TestAppContext,
@@ -17337,7 +17266,7 @@ mod tests {
         assert!(drawn(cx, "ask bead-a 3"));
         assert_eq!(
             placeholder(&view, cx),
-            "Words with the pick, or alone as a note"
+            "Words with the pick, or alone as a note (i)"
         );
 
         // The `a` key opens the yardmaster with the card named first in
@@ -17428,14 +17357,12 @@ mod tests {
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-f@north"));
 
-        // The words field says what holds on a foreign card, and the keys
-        // promise nothing of Enter without a pick: asking about this is
-        // how to talk instead.
-        assert_eq!(placeholder(&view, cx), "Words with the pick");
-        assert_eq!(
-            card_keys_of(&view, cx, "bead-f@north", 3),
-            "1-2 pick · ↑↓ choose · i words · a ask about this"
-        );
+        // The words field says what holds on a foreign card, and each key
+        // stands on its control: asking about this is how to talk instead.
+        assert_eq!(placeholder(&view, cx), "Words with the pick (i)");
+        assert!(drawn(cx, "ask bead-f@north 3"));
+        assert!(drawn(cx, "later bead-f@north 3"));
+        assert!(drawn(cx, "decline bead-f@north 3"));
 
         // With words already in the clerk's draft, the button opens them
         // with the card named before what was there.
@@ -17520,12 +17447,14 @@ mod tests {
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-u"));
 
         // No button: the control says the asker cannot be written to, and
-        // the keys name no key for it.
+        // names no key for it. The recommendation stands answered from its
+        // own button, as Enter answers it.
         assert!(!drawn(cx, "ask bead-u 3"));
         assert!(drawn(cx, "ask unreachable bead-u 3"));
+        assert!(drawn(cx, "send bead-u 3"));
         assert_eq!(
-            card_keys_of(&view, cx, "bead-u", 3),
-            "enter picks 1 · 1-2 pick · ↑↓ choose · i words"
+            placeholder(&view, cx),
+            "Words with the pick, or alone as a note (i)"
         );
 
         // The key says so too, and opens no conversation: the card stays
@@ -17630,30 +17559,15 @@ mod tests {
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
         assert_eq!(current_ask_of(&view, cx), 3);
 
-        // With nothing chosen there is no send button, even with a
-        // recommendation: never one that sends it unasked. Later and
-        // Decline stand beside where it will be.
-        assert!(!drawn(cx, "send bead-a 3"));
+        // With nothing chosen the recommendation stands preselected: the
+        // button answers it, Later and Decline stand beside it, and no pick
+        // is in the model. The head above names the yard and the bead once.
+        assert!(drawn(cx, "in this machine bead-a"));
+        assert!(drawn(cx, "in this machine bead-a dot"));
+        assert!(drawn(cx, "send bead-a 3"));
         assert!(drawn(cx, "later bead-a 3"));
         assert!(drawn(cx, "decline bead-a 3"));
-
-        // The keys line stays, shorter.
-        let keys = view.read_with(cx, |v, _| {
-            let model = v.model.as_ref().unwrap();
-            let now = chrono::Utc::now();
-            let ask = model
-                .decision_detail("bead-a", &now)
-                .unwrap()
-                .asks
-                .into_iter()
-                .find(|a| a.ask == 3)
-                .unwrap();
-            decision_keys(&ask, false, true)
-        });
-        assert_eq!(
-            keys,
-            "enter picks 1 · 1-3 pick · ↑↓ choose · i words · a ask about this"
-        );
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 0);
 
         // A click on an option's line chooses it, as its number key does.
         click_on(cx, "pick bead-a 3 2");
@@ -17695,9 +17609,35 @@ mod tests {
                 )
         });
 
-        // Decline with words already typed goes at once, once the queue's
-        // next read has brought the asks back.
+        // Once the queue's next read has brought the asks back, the button
+        // with nothing chosen answers the recommendation with the words,
+        // exactly as Enter does.
         wait(cx, "the asks back", |cx| {
+            view.read_with(cx, |v, _| {
+                let model = v.model.as_ref().unwrap();
+                let now = chrono::Utc::now();
+                model
+                    .decision_detail("bead-a", &now)
+                    .is_some_and(|d| d.asks.len() == 3)
+            })
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 0);
+        assert!(drawn(cx, "send bead-a 3"));
+        cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
+        cx.simulate_input("tonight");
+        click_on(cx, "send bead-a 3");
+        wait(cx, "the recommendation with words", |_| {
+            yard.asked("AnswerAsk").last()
+                == Some(
+                    &json!({"bead": "bead-a", "ask": 3, "option": 1, "words": "tonight", "actor": "jo"}),
+                )
+        });
+
+        // Decline with words already typed goes at once, once the asks are
+        // back again.
+        wait(cx, "the asks back again", |cx| {
             view.read_with(cx, |v, _| {
                 let model = v.model.as_ref().unwrap();
                 let now = chrono::Utc::now();
@@ -17736,14 +17676,15 @@ mod tests {
 
     /// Words alone on an ordinary card have a Send button where Enter sends
     /// them as a note: no pick and none recommended. It is disabled while
-    /// the line is empty; with a recommendation and no pick there is still
-    /// no button that would send it unasked. The look is untried.
+    /// the line is empty; with a recommendation and no pick the button
+    /// answers the recommendation with them instead. The look is untried.
     #[gpui::test]
     fn words_alone_have_a_send_button_where_enter_sends_a_note(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_three());
         yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
         yard.answer("AddNote", "{}");
         cx.update(|cx| {
             input::bind_keys(cx);
@@ -17764,12 +17705,20 @@ mod tests {
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
 
-        // With a recommendation and no pick there is no send button, even
-        // with words typed: never one that sends it unasked.
+        // With a recommendation and no pick the button answers the
+        // recommendation with the words, as Enter does.
         view.update(cx, |v, cx| v.select_ask("bead-a".into(), 3, cx));
         cx.update(|window, cx| window.focus(&view.read(cx).line.focus_handle(cx)));
         cx.simulate_input("some words");
-        assert!(!drawn(cx, "send bead-a 3"));
+        assert!(drawn(cx, "send bead-a 3"));
+        click_on(cx, "send bead-a 3");
+        wait(cx, "the recommendation with words", |_| {
+            yard.asked("AnswerAsk")
+                == [
+                    json!({"bead": "bead-a", "ask": 3, "option": 1, "words": "some words", "actor": "jo"}),
+                ]
+        });
+        assert_eq!(typed(&view, cx), "");
 
         // With no pick and none recommended the words go as a note, from
         // the button as from Enter.
@@ -26543,16 +26492,17 @@ mod tests {
             cx.run_until_parked();
             yards.map(|(_, yard)| yard.asked("ApproveAsk").len())
         };
-        // On the card: the header and the sentence over the command. That
-        // it is the open yard's is asked of the window, since what was
-        // drawn once is found by its selector in every frame after.
+        // Over the card: the head with the yard, and the sentence over
+        // the command. That it is the open yard's is asked of the window,
+        // since what was drawn once is found by its selector in every frame
+        // after.
         fn names(view: &Entity<Footplate>, cx: &mut VisualTestContext, name: &str) -> bool {
             let read = view.read_with(cx, |v, _| {
                 v.yard == name && v.model.as_ref().is_some_and(|m| m.has_bead("bead-s"))
             });
             cx.update(|window, _| window.refresh());
-            read && drawn(cx, &format!("in {name} bead-s 7"))
-                && drawn(cx, &format!("in {name} bead-s 7 dot"))
+            read && drawn(cx, &format!("in {name} bead-s"))
+                && drawn(cx, &format!("in {name} bead-s dot"))
                 && drawn(cx, &run_runs(name, "jo"))
         }
 
