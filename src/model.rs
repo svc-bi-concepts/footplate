@@ -2765,17 +2765,16 @@ impl Model {
     }
 
     /// The rows the mails above `oldest` add to the shown conversation:
-    /// one for each group they start and each day they break, less the
-    /// group and the break the oldest shown mail loses where it joins
-    /// them. The window keeps its place by it when an older page arrives
-    /// above the view.
+    /// one for each mail, group head and day break, less the head and break
+    /// the oldest shown mail loses where it joins them. The window keeps
+    /// its place by it when an older page arrives above the view.
     pub fn rows_above(&self, oldest: u64) -> usize {
         let entries = self.entries();
         let mut rows = 0;
         let mut under = true;
         for e in &entries {
             if e.seq < oldest {
-                rows += usize::from(e.head) + usize::from(e.day.is_some());
+                rows += 1 + usize::from(e.head) + usize::from(e.day.is_some());
             } else if under {
                 // The oldest shown mail stood first: its head, and its
                 // break where its time reads, stood as rows; what it lost
@@ -4893,14 +4892,14 @@ mod tests {
                 letter_at(14, "yardmaster", "jo", "2026-10-10T12:00:00Z", "three"),
             ],
         );
-        // Above 14 stand two groups and one's break; above 13 the one's
-        // group, since 13 loses its break to its day; above the oldest
+        // Above 14 stand two mails, their heads and the earlier day's
+        // break; above 13 stand one mail and its head; above the oldest
         // mail nothing stands.
-        assert_eq!(m.rows_above(14), 3);
-        assert_eq!(m.rows_above(13), 1);
+        assert_eq!(m.rows_above(14), 5);
+        assert_eq!(m.rows_above(13), 2);
         assert_eq!(m.rows_above(12), 0);
-        // Where the oldest shown mail joins the group above it, it takes
-        // its group back with its break.
+        // Where the oldest shown mail joins the group above it, the new
+        // mail body still adds a row, while its old head and break move up.
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation(
             "yardmaster",
@@ -4911,7 +4910,7 @@ mod tests {
         );
         let zone = chrono::Local;
         let same = day_of("2026-10-08T12:00:00Z", &zone) == day_of("2026-10-08T12:03:00Z", &zone);
-        assert_eq!(m.rows_above(13), if same { 0 } else { 2 });
+        assert_eq!(m.rows_above(13), if same { 1 } else { 3 });
     }
 
     #[test]

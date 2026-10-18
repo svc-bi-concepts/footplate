@@ -388,6 +388,7 @@ fn day_break(day: String, palette: Palette) -> AnyElement {
             let day = day.clone();
             move || format!("day {day}")
         })
+        .mt_2()
         .w_full()
         .max_w(px(READING_WIDTH))
         .flex()
@@ -397,6 +398,17 @@ fn day_break(day: String, palette: Palette) -> AnyElement {
         .child(div().text_sm().text_color(palette.faint).child(day))
         .child(div().h(px(1.)).flex_1().bg(palette.line))
         .into_any_element()
+}
+
+/// A conversation row in the reading column. Group heads stand farther
+/// from the mail before them; bodies in one group stand close together.
+fn reading_row(row: AnyElement, apart: bool) -> AnyElement {
+    let row = div().w_full().max_w(px(READING_WIDTH)).child(row);
+    if apart {
+        row.mt_2().into_any_element()
+    } else {
+        row.into_any_element()
+    }
 }
 
 /// What the Decisions head says waits in it: the number with "waiting",
@@ -3235,15 +3247,15 @@ impl Footplate {
     /// layout of the next frame puts that mail at the top of the view, and
     /// the frame after it moves the view by what the mail stood off the
     /// top ([`Footplate::reconcile_scroll`]).
-    /// The oldest shown mail's group among the conversation's children:
-    /// past the line above it, and past its day's break where it stands.
+    /// The oldest shown mail's body among the conversation's children:
+    /// past the line above it, its day's break, and its group's head.
     fn first_mail_item(&self) -> usize {
         let breaks = self
             .model
             .as_ref()
             .map(|m| m.entries().first().is_some_and(|e| e.day.is_some()))
             .unwrap_or(false);
-        1 + usize::from(breaks)
+        2 + usize::from(breaks)
     }
 
     fn keep_place(&mut self, above: usize) {
@@ -10074,38 +10086,32 @@ impl Footplate {
             )
     }
 
-    fn entry(
-        &self,
-        entry: Entry,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn entry_head(&self, entry: &Entry, palette: Palette) -> AnyElement {
         let seq = entry.seq;
-        let head = entry.head;
         div()
             .flex()
+            .gap_2()
+            .debug_selector(|| format!("head {seq}"))
+            .child(
+                div()
+                    .text_color(palette.faint)
+                    .child(model::clock(&entry.at, &chrono::Local)),
+            )
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(entry.mine, |el| el.text_color(palette.accent))
+                    .child(entry.from.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn entry_body(&self, entry: Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let seq = entry.seq;
+        div()
+            .w_full()
+            .flex()
             .flex_col()
-            // A mail of its sender's group reads under the name and the
-            // time above it; every other one carries its own.
-            .when(head, |el| {
-                el.child(
-                    div()
-                        .debug_selector(|| format!("head {seq}"))
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(palette.faint)
-                                .child(model::clock(&entry.at, &chrono::Local)),
-                        )
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .when(entry.mine, |el| el.text_color(palette.accent))
-                                .child(entry.from),
-                        ),
-                )
-            })
             .when(!entry.text.is_empty(), |el| {
                 // The margin is outside the text's bounds, so that these
                 // are where the text is.
@@ -10131,54 +10137,43 @@ impl Footplate {
                         .child(format!("· {standing}")),
                 )
             })
+            .into_any_element()
+    }
+
+    fn entry(&self, entry: Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let head = entry.head;
+        div()
+            .flex()
+            .flex_col()
+            .when(head, |el| el.child(self.entry_head(&entry, palette)))
+            .child(self.entry_body(entry, palette, cx))
+            .into_any_element()
     }
 
     /// The conversation's mail as groups under one head each: a mail that
     /// reads under the sender's name above joins its group, and every other
     /// one starts a group, with the day's separator above it where the day
     /// changes. Each group stands in the reading column.
-    fn groups(
+    fn mail_rows(
         &self,
         entries: Vec<Entry>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
-        let mut group: Vec<Entry> = Vec::new();
         for entry in entries {
-            // A new day breaks above the mail, and every head starts a
-            // group; the first mail does both.
+            // The head and day break are separate scroll rows. An older
+            // page can then add mail to this group without moving the
+            // message that was already in view inside a growing wrapper.
             if let Some(day) = entry.day.clone() {
-                if !group.is_empty() {
-                    out.push(self.group(std::mem::take(&mut group), palette, cx));
-                }
                 out.push(day_break(day, palette));
-            } else if entry.head && !group.is_empty() {
-                out.push(self.group(std::mem::take(&mut group), palette, cx));
             }
-            group.push(entry);
-        }
-        if !group.is_empty() {
-            out.push(self.group(group, palette, cx));
+            if entry.head {
+                out.push(reading_row(self.entry_head(&entry, palette), true));
+            }
+            out.push(reading_row(self.entry_body(entry, palette, cx), false));
         }
         out
-    }
-
-    /// One head's mails, closer together than the groups stand, in the
-    /// reading column.
-    fn group(&self, entries: Vec<Entry>, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .w_full()
-            .max_w(px(READING_WIDTH))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .children(
-                entries
-                    .into_iter()
-                    .map(|entry| self.entry(entry, palette, cx)),
-            )
-            .into_any_element()
     }
 
     fn talk(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -10302,7 +10297,7 @@ impl Footplate {
             .flex()
             .flex_col()
             .items_center()
-            .gap_3();
+            .gap_1();
         let mail = if entries.is_empty() {
             mail.child(
                 div()
@@ -10336,7 +10331,7 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child(top),
             )
-            .children(self.groups(entries, palette, cx))
+            .children(self.mail_rows(entries, palette, cx))
         };
         // The jump control stands over the mail, at its bottom right,
         // while the view is above its newest.
@@ -27435,6 +27430,29 @@ mod tests {
         );
     }
 
+    /// The yardmaster's mails form one sender group across the page
+    /// boundary, so an older page adds bodies inside it.
+    fn long_grouped_conversation(yard: &Yard, n: u64) {
+        yard.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+        );
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-08T09:30:00Z").unwrap();
+        yard.converse(
+            "yardmaster",
+            (1..=n)
+                .map(|seq| {
+                    let at = start
+                        .checked_add_signed(chrono::TimeDelta::minutes(2 * seq as i64))
+                        .unwrap()
+                        .to_rfc3339();
+                    json!({"seq": seq, "at": at, "from": "yardmaster",
+                        "to": "jo", "read": true, "text": format!("Mail {seq}\nof the shed\nand the fence.")})
+                })
+                .collect(),
+        );
+    }
+
     /// The window on `yard`, once the yardmaster's conversation shows `n`
     /// mails and is drawn at its newest.
     fn opened_on<'a>(
@@ -27580,6 +27598,39 @@ mod tests {
 
         assert_eq!(top_of(&view, cx), Top::Older);
         assert_eq!(yard.asked("Conversation").len(), 3);
+    }
+
+    /// Loading an older page into the first message's sender group keeps
+    /// that message in place as the new mail bodies arrive above it.
+    #[gpui::test]
+    fn an_older_page_inside_a_sender_group_keeps_the_message_in_place(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        long_grouped_conversation(&yard, 100);
+        let (view, cx) = opened_on(&yard, 50, cx);
+        let view_height = view.read_with(cx, |v, _| v.conversation.bounds().size.height);
+        let half: f32 = (view_height / 2.).into();
+        scroll_to(&view, cx, half + 40.);
+        let far = text_bounds(cx, 51);
+        scroll_to(&view, cx, 100.);
+        let expected_y = far.origin.y + px(half + 40. - 100.);
+
+        wait(cx, "the older page in the sender group", |cx| {
+            texts(&view, cx).len() == 100
+        });
+        frames(cx);
+        let stood = text_bounds(cx, 51);
+        assert_eq!(stood.origin.x, far.origin.x);
+        assert_eq!(stood.size.width, far.size.width);
+        assert!(
+            (stood.origin.y - expected_y).abs() <= px(1.),
+            "mail 51 moved while its group grew: {:?} past {expected_y:?}",
+            stood.origin.y
+        );
+        assert_eq!(
+            yard.asked("Conversation").last(),
+            Some(&json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 51}))
+        );
     }
 
     /// At the oldest mail of a conversation its top says that it starts
