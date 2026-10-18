@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, TimeZone};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
@@ -190,6 +190,12 @@ pub struct Entry {
     /// Where a mail the user sent stands. Mails that stand alike share one
     /// line, under the last of them.
     pub standing: Option<String>,
+    /// Whether the name and the time stand above it: the first of its
+    /// sender's mails within five minutes does, and the rest read under it.
+    pub head: bool,
+    /// The day's separator above it, where the day changes: `Today`, or
+    /// the weekday with the day and the month.
+    pub day: Option<String>,
 }
 
 /// Where what is typed goes.
@@ -2369,17 +2375,35 @@ impl Model {
     /// The mail the row `sel` shows, oldest first.
     fn entries_of(&self, sel: &Selected) -> Vec<Entry> {
         let letters = self.letters(sel);
+        let zone = chrono::Local;
+        let today = chrono::Local::now().date_naive();
         let mut out: Vec<Entry> = Vec::with_capacity(letters.len());
+        let mut before: Option<&Letter> = None;
         for l in letters {
             let mine = l.from == self.me;
             let standing = mine.then(|| self.standing(l));
             // The line is under the last of those that stand alike.
-            if let Some(before) = out.last_mut()
-                && before.mine
-                && before.standing == standing
+            if let Some(shown) = out.last_mut()
+                && shown.mine
+                && shown.standing == standing
             {
-                before.standing = None;
+                shown.standing = None;
             }
+            // A mail reads under the sender's name and time above it while
+            // it comes within five minutes on the same day; every other one
+            // heads its own group, and a new day breaks above it.
+            let head = match before {
+                None => true,
+                Some(b) => !grouped(b, l, &zone),
+            };
+            let day = match (day_of(&l.at, &zone), before) {
+                (Some(day), None) => Some(day_words(day, today)),
+                (Some(day), Some(b)) if day_of(&b.at, &zone) != Some(day) => {
+                    Some(day_words(day, today))
+                }
+                _ => None,
+            };
+            before = Some(l);
             out.push(Entry {
                 seq: l.seq,
                 at: l.at.clone(),
@@ -2388,6 +2412,8 @@ impl Model {
                 files: l.files.clone(),
                 mine,
                 standing,
+                head,
+                day,
             });
         }
         out
@@ -2736,6 +2762,30 @@ impl Model {
             _ => Vec::new(),
         };
         Some((letters.first()?.seq, letters.last()?.seq))
+    }
+
+    /// The rows the mails above `oldest` add to the shown conversation:
+    /// one for each group they start and each day they break, less the
+    /// group and the break the oldest shown mail loses where it joins
+    /// them. The window keeps its place by it when an older page arrives
+    /// above the view.
+    pub fn rows_above(&self, oldest: u64) -> usize {
+        let entries = self.entries();
+        let mut rows = 0;
+        let mut under = true;
+        for e in &entries {
+            if e.seq < oldest {
+                rows += usize::from(e.head) + usize::from(e.day.is_some());
+            } else if under {
+                // The oldest shown mail stood first: its head, and its
+                // break where its time reads, stood as rows; what it lost
+                // to the group above it takes those rows back.
+                under = false;
+                rows -= usize::from(!e.head);
+                rows -= usize::from(e.day.is_none() && day_of(&e.at, &chrono::Local).is_some());
+            }
+        }
+        rows
     }
 
     /// The top of the open conversation was reached: asks for the page
@@ -3267,6 +3317,42 @@ where
         Ok(t) => t.with_timezone(zone).format("%m-%d %H:%M").to_string(),
         Err(_) => String::new(),
     }
+}
+
+/// Whether the mail `after` reads under `before`'s name and time: from the
+/// same sender, within five minutes of it, on the same day in the zone of
+/// the person reading. A time that cannot be read stands on its own.
+fn grouped<Tz: TimeZone>(before: &Letter, after: &Letter, zone: &Tz) -> bool {
+    if before.from != after.from {
+        return false;
+    }
+    let (Ok(first), Ok(next)) = (
+        DateTime::parse_from_rfc3339(&before.at),
+        DateTime::parse_from_rfc3339(&after.at),
+    ) else {
+        return false;
+    };
+    if (next.timestamp() - first.timestamp()).abs() > 5 * 60 {
+        return false;
+    }
+    first.with_timezone(zone).date_naive() == next.with_timezone(zone).date_naive()
+}
+
+/// The day `at` (RFC 3339, as the yard gives it) falls on in the zone of
+/// the person reading. Nothing for a time that cannot be read.
+fn day_of<Tz: TimeZone>(at: &str, zone: &Tz) -> Option<NaiveDate> {
+    DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|t| t.with_timezone(zone).date_naive())
+}
+
+/// The day's separator: `Today`, or the weekday with the day and the
+/// month (`Saturday 17 Oct`), as the review's sketch has it.
+fn day_words(day: NaiveDate, today: NaiveDate) -> String {
+    if day == today {
+        return "Today".to_string();
+    }
+    format!("{} {} {}", day.format("%A"), day.day(), day.format("%b"))
 }
 
 /// A topic as the decisions show it: the label without its `topic:`
@@ -3825,6 +3911,19 @@ mod tests {
     fn letter(seq: u64, from: &str, to: &str, text: &str) -> Letter {
         Letter {
             seq,
+            from: from.into(),
+            to: to.into(),
+            text: text.into(),
+            ..Letter::default()
+        }
+    }
+
+    /// The mail `seq` of `from` to `to` at `at` (RFC 3339, as the yard
+    /// gives it).
+    fn letter_at(seq: u64, from: &str, to: &str, at: &str, text: &str) -> Letter {
+        Letter {
+            seq,
+            at: at.into(),
             from: from.into(),
             to: to.into(),
             text: text.into(),
@@ -4745,6 +4844,123 @@ mod tests {
             standing,
             [None, None, Some("sent; assembly is idle".to_string())]
         );
+    }
+
+    #[test]
+    fn mails_of_one_sender_within_five_minutes_share_one_name_and_time() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.conversation(
+            "yardmaster",
+            vec![
+                letter_at(12, "yardmaster", "jo", "2026-10-08T12:00:00Z", "one"),
+                letter_at(13, "yardmaster", "jo", "2026-10-08T12:03:00Z", "two"),
+                letter_at(14, "yardmaster", "jo", "2026-10-08T12:09:00Z", "three"),
+                letter_at(15, "jo", "yardmaster", "2026-10-08T12:10:00Z", "four"),
+                letter_at(16, "yardmaster", "jo", "2026-10-10T12:00:00Z", "five"),
+                letter(17, "yardmaster", "jo", "six"),
+            ],
+        );
+        let entries = m.entries();
+        let heads: Vec<bool> = entries.iter().map(|e| e.head).collect();
+        // The second mail joins the first's group where the two fall on
+        // the same day here; past midnight between them it heads its own.
+        let zone = chrono::Local;
+        let same = day_of("2026-10-08T12:00:00Z", &zone) == day_of("2026-10-08T12:03:00Z", &zone);
+        assert_eq!(heads, [true, !same, true, true, true, true]);
+        // A new day breaks above the mail, and the first mail breaks too;
+        // a mail with no time stands under nothing.
+        let today = chrono::Local::now().date_naive();
+        let words = |at: &str| day_words(day_of(at, &zone).unwrap(), today);
+        assert_eq!(entries[0].day, Some(words("2026-10-08T12:00:00Z")));
+        assert_eq!(
+            entries[1].day,
+            (!same).then(|| words("2026-10-08T12:03:00Z"))
+        );
+        assert_eq!(entries[2].day, None);
+        assert_eq!(entries[3].day, None);
+        assert_eq!(entries[4].day, Some(words("2026-10-10T12:00:00Z")));
+        assert_eq!(entries[5].day, None);
+    }
+
+    #[test]
+    fn the_rows_above_count_the_groups_and_the_breaks_an_older_page_adds() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.conversation(
+            "yardmaster",
+            vec![
+                letter_at(12, "yardmaster", "jo", "2026-10-08T12:00:00Z", "one"),
+                letter_at(13, "yardmaster", "jo", "2026-10-08T12:10:00Z", "two"),
+                letter_at(14, "yardmaster", "jo", "2026-10-10T12:00:00Z", "three"),
+            ],
+        );
+        // Above 14 stand two groups and one's break; above 13 the one's
+        // group, since 13 loses its break to its day; above the oldest
+        // mail nothing stands.
+        assert_eq!(m.rows_above(14), 3);
+        assert_eq!(m.rows_above(13), 1);
+        assert_eq!(m.rows_above(12), 0);
+        // Where the oldest shown mail joins the group above it, it takes
+        // its group back with its break.
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.conversation(
+            "yardmaster",
+            vec![
+                letter_at(12, "yardmaster", "jo", "2026-10-08T12:00:00Z", "one"),
+                letter_at(13, "yardmaster", "jo", "2026-10-08T12:03:00Z", "two"),
+            ],
+        );
+        let zone = chrono::Local;
+        let same = day_of("2026-10-08T12:00:00Z", &zone) == day_of("2026-10-08T12:03:00Z", &zone);
+        assert_eq!(m.rows_above(13), if same { 0 } else { 2 });
+    }
+
+    #[test]
+    fn a_mail_joins_the_sender_s_group_within_five_minutes_on_the_day() {
+        let zone = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let mail = |from: &str, at: &str| letter_at(1, from, "jo", at, "x");
+        // Five minutes on the day, under the name above.
+        assert!(grouped(
+            &mail("ym", "2026-10-08T12:00:00Z"),
+            &mail("ym", "2026-10-08T12:05:00Z"),
+            &zone
+        ));
+        // A second past five minutes, another sender, or another day: its
+        // own head. Three minutes over midnight are another day here.
+        for (before, after) in [
+            ("2026-10-08T12:00:00Z", "2026-10-08T12:05:01Z"),
+            ("2026-10-08T21:59:00Z", "2026-10-08T22:02:00Z"),
+        ] {
+            assert!(
+                !grouped(&mail("ym", before), &mail("ym", after), &zone),
+                "{before} {after}"
+            );
+        }
+        assert!(!grouped(
+            &mail("ym", "2026-10-08T12:00:00Z"),
+            &mail("jo", "2026-10-08T12:01:00Z"),
+            &zone
+        ));
+        // A time that cannot be read stands on its own, either side.
+        assert!(!grouped(
+            &mail("ym", "2026-10-08T12:00:00Z"),
+            &mail("ym", "soon"),
+            &zone
+        ));
+        assert!(!grouped(
+            &mail("ym", ""),
+            &mail("ym", "2026-10-08T12:00:00Z"),
+            &zone
+        ));
+    }
+
+    #[test]
+    fn a_day_s_separator_is_today_or_the_weekday_with_the_day_and_the_month() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
+        assert_eq!(day_words(today, today), "Today");
+        let saturday = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        assert_eq!(day_words(saturday, today), "Saturday 17 Oct");
+        let friday = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
+        assert_eq!(day_words(friday, today), "Friday 9 Oct");
     }
 
     #[test]

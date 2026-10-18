@@ -376,6 +376,29 @@ fn divider(palette: Palette) -> impl IntoElement {
     div().mx_3().my_1().h(px(1.)).bg(palette.line)
 }
 
+/// The conversation's reading width: the mail stands full width up to 720
+/// pixels, centred in the pane, as the review's sketch has it.
+const READING_WIDTH: f32 = 720.;
+
+/// The day's separator: its name centred between two hairlines, in the
+/// reading column.
+fn day_break(day: String, palette: Palette) -> AnyElement {
+    div()
+        .debug_selector({
+            let day = day.clone();
+            move || format!("day {day}")
+        })
+        .w_full()
+        .max_w(px(READING_WIDTH))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().h(px(1.)).flex_1().bg(palette.line))
+        .child(div().text_sm().text_color(palette.faint).child(day))
+        .child(div().h(px(1.)).flex_1().bg(palette.line))
+        .into_any_element()
+}
+
 /// What the Decisions head says waits in it: the number with "waiting",
 /// or that none does.
 fn waiting_words(waiting: usize) -> String {
@@ -3099,7 +3122,7 @@ impl Footplate {
                     let entries = model.entries();
                     let (above, below) = match before_span {
                         Some((oldest, newest)) => (
-                            entries.iter().filter(|e| e.seq < oldest).count(),
+                            model.rows_above(oldest),
                             entries.iter().filter(|e| e.seq > newest).count(),
                         ),
                         None => (0, entries.len()),
@@ -3205,13 +3228,24 @@ impl Footplate {
         self.anchor = None;
     }
 
-    /// `above` mails were put in above the view of the open conversation:
+    /// `above` rows were put in above the view of the open conversation:
     /// the mail at the top of the view stays where it stood. The scroll
     /// offset is counted from the top of the conversation, and how high
-    /// the new mails are is known only once they are laid out. So the
+    /// the new rows are is known only once they are laid out. So the
     /// layout of the next frame puts that mail at the top of the view, and
     /// the frame after it moves the view by what the mail stood off the
     /// top ([`Footplate::reconcile_scroll`]).
+    /// The oldest shown mail's group among the conversation's children:
+    /// past the line above it, and past its day's break where it stands.
+    fn first_mail_item(&self) -> usize {
+        let breaks = self
+            .model
+            .as_ref()
+            .map(|m| m.entries().first().is_some_and(|e| e.day.is_some()))
+            .unwrap_or(false);
+        1 + usize::from(breaks)
+    }
+
     fn keep_place(&mut self, above: usize) {
         let anchor = match self.anchor.take() {
             // More was put in before the last was laid out.
@@ -3222,7 +3256,10 @@ impl Footplate {
             None => {
                 // The first child is the line above the oldest mail, which
                 // stays the first: at the very top the oldest mail is kept.
-                let item = self.conversation.logical_scroll_top().0.max(1);
+                let item = match self.conversation.logical_scroll_top().0 {
+                    0 => self.first_mail_item(),
+                    top => top,
+                };
                 let off = self
                     .conversation
                     .bounds_for_item(item)
@@ -10044,25 +10081,31 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let seq = entry.seq;
+        let head = entry.head;
         div()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(palette.faint)
-                            .child(model::clock(&entry.at, &chrono::Local)),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(entry.mine, |el| el.text_color(palette.accent))
-                            .child(entry.from),
-                    ),
-            )
+            // A mail of its sender's group reads under the name and the
+            // time above it; every other one carries its own.
+            .when(head, |el| {
+                el.child(
+                    div()
+                        .debug_selector(|| format!("head {seq}"))
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(palette.faint)
+                                .child(model::clock(&entry.at, &chrono::Local)),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .when(entry.mine, |el| el.text_color(palette.accent))
+                                .child(entry.from),
+                        ),
+                )
+            })
             .when(!entry.text.is_empty(), |el| {
                 // The margin is outside the text's bounds, so that these
                 // are where the text is.
@@ -10088,6 +10131,54 @@ impl Footplate {
                         .child(format!("· {standing}")),
                 )
             })
+    }
+
+    /// The conversation's mail as groups under one head each: a mail that
+    /// reads under the sender's name above joins its group, and every other
+    /// one starts a group, with the day's separator above it where the day
+    /// changes. Each group stands in the reading column.
+    fn groups(
+        &self,
+        entries: Vec<Entry>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out: Vec<AnyElement> = Vec::new();
+        let mut group: Vec<Entry> = Vec::new();
+        for entry in entries {
+            // A new day breaks above the mail, and every head starts a
+            // group; the first mail does both.
+            if let Some(day) = entry.day.clone() {
+                if !group.is_empty() {
+                    out.push(self.group(std::mem::take(&mut group), palette, cx));
+                }
+                out.push(day_break(day, palette));
+            } else if entry.head && !group.is_empty() {
+                out.push(self.group(std::mem::take(&mut group), palette, cx));
+            }
+            group.push(entry);
+        }
+        if !group.is_empty() {
+            out.push(self.group(group, palette, cx));
+        }
+        out
+    }
+
+    /// One head's mails, closer together than the groups stand, in the
+    /// reading column.
+    fn group(&self, entries: Vec<Entry>, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .max_w(px(READING_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(
+                entries
+                    .into_iter()
+                    .map(|entry| self.entry(entry, palette, cx)),
+            )
+            .into_any_element()
     }
 
     fn talk(&self, model: &Model, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -10199,6 +10290,8 @@ impl Footplate {
             }));
 
         let entries = model.entries();
+        // The mail reads as a column: each row stands full width up to the
+        // reading width, centred in the pane.
         let mail = div()
             .id("conversation")
             .flex_1()
@@ -10208,10 +10301,13 @@ impl Footplate {
             .p_4()
             .flex()
             .flex_col()
+            .items_center()
             .gap_3();
         let mail = if entries.is_empty() {
             mail.child(
                 div()
+                    .w_full()
+                    .max_w(px(READING_WIDTH))
                     .text_color(palette.faint)
                     .child(if with == model.me() {
                         "No notes to yourself yet. What you write here is mail to yourself."
@@ -10232,17 +10328,15 @@ impl Footplate {
             mail.child(
                 div()
                     .debug_selector(|| "conversation top".to_string())
+                    .w_full()
+                    .max_w(px(READING_WIDTH))
                     .flex()
                     .justify_center()
                     .text_sm()
                     .text_color(palette.faint)
                     .child(top),
             )
-            .children(
-                entries
-                    .into_iter()
-                    .map(|entry| self.entry(entry, palette, cx)),
-            )
+            .children(self.groups(entries, palette, cx))
         };
         // The jump control stands over the mail, at its bottom right,
         // while the view is above its newest.
@@ -10392,7 +10486,11 @@ impl Footplate {
             list.children(said.into_iter().map(|(_, said)| {
                 let n = match said {
                     Said::Notice(n) => n,
-                    Said::Mail(entry) => {
+                    Said::Mail(mut entry) => {
+                        // The notices stand between the mails, so no mail
+                        // reads under another's name here: every one carries
+                        // its own.
+                        entry.head = true;
                         return self.entry(entry, palette, cx).into_any_element();
                     }
                 };
@@ -13778,11 +13876,22 @@ mod tests {
     const LINK: &str = "see https://example.org/a now";
 
     /// The yardmaster's conversation is these mails, from seq 12 on.
+    /// The time of the `n`th mail of a conversation: six minutes apart,
+    /// so that every mail heads its own group.
+    fn mailed(n: u64) -> String {
+        chrono::DateTime::parse_from_rfc3339("2026-10-08T09:30:00Z")
+            .unwrap()
+            .checked_add_signed(chrono::TimeDelta::minutes(6 * n as i64))
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
     fn mails(yard: &Yard, texts: &[&str]) {
         let mails: Vec<serde_json::Value> = texts
             .iter()
             .zip(12..)
-            .map(|(text, seq)| json!({"seq": seq, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": text, "read": false}))
+            .map(|(text, seq)| json!({"seq": seq, "at": mailed(seq - 12), "from": "yardmaster", "to": "jo", "text": text, "read": false}))
             .collect();
         yard.answer("Conversation", &json!({"result": mails}).to_string());
     }
@@ -19137,6 +19246,77 @@ mod tests {
                 Some(&Selected::Bead("yd-zulu".into()))
             );
         });
+    }
+
+    /// The conversation reads as a column: each mail's name stands over
+    /// its sender's group alone, a separator breaks over each day, and at
+    /// 1920 pixels the mail stands 720 wide, centred in the pane.
+    #[gpui::test]
+    fn the_conversation_reads_as_a_grouped_column_with_day_separators(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "one", "read": true},
+                {"seq": 13, "at": "2026-10-13T09:33:00Z", "from": "yardmaster", "to": "jo", "text": "two", "read": true},
+                {"seq": 14, "at": "2026-10-14T08:05:00Z", "from": "jo", "to": "yardmaster", "text": "three", "read": true},
+            ]})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        // The second mail joins the first's group where the two fall on
+        // the same day here; the third heads its own, past midnight. Each
+        // mail's name stands over it exactly where the model says.
+        let entries = view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries());
+        assert_eq!([entries[0].head, entries[2].head], [true, true]);
+        for (seq, head) in [
+            (12, entries[0].head),
+            (13, entries[1].head),
+            (14, entries[2].head),
+        ] {
+            assert_eq!(
+                drawn(cx, &format!("head {seq}")),
+                head,
+                "the name over mail {seq}"
+            );
+        }
+        // A separator breaks over each day the model names.
+        for (seq, day) in [
+            (12, &entries[0].day),
+            (13, &entries[1].day),
+            (14, &entries[2].day),
+        ] {
+            if let Some(label) = day {
+                assert!(
+                    drawn(cx, &format!("day {label}")),
+                    "no break over mail {seq}"
+                );
+            }
+        }
+        // At 1920 pixels the mail stands in the reading column: capped at
+        // 720, off both edges of the pane.
+        cx.simulate_resize(gpui::size(px(1920.), px(1080.)));
+        let rows = bounds_of(cx, "rows");
+        for seq in [12, 13, 14] {
+            let text = bounds_of(cx, &format!("text {seq}"));
+            assert!(
+                text.size.width <= px(720.),
+                "mail {seq} runs past the column: {text:?}"
+            );
+            assert!(
+                text.size.width >= px(690.),
+                "mail {seq} stands off the column's width: {text:?}"
+            );
+            assert!(
+                text.origin.x >= rows.right() + px(300.),
+                "mail {seq} stands off the column's left: {text:?} in {rows:?}"
+            );
+            assert!(
+                text.right() <= px(1920.) - px(300.),
+                "mail {seq} stands off the column's right: {text:?}"
+            );
+        }
     }
 
     /// At the narrowest window the arrivals panes hold: the list's row
@@ -27248,7 +27428,7 @@ mod tests {
             "yardmaster",
             (1..=n)
                 .map(|seq| {
-                    json!({"seq": seq, "at": "2026-10-08T09:30:00Z", "from": "yardmaster",
+                    json!({"seq": seq, "at": mailed(seq - 1), "from": "yardmaster",
                         "to": "jo", "read": true, "text": format!("Mail {seq}\nof the shed\nand the fence.")})
                 })
                 .collect(),
@@ -27361,9 +27541,24 @@ mod tests {
         frames(cx);
         // 401 was the oldest, at the top of the view where 451 would
         // have stood there: it stands there still, under the mails before.
+        // gpui rounds layout to device pixels, so the same text stands up
+        // to half a pixel off where another mail's stood: the place is
+        // pinned within that rounding, not to the pixel.
         let mut at_top = far[0];
         at_top.origin.y += px(half + 40.);
-        assert_eq!(text_bounds(cx, 401), at_top);
+        let stood = text_bounds(cx, 401);
+        assert_eq!(stood.origin.x, at_top.origin.x);
+        assert_eq!(stood.size.width, at_top.size.width);
+        assert!(
+            (stood.origin.y - at_top.origin.y).abs() <= px(1.),
+            "mail 401 stands off where 451 stood: {:?} past {at_top:?}",
+            stood.origin.y
+        );
+        assert!(
+            (stood.size.height - at_top.size.height).abs() <= px(1.),
+            "mail 401 stands off 451's height: {:?} past {at_top:?}",
+            stood.size.height
+        );
         assert_eq!(
             yard.asked("Conversation").last(),
             Some(&json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 401}))

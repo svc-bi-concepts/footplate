@@ -444,13 +444,18 @@ fn populate(yard: &Yard, state: &str) {
         | "arrivals"
         | "arrival"
         | "flow" => {
+            // The conversation reads over two days, with a mail in each
+            // sender's group: the yardmaster shot shows the column, the
+            // grouping and the separators.
             let inbox = json!({"result": {"mail": [
                 {"seq": 12, "from": "yardmaster", "to": "jo",
                  "text": "The evening's work is shaped: three beads, one question each.",
                  "read": false},
                 {"seq": 14, "from": "yardmaster", "to": "jo",
                  "text": "They are green. Shall I land it?", "read": false},
-            ], "unread": 2, "last": 14, "from": ["yardmaster"]}});
+                {"seq": 15, "from": "yardmaster", "to": "jo",
+                 "text": "The second lands behind it.", "read": false},
+            ], "unread": 3, "last": 15, "from": ["yardmaster"]}});
             yard.answer("UserInbox", &inbox.to_string());
             let conversation = json!({"result": [
                 {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo",
@@ -460,6 +465,12 @@ fn populate(yard: &Yard, state: &str) {
                  "text": "Land the first when its tests are green.", "read": false},
                 {"seq": 14, "at": "2026-10-13T09:35:00Z", "from": "yardmaster", "to": "jo",
                  "text": "They are green. Shall I land it?", "read": false},
+                {"seq": 15, "at": "2026-10-13T09:37:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "The second lands behind it.", "read": false},
+                {"seq": 16, "at": "2026-10-14T08:05:00Z", "from": "jo", "to": "yardmaster",
+                 "text": "Both are landed.", "read": false},
+                {"seq": 17, "at": "2026-10-14T08:09:00Z", "from": "jo", "to": "yardmaster",
+                 "text": "What is next?", "read": false},
             ]});
             yard.answer("Conversation", &conversation.to_string());
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
@@ -856,13 +867,13 @@ mod tests {
                 | "signedout" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
-                    assert_eq!(letters.len(), 3, "{state}");
+                    assert_eq!(letters.len(), 6, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
                 }
                 "arrivals" | "arrival" | "flow" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
-                    assert_eq!(letters.len(), 3, "{state}");
+                    assert_eq!(letters.len(), 6, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
                     // The board the window opens: three rows, with an
                     // amber remark, none, and a red one, beside the
