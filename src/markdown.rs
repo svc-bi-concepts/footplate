@@ -335,15 +335,18 @@ pub fn short_link(url: &str) -> String {
     else {
         return url.to_string();
     };
-    let (host, path) = match rest.find('/') {
+    // A valid URL can put its query or fragment directly after the host,
+    // with no slash for an empty path. Keep those suffixes with the path
+    // tail so a long root URL shortens just like one with a path.
+    let (host, suffix) = match rest.find(['/', '?', '#']) {
         Some(at) => rest.split_at(at),
         None => return rest.to_string(),
     };
-    let chars = path.chars().count();
+    let chars = suffix.chars().count();
     if chars <= LINK_TAIL + 1 {
         return rest.to_string();
     }
-    let tail: String = path.chars().skip(chars - LINK_TAIL).collect();
+    let tail: String = suffix.chars().skip(chars - LINK_TAIL).collect();
     format!("{host}/…{}", tail.trim_start_matches('/'))
 }
 
@@ -738,6 +741,16 @@ mod tests {
                 "https://calendar.google.com/calendar/event?action=TEMPLATE&tmeid=abc123&dates=20261019"
             ),
             "calendar.google.com/…id=abc123&dates=20261019"
+        );
+        // A root URL may put its query or fragment directly after the
+        // host, with no slash to mark the path.
+        assert_eq!(
+            short_link("https://calendar.google.com?event_id=12345678901234567890123456789012"),
+            "calendar.google.com/…901234567890123456789012"
+        );
+        assert_eq!(
+            short_link("https://example.org#release-20261019-123456789012345678901234"),
+            "example.org/…123456789012345678901234"
         );
         // A long host with no path, or with a short one, loses the scheme
         // alone.
