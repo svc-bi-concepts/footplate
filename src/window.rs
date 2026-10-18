@@ -3083,6 +3083,7 @@ impl Footplate {
     /// conversation shows its newest, and the yard its notices; the open
     /// card never moves for mail or notices arriving.
     fn change(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Model) -> Vec<Effect>) {
+        let before_first_mail = self.first_mail_item();
         let Some(model) = self.model.as_mut() else {
             return;
         };
@@ -3148,7 +3149,7 @@ impl Footplate {
                             // the jump control carries how many arrived.
                             // Nor does it move for older mail above it.
                             if above > 0 {
-                                self.keep_place(above);
+                                self.keep_place(above, before_first_mail);
                             }
                             self.new_below += below;
                         }
@@ -3258,7 +3259,7 @@ impl Footplate {
         2 + usize::from(breaks)
     }
 
-    fn keep_place(&mut self, above: usize) {
+    fn keep_place(&mut self, above: usize, first_mail: usize) {
         let anchor = match self.anchor.take() {
             // More was put in before the last was laid out.
             Some((kept, _)) => Anchor {
@@ -3266,12 +3267,11 @@ impl Footplate {
                 off: kept.off,
             },
             None => {
-                // The first child is the line above the oldest mail, which
-                // stays the first: at the very top the oldest mail is kept.
-                let item = match self.conversation.logical_scroll_top().0 {
-                    0 => self.first_mail_item(),
-                    top => top,
-                };
+                // The line, day break and group head stay at the front
+                // when older mail joins the first group. Anchor its first
+                // body instead, which moves by the new mail rows.
+                let top = self.conversation.logical_scroll_top().0;
+                let item = if top < first_mail { first_mail } else { top };
                 let off = self
                     .conversation
                     .bounds_for_item(item)
