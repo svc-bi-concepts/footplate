@@ -10196,14 +10196,6 @@ impl Footplate {
             })
     }
 
-    /// A bead with open asks, already expanded: the question's first line
-    /// in plain words, or the bead's title with how many it asks, then
-    /// every ask with its question's first line and its numbered options,
-    /// then whose it is and how long it waits, the bead's id small at the
-    /// row's end. A bead with one ask shows its options under its head,
-    /// which already says its question. The options take no clicks and no
-    /// keys: the list is for triage, and answering stays in the card on
-    /// the right.
     /// One bead's open row: the question wrapped to two lines, then
     /// whose it is, what it wants and how long it waits. A bead with
     /// several open asks carries its title instead, with each ask beneath
