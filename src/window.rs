@@ -6015,6 +6015,7 @@ impl Footplate {
     /// again. While they show, the window holds the keys: nothing typed
     /// goes to a line that is not in view.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shut_menu();
         self.settings_open = !self.settings_open;
         // A card under the settings is not in view, and neither is its
         // field: nothing typed of a secret waits there.
@@ -20337,6 +20338,14 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert!(settings_open(&view, cx));
         assert_eq!(view.read_with(cx, |v, _| v.yard_menu.clone()), None);
+        click_on(cx, "yard menu this machine");
+        click_on(cx, "settings back");
+        assert!(!settings_open(&view, cx));
+        assert_eq!(view.read_with(cx, |v, _| v.yard_menu.clone()), None);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        click_on(cx, "settings section yards");
+        assert!(!drawn(cx, "yard rename this machine"));
         // Agents: the operator's styles, the line about them, and save.
         click_on(cx, "settings section agents");
         wait(cx, "the operator's settings read", |cx| {
