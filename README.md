@@ -163,9 +163,11 @@ first screen, or with no yard where the state says none:
     scripts/shot-linux.sh <state> "$shot"
 
 The states are `yardmaster` (the conversation with the yardmaster, with a
-few mails), `thread` (a long wrapped thread from alternating senders,
-the newest mail with an image), `plain` (an open decision card of a plain ask), `dot` (that
-card with the timetable's dot lit), `page` (an
+few mails), `crew` (chat with the sidebar's groups full: crew working
+and stopped, a linked yard's people, this yard's people, and unread
+notices), `thread` (a long wrapped thread from alternating senders,
+the newest mail with an image), `plain` (an open decision card of a plain ask), `lines` (that
+card with one of jo's beads changed, so Lines carries its badge), `page` (an
 open card whose note carries a page, an image and a file), `mail` (a mail with
 a page and an image), `image` (that mail's image open full size over
 the window), `run` (an

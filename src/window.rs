@@ -30,7 +30,7 @@ use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
-use crate::theme::{Look, Palette, yard_color, yard_ink};
+use crate::theme::{Look, Palette, crew_dot, yard_color, yard_ink};
 use crate::yard::{self, Env};
 
 mod firstrun;
@@ -115,9 +115,16 @@ const IMAGE_MARGIN: f32 = 2.;
 /// name stands in it where it is no image, so it goes with the text size.
 const ATTACHMENT: f32 = 3.5;
 
-/// The rail's width in pixels, fixed: the kit's minimum target with its
-/// sidebar padding on both sides, 8 + 40 + 8.
-const RAIL: f32 = 56.;
+/// The rail's width in pixels, fixed: room for a label under each
+/// icon, as the review has it.
+const RAIL: f32 = 64.;
+
+/// A rail tile's width in pixels: the glyph with its label under it, in
+/// the rail with its padding on both sides, 6 + 52 + 6.
+const RAIL_TILE: f32 = 52.;
+
+/// A rail label's size in pixels, fixed with its tile.
+const RAIL_LABEL: f32 = 10.;
 
 /// The key that is cmd on macOS and ctrl elsewhere, as the hints name it.
 const SECONDARY: &str = if cfg!(target_os = "macos") {
@@ -387,11 +394,6 @@ fn post_note(
     Ok(())
 }
 
-/// A line between the sections of the left list.
-fn divider(palette: Palette) -> impl IntoElement {
-    div().mx_3().my_1().h(px(1.)).bg(palette.line)
-}
-
 /// The conversation's reading width: the mail stands full width up to 720
 /// pixels, centred in the pane, as the review's sketch has it.
 const READING_WIDTH: f32 = 720.;
@@ -545,6 +547,18 @@ fn section_head(title: &'static str, count: String, palette: Palette) -> impl In
                 .flex_none()
                 .child(count),
         )
+}
+
+/// One of chat's groups: its title in the section heads' style, with no
+/// count. Each row carries its own.
+fn group_head(title: &'static str) -> impl IntoElement {
+    div().px_3().pt_2().pb_1().child(
+        div()
+            .debug_selector(move || format!("group {title}"))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(title),
+    )
 }
 
 /// What the card's button reads with an option to answer with: the
@@ -925,8 +939,9 @@ fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
 /// desktop and stand in for a missing glyph on the next.
 /// A rail glyph's canvas: 28 pixels, drawn from the mock's geometry
 /// (docs/design/2026-10-16-footplate-zj5f-rail-mock.html), a 24-grid with
-/// its strokes, scaled to the canvas. Fixed pixels, not rems: the rail
-/// carries no reading text.
+/// its strokes, scaled to the canvas. Fixed pixels, not rems, as the
+/// labels under the glyphs are: the rail keeps its size whatever the
+/// text.
 fn glyph_canvas(
     paint: impl Fn(gpui::Point<Pixels>, f32, &mut Window) + 'static,
 ) -> impl IntoElement {
@@ -1363,6 +1378,7 @@ struct Counts {
     mail: usize,
     decisions: usize,
     notices: usize,
+    changed: usize,
 }
 
 /// What makes a yard entry the same yard while a call is away from the
@@ -1404,26 +1420,19 @@ fn rail_counts(model: Option<&Model>, away: bool) -> Option<Counts> {
     if away { None } else { model.map(Counts::of) }
 }
 
-/// Whether the open yard's rail carries the timetable's dot: one of the
-/// person's beads changed since they last had Timetable open. As the
-/// counts, nothing while the yard is away, even where its model stays on
-/// screen.
-fn rail_dot(model: Option<&Model>, away: bool) -> bool {
-    !away && model.is_some_and(Model::timetable_dot)
-}
-
 impl Counts {
     fn of(model: &Model) -> Counts {
         Counts {
             mail: model.rows().iter().map(|row| row.unread).sum(),
             decisions: model.decisions_count(),
             notices: model.yard_unread(),
+            changed: model.timetable_news(),
         }
     }
 
     /// How many things of the yard wait for the person: the mail that is
     /// not read and the cards to decide. A notice of the yard asks nothing
-    /// of them.
+    /// of them, and neither does a bead that changed.
     fn waiting(&self) -> usize {
         self.mail + self.decisions
     }
@@ -1465,17 +1474,18 @@ impl Counts {
         (self.waiting().to_string(), words)
     }
 
-    /// What the rail's glyph of `mode` carries of these counts: the
-    /// badge's label with the tooltip's words, or none where the glyph
+    /// What the rail's tile of `mode` carries of these counts: the
+    /// badge's label with the tooltip's words, or none where the tile
     /// carries nothing. Chat carries the unread mail, decisions the open
-    /// asks, and the timetable nothing; nothing is carried where nothing
-    /// waits, and the notices are no glyph's. Above nine the badge says
-    /// 9+, and the tooltip still says the number.
+    /// asks, the timetable the person's beads added or closed since they
+    /// last had it open; nothing is carried where nothing waits, and the
+    /// notices are no glyph's. Above nine the badge says 9+, and the
+    /// tooltip still says the number.
     fn rail(&self, mode: Mode) -> Option<(String, String)> {
         let (n, one, more) = match mode {
             Mode::Chat => (self.mail, "mail", "mail"),
             Mode::Decisions => (self.decisions, "decision", "decisions"),
-            Mode::Timetable => return None,
+            Mode::Timetable => (self.changed, "bead changed", "beads changed"),
         };
         let label = match n > 9 {
             true => "9+".to_string(),
@@ -1835,7 +1845,7 @@ fn shot_selected() -> Option<Selected> {
     #[cfg(debug_assertions)]
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
-        Ok("plain") | Ok("page") | Ok("dot") => return Some(Selected::Decision("bead-a".into())),
+        Ok("plain") | Ok("page") | Ok("lines") => return Some(Selected::Decision("bead-a".into())),
         Ok("run") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
             return Some(Selected::Decision("bead-s".into()));
         }
@@ -2275,6 +2285,7 @@ impl Footplate {
                     mail: waits.mail + yard.mail,
                     decisions: waits.decisions + yard.decisions,
                     notices: 0,
+                    changed: 0,
                 },
             );
             crate::tray::said(
@@ -4542,10 +4553,10 @@ impl Footplate {
                 Effect::Timetable { from, until } => self.ask_in(
                     session,
                     cx,
-                    move |client, me| client.timetable_changed(me, from, until),
-                    move |this, changed, cx| match changed {
-                        Ok(changed) => this.change_in(session, cx, |m| {
-                            m.timetable_seeded(changed, until);
+                    move |client, me| client.timetable_news(me, from, until),
+                    move |this, news, cx| match news {
+                        Ok(news) => this.change_in(session, cx, |m| {
+                            m.timetable_seeded(news, until);
                             Vec::new()
                         }),
                         Err(err) => this.notice_in(
@@ -9174,27 +9185,26 @@ impl Footplate {
     }
 
     /// The rail on the window's far left: the open yard's chip on top,
-    /// the three mode icons, and at the foot the settings' gear. The
-    /// chip is the yard's first two letters on its colour, so the yard
-    /// picks and approvals count in is unmistakable; a click opens the
-    /// switcher. The open mode's icon stands in the accent on the open
-    /// ground, as the open row does; the others stand quiet and
-    /// brighten on hover, as quiet text does. The chat and decisions
-    /// icons carry what waits in them as a badge, and in words in their
-    /// tooltips; the timetable's carries a dot where one of the
-    /// person's beads changed since they last had Timetable open. While
-    /// the yard is away the modes stand dimmed and inert, and the chip
-    /// and the foot stay alive, because leaving is their job.
+    /// the three mode icons with their labels, and at the foot the
+    /// settings' gear with its. The chip is the yard's first two letters
+    /// on its colour, so the yard picks and approvals count in is
+    /// unmistakable; a click opens the switcher. The open mode's tile
+    /// stands in the accent on the open ground, as the open row does;
+    /// the others stand quiet and brighten on hover, as quiet text does.
+    /// Each mode's tile carries what waits in it as a badge, and in
+    /// words in its tooltip: the unread mail, the open asks, the
+    /// person's beads added or closed since they last had Lines open.
+    /// While the yard is away the modes stand dimmed and inert, and the
+    /// chip and the foot stay alive, because leaving is their job.
     fn rail(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.mode();
         // The modes answer where a yard's rows are there to show.
         let live = self.model.is_some();
-        // What waits in the open yard, for the glyphs' badges and the
-        // timetable's dot. A reconnecting yard keeps its model for its
-        // rows, but it is away and has nothing current to show.
+        // What waits in the open yard, for the tiles' badges. A
+        // reconnecting yard keeps its model for its rows, but it is away
+        // and has nothing current to show.
         let away = self.down.is_some() && !self.answers_under_adding();
         let counts = rail_counts(self.model.as_ref(), away);
-        let dot = rail_dot(self.model.as_ref(), away);
         let mut rail = div()
             .debug_selector(|| "rail".to_string())
             .w(px(RAIL))
@@ -9249,33 +9259,33 @@ impl Footplate {
                 Mode::Decisions => semaphore_glyph(color).into_any_element(),
                 Mode::Timetable => track_glyph(color).into_any_element(),
             };
-            // The glyph's badge: the count's label at its top right,
-            // and the count in words in its tooltip. The timetable
-            // carries no count; its dot says in words that the person's
-            // beads changed.
+            // The tile's badge: the count's label at its top right,
+            // and the count in words in its tooltip.
             let badge = counts.and_then(|counts| counts.rail(m));
-            let dot = dot && m == Mode::Timetable;
             let tip = match live {
-                true => format!("{} ({}+[ or {}+])", m.name(), SECONDARY, SECONDARY),
+                true => format!("{} ({}+[ or {}+])", m.label(), SECONDARY, SECONDARY),
                 false => "the yard is away".to_string(),
             };
-            let tip = match (badge.as_ref(), dot) {
-                (Some((_, words)), _) => format!("{tip} — {words}"),
-                (None, true) => format!("{tip} — your beads changed"),
-                (None, false) => tip,
+            let tip = match badge.as_ref() {
+                Some((_, words)) => format!("{tip} — {words}"),
+                None => tip,
             };
             let id = format!("rail {}", m.name());
+            let label = format!("{} label", id);
             rail =
                 rail.child(
                     div()
                         .id(SharedString::from(id.clone()))
                         .debug_selector(move || id.clone())
-                        .size(px(40.))
+                        .w(px(RAIL_TILE))
                         .rounded_md()
                         .relative()
                         .flex()
+                        .flex_col()
                         .items_center()
                         .justify_center()
+                        .py_1()
+                        .gap_1()
                         .when(n == 0, |el| el.mt_2())
                         .when(n > 0, |el| el.mt_1())
                         .when(open, |el| el.bg(palette.open))
@@ -9297,12 +9307,16 @@ impl Footplate {
                         })
                         .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
                         .child(glyph)
-                        // The badge stands centered on the glyph's top
-                        // right corner: the glyph is 28 in the tile's
-                        // 40, so its corner stands at (34, 6), and the
-                        // badge from (40 - 16, 0) stands centered on
-                        // it. In the accent, as the jump button's
-                        // count is.
+                        .child(
+                            div()
+                                .debug_selector(move || label.clone())
+                                .flex_none()
+                                .text_size(px(RAIL_LABEL))
+                                .text_color(color)
+                                .child(m.label()),
+                        )
+                        // The badge stands at the tile's top right, in
+                        // the accent, as the jump button's count is.
                         .children(badge.map(|(label, _)| {
                             div()
                                 .debug_selector(move || format!("rail badge {}", m.name()))
@@ -9321,44 +9335,42 @@ impl Footplate {
                                 .items_center()
                                 .justify_center()
                                 .child(label)
-                        }))
-                        // The timetable's dot: no number, on the same
-                        // corner as the badges, in the accent. It neither
-                        // blinks nor moves.
-                        .children(dot.then(|| {
-                            div()
-                                .debug_selector(|| "rail dot timetable".to_string())
-                                .absolute()
-                                .top(px(4.))
-                                .right(px(4.))
-                                .size(px(8.))
-                                .rounded_full()
-                                .bg(palette.accent)
                         })),
                 );
         }
         rail = rail.child(div().flex_1().min_h_0());
-        // The foot: the settings' gear. The yards are switched from the
-        // chip at the rail's head.
+        // The foot: the settings' gear with its label. The yards are
+        // switched from the chip at the rail's head.
         rail.child(
             div()
                 .id("settings")
                 .debug_selector(|| "settings".to_string())
-                .size(px(40.))
+                .w(px(RAIL_TILE))
                 .rounded_md()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .py_1()
+                .gap_1()
                 .mt_1()
                 .cursor_pointer()
                 .hover(|style| style.bg(palette.hover))
                 .when(self.settings_open, |el| el.bg(palette.open))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
                 .tooltip(|_, cx| {
-                    cx.new(|_| RailTip(format!("settings ({SECONDARY}+,)")))
+                    cx.new(|_| RailTip(format!("Settings ({SECONDARY}+,)")))
                         .into()
                 })
-                .child(gear_glyph(palette.faint)),
+                .child(gear_glyph(palette.faint))
+                .child(
+                    div()
+                        .debug_selector(|| "settings label".to_string())
+                        .flex_none()
+                        .text_size(px(RAIL_LABEL))
+                        .text_color(palette.faint)
+                        .child("Settings"),
+                ),
         )
     }
 
@@ -9414,21 +9426,24 @@ impl Footplate {
             .py_1()
     }
 
-    /// Chat's list: the crew rows, then the yard row below them. The
-    /// yard's notifications row lives here because notifications are mail
-    /// the yard wrote to the person, and chat is where the person reads
-    /// mail.
+    /// Chat's list: this yard's crew, the linked yards' people, this
+    /// yard's people, each under its head, then the yard row under its.
+    /// A group with no rows stands without its head. The yard's
+    /// notifications row lives here because notifications are mail the
+    /// yard wrote to the person, and chat is where the person reads mail.
     fn list_chat(
         &self,
         model: &Model,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let rows = model.rows();
+        let groups = [
+            ("This yard's crew", model.crew_rows()),
+            ("Linked yards", model.linked_rows()),
+            ("People", model.people_rows()),
+        ];
         let mut body = self.list_body();
-        let unread: usize = rows.iter().map(|row| row.unread).sum();
-        body = body.child(section_head("Crew", unread_words(unread), palette));
-        if rows.is_empty() {
+        if groups.iter().all(|(_, rows)| rows.is_empty()) {
             body =
                 body.child(
                     div().p_3().text_sm().text_color(palette.faint).child(
@@ -9436,12 +9451,18 @@ impl Footplate {
                     ),
                 )
         } else {
-            for row in rows {
-                let sel = Selected::Conversation(row.name.clone());
-                body = body.child(self.row(row, sel, palette, cx));
+            for (title, rows) in groups {
+                if rows.is_empty() {
+                    continue;
+                }
+                body = body.child(group_head(title));
+                for row in rows {
+                    let sel = Selected::Conversation(row.name.clone());
+                    body = body.child(self.row(row, sel, palette, cx));
+                }
             }
         }
-        body = body.child(divider(palette));
+        body = body.child(group_head("Yard"));
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
         self.column(body, palette, cx)
@@ -9766,9 +9787,15 @@ impl Footplate {
         strip
     }
 
-    /// One row of a list on the left. The open row keeps its fill, and
-    /// a row under the pointer a hairline instead: hover drawn apart
-    /// from selection, so exactly one row ever reads open.
+    /// One conversation's row, or the yard's: the name with its state
+    /// as a dot beside it where it has one, the words under it, the
+    /// unread at the right. A linked name's peer suffix stands in its
+    /// own colour, past a name that still ends in an ellipsis before it.
+    /// The yard's notices are FYI, not waiting, so their count is a grey
+    /// badge; every other count is quiet words, never a numeral badge.
+    /// The open row keeps its fill, and a row under the pointer a
+    /// hairline instead: hover drawn apart from selection, so exactly
+    /// one row ever reads open.
     fn row(
         &self,
         row: Row,
@@ -9780,7 +9807,23 @@ impl Footplate {
             Selected::Yard => "row yard".to_string(),
             _ => format!("row {}", row.name),
         };
+        let is_yard = matches!(sel, Selected::Yard);
         let name = row.name.clone();
+        // A linked name's peer suffix, past the name: `@airy` in its own
+        // colour, always shown whole, while the name ends in an ellipsis
+        // before it.
+        let (who, peer) = match name.split_once('@') {
+            Some((who, peer)) => (who.to_string(), Some(format!("@{peer}"))),
+            None => (name.clone(), None),
+        };
+        let dot = row.dot.map(|state| {
+            div()
+                .debug_selector(|| format!("row dot {}", name))
+                .size(px(8.))
+                .rounded_full()
+                .flex_none()
+                .bg(crew_dot(state, palette))
+        });
         div()
             .id(SharedString::from(id.clone()))
             .debug_selector(move || id.clone())
@@ -9810,30 +9853,67 @@ impl Footplate {
                     .min_w_0()
                     .child(
                         div()
-                            .truncate()
-                            .debug_selector(|| format!("row name {}", name))
-                            .when(row.unread > 0, |el| el.font_weight(FontWeight::SEMIBOLD))
-                            .child(row.name),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .children(dot)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .debug_selector(|| format!("row name {}", name))
+                                    .when(row.unread > 0, |el| el.font_weight(FontWeight::SEMIBOLD))
+                                    .child(div().min_w_0().truncate().child(who))
+                                    .children(peer.map(|peer| {
+                                        div()
+                                            .debug_selector(|| format!("row peer {}", name))
+                                            .flex_none()
+                                            .text_color(palette.peer)
+                                            .child(peer)
+                                    })),
+                            ),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(palette.faint)
                             .truncate()
+                            // Under the name, past the dot and its gap.
+                            .when(row.dot.is_some(), |el| el.ml(px(16.)))
                             .child(row.line),
                     ),
             )
-            // Every count is quiet words at the right, never a numeral
-            // badge.
-            .when(row.unread > 0, |el| {
-                el.child(
+            .when(row.unread > 0, |el| match is_yard {
+                true => el.child(
+                    div()
+                        .flex_none()
+                        .debug_selector(|| format!("row unread {}", name))
+                        .h(px(16.))
+                        .min_w(px(16.))
+                        .px(px(7.))
+                        .rounded_full()
+                        .bg(Rgba {
+                            a: 0.25,
+                            ..palette.faint
+                        })
+                        .text_color(palette.text)
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(row.unread.to_string()),
+                ),
+                false => el.child(
                     div()
                         .flex_none()
                         .debug_selector(|| format!("row unread {}", name))
                         .text_sm()
                         .text_color(palette.faint)
                         .child(unread_words(row.unread)),
-                )
+                ),
             })
     }
 
@@ -19096,8 +19176,8 @@ mod tests {
     /// The layout at the smallest and the largest text: the rows of the
     /// left column stand under one another, a long head still ends before
     /// the bead's id (which is why it ends in an ellipsis, footplate-eryf),
-    /// the column and its rows go with the text, and the rail stays 56
-    /// pixels wide with its 32-pixel targets.
+    /// the column and its rows go with the text, and the rail stays 64
+    /// pixels wide with its labelled tiles.
     #[gpui::test]
     fn the_layout_holds_at_the_smallest_and_the_largest_text(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -19163,19 +19243,22 @@ mod tests {
                 short.size.width, long.size.width,
                 "at {text} px the head's column hugs its content"
             );
-            // The rail stays 56 pixels wide with its 40-pixel targets,
+            // The rail stays 64 pixels wide with its labelled tiles,
             // whatever the text.
             let rail = bounds_of(cx, "rail");
             assert!(
-                (rail.size.width - px(56.)).abs() < px(1.),
-                "at {text} px the rail is {rail:?}, not 56 wide"
+                (rail.size.width - px(64.)).abs() < px(1.),
+                "at {text} px the rail is {rail:?}, not 64 wide"
             );
             for target in ["yard chip", "rail chat", "settings"] {
                 let at = bounds_of(cx, target);
+                let wide = match target {
+                    "yard chip" => 40.,
+                    _ => 52.,
+                };
                 assert!(
-                    (at.size.width - px(40.)).abs() < px(1.)
-                        && (at.size.height - px(40.)).abs() < px(1.),
-                    "at {text} px {target} is {at:?}, not 40 a side"
+                    (at.size.width - px(wide)).abs() < px(1.),
+                    "at {text} px {target} is {at:?}, not {wide} wide"
                 );
                 assert!(
                     rail.left() <= at.left() && at.right() <= rail.right() + px(1.),
@@ -19193,7 +19276,7 @@ mod tests {
         assert!(rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1, "{rows:?}");
         assert!(rows[0].2 < rows[1].2 && rows[1].2 < rows[2].2, "{rows:?}");
         let rail = bounds_of(cx, "rail");
-        assert!((rail.size.width - px(56.)).abs() < px(1.));
+        assert!((rail.size.width - px(64.)).abs() < px(1.));
     }
 
     /// A section's head says what waits in it: the number with its
@@ -19213,13 +19296,14 @@ mod tests {
         assert_eq!(decided_words(3), "3 decided");
     }
 
-    /// Each mode's list stands under its title with its count at the
-    /// right: "Decisions" over the open questions, "Crew" over the
-    /// conversations, "Timetable" over the arrivals row. Each head stands
-    /// whatever the yard holds, in its own mode alone. What was drawn
-    /// stays drawn to the tests, so a head's absence is said only where
-    /// it was never drawn: the window opens in decisions, and the other
-    /// heads are said away there.
+    /// Decisions' and the timetable's lists stand under their titles
+    /// with their counts at the right: "Decisions" over the open
+    /// questions, "Timetable" over the arrivals row. Each head stands
+    /// whatever the yard holds, in its own mode alone; chat's groups
+    /// stand under their own heads instead. What was drawn stays drawn
+    /// to the tests, so a head's absence is said only where it was never
+    /// drawn: the window opens in decisions, and the timetable's head is
+    /// said away there.
     #[gpui::test]
     fn the_sections_stand_under_their_titles_with_their_counts(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -19261,12 +19345,10 @@ mod tests {
         assert_eq!(rail_mode(&view, cx), Mode::Decisions);
         assert!(drawn(cx, "section Decisions"));
         assert!(drawn(cx, "section Decisions count"));
-        assert!(!drawn(cx, "section Crew"));
         assert!(!drawn(cx, "section Timetable"));
-        for title in ["Decisions", "Crew", "Timetable"] {
+        for title in ["Decisions", "Timetable"] {
             match title {
                 "Decisions" => to_decisions(&view, cx),
-                "Crew" => to_chat(&view, cx),
                 _ => to_timetable(&view, cx),
             }
             cx.run_until_parked();
@@ -19289,11 +19371,10 @@ mod tests {
     }
 
     /// With nothing to decide the Decisions head still stands, in
-    /// decisions alone; in chat the Crew head stands over the
-    /// conversations with the yard row below them, and the arrivals row
-    /// in timetable.
+    /// decisions alone; in chat the groups stand under their heads with
+    /// the yard row below them, and the arrivals row in timetable.
     #[gpui::test]
-    fn without_decisions_the_crew_head_stands_alone(cx: &mut TestAppContext) {
+    fn without_decisions_the_chat_groups_stand(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
@@ -19302,15 +19383,16 @@ mod tests {
         });
         assert!(!drawn(cx, "section Decisions"));
         assert!(!drawn(cx, "section Decisions count"));
-        assert!(drawn(cx, "section Crew"));
-        assert!(drawn(cx, "section Crew count"));
+        assert!(drawn(cx, "group This yard's crew"));
+        assert!(drawn(cx, "group Linked yards"));
+        assert!(drawn(cx, "group People"));
+        assert!(drawn(cx, "group Yard"));
         assert!(drawn(cx, "row name yardmaster"));
         assert!(drawn(cx, "row yard"));
         assert!(!drawn(cx, "row arrivals"));
         // The Decisions head stands in decisions, over no rows. (What
-        // was drawn stays drawn to the tests, so the Crew head gone from
-        // the list is not said here; the sections test opens in
-        // decisions, where no Crew head is ever drawn.)
+        // was drawn stays drawn to the tests, so the groups gone from
+        // the list are not said here.)
         to_decisions(&view, cx);
         cx.run_until_parked();
         assert!(drawn(cx, "section Decisions"));
@@ -19325,6 +19407,79 @@ mod tests {
                 "none in transit"
             );
         });
+    }
+
+    /// Chat's groups hold their rows in order, each under its head: the
+    /// crew with their states as dots beside their names, the linked
+    /// yards' people with their peer suffixes drawn apart, this yard's
+    /// people, and the yard row. Only the crew carries dots. The yard's
+    /// count is a badge; the rows' counts stay quiet words.
+    #[gpui::test]
+    fn the_chat_groups_hold_their_rows_with_dots_and_peers(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserNotifications", &notices_many(2));
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        wait(cx, "the notices", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.yard_unread() == 2)
+            })
+        });
+        // Each head over its rows, in order down the list.
+        let crew = bounds_of(cx, "group This yard's crew");
+        let assembly = bounds_of(cx, "row name assembly");
+        let master = bounds_of(cx, "row name yardmaster");
+        let linked = bounds_of(cx, "group Linked yards");
+        let clerk = bounds_of(cx, "row name clerk@north");
+        let people = bounds_of(cx, "group People");
+        let jo = bounds_of(cx, "row name jo");
+        let head = bounds_of(cx, "group Yard");
+        let yard_row = bounds_of(cx, "row yard");
+        let mut last = crew.top();
+        for (what, at) in [
+            ("crew head", &crew),
+            ("assembly", &assembly),
+            ("yardmaster", &master),
+            ("linked head", &linked),
+            ("clerk", &clerk),
+            ("people head", &people),
+            ("jo", &jo),
+            ("yard head", &head),
+            ("yard row", &yard_row),
+        ] {
+            assert!(
+                last <= at.top(),
+                "{what} stands out of order: {at:?} after {last:?}"
+            );
+            last = at.bottom();
+        }
+        // The dots stand beside the crew's names, on their lines, and
+        // nowhere else.
+        for name in ["assembly", "yardmaster"] {
+            let dot = bounds_of(cx, &format!("row dot {name}"));
+            let row = bounds_of(cx, &format!("row name {name}"));
+            assert!(
+                dot.right() <= row.left() + px(1.)
+                    && dot.top() >= row.top()
+                    && dot.bottom() <= row.bottom() + px(1.),
+                "{name}'s dot stands off its name: {dot:?} {row:?}"
+            );
+        }
+        assert!(!drawn(cx, "row dot clerk@north"));
+        assert!(!drawn(cx, "row dot jo"));
+        assert!(!drawn(cx, "row dot yard"));
+        // The peer suffix stands apart at its name's end.
+        let peer = bounds_of(cx, "row peer clerk@north");
+        assert!(
+            peer.right() <= clerk.right() + px(1.) && peer.left() >= clerk.left(),
+            "the peer stands off its name: {peer:?} {clerk:?}"
+        );
+        // The yard's count is a badge sixteen high, not words.
+        let badge = bounds_of(cx, "row unread yard");
+        assert!(
+            (badge.size.height - px(16.)).abs() < px(1.),
+            "the notices count is no badge: {badge:?}"
+        );
     }
 
     /// The timetable's list holds the arrivals row, counting what is in
@@ -20390,10 +20545,11 @@ mod tests {
         }
     }
 
-    /// The rail stands 56 pixels wide on the window's far left: the
+    /// The rail stands 64 pixels wide on the window's far left: the
     /// open yard's chip on top, the three modes under it in order, the
-    /// settings' gear at the foot. A click on a mode opens it, on the
-    /// chip the switcher, on the gear the settings.
+    /// settings' gear at the foot. Each mode's tile carries its glyph
+    /// over its label, as the gear does. A click on a mode opens it, on
+    /// the chip the switcher, on the gear the settings.
     #[gpui::test]
     fn the_rail_holds_the_yard_s_chip_the_modes_and_the_foot(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -20414,11 +20570,12 @@ mod tests {
         cx.simulate_resize(gpui::size(px(616.), px(360.)));
         let rail = bounds_of(cx, "rail");
         assert!(
-            (rail.size.width - px(56.)).abs() < px(1.),
-            "the rail is {rail:?}, not 56 wide"
+            (rail.size.width - px(64.)).abs() < px(1.),
+            "the rail is {rail:?}, not 64 wide"
         );
         // The chip, the modes in order, the gear: each under the
-        // last, each within the rail.
+        // last, each within the rail. The chip is 40 a side; the tiles
+        // are 52 wide, with their labels under their glyphs.
         let mut tops = Vec::new();
         for target in [
             "yard chip",
@@ -20428,11 +20585,27 @@ mod tests {
             "settings",
         ] {
             let at = bounds_of(cx, target);
-            assert!(
-                (at.size.width - px(40.)).abs() < px(1.)
-                    && (at.size.height - px(40.)).abs() < px(1.),
-                "{target} is {at:?}, not 40 a side"
-            );
+            match target {
+                "yard chip" => assert!(
+                    (at.size.width - px(40.)).abs() < px(1.)
+                        && (at.size.height - px(40.)).abs() < px(1.),
+                    "{target} is {at:?}, not 40 a side"
+                ),
+                _ => {
+                    assert!(
+                        (at.size.width - px(52.)).abs() < px(1.),
+                        "{target} is {at:?}, not 52 wide"
+                    );
+                    let label = bounds_of(cx, &format!("{target} label"));
+                    assert!(
+                        label.top() > at.top() + px(28.)
+                            && label.bottom() <= at.bottom() + px(1.)
+                            && at.left() <= label.left()
+                            && label.right() <= at.right() + px(1.),
+                        "{target}'s label stands off its tile: {label:?} {at:?}"
+                    );
+                }
+            }
             assert!(
                 rail.left() <= at.left() && at.right() <= rail.right() + px(1.),
                 "{target} leaves the rail: {at:?} {rail:?}"
@@ -20473,8 +20646,8 @@ mod tests {
         assert!(!settings_open(&view, cx));
     }
 
-    /// The rail's chat and decisions glyphs carry what waits in the open
-    /// yard: its unread mail and its open asks, each at its glyph's top
+    /// The rail's chat and decisions tiles carry what waits in the open
+    /// yard: its unread mail and its open asks, each at its tile's top
     /// right. The timetable carries none.
     #[gpui::test]
     fn the_rail_s_chat_and_decisions_carry_what_waits(cx: &mut TestAppContext) {
@@ -20561,34 +20734,34 @@ mod tests {
         );
     }
 
-    /// The rail's timetable glyph carries a dot where one of the person's
-    /// beads was added or closed since they last had Timetable open: at
-    /// its glyph's top right corner, as the badges. Another person's bead
-    /// lights nothing, and opening Timetable clears it.
+    /// The rail's timetable tile carries a badge where the person's
+    /// beads were added or closed since they last had Timetable open: at
+    /// its tile's top right corner, as the other badges. Another
+    /// person's bead lights nothing, and opening Timetable clears it.
     #[gpui::test]
-    fn the_rail_s_timetable_carries_a_dot_for_the_person_s_beads(cx: &mut TestAppContext) {
+    fn the_rail_s_timetable_carries_a_badge_for_the_person_s_beads(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        assert!(!drawn(cx, "rail dot timetable"));
-        // Another person's bead, added: no dot. The arrivals are read
+        assert!(!drawn(cx, "rail badge timetable"));
+        // Another person's bead, added: no badge. The arrivals are read
         // again for it, so their second read says it was applied.
         yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "ada"}}"#);
         wait(cx, "the other bead's arrival", |_| {
             yard.asked("Arrivals").len() >= 2
         });
-        assert!(!drawn(cx, "rail dot timetable"));
-        // One of the person's, added: the dot, on its glyph's corner.
+        assert!(!drawn(cx, "rail badge timetable"));
+        // One of the person's, added: the badge, on its tile's corner.
         yard.emit(r#"{"seq": 22, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
-        wait(cx, "the timetable's dot", |cx| {
-            drawn(cx, "rail dot timetable")
+        wait(cx, "the timetable's badge", |cx| {
+            drawn(cx, "rail badge timetable")
         });
         let tile = bounds_of(cx, "rail timetable");
-        let dot = bounds_of(cx, "rail dot timetable");
+        let badge = bounds_of(cx, "rail badge timetable");
         assert!(
-            (dot.top() - (tile.top() + px(4.))).abs() < px(1.)
-                && ((tile.right() - px(4.)) - dot.right()).abs() < px(1.),
-            "the dot stands off its glyph's corner: {dot:?} {tile:?}"
+            (badge.top() - tile.top()).abs() < px(1.)
+                && (tile.right() - badge.right()).abs() < px(1.),
+            "the badge stands off its tile's corner: {badge:?} {tile:?}"
         );
         // Opening Timetable clears it, and keeps what was seen. A
         // painted element's selector stays in the test frame, so the
@@ -20600,32 +20773,32 @@ mod tests {
         });
         assert_eq!(
             view.read_with(cx, |v, _| (
-                v.model.as_ref().map(|m| m.timetable_dot()),
+                v.model.as_ref().map(|m| m.timetable_news()),
                 v.settings.timetable_seen_of(&v.yard),
             )),
-            (Some(false), Some(22))
+            (Some(0), Some(22))
         );
-        // One of the person's, closed: the dot again.
+        // One of the person's, closed: the badge again.
         to_chat(&view, cx);
         yard.emit(r#"{"seq": 23, "kind": "closed", "actor": "yardmaster", "bead": "yd-barn", "data": {"reason": "merged", "originator": "jo"}}"#);
-        wait(cx, "the timetable's dot again", |cx| {
+        wait(cx, "the timetable's badge again", |cx| {
             view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| m.timetable_dot())
+                v.model.as_ref().is_some_and(|m| m.timetable_news() == 1)
             })
         });
     }
 
-    /// While the yard is away the rail carries no dot, as it carries
-    /// no count: the model keeps the dot as last seen, but nothing shown
-    /// implies it is current.
+    /// While the yard is away the rail carries no badge on the
+    /// timetable, as it carries no count: the model keeps the news as
+    /// last seen, but nothing shown implies it is current.
     #[gpui::test]
-    fn the_rail_carries_no_dot_while_the_yard_is_away(cx: &mut TestAppContext) {
+    fn the_rail_carries_no_badge_while_the_yard_is_away(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
-        wait(cx, "the timetable's dot", |cx| {
-            drawn(cx, "rail dot timetable")
+        wait(cx, "the timetable's badge", |cx| {
+            drawn(cx, "rail badge timetable")
         });
         yard.stop();
         wait(cx, "that the yard is away", |cx| {
@@ -20640,24 +20813,24 @@ mod tests {
                     v.down.is_some(),
                     v.reconnecting(),
                     v.answers_under_adding(),
-                    v.model.as_ref().map(|m| m.timetable_dot()),
-                    rail_dot(
+                    v.model.as_ref().map(|m| m.timetable_news()),
+                    rail_counts(
                         v.model.as_ref(),
                         v.down.is_some() && !v.answers_under_adding(),
                     ),
                 )
             });
         assert!(
-            down && reconnecting && !answers_under_adding && kept == Some(true) && !carried,
-            "away state: down={down}, reconnecting={reconnecting}, answers_under_adding={answers_under_adding}, kept={kept:?}, carried={carried}"
+            down && reconnecting && !answers_under_adding && kept == Some(1) && carried.is_none(),
+            "away state: down={down}, reconnecting={reconnecting}, answers_under_adding={answers_under_adding}, kept={kept:?}, carried={carried:?}"
         );
     }
 
-    /// A yard opened with Timetable last open behind its head lights the
-    /// dot where the gap added or closed one of the person's beads: what
+    /// A yard opened with Timetable last open behind its head badges
+    /// where the gap added or closed one of the person's beads: what
     /// changed while the window was shut.
     #[gpui::test]
-    fn the_dot_lights_for_what_changed_while_the_window_was_shut(cx: &mut TestAppContext) {
+    fn the_badge_counts_what_changed_while_the_window_was_shut(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let yard = Yard::start();
         a_yard_of_jo(&yard);
@@ -20675,8 +20848,8 @@ mod tests {
             ..Env::default()
         };
         let (view, cx) = opened_at(env, &file, cx);
-        wait(cx, "the timetable's dot", |cx| {
-            drawn(cx, "rail dot timetable")
+        wait(cx, "the timetable's badge", |cx| {
+            drawn(cx, "rail badge timetable")
         });
         // Opening Timetable clears it, and the file keeps the head.
         to_timetable(&view, cx);
@@ -20684,8 +20857,8 @@ mod tests {
             rail_mode(&view, cx) == Mode::Timetable
         });
         assert_eq!(
-            view.read_with(cx, |v, _| v.model.as_ref().map(|m| m.timetable_dot())),
-            Some(false)
+            view.read_with(cx, |v, _| v.model.as_ref().map(|m| m.timetable_news())),
+            Some(0)
         );
         assert_eq!(
             Settings::read(&file).timetable_seen_of("this machine"),
@@ -20715,9 +20888,9 @@ mod tests {
         );
 
         yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
-        wait(cx, "the first window's dot", |cx| {
+        wait(cx, "the first window's badge", |cx| {
             first.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(Model::timetable_dot)
+                v.model.as_ref().is_some_and(|m| m.timetable_news() == 1)
             })
         });
 
@@ -20725,9 +20898,9 @@ mod tests {
         // saved first-run baseline lets its catch-up still find it.
         yard.answer("Head", r#"{"result": 21}"#);
         let (second, cx) = opened_at(env, &file, cx);
-        wait(cx, "the restarted window's dot", |cx| {
+        wait(cx, "the restarted window's badge", |cx| {
             second.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(Model::timetable_dot)
+                v.model.as_ref().is_some_and(|m| m.timetable_news() == 1)
             })
         });
     }
@@ -21752,41 +21925,45 @@ mod tests {
 
     #[test]
     fn what_waits_over_the_yards_is_their_mail_and_decisions_summed() {
-        let counts = |mail, decisions, notices| {
+        let counts = |mail, decisions, notices, changed| {
             Some(Counts {
                 mail,
                 decisions,
                 notices,
+                changed,
             })
         };
         // No yard, and one where nothing waits.
         assert_eq!(waiting([]), 0);
-        assert_eq!(waiting([counts(0, 0, 0)]), 0);
-        // One yard: its mail and its decisions, and not its notices.
-        assert_eq!(waiting([counts(2, 1, 0)]), 3);
-        assert_eq!(waiting([counts(0, 0, 4)]), 0);
+        assert_eq!(waiting([counts(0, 0, 0, 0)]), 0);
+        // One yard: its mail and its decisions, and not its notices or
+        // its changed beads.
+        assert_eq!(waiting([counts(2, 1, 0, 0)]), 3);
+        assert_eq!(waiting([counts(0, 0, 4, 0)]), 0);
+        assert_eq!(waiting([counts(0, 0, 0, 7)]), 0);
         // Several.
         assert_eq!(
-            waiting([counts(2, 1, 5), counts(0, 3, 0), counts(1, 0, 0)]),
+            waiting([counts(2, 1, 5, 3), counts(0, 3, 0, 0), counts(1, 0, 0, 0)]),
             7
         );
         // One that was not reached yet has nothing to count, and takes
         // nothing from the others.
-        assert_eq!(waiting([counts(2, 1, 0), None, counts(0, 3, 0)]), 6);
+        assert_eq!(waiting([counts(2, 1, 0, 0), None, counts(0, 3, 0, 0)]), 6);
         assert_eq!(waiting([None]), 0);
     }
 
     #[test]
     fn what_a_yard_has_waiting_is_said_in_words() {
-        let counts = |mail, decisions, notices| Counts {
+        let counts = |mail, decisions, notices, changed| Counts {
             mail,
             decisions,
             notices,
+            changed,
         };
-        assert_eq!(counts(0, 0, 0).line(), "nothing waiting");
-        assert_eq!(counts(2, 1, 0).line(), "2 mail, 1 decision");
-        assert_eq!(counts(1, 0, 1).line(), "1 mail, 1 notice");
-        assert_eq!(counts(0, 3, 12).line(), "3 decisions, 12 notices");
+        assert_eq!(counts(0, 0, 0, 0).line(), "nothing waiting");
+        assert_eq!(counts(2, 1, 0, 3).line(), "2 mail, 1 decision");
+        assert_eq!(counts(1, 0, 1, 0).line(), "1 mail, 1 notice");
+        assert_eq!(counts(0, 3, 12, 0).line(), "3 decisions, 12 notices");
     }
 
     #[test]
@@ -21795,6 +21972,7 @@ mod tests {
             mail,
             decisions,
             notices,
+            changed: 0,
         };
         // Every reached yard has a number, including zero. Notices do not
         // add to the waiting count, but remain in the tooltip.
@@ -21832,45 +22010,59 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_s_glyphs_carry_the_mail_and_the_decisions() {
-        let counts = |mail, decisions, notices| Counts {
+    fn the_rail_s_tiles_carry_the_mail_the_decisions_and_the_changed() {
+        let counts = |mail, decisions, notices, changed| Counts {
             mail,
             decisions,
             notices,
+            changed,
         };
-        // Chat carries the unread mail, decisions the open asks: the
-        // badge's label with the tooltip's words. None at 0, and each
-        // glyph none of the other's.
-        assert_eq!(counts(0, 0, 0).rail(Mode::Chat), None);
-        assert_eq!(counts(0, 0, 0).rail(Mode::Decisions), None);
+        // Chat carries the unread mail, decisions the open asks, the
+        // timetable the changed beads: the badge's label with the
+        // tooltip's words. None at 0, and each tile none of the other's.
+        assert_eq!(counts(0, 0, 0, 0).rail(Mode::Chat), None);
+        assert_eq!(counts(0, 0, 0, 0).rail(Mode::Decisions), None);
+        assert_eq!(counts(0, 0, 0, 0).rail(Mode::Timetable), None);
         assert_eq!(
-            counts(1, 0, 0).rail(Mode::Chat),
+            counts(1, 0, 0, 0).rail(Mode::Chat),
             Some(("1".to_string(), "1 mail".to_string()))
         );
         assert_eq!(
-            counts(0, 1, 0).rail(Mode::Decisions),
+            counts(0, 1, 0, 0).rail(Mode::Decisions),
             Some(("1".to_string(), "1 decision".to_string()))
         );
-        assert_eq!(counts(1, 0, 0).rail(Mode::Decisions), None);
-        assert_eq!(counts(0, 1, 0).rail(Mode::Chat), None);
+        assert_eq!(
+            counts(0, 0, 0, 1).rail(Mode::Timetable),
+            Some(("1".to_string(), "1 bead changed".to_string()))
+        );
+        assert_eq!(
+            counts(0, 0, 0, 2).rail(Mode::Timetable),
+            Some(("2".to_string(), "2 beads changed".to_string()))
+        );
+        assert_eq!(counts(1, 0, 0, 0).rail(Mode::Decisions), None);
+        assert_eq!(counts(0, 1, 0, 0).rail(Mode::Chat), None);
+        assert_eq!(counts(0, 0, 0, 1).rail(Mode::Chat), None);
         // Above nine the badge says 9+, and the tooltip the number.
         assert_eq!(
-            counts(10, 0, 0).rail(Mode::Chat),
+            counts(10, 0, 0, 0).rail(Mode::Chat),
             Some(("9+".to_string(), "10 mail".to_string()))
         );
         assert_eq!(
-            counts(0, 12, 0).rail(Mode::Decisions),
+            counts(0, 12, 0, 0).rail(Mode::Decisions),
             Some(("9+".to_string(), "12 decisions".to_string()))
         );
-        // The notices are no glyph's, and the timetable carries none
-        // whatever waits.
-        assert_eq!(counts(0, 0, 5).rail(Mode::Chat), None);
-        assert_eq!(counts(0, 0, 5).rail(Mode::Decisions), None);
-        assert_eq!(counts(3, 2, 9).rail(Mode::Timetable), None);
+        assert_eq!(
+            counts(0, 0, 0, 11).rail(Mode::Timetable),
+            Some(("9+".to_string(), "11 beads changed".to_string()))
+        );
+        // The notices are no tile's.
+        assert_eq!(counts(0, 0, 5, 0).rail(Mode::Chat), None);
+        assert_eq!(counts(0, 0, 5, 0).rail(Mode::Decisions), None);
+        assert_eq!(counts(0, 0, 5, 0).rail(Mode::Timetable), None);
     }
 
     #[test]
-    fn the_rail_s_dot_is_the_model_s_unless_the_yard_is_away() {
+    fn the_rail_s_counts_are_the_model_s_unless_the_yard_is_away() {
         let state = model::State {
             me: "jo".into(),
             head: 20,
@@ -21878,20 +22070,21 @@ mod tests {
         };
         let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.adopt_timetable_seen(None, 20);
-        // Nothing lit, nothing carried, whatever answers.
-        assert!(!rail_dot(Some(&m), false));
-        assert!(!rail_dot(Some(&m), true));
-        assert!(!rail_dot(None, false));
-        // Lit: carried while the yard answers, hidden while it is away.
+        // Nothing changed, nothing carried, whatever answers.
+        assert_eq!(rail_counts(Some(&m), false).map(|c| c.changed), Some(0));
+        assert_eq!(rail_counts(Some(&m), true), None);
+        assert_eq!(rail_counts(None, false), None);
+        // Changed: carried while the yard answers, hidden while it is
+        // away.
         let created: api::Event = serde_json::from_value(json!({
             "seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn",
             "data": {"originator": "jo"},
         }))
         .unwrap();
         let _ = m.event(&created);
-        assert!(m.timetable_dot());
-        assert!(rail_dot(Some(&m), false));
-        assert!(!rail_dot(Some(&m), true));
+        assert_eq!(m.timetable_news(), 1);
+        assert_eq!(rail_counts(Some(&m), false).map(|c| c.changed), Some(1));
+        assert_eq!(rail_counts(Some(&m), true), None);
     }
 
     /// The yards in the settings: this machine's, as before, and one at an

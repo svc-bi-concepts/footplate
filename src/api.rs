@@ -11,7 +11,7 @@
 //! HTTP are written out, since a call is one request on one connection and
 //! neither needs a runtime nor a client library with a unix connector.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
@@ -2391,40 +2391,43 @@ impl Client {
         })
     }
 
-    /// Whether any of `me`'s beads was added or closed after `after`
-    /// through `until`: the created and closed events with them as
-    /// originator. The timetable's catch-up reads it for what changed
-    /// while nobody followed: `after` is when Timetable was last open,
-    /// `until` the head it was read at. Nothing is asked where there is
-    /// no gap: a stream past the head would wait for what happens next.
-    /// Past `until` the stream is left: what happens next comes down the
-    /// follower's own. What the yard no longer has is quietly missed. A
-    /// stream that sends more events than the gap holds seqs is not
-    /// describing the gap, and is left where it outruns it: the gap
-    /// holds one event of each seq after `after` through `until`, and
-    /// no more, so the catch-up cannot be held open for ever by a yard
-    /// replaying a seq it has already sent.
-    pub fn timetable_changed(&self, me: &str, after: u64, until: u64) -> Result<bool> {
+    /// Which of `me`'s beads were added or closed after `after`
+    /// through `until`, by bead, in the order they changed: the created
+    /// and closed events with them as originator. The timetable's
+    /// catch-up reads it for what changed while nobody followed: `after`
+    /// is when Timetable was last open, `until` the head it was read at.
+    /// Nothing is asked where there is no gap: a stream past the head
+    /// would wait for what happens next. Past `until` the stream is
+    /// left: what happens next comes down the follower's own. What the
+    /// yard no longer has is quietly missed. A stream that sends more
+    /// events than the gap holds seqs is not describing the gap, and is
+    /// left where it outruns it: the gap holds one event of each seq
+    /// after `after` through `until`, and no more, so the catch-up
+    /// cannot be held open for ever by a yard replaying a seq it has
+    /// already sent.
+    pub fn timetable_news(&self, me: &str, after: u64, until: u64) -> Result<Vec<String>> {
         if after >= until {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         let events = self.events(after)?;
         let most = until - after;
         let mut read = 0;
+        let mut seen = HashSet::new();
+        let mut news = Vec::new();
         for event in events {
             let event = event?;
             read += 1;
             if event.seq > until || read > most {
                 break;
             }
-            if event.timetable_news(me) {
-                return Ok(true);
+            if event.timetable_news(me) && seen.insert(event.bead.clone()) {
+                news.push(event.bead);
             }
             if event.seq == until {
                 break;
             }
         }
-        Ok(false)
+        Ok(news)
     }
 
     fn answer<T: DeserializeOwned>(&self, method: &str, args: Value) -> Result<T> {
@@ -5179,41 +5182,69 @@ mod tests {
     }
 
     #[test]
-    fn timetable_changed_reads_the_gap_for_mine_added_or_closed() {
+    fn timetable_news_reads_the_gap_for_mine_added_or_closed() {
         let yard = Yard::start();
         yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "ada"}}"#);
         yard.emit(r#"{"seq": 22, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"originator": "jo"}}"#);
         yard.emit(r#"{"seq": 23, "kind": "noted", "actor": "yardmaster", "bead": "yd-barn", "data": {"note": 1}}"#);
         yard.emit(r#"{"seq": 24, "kind": "closed", "actor": "yardmaster", "bead": "yd-barn", "data": {"reason": "merged", "originator": "jo"}}"#);
         let client = yard.client();
-        assert!(client.timetable_changed("jo", 20, 24).unwrap());
-        assert!(client.timetable_changed("jo", 20, 22).unwrap());
-        assert!(client.timetable_changed("ada", 20, 21).unwrap());
-        assert!(!client.timetable_changed("jo", 20, 21).unwrap());
-        assert!(!client.timetable_changed("jo", 22, 23).unwrap());
-        assert!(client.timetable_changed("jo", 20, 24).unwrap());
+        // One bead added and closed counts once.
+        assert_eq!(
+            client.timetable_news("jo", 20, 24).unwrap(),
+            ["yd-barn".to_string()]
+        );
+        assert_eq!(
+            client.timetable_news("jo", 20, 22).unwrap(),
+            ["yd-barn".to_string()]
+        );
+        assert_eq!(
+            client.timetable_news("ada", 20, 21).unwrap(),
+            ["yd-shed".to_string()]
+        );
+        assert!(client.timetable_news("jo", 20, 21).unwrap().is_empty());
+        assert!(client.timetable_news("jo", 22, 23).unwrap().is_empty());
+        assert_eq!(
+            client.timetable_news("jo", 20, 24).unwrap(),
+            ["yd-barn".to_string()]
+        );
     }
 
     #[test]
-    fn timetable_changed_asks_nothing_where_there_is_no_gap() {
+    fn timetable_news_asks_nothing_where_there_is_no_gap() {
         let yard = Yard::start();
-        assert!(!yard.client().timetable_changed("jo", 20, 20).unwrap());
-        assert!(!yard.client().timetable_changed("jo", 21, 20).unwrap());
+        assert!(
+            yard.client()
+                .timetable_news("jo", 20, 20)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            yard.client()
+                .timetable_news("jo", 21, 20)
+                .unwrap()
+                .is_empty()
+        );
         assert!(yard.streams_asked().is_empty());
     }
 
     #[test]
-    fn timetable_changed_leaves_the_stream_past_its_seq() {
+    fn timetable_news_leaves_the_stream_past_its_seq() {
         let yard = Yard::start();
         // Past `until` the stream is left, not waited on: what happens
         // next comes down the follower's own.
         yard.emit(r#"{"seq": 30, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "jo"}}"#);
-        assert!(!yard.client().timetable_changed("jo", 20, 25).unwrap());
+        assert!(
+            yard.client()
+                .timetable_news("jo", 20, 25)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(yard.streams_asked(), vec![20]);
     }
 
     #[test]
-    fn timetable_changed_leaves_a_stream_that_outruns_its_gap() {
+    fn timetable_news_leaves_a_stream_that_outruns_its_gap() {
         let yard = Yard::start();
         // The gap 20..22 holds two seqs at most. A stream that sends
         // more events than that is not describing the gap — it replays
@@ -5223,11 +5254,16 @@ mod tests {
             yard.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "yd-shed", "data": {}}"#);
         }
         yard.emit(r#"{"seq": 22, "kind": "created", "actor": "yardmaster", "bead": "yd-shed", "data": {"originator": "jo"}}"#);
-        assert!(!yard.client().timetable_changed("jo", 20, 22).unwrap());
+        assert!(
+            yard.client()
+                .timetable_news("jo", 20, 22)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn timetable_changed_reads_past_ten_thousand_events() {
+    fn timetable_news_reads_past_ten_thousand_events() {
         let yard = Yard::start();
         for seq in 21..=10_021 {
             let event = if seq == 10_021 {
@@ -5239,6 +5275,9 @@ mod tests {
             };
             yard.emit(&event);
         }
-        assert!(yard.client().timetable_changed("jo", 20, 10_021).unwrap());
+        assert_eq!(
+            yard.client().timetable_news("jo", 20, 10_021).unwrap(),
+            ["yd-shed".to_string()]
+        );
     }
 }

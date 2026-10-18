@@ -14,9 +14,12 @@ use crate::fake::{Router, Yard};
 use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
-/// the conversation with the yardmaster, a long wrapped thread with an
+/// the conversation with the yardmaster, chat with the sidebar's groups
+/// full: crew working and stopped, a linked yard's people, this yard's
+/// people, and unread notices, a long wrapped thread with an
 /// image, an open decision card of a plain
-/// ask, that card with the timetable's dot lit, an open card of a run ask,
+/// ask, that card with one of jo's beads changed, so Lines carries its
+/// badge, an open card of a run ask,
 /// a yard that is stopped, a yard at an
 /// address, the settings on each of their sections, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
@@ -59,9 +62,10 @@ use crate::yard::Env;
 /// draws the same on every shot.
 pub const STATES: &[&str] = &[
     "yardmaster",
+    "crew",
     "thread",
     "plain",
-    "dot",
+    "lines",
     "run",
     "stopped",
     "far",
@@ -612,7 +616,77 @@ fn populate(yard: &Yard, state: &str) {
                 yard.answer("Bead", &bead_zulu());
             }
         }
-        "plain" | "dot" => {
+        "crew" => {
+            // Chat with the sidebar's groups full: the yardmaster
+            // working, brakeman idle and assembly stopped, north's clerk
+            // and warden with rue, jo and ada for people, and three
+            // unread notices. The unread mail is elsewhere than the open
+            // conversation, so Crew carries its badge, as Decide does for
+            // the open ask and Lines for one of jo's beads added past
+            // the head.
+            yard.answer(
+                "Crew",
+                r#"{"result": [{"name": "assembly", "enabled": true, "state": "stopped"},
+                               {"name": "yardmaster", "enabled": true, "state": "running", "status": "working"},
+                               {"name": "brakeman", "enabled": true, "state": "running", "status": "idle"}]}"#,
+            );
+            yard.answer(
+                "Peers",
+                r#"{"result": [{"name": "north", "send": ["mail"], "receive": ["mail"],
+                    "said": {"roster": [{"name": "clerk", "kind": "crew", "role": "Keeps the books", "mail": true},
+                                        {"name": "warden", "kind": "crew", "role": "Watches the north gate", "mail": true},
+                                        {"name": "rue", "kind": "user", "role": "Operates the north link", "mail": true}],
+                             "at": "2026-10-08T09:30:00Z"}}]}"#,
+            );
+            yard.answer(
+                "Users",
+                r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0},
+                               {"name": "ada", "cursor": 9, "notification_cursor": 4}]}"#,
+            );
+            yard.answer(
+                "UserNotifications",
+                &json!({"result": {"notifications": [
+                    {"seq": 10, "kind": "created", "bead": "yd-barn",
+                     "text": "Paint the barn was opened", "read": false},
+                    {"seq": 11, "kind": "closed", "bead": "yd-shed",
+                     "text": "Shed the tools was closed", "read": false},
+                    {"seq": 12, "kind": "advanced", "bead": "yd-barn",
+                     "text": "Paint the barn moved to review", "read": false},
+                ], "unread": 3, "last": 12}})
+                .to_string(),
+            );
+            yard.answer(
+                "UserInbox",
+                &json!({"result": {"mail": [
+                    {"seq": 12, "from": "yardmaster", "to": "jo",
+                     "text": "The evening's work is shaped: three beads, one question each.",
+                     "read": false},
+                    {"seq": 13, "from": "brakeman", "to": "jo",
+                     "text": "The second lands behind it.", "read": false},
+                    {"seq": 14, "from": "brakeman", "to": "jo",
+                     "text": "Green across the board.", "read": false},
+                    {"seq": 15, "from": "clerk@north", "to": "jo",
+                     "text": "The books balance.", "read": false},
+                ], "unread": 4, "last": 15,
+                "from": ["yardmaster", "brakeman", "clerk@north"]}})
+                .to_string(),
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "The evening's work is shaped: three beads, one question each.", "read": false}]}"#,
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [
+                    {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                     "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                     "since": "2026-10-10T10:00:00Z"},
+                ], "decided": []}})
+                .to_string(),
+            );
+            yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"title": "Paint the barn", "stage": "new", "type": "task", "originator": "jo"}}"#);
+        }
+        "plain" | "lines" => {
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
@@ -658,9 +732,9 @@ fn populate(yard: &Yard, state: &str) {
                 }})
                 .to_string(),
             );
-            // The dot's bead: one of jo's added past the head, so the
-            // rail's timetable carries its dot beside the badges.
-            if state == "dot" {
+            // The lines badge's bead: one of jo's added past the head,
+            // so the rail's Lines carries its badge beside the others.
+            if state == "lines" {
                 yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"title": "Paint the barn", "stage": "new", "type": "task", "originator": "jo"}}"#);
             }
         }
@@ -1230,14 +1304,56 @@ mod tests {
                         );
                     }
                 }
-                "plain" | "dot" => {
+                "crew" => {
+                    // The sidebar's groups full: three crew with their
+                    // states, three of the linked yard, two people, three
+                    // unread notices, one open ask, and one of jo's beads
+                    // added past the head.
+                    assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    let crew: Vec<(&str, &str, &str)> = loaded
+                        .crew
+                        .iter()
+                        .map(|r| (r.name.as_str(), r.state.as_str(), r.status.as_str()))
+                        .collect();
+                    assert_eq!(
+                        crew,
+                        [
+                            ("assembly", "stopped", ""),
+                            ("yardmaster", "running", "working"),
+                            ("brakeman", "running", "idle"),
+                        ],
+                        "{state}"
+                    );
+                    let roster: Vec<&str> = loaded.peers[0]
+                        .said
+                        .as_ref()
+                        .unwrap()
+                        .roster
+                        .iter()
+                        .map(|e| e.name.as_str())
+                        .collect();
+                    assert_eq!(roster, ["clerk", "warden", "rue"], "{state}");
+                    let users: Vec<&str> = loaded.users.iter().map(|u| u.name.as_str()).collect();
+                    assert_eq!(users, ["jo", "ada"], "{state}");
+                    assert_eq!(
+                        loaded.notifications.iter().filter(|n| !n.read).count(),
+                        3,
+                        "{state}"
+                    );
+                    let mut events = yard.client().events(20).unwrap();
+                    let added = events.next().unwrap().unwrap();
+                    assert_eq!(added.kind.as_str(), "created", "{state}");
+                    assert_eq!(added.text("originator"), "jo", "{state}");
+                }
+                "plain" | "lines" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
                     let bead = yard.client().bead("bead-a").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].options.len(), 3, "{state}");
                     assert_eq!(bead.asks[0].recommend, 1, "{state}");
-                    // The dot's bead, added past the head: one of jo's.
-                    if *state == "dot" {
+                    // The lines badge's bead, added past the head: one of
+                    // jo's.
+                    if *state == "lines" {
                         let mut events = yard.client().events(20).unwrap();
                         let added = events.next().unwrap().unwrap();
                         assert_eq!(added.kind.as_str(), "created", "{state}");

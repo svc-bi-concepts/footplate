@@ -4,6 +4,8 @@
 use gpui::{App, Global, Rgba, Window, WindowAppearance, rgb, rgba};
 use serde::{Deserialize, Serialize};
 
+use crate::model::Dot;
+
 /// Which of the two a person wants: the desktop's, as it is now and as it
 /// changes, or one of them whatever the desktop has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +81,12 @@ pub fn yard_color(name: &str, dark: bool) -> Rgba {
 const YARD_DARK_COLORS: [u32; 3] = [0xeba17e, 0xe2794a, 0xd3602f];
 const YARD_LIGHT_COLORS: [u32; 3] = [0xd3602f, 0xb54e22, 0x8f3c19];
 
+/// A linked name's peer suffix in either look: the dark one is the
+/// review's peer colour, and the light one darkened past text contrast
+/// on the list's grounds.
+const PEER_DARK: u32 = 0xb693f5;
+const PEER_LIGHT: u32 = 0x6440b8;
+
 /// The chip's letters, chosen to read against its yard shade at text
 /// contrast. Dots in cards and rows carry no letters.
 pub fn yard_ink(name: &str, dark: bool) -> Rgba {
@@ -99,6 +107,19 @@ fn slot(name: &str) -> usize {
     hash as usize
 }
 
+/// The dot a crew member's state draws beside their name: what runs is
+/// the running green, what waits the waiting amber, what failed the
+/// error red, and what rests or stopped the quiet grey. Never colour
+/// alone: the state stays in words on the row's second line.
+pub fn crew_dot(dot: Dot, palette: Palette) -> Rgba {
+    match dot {
+        Dot::Working => palette.ok,
+        Dot::Idle | Dot::Stopped => palette.faint,
+        Dot::Blocked => palette.accent,
+        Dot::Failed => palette.warn,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     /// Whether the grounds are dark: a yard's colour is the one that
@@ -117,6 +138,9 @@ pub struct Palette {
     pub accent: Rgba,
     pub on_accent: Rgba,
     pub warn: Rgba,
+    /// A linked name's peer suffix (`@airy`), in its own colour, so what
+    /// crosses a link reads apart from this yard's own names.
+    pub peer: Rgba,
     /// The status row's dot where the yard runs.
     pub ok: Rgba,
     pub selection: Rgba,
@@ -148,6 +172,7 @@ impl Palette {
                 accent: rgb(0xe8a33d),
                 on_accent: rgb(0x1e2024),
                 warn: rgb(0xf0764f),
+                peer: rgb(PEER_DARK),
                 ok: rgb(0x7fb069),
                 selection: rgba(0xe8a33d55),
                 code: rgba(0xffffff14),
@@ -165,6 +190,7 @@ impl Palette {
                 accent: rgb(0xa8600a),
                 on_accent: rgb(0xffffff),
                 warn: rgb(0xb3401c),
+                peer: rgb(PEER_LIGHT),
                 ok: rgb(0x3d8b4f),
                 selection: rgba(0xa8600a40),
                 code: rgba(0x0000000f),
@@ -270,6 +296,37 @@ mod tests {
                 assert_ne!(ground, palette.ok, "{ground:?}");
                 assert_ne!(ground, palette.warn, "{ground:?}");
             }
+        }
+    }
+
+    #[test]
+    fn the_peer_suffix_reads_on_every_list_ground_in_either_look() {
+        // The dark peer is the review's own; the light one is darkened
+        // past text contrast.
+        assert_eq!((PEER_DARK, PEER_LIGHT), (0xb693f5, 0x6440b8));
+        for look in [Look::Dark, Look::Light] {
+            let palette = Palette::of(look, WindowAppearance::Dark);
+            for ground in [palette.side, palette.ground, palette.hover, palette.open] {
+                assert!(
+                    contrast(palette.peer, ground) >= 4.5,
+                    "{:?} on {ground:?}",
+                    palette.peer
+                );
+            }
+            assert_ne!(palette.peer, palette.text);
+            assert_ne!(palette.peer, palette.faint);
+        }
+    }
+
+    #[test]
+    fn every_crew_state_dots_its_colour() {
+        for look in [Look::Dark, Look::Light] {
+            let palette = Palette::of(look, WindowAppearance::Dark);
+            assert_eq!(crew_dot(Dot::Working, palette), palette.ok);
+            assert_eq!(crew_dot(Dot::Idle, palette), palette.faint);
+            assert_eq!(crew_dot(Dot::Blocked, palette), palette.accent);
+            assert_eq!(crew_dot(Dot::Stopped, palette), palette.faint);
+            assert_eq!(crew_dot(Dot::Failed, palette), palette.warn);
         }
     }
 
