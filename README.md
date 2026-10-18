@@ -432,7 +432,7 @@ list it, and the settings say the whole of it: `this machine's yard`, or
 **The yards in the settings.** The settings keep the yards the window
 shows, each as a card with its kind ("on this machine" or "paired"), how
 it is reached, whether it is the open one, and what waits in it, with
-"open" and a ⋯ menu holding "pair again", "rename" and "remove" (and the
+"open" and a … menu holding "pair again", "rename" and "remove" (and the
 sign-in again of a hosted yard). A file that names none has one: `this
 machine`, the yard at this run's socket. A rename keeps the yard's reach,
 its files and what was written for it. "add a yard of this machine" takes
@@ -1029,7 +1029,7 @@ folder. A change is drawn at once and kept for the next start:
   [Notifications](#notifications) has.
 - Yards: the yards the window keeps, each as a card with its name, its
   kind, how it is reached, whether it is open and what waits in it, with
-  Open and a ⋯ menu holding pair again, rename and remove; which
+  Open and a … menu holding pair again, rename and remove; which
   [A yard at an address](#a-yard-at-an-address) has. The open yard's card
   carries start at login where it is a yard of this machine.
 - Agents & you: how this yard's agents work with you, and the line they

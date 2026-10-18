@@ -1148,6 +1148,28 @@ fn segmented(segments: Vec<gpui::Stateful<Div>>, palette: Palette) -> Div {
     row
 }
 
+/// A drawn check mark, so the checkbox does not depend on a text glyph.
+fn checkmark(color: Rgba) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let scale = f32::from(bounds.size.width) / 16.;
+            let at = |x: f32, y: f32| {
+                gpui::point(bounds.origin.x + px(x * scale), bounds.origin.y + px(y * scale))
+            };
+            let mut path = gpui::PathBuilder::stroke(px(1.8 * scale));
+            path.move_to(at(3.2, 8.2));
+            path.line_to(at(6.5, 11.2));
+            path.line_to(at(12.8, 4.8));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(rems(1.))
+    .flex_none()
+}
+
 /// A checkbox: a box with a tick where `checked`, beside its label. The
 /// caller puts the click on.
 fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
@@ -1167,17 +1189,11 @@ fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
                 .rounded_sm()
                 .border_1()
                 .border_color(palette.line)
-                .text_xs()
                 .when(checked, |el| {
                     el.bg(palette.accent)
                         .border_color(palette.accent)
-                        .text_color(palette.on_accent)
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(checkmark(palette.on_accent))
                 })
-                .child(match checked {
-                    true => "✓",
-                    false => "",
-                }),
         )
         .child(div().text_sm().child(label))
 }
