@@ -8,6 +8,7 @@ use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Duration, Local};
 use serde_json::json;
 
 use crate::fake::{Router, Yard};
@@ -88,6 +89,8 @@ pub const STATES: &[&str] = &[
     "secret-shown",
     "secret-refused",
     "switcher",
+    "decisions",
+    "decisions-filtered",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -852,6 +855,31 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.answer("Bead", &bead_secret(unconcealed));
         }
+        "decisions" | "decisions-filtered" => {
+            // One open ask with a question that wraps, and a history of
+            // 156 decided: three outcomes asked today, a folded look-alike
+            // run of four with a put-aside, a decline and a secret given
+            // yesterday, and the older weeks behind them. The filtered
+            // state poses the filter with `docs`, which matches today
+            // above the fold and yesterday below it.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {
+                    "open": [queued_links()],
+                    "decided": decided_history(),
+                }})
+                .to_string(),
+            );
+            yard.answer("Bead", &bead_links());
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -1041,6 +1069,150 @@ fn bead_secret(unconcealed: bool) -> String {
     .to_string()
 }
 
+/// The open ask of the decisions states: a question that wraps to two
+/// lines in the list, with four options on its card.
+fn queued_links() -> serde_json::Value {
+    json!({
+        "bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+        "ask": 3,
+        "question": "Point this yard's 64 links at the declared source now, before Friday's release?",
+        "asker": "yardmaster", "since": "2026-10-10T10:00:00Z"
+    })
+}
+
+/// The bead of that ask, with its four options.
+fn bead_links() -> String {
+    json!({"result": {
+        "id": "bead-a", "title": "Move the links",
+        "body": "The body of bead-a.",
+        "stage": "new", "labels": ["topic:linear-out"],
+        "notes": [{"seq": 2, "kind": "note", "author": "yardmaster",
+                   "text": "the test passed", "at": "2026-10-10T09:30:00Z"}],
+        "asks": [{
+            "ask": 3, "to": "jo", "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z",
+            "question": "Point this yard's 64 links at the declared source now, before Friday's release?",
+            "context": ["The links file declares the new source.",
+                        "The move was tested."],
+            "options": [
+                {"label": "Move them now",
+                 "consequence": "all 64 links point tonight"},
+                {"label": "After Friday",
+                 "consequence": "keep the old source"},
+                {"label": "One lane first",
+                 "consequence": "move the drafts lane tonight"},
+                {"label": "You decide",
+                 "consequence": "leave it to yardmaster"}
+            ],
+            "recommend": 1, "why": "the test passed",
+            "state": "open"
+        }]
+    }})
+    .to_string()
+}
+
+/// Midnight this morning, in the person shooting's zone: the history's
+/// days stand against it, so the shot always shows a Today and a
+/// Yesterday whatever day it is taken.
+fn shot_midnight() -> DateTime<Local> {
+    Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(Local)
+        .single()
+        .unwrap()
+}
+
+/// An asked time `days` days ago at `hour`:`min`, as the yard serves it.
+fn shot_since(midnight: &DateTime<Local>, days: i64, hour: u32, min: u32) -> String {
+    (*midnight - Duration::days(days)
+        + Duration::hours(hour as i64)
+        + Duration::minutes(min as i64))
+    .to_rfc3339()
+}
+
+/// The decisions states' history, newest first: 156 dealt with asks.
+fn decided_history() -> serde_json::Value {
+    let midnight = shot_midnight();
+    let at = |days: i64, hour: u32, min: u32| shot_since(&midnight, days, hour, min);
+    let mut decided = vec![
+        json!({"bead": "yd-cal", "bead_title": "The calendar", "topic": "topic:linear-out",
+               "ask": 101, "question": "Let me edit Google Docs in place", "asker": "yardmaster",
+               "since": at(0, 11, 53), "state": "answered",
+               "option": 1, "option_label": "Let them"}),
+        json!({"bead": "yd-cal", "bead_title": "The calendar", "topic": "topic:linear-out",
+               "ask": 102, "question": "Which inbox set should count as attention?", "asker": "mayor",
+               "since": at(0, 10, 5), "state": "answered", "words": "just the direct ones"}),
+        json!({"bead": "yd-train", "bead_title": "The release train", "topic": "",
+               "ask": 103, "question": "Take the release train tonight?", "asker": "yardmaster",
+               "since": at(0, 9, 12), "state": "taken back",
+               "by": "yardmaster", "words": "the train left"}),
+        json!({"bead": "yd-docs", "bead_title": "The quota", "topic": "topic:linear-out",
+               "ask": 107, "question": "Raise Google Docs to 4000 calls", "asker": "mayor",
+               "since": at(1, 20, 21), "state": "answered",
+               "option": 1, "option_label": "Raise them"}),
+        json!({"bead": "yd-docs", "bead_title": "The quota", "topic": "topic:linear-out",
+               "ask": 106, "question": "Raise Google Docs to 3000 calls", "asker": "mayor",
+               "since": at(1, 20, 19), "state": "answered",
+               "option": 1, "option_label": "Raise them"}),
+        json!({"bead": "yd-docs", "bead_title": "The quota", "topic": "topic:linear-out",
+               "ask": 105, "question": "Raise Google Docs to 2000 calls", "asker": "mayor",
+               "since": at(1, 20, 18), "state": "answered",
+               "option": 1, "option_label": "Raise them"}),
+        json!({"bead": "yd-docs", "bead_title": "The quota", "topic": "topic:linear-out",
+               "ask": 104, "question": "Raise Google Docs to 1000 calls", "asker": "mayor",
+               "since": at(1, 20, 17), "state": "answered",
+               "option": 1, "option_label": "Raise them"}),
+        json!({"bead": "yd-index", "bead_title": "The index", "topic": "",
+               "ask": 108, "question": "Rebuild the search index tonight?", "asker": "yardmaster",
+               "since": at(1, 18, 2), "state": "put aside",
+               "return_at": at(-1, 9, 30)}),
+        json!({"bead": "yd-ship", "bead_title": "The migration", "topic": "topic:linear-out",
+               "ask": 109, "question": "Land the half-written migration?", "asker": "assembly",
+               "since": at(1, 14, 44), "state": "declined", "words": "not yet"}),
+        json!({"bead": "yd-books", "bead_title": "The books", "topic": "",
+               "ask": 110, "question": "The token for the books", "asker": "yardmaster",
+               "since": at(1, 9, 30), "state": "answered", "given": ["BOOKS_TOKEN"]}),
+    ];
+    // The older weeks: 146 asks over eleven days, newest first. The asker
+    // turns every ask, so no two neighbours ever fold: the frame's rows
+    // stand as written.
+    let askers = ["mayor", "yardmaster", "assembly"];
+    let services = ["api", "web", "worker", "store", "mail"];
+    for (i, n) in (111..=256).enumerate() {
+        let days = 2 + (i as i64) / 14;
+        let hour = 18 - (i as u32 % 14);
+        let min = (i as u32 * 7) % 60;
+        let asker = askers[i % askers.len()];
+        let mut ask = json!({
+            "bead": format!("yd-past-{n}"), "bead_title": "The older weeks",
+            "topic": "topic:linear-out", "ask": n,
+            "question": format!("Approve the {} {} deploy?", services[i % services.len()], 100 + i),
+            "asker": asker, "since": at(days, hour, min),
+        });
+        if n == 160 || n == 230 {
+            ask["state"] = json!("declined");
+            ask["words"] = json!("not now");
+        } else if i % 13 == 7 {
+            ask["state"] = json!("put aside");
+        } else if i % 11 == 5 {
+            ask["state"] = json!("taken back");
+            ask["by"] = json!(asker);
+            ask["words"] = json!("changed my mind");
+        } else if i % 7 == 3 {
+            ask["state"] = json!("answered");
+            ask["words"] = json!("on it");
+        } else {
+            ask["state"] = json!("answered");
+            ask["option"] = json!(1);
+            ask["option_label"] = json!("Approve it");
+        }
+        decided.push(ask);
+    }
+    json!(decided)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,7 +1260,12 @@ mod tests {
             populate(&yard, state);
             let loaded = session::load(&yard.client(), "shot").unwrap();
             assert_eq!(loaded.me, "jo", "{state}");
-            assert_eq!(loaded.asks.decided.len(), 0, "{state}");
+            match *state {
+                "decisions" | "decisions-filtered" => {
+                    assert_eq!(loaded.asks.decided.len(), 156, "{state}")
+                }
+                _ => assert_eq!(loaded.asks.decided.len(), 0, "{state}"),
+            }
             match *state {
                 "yardmaster"
                 | "far"
@@ -1323,6 +1500,45 @@ mod tests {
                     assert_eq!(telling.text("undelivered"), "m1", "{state}");
                     assert_eq!(telling.number("limit"), 30, "{state}");
                     assert!(!telling.text("until").is_empty(), "{state}");
+                }
+                "decisions" | "decisions-filtered" => {
+                    // One open ask with four options on its card.
+                    assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    let bead = yard.client().bead("bead-a").unwrap();
+                    assert_eq!(bead.asks.len(), 1, "{state}");
+                    assert_eq!(bead.asks[0].options.len(), 4, "{state}");
+                    assert_eq!(bead.asks[0].recommend, 1, "{state}");
+                    // Three outcomes asked today, then yesterday's folded
+                    // run of four, newest first.
+                    let asked: Vec<u64> = loaded.asks.decided.iter().map(|ask| ask.ask).collect();
+                    assert_eq!(
+                        &asked[..10],
+                        &[101, 102, 103, 107, 106, 105, 104, 108, 109, 110],
+                        "{state}"
+                    );
+                    assert_eq!(
+                        loaded.asks.decided[0].question, "Let me edit Google Docs in place",
+                        "{state}"
+                    );
+                    // The history the window draws from it: a Today and a
+                    // Yesterday first, with the run folded to one row.
+                    let (model, _) = crate::model::Model::new(
+                        loaded.clone(),
+                        crate::model::Mode::Decisions,
+                        None,
+                    );
+                    let groups = model.decided_groups(&Local::now());
+                    assert_eq!(groups[0].day, "Today", "{state}");
+                    assert_eq!(groups[1].day, "Yesterday", "{state}");
+                    assert!(groups.len() > 2, "{state}");
+                    let yesterday = &groups[1].rows[0];
+                    match yesterday {
+                        crate::model::DecidedEntry::Fold(fold) => {
+                            assert_eq!(fold.ask, 107, "{state}");
+                            assert_eq!(fold.rows.len(), 4, "{state}");
+                        }
+                        entry => panic!("the run folds: {entry:?}"),
+                    }
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }

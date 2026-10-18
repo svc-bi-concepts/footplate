@@ -193,8 +193,11 @@ its flow), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
-its answer) and `switcher` (the switcher's list open over four
-yards, one of them away). With no state the first
+its answer), `switcher` (the switcher's list open over four
+yards, one of them away), `decisions` (the decisions list with one
+open ask and the 156-item history open: day groups and a folded
+look-alike row) and `decisions-filtered` (that history with `docs`
+in its filter). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
@@ -845,12 +848,18 @@ ask whose a home is.
 ## The window
 
 Left, the rows: above the conversations the open questions addressed to
-you, oldest first and grouped by topic (the bead's first `topic:` label,
-without the prefix; asks with none under "Everything else"), each row the
-question in plain words with whose it is and how long it waits, and the
-bead's id small at its end; a bead with several open asks is one row. Under
-them, folded, "Decided" with the answered, declined and put-aside asks and
-their picks. Then the crew with what each one's session does (`working`,
+you, oldest first and grouped by topic where a topic has two asks or more
+(the bead's first `topic:` label, without the prefix; asks with none under
+"Everything else"), each row the question wrapped to two lines, then whose
+it is, what it wants and how long it waits, and the bead's id small at its
+end; a bead with several open asks is one row, with each ask beneath its
+title in the same shape. Under them, folded, "Decided" with the answered,
+declined and put-aside asks and the ones taken back, newest first. Open,
+the history stands grouped by the day it was asked, with the outcome's
+icon first on every row, and look-alikes folded into one row with their
+count; `/` types in its filter, over question, asker and outcome, with the
+chips All, Approved, Words, Taken back and Put aside above the days. Then
+the crew with what each one's session does (`working`,
 `idle`, `blocked`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a
 person) and their role line, then the users of this yard, your own row
@@ -975,6 +984,8 @@ carrying out failed reads `approved, failed:` with the failure under it.
 | `pageup`, `pagedown` | scroll the open conversation, card or yard row by a page, with the focus anywhere |
 | `cmd+home` (`ctrl+home` on Linux) | the oldest loaded message; the newest is `cmd+end`, on a card or the yard row too |
 | a click on "Decided" | folds it open, shut |
+| a click on a folded history row | opens it to show its rows, shut |
+| `/`, in decisions | opens the history with its filter typed in; `esc` leaves the filter, and what is typed stands |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
 | `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |
 | `cmd+enter` (`ctrl+enter` on Linux), on a run ask's card | approves it: the yard runs the command the card shows. No other card answers to it, and Enter alone approves nothing |

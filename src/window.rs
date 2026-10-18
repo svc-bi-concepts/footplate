@@ -21,9 +21,9 @@ use crate::api::{CrewMember, Flow, FlowBead, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
-    self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedRow, DecisionAsk,
-    DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model, News, Route,
-    Row, Selected, Target, Top, late_line, state_of, you_first,
+    self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedEntry, DecidedFold,
+    DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode, Model, News,
+    Outcome, Route, Row, Selected, Target, Top, late_line, state_of, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -66,6 +66,7 @@ actions!(
         AskAbout,
         Expand,
         FocusWords,
+        FocusFilter,
         Leave,
         OpenSettings,
         Larger,
@@ -94,8 +95,8 @@ actions!(
 const CONTEXT: &str = "Footplate";
 /// Where no line is typed in: the yard row, and a decision with the window
 /// focused, where a number key picks and `x` puts aside. With a
-/// conversation open, or a decision with the line focused to type words in,
-/// those keys are the line's text.
+/// conversation open, with the line focused to type words in, or with the
+/// history's filter focused, those keys are the line's text.
 const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 /// Where the switcher's list is open: the arrows move in it, Enter opens
 /// the yard they are on, esc leaves it, + adds a yard, and no key is a
@@ -1136,6 +1137,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("a", AskAbout, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("i", FocusWords, Some(NO_LINE_CONTEXT)),
+        // The history's filter, from anywhere its keys are the window's:
+        // with the focus in a line the key is the line's text.
+        KeyBinding::new("/", FocusFilter, Some(NO_LINE_CONTEXT)),
     ]);
     cx.bind_keys([
         KeyBinding::new("up", ChoiceUp, Some(SWITCH_CONTEXT)),
@@ -1224,6 +1228,10 @@ struct Place {
     texts: HashSet<(String, u64)>,
     decided_expanded: bool,
     quiet_expanded: bool,
+    /// The history's chip and the folded rows standing open, as the
+    /// folded history itself is kept.
+    decided_chip: Option<Outcome>,
+    decided_folds: HashSet<(String, u64)>,
 }
 
 impl Place {
@@ -1673,6 +1681,9 @@ pub struct Footplate {
     /// is in no draft and with no ask's words, and it is gone when the
     /// card is left.
     secret: Entity<Line>,
+    /// The history's filter field. The model holds what is typed, as it is
+    /// typed; the field is the editor alone.
+    filter: Entity<Line>,
     /// The values typed so far for an ask of several names, in the order
     /// of its names: they go together, with the last.
     secret_typed: Vec<String>,
@@ -1836,6 +1847,9 @@ fn shot_selected() -> Option<Selected> {
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
         Ok("plain") | Ok("page") | Ok("dot") => return Some(Selected::Decision("bead-a".into())),
+        Ok("decisions") | Ok("decisions-filtered") => {
+            return Some(Selected::Decision("bead-a".into()));
+        }
         Ok("run") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
             return Some(Selected::Decision("bead-s".into()));
         }
@@ -1985,6 +1999,24 @@ impl Footplate {
         // is empty: the window is drawn again with what is typed.
         cx.observe(&line, |_, _, cx| cx.notify()).detach();
         cx.observe(&secret, |_, _, cx| cx.notify()).detach();
+        // The history's filter: what is typed is the model's, as it is
+        // typed, and the window draws the rows again only when it changed.
+        let filter = cx.new(|cx| {
+            let mut filter = Line::new(cx);
+            filter.set_placeholder("Filter decided ( / )", cx);
+            filter
+        });
+        cx.observe(&filter, |this, filter, cx| {
+            let typed = filter.read(cx).text().to_string();
+            let changed = this
+                .model
+                .as_mut()
+                .is_some_and(|m| m.set_decided_filter(&typed));
+            if changed {
+                cx.notify();
+            }
+        })
+        .detach();
         // Enter in a field of a yard adds it, or sends the pairing's code.
         let field = |hint: &'static str, cx: &mut Context<Self>| {
             let field = cx.new(|cx| {
@@ -2168,6 +2200,7 @@ impl Footplate {
             rail_hover: None,
             declining: None,
             secret,
+            filter,
             secret_typed: Vec::new(),
             secret_for: None,
             secret_shown: false,
@@ -2730,6 +2763,12 @@ impl Footplate {
         );
         model.expand(&kept.expanded);
         model.show_texts(&kept.texts);
+        model.set_decided_chip(kept.decided_chip);
+        model.show_folds(&kept.decided_folds);
+        // The filter's field is the window's, not the yard's: what is
+        // typed is this yard's filter again.
+        let typed = self.filter.read(cx).text().to_string();
+        model.set_decided_filter(&typed);
         // Back on Timetable: it is looked at again, and the dot clears.
         let looked = (mode == Mode::Timetable).then(|| model.timetable_visited(true));
         if let Some(late) = self.late.take() {
@@ -2997,6 +3036,10 @@ impl Footplate {
                 if !notices.is_empty() {
                     model.notice = notices.join("; ");
                 }
+                // The model read again has no filter yet: what the field
+                // holds is its filter, as on a yard switched to.
+                let typed = self.filter.read(cx).text().to_string();
+                model.set_decided_filter(&typed);
                 if fresh {
                     // The dot starts from when Timetable was last open,
                     // caught up to the head. Opened looking, what is
@@ -3023,6 +3066,8 @@ impl Footplate {
                     }
                     model.expand(&kept.expanded);
                     model.show_texts(&kept.texts);
+                    model.set_decided_chip(kept.decided_chip);
+                    model.show_folds(&kept.decided_folds);
                     // The page shot opens the card, so the note's page row
                     // and image show: a debug build's alone, as the settings
                     // and the draft of Footplate::opened.
@@ -3063,6 +3108,20 @@ impl Footplate {
                             bytes,
                             back: None,
                         });
+                    }
+                    // The decisions shots stand with the history open; the
+                    // filtered one with `docs` typed in its filter, as a
+                    // `/` and the word would. A debug build's alone.
+                    #[cfg(debug_assertions)]
+                    if matches!(
+                        std::env::var("FOOTPLATE_SHOT").as_deref(),
+                        Ok("decisions") | Ok("decisions-filtered")
+                    ) {
+                        model.toggle_decided();
+                        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("decisions-filtered") {
+                            model.set_decided_filter("docs");
+                            self.filter.update(cx, |line, cx| line.set_text("docs", cx));
+                        }
                     }
                 }
                 self.model = Some(model);
@@ -3493,6 +3552,8 @@ impl Footplate {
         kept.texts = model.map(|m| m.texts().clone()).unwrap_or_default();
         kept.decided_expanded = model.is_some_and(Model::decided_expanded);
         kept.quiet_expanded = model.is_some_and(Model::quiet_expanded);
+        kept.decided_chip = model.and_then(|m| m.decided_chip());
+        kept.decided_folds = model.map(|m| m.decided_folds().clone()).unwrap_or_default();
         kept
     }
 
@@ -5618,6 +5679,21 @@ impl Footplate {
         window.focus(&field.focus_handle(cx));
     }
 
+    /// `/` types in the history's filter: the folded history stands open
+    /// for it. Elsewhere than decisions the key is nothing.
+    fn focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode() != Mode::Decisions {
+            return;
+        }
+        self.change(cx, |m| {
+            if !m.decided_expanded() {
+                m.toggle_decided();
+            }
+            Vec::new()
+        });
+        window.focus(&self.filter.focus_handle(cx));
+    }
+
     /// Esc leaves what it can: the image over the window, a decline
     /// asked for words, the words for the card's keys, the pick, then
     /// the words.
@@ -5659,6 +5735,11 @@ impl Footplate {
             self.shown(cx);
             window.focus(&self.focus.clone());
             cx.notify();
+            return;
+        }
+        // Esc in the history's filter leaves it, and what is typed stays.
+        if self.filter.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus.clone());
             return;
         }
         let Some((bead, ask)) = self.card() else {
@@ -9447,10 +9528,12 @@ impl Footplate {
         self.column(body, palette, cx)
     }
 
-    /// Decisions' list: the open questions already expanded, grouped by
-    /// topic, with the Decided toggle at the list's end: decided asks are
-    /// unbounded history, and without the toggle they would push open
-    /// decisions off a short list.
+    /// Decisions' list: the open questions, each with what it wants,
+    /// grouped by topic where a topic has two asks or more, with the
+    /// Decided toggle at the list's end: decided asks are unbounded
+    /// history, and without the toggle they would push open decisions
+    /// off a short list. Open, the history has its filter with its chips,
+    /// and its days with their rows, look-alikes folded.
     fn list_decisions(
         &self,
         model: &Model,
@@ -9463,15 +9546,24 @@ impl Footplate {
         let decided = model.decided_count();
         body = body.child(section_head("Decisions", waiting_words(decisions), palette));
         for group in model.decision_groups(&now) {
-            body = body.child(
-                div()
-                    .px_3()
-                    .pt_1()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(palette.faint)
-                    .child(group.topic),
-            );
+            // A topic above a single ask is noise: the head stands only
+            // where two asks or more share the topic.
+            let asks: usize = group.rows.iter().map(|row| row.asks.len().max(1)).sum();
+            if asks > 1 {
+                body = body.child(
+                    div()
+                        .debug_selector({
+                            let topic = group.topic.clone();
+                            move || format!("decisions topic {topic}")
+                        })
+                        .px_3()
+                        .pt_1()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(palette.faint)
+                        .child(group.topic),
+                );
+            }
             for row in group.rows {
                 body = body.child(self.decision_row(row, palette, cx));
             }
@@ -9507,12 +9599,132 @@ impl Footplate {
                     ),
             );
             if open {
-                for row in model.decided_rows() {
-                    body = body.child(self.decided_row(row, palette, cx));
+                body = body.child(self.decided_filter(palette, cx));
+                body = body.child(self.decided_chips(model, palette, cx));
+                let groups = model.decided_groups(&chrono::Local::now());
+                if groups.iter().all(|group| group.rows.is_empty()) {
+                    body = body.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child("Nothing decided matches."),
+                    );
+                }
+                for group in groups {
+                    if group.rows.is_empty() {
+                        continue;
+                    }
+                    body = body.child(
+                        div()
+                            .debug_selector({
+                                let day = group.day.clone();
+                                move || format!("decided day {day}")
+                            })
+                            .px_3()
+                            .pt_1()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(palette.faint)
+                            .child(group.day),
+                    );
+                    for row in group.rows {
+                        match row {
+                            DecidedEntry::One(row) => {
+                                body = body.child(self.decided_row(row, palette, cx));
+                            }
+                            DecidedEntry::Fold(fold) => {
+                                body = body.child(self.decided_fold(fold.clone(), palette, cx));
+                                if fold.open {
+                                    for row in fold.rows {
+                                        body = body.child(self.decided_row(row, palette, cx));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
         self.column(body, palette, cx)
+    }
+
+    /// The history's filter field: `/` types in it, and every word typed
+    /// matches a row's question, asker or outcome.
+    fn decided_filter(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let field = self.filter.clone();
+        let focus = field.focus_handle(cx);
+        div()
+            .id("decided filter")
+            .debug_selector(|| "decided filter".to_string())
+            .mx_1()
+            .mt_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.side)
+            .text_sm()
+            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                window.focus(&focus);
+                window.prevent_default();
+            })
+            .child(field)
+    }
+
+    /// The history's chips: All with the four outcomes after it, each with
+    /// how many rows choosing it would show.
+    fn decided_chips(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut chips = div().mx_1().px_2().py_1().flex().flex_wrap().gap_1();
+        for (chip, count) in model.decided_chip_counts() {
+            let word = match chip {
+                None => "All".to_string(),
+                Some(outcome) => outcome.chip().to_string(),
+            };
+            let current = model.decided_chip() == chip;
+            let id = match chip {
+                None => "decided chip all".to_string(),
+                Some(outcome) => format!("decided chip {}", outcome.word()),
+            };
+            chips = chips.child(
+                div()
+                    .id(SharedString::from(id.clone()))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || id.clone()
+                    })
+                    .px_2()
+                    .rounded_full()
+                    .border_1()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(current, |el| {
+                        el.bg(palette.accent)
+                            .border_color(palette.accent)
+                            .text_color(palette.on_accent)
+                    })
+                    .when(!current, |el| {
+                        el.border_color(palette.line)
+                            .text_color(palette.faint)
+                            .hover(|style| style.bg(palette.hover))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change(cx, |m| {
+                            m.set_decided_chip(chip);
+                            Vec::new()
+                        })
+                    }))
+                    .child(format!("{word} {count}")),
+            );
+        }
+        chips
     }
 
     /// The timetable's list: the arrivals row with the yard-wide
@@ -9845,6 +10057,10 @@ impl Footplate {
     /// which already says its question. The options take no clicks and no
     /// keys: the list is for triage, and answering stays in the card on
     /// the right.
+    /// One bead's open row: the question wrapped to two lines, then
+    /// whose it is, what it wants and how long it waits. A bead with
+    /// several open asks carries its title instead, with each ask beneath
+    /// it in the same shape.
     fn decision_row(
         &self,
         row: DecisionRow,
@@ -9856,35 +10072,43 @@ impl Footplate {
             .flex()
             .flex_col()
             // Resolve the available row width before measuring the
-            // head, so truncate() can draw its ellipsis.
+            // head, so it wraps within the row.
             .flex_1()
             .min_w_0()
             .child(
                 div()
-                    .truncate()
+                    .line_clamp(2)
                     .debug_selector(|| format!("decision head {}", row.bead))
                     .child(row.head),
             );
-        let several = row.asks.len() > 1;
         for ask in &row.asks {
-            if several {
-                let seq = ask.ask;
-                col = col.child(
+            let seq = ask.ask;
+            col = col
+                .child(
                     div()
-                        .truncate()
+                        .line_clamp(2)
                         .debug_selector(|| format!("decision ask {seq} {}", row.bead))
                         .child(ask.head.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette.faint)
+                        .truncate()
+                        .debug_selector(|| format!("decision meta {seq} {}", row.bead))
+                        .child(ask.meta.clone()),
                 );
-            }
-            col = col.children(Self::decision_ask_rows(&row.bead, ask, palette));
         }
-        col = col.child(
-            div()
-                .text_xs()
-                .text_color(palette.faint)
-                .truncate()
-                .child(row.sub),
-        );
+        if !row.sub.is_empty() {
+            col = col.child(
+                div()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .truncate()
+                    .debug_selector(|| format!("decision sub {}", row.bead))
+                    .child(row.sub),
+            );
+        }
         div()
             .id(SharedString::from(format!("decision {}", row.bead)))
             .debug_selector(|| format!("decision row {}", row.bead))
@@ -9915,47 +10139,9 @@ impl Footplate {
             )
     }
 
-    /// One ask expanded in its bead's row: its numbered options with their
-    /// words, or what its card shows where it has none: a secret ask the
-    /// yard's line, a run ask its command, any other that words are
-    /// wanted.
-    fn decision_ask_rows(bead: &str, ask: &DecisionRowAsk, palette: Palette) -> Vec<AnyElement> {
-        let line = |text: String| {
-            div()
-                .text_xs()
-                .text_color(palette.faint)
-                .truncate()
-                .child(text)
-                .into_any_element()
-        };
-        if !ask.options.is_empty() {
-            return ask
-                .options
-                .iter()
-                .map(|(n, label)| {
-                    div()
-                        .debug_selector({
-                            let bead = bead.to_string();
-                            move || format!("decision option {bead} {n}")
-                        })
-                        .text_xs()
-                        .text_color(palette.faint)
-                        .truncate()
-                        .child(format!("{n} {label}"))
-                        .into_any_element()
-                })
-                .collect();
-        }
-        if let Some(secret) = &ask.secret {
-            return vec![line(secret.clone())];
-        }
-        if let Some(run) = &ask.run {
-            return vec![line(run.clone())];
-        }
-        vec![line("words wanted".to_string())]
-    }
-
-    /// One dealt with, with its pick.
+    /// One dealt with, with its outcome's icon first, then whose it was
+    /// and when it was asked. The outcome stands in the text colour, the
+    /// rest quiet, each cut with an ellipsis where it does not fit.
     fn decided_row(
         &self,
         row: DecidedRow,
@@ -10000,10 +10186,30 @@ impl Footplate {
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(palette.faint)
-                            .truncate()
-                            .child(row.sub),
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(relative(0.6))
+                                    .text_xs()
+                                    .truncate()
+                                    .debug_selector(|| {
+                                        format!("decided outcome {} {}", row.bead, row.ask)
+                                    })
+                                    .child(row.outcome),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(palette.faint)
+                                    .truncate()
+                                    .child(format!("· {}", row.detail)),
+                            ),
                     ),
             )
             .child(
@@ -10013,6 +10219,93 @@ impl Footplate {
                     .text_color(palette.faint)
                     .debug_selector(|| format!("decided id {} {}", row.bead, row.ask))
                     .child(row.short),
+            )
+    }
+
+    /// Several look-alikes folded into one row: the first's question with
+    /// the shared outcome and asker. A click opens the fold to show them,
+    /// or folds it shut again; the count with ▸ and ▾ stands where one
+    /// row's bead id does, past what the head's cut would hide.
+    fn decided_fold(
+        &self,
+        fold: DecidedFold,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bead = fold.bead.clone();
+        let ask = fold.ask;
+        let mark = if fold.open { "▾" } else { "▸" };
+        let count = format!("×{} {mark}", fold.rows.len());
+        div()
+            .id(SharedString::from(format!(
+                "decided fold {} {}",
+                fold.bead, fold.ask
+            )))
+            .debug_selector(|| format!("decided fold {} {}", fold.bead, fold.ask))
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
+            .hover(|style| style.border_color(palette.line))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change(cx, |m| {
+                    m.toggle_decided_fold(&bead, ask);
+                    Vec::new()
+                })
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .debug_selector(|| {
+                                format!("decided fold head {} {}", fold.bead, fold.ask)
+                            })
+                            .child(fold.head),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .debug_selector(|| {
+                                        format!("decided fold outcome {} {}", fold.bead, fold.ask)
+                                    })
+                                    .child(fold.outcome),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(palette.faint)
+                                    .truncate()
+                                    .child(format!("· {}", fold.detail)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .child(count),
             )
     }
 
@@ -13010,6 +13303,9 @@ impl Render for Footplate {
             // reconnecting keeps its card, and its keys.
             _ if self.down.is_some() && !self.reconnecting() => CONTEXT,
             Some(Selected::Conversation(_)) => CONTEXT,
+            // With the focus in the history's filter its keys are text,
+            // whatever is open: a `d` or `/` typed there is no card's.
+            _ if self.filter.focus_handle(cx).is_focused(window) => CONTEXT,
             Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
                 if self.line.focus_handle(cx).is_focused(window)
                     || self.secret.focus_handle(cx).is_focused(window) =>
@@ -13057,6 +13353,7 @@ impl Render for Footplate {
             .on_action(cx.listener(Self::ask_about))
             .on_action(cx.listener(Self::expand))
             .on_action(cx.listener(Self::focus_words))
+            .on_action(cx.listener(Self::focus_filter))
             .on_action(cx.listener(Self::leave))
             .on_action(cx.listener(Self::jump_newest))
             .on_action(cx.listener(Self::jump_oldest))
@@ -17134,6 +17431,33 @@ mod tests {
         })
     }
 
+    /// Noon of the 12th of October 2026, UTC: the history's day groups and
+    /// times stand still under it.
+    fn history_noon() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-10-12T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// Every decided row of every day under the fixed noon, folds'
+    /// members with them: what the history holds, without its shape.
+    fn decided_all(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Vec<DecidedRow> {
+        let now = history_noon();
+        view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decided_groups(&now)
+                .into_iter()
+                .flat_map(|group| group.rows)
+                .flat_map(|entry| match entry {
+                    DecidedEntry::One(row) => vec![row],
+                    DecidedEntry::Fold(fold) => fold.rows,
+                })
+                .collect()
+        })
+    }
+
     /// Six dealt with on one bead, asked by mayor at 11:07: answered,
     /// answered with words, put aside, declined, left to the asker, and a
     /// words answer. Ask 11's pick is `pick` with `label`. The one put aside
@@ -17314,25 +17638,24 @@ mod tests {
         assert_eq!(d.state_line, "you answered: warmly");
         assert_eq!(decided_keys(&d), "i words · enter sends");
 
-        // The Decided rows keep showing the picks.
-        let subs: Vec<String> = view.read_with(cx, |v, _| {
-            v.model
-                .as_ref()
-                .unwrap()
-                .decided_rows()
-                .into_iter()
-                .map(|r| r.sub)
-                .collect()
-        });
+        // The Decided rows lead with the outcome's icon, then whose and
+        // when; the picks stay on the cards.
+        let rows: Vec<(String, String)> = decided_all(&view, cx)
+            .into_iter()
+            .map(|r| (r.outcome, r.detail))
+            .collect();
         assert_eq!(
-            subs,
+            rows,
             [
-                "mayor · Switch to attention",
-                "mayor · Add only the three · go slow",
-                "mayor · put aside",
-                "mayor · declined · not mine",
-                "mayor · You decide",
-                "mayor · warmly",
+                ("✓approved".to_string(), "mayor · 11:07".to_string()),
+                ("✓approved".to_string(), "mayor · 11:07".to_string()),
+                ("‖put aside".to_string(), "mayor · 11:07".to_string()),
+                (
+                    "✕declined: not mine".to_string(),
+                    "mayor · 11:07".to_string()
+                ),
+                ("✓left to mayor".to_string(), "11:07".to_string()),
+                ("✎warmly".to_string(), "mayor · 11:07".to_string()),
             ]
         );
 
@@ -17382,6 +17705,218 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// `/` opens the folded history with its filter typed in: what is typed
+    /// narrows its rows, and esc leaves the filter with what is typed
+    /// standing.
+    #[gpui::test]
+    fn slash_types_in_the_history_s_filter_and_narrows_its_rows(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
+        yard.answer("Bead", &bead_decided());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
+            })
+        });
+        to_decisions(&view, cx);
+        open_decided(&view, cx, "bead-d", 11);
+        // Folded again, the card still open; esc leaves the line for the
+        // window's keys.
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| {
+                m.toggle_decided();
+                Vec::new()
+            })
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(!v.model.as_ref().unwrap().decided_expanded())
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        // `/` opens the history with its filter and chips.
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().decided_expanded())
+        });
+        assert!(drawn(cx, "decided filter"));
+        assert!(drawn(cx, "decided chip all"));
+        assert!(drawn(cx, "decided chip words"));
+        // Typed: only the ask naming the attention set stands.
+        cx.simulate_input("attention");
+        cx.run_until_parked();
+        let rows: Vec<u64> = decided_all(&view, cx).into_iter().map(|r| r.ask).collect();
+        assert_eq!(rows, [11]);
+        // Esc leaves the filter; what is typed stays typed.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let rows: Vec<u64> = decided_all(&view, cx).into_iter().map(|r| r.ask).collect();
+        assert_eq!(rows, [11]);
+    }
+
+    /// A topic's head stands only where two asks or more share the topic: a
+    /// topic above a single ask is not drawn.
+    #[gpui::test]
+    fn a_topic_head_shows_only_where_two_asks_share_the_topic(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"},
+                {"bead": "bead-b", "bead_title": "Send to build", "topic": "topic:linear-out",
+                 "ask": 4, "question": "Send them to build?", "asker": "yardmaster",
+                 "since": "2026-10-10T11:00:00Z"},
+                {"bead": "bead-c", "bead_title": "Cleanup", "topic": "topic:web-view",
+                 "ask": 5, "question": "Build the cleanup?", "asker": "assembly",
+                 "since": "2026-10-10T11:30:00Z"},
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decisions", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decisions_count() == 3)
+            })
+        });
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "decisions topic linear-out"));
+        assert!(!drawn(cx, "decisions topic web-view"));
+    }
+
+    /// A chip narrows the history to its outcome, and All opens it again.
+    #[gpui::test]
+    fn a_chip_narrows_the_history_to_its_outcome(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
+        yard.answer("Bead", &bead_decided());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
+            })
+        });
+        to_decisions(&view, cx);
+        open_decided(&view, cx, "bead-d", 11);
+        assert!(drawn(cx, "decided head bead-d 11"));
+        assert!(drawn(cx, "decided chip all"));
+        assert!(drawn(cx, "decided chip words"));
+        // Words: only the words answer stands, ask 16.
+        click_on(cx, "decided chip words");
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.decided_chip(), Some(Outcome::Words));
+        });
+        let rows: Vec<u64> = decided_all(&view, cx).into_iter().map(|r| r.ask).collect();
+        assert_eq!(rows, [16]);
+        // All: every row stands again.
+        click_on(cx, "decided chip all");
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.decided_chip(), None);
+        });
+        assert_eq!(decided_all(&view, cx).len(), 6);
+    }
+
+    /// A fold opens on a click to show its rows, and folds shut on another.
+    #[gpui::test]
+    fn a_fold_opens_on_a_click_to_show_its_rows(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [
+                {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+                 "ask": 23, "question": "Who greets the newcomer?", "asker": "mayor",
+                 "since": "2026-10-12T11:09:00Z", "state": "answered", "words": "warmly"},
+                {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+                 "ask": 22, "question": "Raise Google Docs to 2000 calls", "asker": "mayor",
+                 "since": "2026-10-12T11:08:00Z", "state": "answered",
+                 "option": 1, "option_label": "Raise them"},
+                {"bead": "bead-d", "bead_title": "Switch the inbox", "topic": "topic:linear-out",
+                 "ask": 21, "question": "Raise Google Docs to 1000 calls", "asker": "mayor",
+                 "since": "2026-10-12T11:07:00Z", "state": "answered",
+                 "option": 1, "option_label": "Raise them"},
+            ]}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_decided());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 3)
+            })
+        });
+        to_decisions(&view, cx);
+        open_decided(&view, cx, "bead-d", 23);
+        // The pair stands folded; its rows were never drawn. (What was
+        // drawn once stays in the test's bounds map, so only the model
+        // says what hiding hides.)
+        assert!(drawn(cx, "decided fold bead-d 22"));
+        assert!(!drawn(cx, "decided head bead-d 22"));
+        assert!(!drawn(cx, "decided head bead-d 21"));
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().decided_folds().is_empty())
+        });
+        // Open on a click: its rows draw, with the fold standing open.
+        click_on(cx, "decided fold bead-d 22");
+        cx.run_until_parked();
+        assert!(drawn(cx, "decided head bead-d 22"));
+        assert!(drawn(cx, "decided head bead-d 21"));
+        view.read_with(cx, |v, _| {
+            let folds = v.model.as_ref().unwrap().decided_folds().clone();
+            assert_eq!(folds, HashSet::from([("bead-d".to_string(), 22)]));
+        });
+        // Shut on another: the fold stands folded again.
+        click_on(cx, "decided fold bead-d 22");
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().decided_folds().is_empty())
+        });
     }
 
     /// A decided head longer than the row ends in an ellipsis before the
@@ -27299,11 +27834,11 @@ mod tests {
         );
     }
 
-    /// The same forged run ask in the decisions list: the row draws one
-    /// line of the question, its first, and neither the forged sentence
-    /// nor the forged command.
+    /// The same forged run ask in the decisions list: the row draws the
+    /// question whole, wrapped to two lines, with whose it is beneath it,
+    /// as a mail row draws its wrapped text with its sender.
     #[gpui::test]
-    fn a_forged_run_ask_s_row_shows_its_first_line(cx: &mut TestAppContext) {
+    fn a_forged_run_ask_s_row_shows_its_question_with_whose(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let yard = Yard::start();
@@ -27316,16 +27851,17 @@ mod tests {
             cx,
         );
         assert!(drawn(cx, "decision head bead-s"));
-        // The row's drawn text: the first line alone.
-        let head = view.read_with(cx, |v, _| {
+        // The row's drawn text: the question whole, whose beneath it.
+        let row = view.read_with(cx, |v, _| {
             let model = v.model.as_ref().unwrap();
-            model.decision_groups(&chrono::Utc::now())[0].rows[0]
-                .head
-                .clone()
+            model.decision_groups(&chrono::Utc::now())[0].rows[0].clone()
         });
-        assert_eq!(head, "Take more?");
-        assert!(!head.contains("when you approve"), "{head:?}");
-        assert!(!head.contains("yardr peer list"), "{head:?}");
+        assert_eq!(row.head, question);
+        assert!(
+            row.sub.starts_with("yardmaster · approval wanted ·"),
+            "{:?}",
+            row.sub
+        );
     }
 
     /// The same forged run ask in the Decided list, put aside: the row
@@ -27346,9 +27882,7 @@ mod tests {
         );
         assert!(drawn(cx, "decided head bead-s 7"));
         // The row's drawn text: the first line alone.
-        let head = view.read_with(cx, |v, _| {
-            v.model.as_ref().unwrap().decided_rows()[0].head.clone()
-        });
+        let head = decided_all(&view, cx)[0].head.clone();
         assert_eq!(head, "Take more?");
         assert!(!head.contains("when you approve"), "{head:?}");
         assert!(!head.contains("yardr peer list"), "{head:?}");
@@ -28111,20 +28645,21 @@ mod tests {
         wait(cx, "the decided", |cx| {
             view.read_with(cx, |v, _| v.model.as_ref().unwrap().decided_count() == 2)
         });
-        let subs: Vec<String> = view.read_with(cx, |v, _| {
-            v.model
-                .as_ref()
-                .unwrap()
-                .decided_rows()
-                .into_iter()
-                .map(|r| r.sub)
-                .collect()
-        });
+        let rows: Vec<(String, String)> = decided_all(&view, cx)
+            .into_iter()
+            .map(|r| (r.outcome, r.detail))
+            .collect();
         assert_eq!(
-            subs,
+            rows,
             [
-                "yardmaster · taken back by yardmaster: the books moved",
-                "yardmaster · it was taken back in north's yard",
+                (
+                    "↩taken back by yardmaster: the books moved".to_string(),
+                    "yardmaster · 10:00".to_string()
+                ),
+                (
+                    "↩it was taken back in north's yard".to_string(),
+                    "yardmaster · 10:00".to_string()
+                ),
             ]
         );
 
