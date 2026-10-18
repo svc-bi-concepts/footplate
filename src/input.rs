@@ -6,6 +6,8 @@
 //! with the cursor, that shift+Enter breaks the line and that Enter hands
 //! the text on. A masked line is the same line for a secret: it draws a
 //! mark for each character, takes what is pasted and gives nothing out.
+//! Shown, it draws the text as typed, for a look, and still gives
+//! nothing out.
 
 use std::ops::Range;
 
@@ -99,6 +101,10 @@ pub struct Line {
     /// The text is a secret: each character is drawn as [`MARK`], it is
     /// not copied or cut out, and the input method is told none of it.
     masked: bool,
+    /// A secret drawn as typed, for a look: still a secret, which
+    /// nothing is copied or cut out of and the input method is told
+    /// none of.
+    shown: bool,
 }
 
 /// What a masked line draws in place of each character.
@@ -132,6 +138,7 @@ impl Line {
             column: None,
             is_selecting: false,
             masked: false,
+            shown: false,
         }
     }
 
@@ -142,6 +149,16 @@ impl Line {
         Line {
             masked: true,
             ..Line::new(cx)
+        }
+    }
+
+    /// Draws the secret as typed, for a look, or as marks again. What
+    /// is typed is unchanged, and still nothing is copied or cut out
+    /// of it.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.shown != shown {
+            self.shown = shown;
+            self.changed(cx);
         }
     }
 
@@ -782,8 +799,9 @@ impl Line {
     /// shown as marks) changes the text here, and the rows follow.
     fn shape(&self, width: Option<Pixels>, look: &Look, window: &Window) -> Layout {
         // A masked text is drawn as a mark for each character, and what is
-        // shaped is never the text.
-        let marks = self.masked.then(|| marks_of(&self.content));
+        // shaped is never the text; shown, it is drawn as typed, for a
+        // look.
+        let marks = (self.masked && !self.shown).then(|| marks_of(&self.content));
         let drawn: SharedString = match &marks {
             Some(marks) => MARK.repeat(marks.len() - 1).into(),
             None => self.content.clone(),
@@ -1564,6 +1582,26 @@ mod tests {
         cx.simulate_keystrokes("secondary-x");
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
         assert_eq!(text(&line, cx), "pasted-k3y");
+    }
+
+    /// Shown, a masked line draws its text as typed, for a look, and
+    /// still copies nothing out; hidden again, it draws marks.
+    #[gpui::test]
+    fn a_shown_masked_line_draws_its_text_and_still_copies_nothing_out(cx: &mut TestAppContext) {
+        let (line, cx) = opened_masked(cx);
+        cx.simulate_input("s3cret");
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(6));
+        line.update(cx, |line, cx| line.set_shown(true, cx));
+        assert_eq!(drawn_text(&line, cx), "s3cret");
+        assert_eq!(text(&line, cx), "s3cret");
+        // Copy and cut of all of it still leave the clipboard as it was,
+        // and cut leaves the text.
+        cx.write_to_clipboard(ClipboardItem::new_string("before".to_string()));
+        cx.simulate_keystrokes("secondary-a secondary-c secondary-x");
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        assert_eq!(text(&line, cx), "s3cret");
+        line.update(cx, |line, cx| line.set_shown(false, cx));
+        assert_eq!(drawn_text(&line, cx), MARK.repeat(6));
     }
 
     #[gpui::test]

@@ -435,7 +435,8 @@ pub struct DecisionAsk {
     /// `open`, `answered`, `put aside` or `declined`.
     pub state: String,
     /// What a secret ask asks for: its card has the yard's line and a field
-    /// that shows marks, where another has options or a line for words.
+    /// that shows marks unless its toggle is pressed, where another has
+    /// options or a line for words.
     pub secret: Option<Secret>,
     /// The command a run ask proposes: its card has the yard's block and
     /// the control that approves, and its question and context are marked
@@ -1977,6 +1978,7 @@ impl Model {
                     by: String::new(),
                     return_at: String::new(),
                     secret: open.secret,
+                    concealed: open.concealed,
                     given: Vec::new(),
                     run: open.run,
                     ran: None,
@@ -2005,6 +2007,21 @@ impl Model {
             .chain(decided.map(|a| &a.secret))
             .next()?
             .as_ref()
+    }
+
+    /// Whether the ask's secret value is drawn hidden, open or dealt
+    /// with. An ask the yard says nothing of, and one that is no ask
+    /// here, is concealed.
+    pub fn concealed(&self, bead: &str, ask: u64) -> bool {
+        let open = self.open.iter().filter(|a| a.bead == bead && a.ask == ask);
+        let decided = self
+            .decided
+            .iter()
+            .filter(|a| a.bead == bead && a.ask == ask);
+        open.map(|a| a.concealed)
+            .chain(decided.map(|a| a.concealed))
+            .next()
+            .unwrap_or(true)
     }
 
     /// Whether its asker took the ask back: its card reads only, with
@@ -2056,6 +2073,7 @@ impl Model {
                     since: open.since,
                     state: "answered".to_string(),
                     secret: open.secret,
+                    concealed: open.concealed,
                     given: names.to_vec(),
                     ..DecidedAsk::default()
                 },
@@ -2133,6 +2151,7 @@ impl Model {
                     asker: open.asker,
                     since: open.since,
                     state: "answered".to_string(),
+                    concealed: open.concealed,
                     run: open.run,
                     ran,
                     ..DecidedAsk::default()
@@ -2177,6 +2196,7 @@ impl Model {
                 by: String::new(),
                 return_at: String::new(),
                 secret: open.secret,
+                concealed: open.concealed,
                 given: Vec::new(),
                 run: open.run,
                 ran: None,
@@ -2223,6 +2243,7 @@ impl Model {
                 by: String::new(),
                 return_at: String::new(),
                 secret: open.secret,
+                concealed: open.concealed,
                 given: Vec::new(),
                 run: open.run,
                 ran: None,
@@ -6467,6 +6488,7 @@ mod tests {
             asker: asker.into(),
             since: since.into(),
             secret: None,
+            concealed: true,
             run: None,
         }
     }
@@ -6495,6 +6517,7 @@ mod tests {
             by: String::new(),
             return_at: return_at.into(),
             secret: None,
+            concealed: true,
             given: Vec::new(),
             run: None,
             ran: None,
@@ -7348,6 +7371,7 @@ mod tests {
                 stage: "new".into(),
             }],
             state: "open".into(),
+            concealed: true,
             ..BeadAsk::default()
         }
     }
@@ -8027,6 +8051,30 @@ mod tests {
         let mut m = with_a_secret_ask();
         m.deferred("yd-crm", 18);
         assert_eq!(m.giving("yd-crm", 18), Some(&books()));
+    }
+
+    /// A secret ask the yard marks unconcealed reads so, open and after
+    /// it is given, put aside or declined; one the yard says nothing of,
+    /// and no ask at all, is concealed.
+    #[test]
+    fn an_unconcealed_secret_ask_reads_so_wherever_it_stands() {
+        let mut m = with_a_secret_ask();
+        assert!(m.concealed("yd-crm", 18));
+        assert!(m.concealed("yd-crm", 19));
+        m.open[0].concealed = false;
+        assert!(!m.concealed("yd-crm", 18));
+        // Given, put aside or declined, it stands decided and still
+        // unconcealed.
+        m.gave("yd-crm", 18, &["BOOKS_TOKEN".to_string()]);
+        assert!(!m.concealed("yd-crm", 18));
+        let mut m = with_a_secret_ask();
+        m.open[0].concealed = false;
+        m.deferred("yd-crm", 18);
+        assert!(!m.concealed("yd-crm", 18));
+        let mut m = with_a_secret_ask();
+        m.open[0].concealed = false;
+        m.declined("yd-crm", 18, "");
+        assert!(!m.concealed("yd-crm", 18));
     }
 
     #[test]

@@ -131,6 +131,12 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// An ask the yard says nothing of is concealed: a yard from before the
+/// ask said draws every secret hidden.
+fn concealed() -> bool {
+    true
+}
+
 /// The yard's settings, of which a client reads the operator, the cap on
 /// a file, and how many of them a mail or a note carries.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -744,6 +750,12 @@ pub struct OpenAsk {
     /// What a secret ask asks for; absent on any other ask.
     #[serde(default)]
     pub secret: Option<Secret>,
+    /// Whether a secret ask's value is drawn hidden. False where the
+    /// source marks the asked names as no secret: the value is asked in
+    /// the clear. Absent on a yard from before the ask said, and on any
+    /// other ask: concealed.
+    #[serde(default = "concealed")]
+    pub concealed: bool,
     /// The command a run ask proposes; absent on any other ask.
     #[serde(default)]
     pub run: Option<Run>,
@@ -789,6 +801,9 @@ pub struct DecidedAsk {
     /// What a secret ask asks for; absent on any other ask.
     #[serde(default)]
     pub secret: Option<Secret>,
+    /// Whether a secret ask's value is drawn hidden, as on an open ask.
+    #[serde(default = "concealed")]
+    pub concealed: bool,
     /// The names a secret ask was given values for.
     #[serde(default, deserialize_with = "or_default")]
     pub given: Vec<String>,
@@ -871,6 +886,9 @@ pub struct BeadAsk {
     /// What a secret ask asks for; absent on any other ask.
     #[serde(default)]
     pub secret: Option<Secret>,
+    /// Whether a secret ask's value is drawn hidden, as on an open ask.
+    #[serde(default = "concealed")]
+    pub concealed: bool,
     /// The names a secret ask was given values for; none until it is given.
     #[serde(default, deserialize_with = "or_default")]
     pub given: Vec<String>,
@@ -3311,7 +3329,7 @@ mod tests {
                           "asker": "yardmaster", "secret": secret}],
                 "decided": [{"bead": "yd-crm", "ask": 17, "question": "The token for the books",
                              "asker": "yardmaster", "state": "answered",
-                             "secret": secret, "given": ["BOOKS_TOKEN"]},
+                             "secret": secret, "concealed": false, "given": ["BOOKS_TOKEN"]},
                             {"bead": "yd-crm", "ask": 16, "question": "Move them now?",
                              "asker": "yardmaster", "state": "answered", "option": 1}]
             }})
@@ -3331,6 +3349,11 @@ mod tests {
         // Any other ask has neither.
         assert_eq!(asks.decided[1].secret, None);
         assert!(asks.decided[1].given.is_empty());
+        // An ask the yard says nothing of is concealed, in the queue and
+        // on the bead; one it marks unconcealed is not.
+        assert!(asks.open[0].concealed);
+        assert!(!asks.decided[0].concealed);
+        assert!(asks.decided[1].concealed);
 
         yard.answer(
             "Bead",
@@ -3338,7 +3361,7 @@ mod tests {
                 {"ask": 18, "question": "The token for the books", "options": [],
                  "state": "open", "secret": secret},
                 {"ask": 17, "question": "The token for the books", "options": [],
-                 "state": "answered", "secret": secret, "given": ["BOOKS_TOKEN"]},
+                 "state": "answered", "secret": secret, "concealed": false, "given": ["BOOKS_TOKEN"]},
                 {"ask": 16, "question": "Move them now?", "state": "answered", "option": 1}
             ]}})
             .to_string(),
@@ -3348,6 +3371,9 @@ mod tests {
         assert!(bead.asks[0].given.is_empty());
         assert_eq!(bead.asks[1].given, ["BOOKS_TOKEN"]);
         assert_eq!(bead.asks[2].secret, None);
+        assert!(bead.asks[0].concealed);
+        assert!(!bead.asks[1].concealed);
+        assert!(bead.asks[2].concealed);
     }
 
     /// The same client, the same requests, the same answers, whichever way

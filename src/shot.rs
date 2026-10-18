@@ -30,8 +30,9 @@ use crate::yard::Env;
 /// canned doctor of two providers and their model offers, the first
 /// screen with the hosted way's fields open and filled, and the away
 /// screen of a hosted yard that is signed out, the arrivals board open
-/// on the arrivals row, one arrival's bead open from the board, and one
-/// line's flow open on its row.
+/// on the arrivals row, one arrival's bead open from the board, one
+/// line's flow open on its row, and an open card of a secret ask posed
+/// with a value typed, hidden and shown.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -76,6 +77,8 @@ pub const STATES: &[&str] = &[
     "arrivals",
     "arrival",
     "flow",
+    "secret",
+    "secret-shown",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -646,6 +649,26 @@ fn populate(yard: &Yard, state: &str) {
             yard.emit(r#"{"seq": 21, "kind": "peer_message_failed", "actor": "yard", "data": {"peer": "north", "kind": "mail", "id": "m1", "attempts": 1, "reason": "peer north: refused by the peer: it takes 30 mails an hour from this yard; send again after 21:00"}}"#);
             yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "yard", "at": "2026-10-13T20:31:00Z", "data": {"to": "jo", "to_user": true, "undelivered": "m1", "limit": 30, "until": "2026-10-13T21:00:00Z", "text": "your mail to clerk@north of 10-13 20:31 was not delivered: refused by the peer: it takes 30 mails an hour from this yard; send again after 21:00"}}"#);
         }
+        "secret" | "secret-shown" => {
+            // An open card of a secret ask, posed with a value typed:
+            // hidden, with the toggle to Show, or shown where the yard
+            // marks the value no secret, with the toggle to Hide.
+            let unconcealed = state == "secret-shown";
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [queued_secret(unconcealed)], "decided": []}})
+                    .to_string(),
+            );
+            yard.answer("Bead", &bead_secret(unconcealed));
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -732,6 +755,42 @@ fn bead_run(question: &str, context: &[&str]) -> String {
              "question": question,
              "context": context,
              "options": [], "state": "open", "run": run_of()}]}})
+    .to_string()
+}
+
+/// What the secret ask asks for, in the yard's words.
+fn secret_of() -> serde_json::Value {
+    json!({"source": "books", "env": ["BOOKS_TOKEN"],
+           "line": "a secret: BOOKS_TOKEN, for the source books (https://books.example.com)"})
+}
+
+/// The secret ask 7 on bead-s as the queue lists it, marked no secret
+/// where the state shows it.
+fn queued_secret(unconcealed: bool) -> serde_json::Value {
+    let mut ask = json!({
+        "bead": "bead-s", "bead_title": "The books", "topic": "", "ask": 7,
+        "question": "The token for the books", "asker": "yardmaster",
+        "since": "2026-10-10T10:00:00Z", "secret": secret_of()
+    });
+    if unconcealed {
+        ask["concealed"] = json!(false);
+    }
+    ask
+}
+
+/// The bead of that ask, marked as the queue marks it.
+fn bead_secret(unconcealed: bool) -> String {
+    let mut ask = json!(
+        {"ask": 7, "to": "jo", "asker": "yardmaster",
+         "since": "2026-10-10T10:00:00Z",
+         "question": "The token for the books",
+         "context": ["The books were moved to the declared source."],
+         "options": [], "state": "open", "secret": secret_of()});
+    if unconcealed {
+        ask["concealed"] = json!(false);
+    }
+    json!({"result": {"id": "bead-s", "title": "The books", "body": "The body.",
+        "stage": "new", "labels": [], "notes": [], "asks": [ask]}})
     .to_string()
 }
 
@@ -884,6 +943,15 @@ mod tests {
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].question.lines().count(), 3, "{state}");
                     assert!(bead.asks[0].run.is_some(), "{state}");
+                }
+                "secret" | "secret-shown" => {
+                    assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    assert!(loaded.asks.open[0].secret.is_some(), "{state}");
+                    assert_eq!(loaded.asks.open[0].concealed, *state == "secret", "{state}");
+                    let bead = yard.client().bead("bead-s").unwrap();
+                    assert_eq!(bead.asks.len(), 1, "{state}");
+                    assert!(bead.asks[0].secret.is_some(), "{state}");
+                    assert_eq!(bead.asks[0].concealed, *state == "secret", "{state}");
                 }
                 "page" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

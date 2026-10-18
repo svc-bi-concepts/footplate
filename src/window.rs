@@ -795,6 +795,22 @@ fn give_label(secret: &api::Secret, typed: usize) -> String {
     }
 }
 
+/// The toggle beside a secret ask's field: `Show` draws what is typed as
+/// typed, for a look, `Hide` draws marks again. The value is unchanged
+/// either way: it goes in its call as ever.
+fn show_button(
+    id: String,
+    shown: bool,
+    palette: Palette,
+    cx: &mut Context<Footplate>,
+) -> impl IntoElement {
+    let text = if shown { "Hide" } else { "Show" }.to_string();
+    small_button(text, palette)
+        .id(SharedString::from(id.clone()))
+        .debug_selector(|| id.clone())
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_secret(cx)))
+}
+
 /// Whether the words of an open ordinary card want their own `Send` button:
 /// they are the answer where there are no options, or a note where there
 /// is no pick and none recommended. With a pick the pick's button sends
@@ -1531,15 +1547,19 @@ pub struct Footplate {
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
-    /// The field of a secret ask's card, which shows marks. It is another
-    /// than the line: what is typed here is in no draft and with no ask's
-    /// words, and it is gone when the card is left.
+    /// The field of a secret ask's card, which shows marks unless its
+    /// toggle is pressed. It is another than the line: what is typed here
+    /// is in no draft and with no ask's words, and it is gone when the
+    /// card is left.
     secret: Entity<Line>,
     /// The values typed so far for an ask of several names, in the order
     /// of its names: they go together, with the last.
     secret_typed: Vec<String>,
     /// The ask the field and those values are for.
     secret_for: Option<(String, u64)>,
+    /// The field draws the secret as typed, for a look: its toggle's
+    /// state, for the ask the field is for, and kept for no other.
+    secret_shown: bool,
     /// The run ask whose approval is with the yard and not answered yet:
     /// no second one goes after it.
     approving: Option<(String, u64)>,
@@ -1681,9 +1701,9 @@ fn shot_section() -> Option<Section> {
 
 /// The row a screenshot state opens on instead of the yard's own: the
 /// refused mail's conversation for the undelivered shot, the open card
-/// for the plain, page and run shots, the board for the arrivals shot,
-/// one arrival's bead for the arrival shot and yardr's line for the flow
-/// shot, else none. A debug build's alone.
+/// for the plain, page, run and secret shots, the board for the arrivals
+/// shot, one arrival's bead for the arrival shot and yardr's line for
+/// the flow shot, else none. A debug build's alone.
 fn shot_selected() -> Option<Selected> {
     // The card shots open their cards, in decisions: a debug build's
     // alone, as the settings and the draft of Footplate::opened.
@@ -1691,7 +1711,9 @@ fn shot_selected() -> Option<Selected> {
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
         Ok("plain") | Ok("page") | Ok("dot") => return Some(Selected::Decision("bead-a".into())),
-        Ok("run") => return Some(Selected::Decision("bead-s".into())),
+        Ok("run") | Ok("secret") | Ok("secret-shown") => {
+            return Some(Selected::Decision("bead-s".into()));
+        }
         Ok("arrivals") => return Some(Selected::Arrivals),
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
         Ok("flow") => return Some(Selected::Line("yardr".into())),
@@ -2010,6 +2032,7 @@ impl Footplate {
             secret,
             secret_typed: Vec::new(),
             secret_for: None,
+            secret_shown: false,
             approving: None,
             approve_elsewhere: HashSet::new(),
             thumbs: HashMap::new(),
@@ -3880,11 +3903,30 @@ impl Footplate {
         self.line
             .update(cx, |line, cx| line.set_placeholder(&to, cx));
         // What is typed of a secret is for the ask it was typed on, and is
-        // kept for no other and for no return to this one.
+        // kept for no other and for no return to this one. The toggle
+        // stands as the ask says: shown where the yard marks its value
+        // no secret, hidden elsewhere.
         let ask = self.open_ask();
         if ask != self.secret_for {
             self.forget_secret(cx);
             self.secret_for = ask.clone();
+            let shown = ask.as_ref().is_some_and(|(bead, ask)| {
+                self.model
+                    .as_ref()
+                    .is_some_and(|m| !m.concealed(bead, *ask))
+            });
+            self.set_secret_shown(shown, cx);
+            // The secret shots pose a value in the field, hidden and
+            // shown: a debug build's alone, as the settings and the
+            // draft of Footplate::opened.
+            #[cfg(debug_assertions)]
+            if matches!(
+                std::env::var("FOOTPLATE_SHOT").as_deref(),
+                Ok("secret" | "secret-shown")
+            ) {
+                self.secret
+                    .update(cx, |field, cx| field.set_text("bk-live-3f9a-7Qx", cx));
+            }
         }
         // A secret ask's card draws no line for words, nor does the card
         // of an ask taken back. A focus left in
@@ -3957,6 +3999,22 @@ impl Footplate {
     fn forget_secret(&mut self, cx: &mut Context<Self>) {
         self.secret_typed.clear();
         self.secret.update(cx, |field, cx| field.set_text("", cx));
+    }
+
+    /// Draws the secret as typed, for a look, or as marks again: the
+    /// card's toggle, for the ask the field is for.
+    fn set_secret_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.secret_shown = shown;
+        self.secret
+            .update(cx, |field, cx| field.set_shown(shown, cx));
+    }
+
+    /// The card's toggle is pressed: what is typed is drawn as typed,
+    /// for a look, or as marks again. The value is unchanged: it goes
+    /// in its call as ever.
+    fn toggle_secret(&mut self, cx: &mut Context<Self>) {
+        let shown = !self.secret_shown;
+        self.set_secret_shown(shown, cx);
     }
 
     /// Whether the open card's bead is another yard's question.
@@ -11416,22 +11474,41 @@ impl Footplate {
             // A run ask takes words only with a decline: its card has the
             // line while one is asked for, and at no other time.
             let declining = self.declining.as_ref() == Some(&(bead_id.clone(), ask_seq));
-            card = card.when(ask.run.is_none() || declining, |card| {
-                card.child(
-                    div()
-                        .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(palette.line)
-                        .bg(palette.side)
-                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                            window.focus(&focus);
-                            window.prevent_default();
-                        })
-                        .child(field),
+            // A secret's field stands beside its toggle: Show draws what
+            // is typed as typed, for a look, Hide draws marks again.
+            let toggle = ask.secret.as_ref().map(|_| {
+                show_button(
+                    format!("show {bead_id} {ask_seq}"),
+                    self.secret_shown,
+                    palette,
+                    cx,
                 )
+            });
+            card = card.when(ask.run.is_none() || declining, |card| {
+                let boxed = div()
+                    .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        window.focus(&focus);
+                        window.prevent_default();
+                    })
+                    .child(field);
+                match toggle {
+                    Some(toggle) => card.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(boxed.flex_1())
+                            .child(toggle),
+                    ),
+                    None => card.child(boxed),
+                }
             });
             // Under the line the files attached to the ask's note, with
             // why a marked one cannot go: what Enter sends with the
@@ -11990,22 +12067,37 @@ impl Footplate {
             };
             let words = detail.secret.is_none() && detail.run.is_none();
             let fielded = !taken_back && (words || giving.is_some());
+            // A secret's field stands beside its toggle, as on an open
+            // card.
+            let toggle = detail
+                .secret
+                .as_ref()
+                .map(|_| show_button(format!("show {bead} {ask}"), self.secret_shown, palette, cx));
             body = body.when(fielded, |body| {
-                body.child(
-                    div()
-                        .debug_selector(|| format!("{kind} {bead} {ask}"))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(palette.line)
-                        .bg(palette.side)
-                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                            window.focus(&focus);
-                            window.prevent_default();
-                        })
-                        .child(field),
-                )
+                let boxed = div()
+                    .debug_selector(|| format!("{kind} {bead} {ask}"))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        window.focus(&focus);
+                        window.prevent_default();
+                    })
+                    .child(field);
+                match toggle {
+                    Some(toggle) => body.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(boxed.flex_1())
+                            .child(toggle),
+                    ),
+                    None => body.child(boxed),
+                }
             });
             // Under it the button that sends the field, exactly as Enter
             // does: the value again on a secret, the words where they are
@@ -24716,6 +24808,30 @@ mod tests {
         opened_on_the_ask(at, file, cx)
     }
 
+    /// The window on a yard whose one open ask is the secret ask 7 on
+    /// bead-s for `env`, marked no secret, its card open and read, the
+    /// settings kept in `file`.
+    fn opened_on_an_unconcealed_secret_ask<'a>(
+        yard: &Yard,
+        env: &[&str],
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        let mut open = queued_secret(env, 7, "", &[]);
+        open["concealed"] = json!(false);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [open], "decided": []}}).to_string(),
+        );
+        yard.answer("Bead", &bead_secret(env, &[7]));
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
     /// The window at `at`, a yard whose one open ask is on bead-s, with
     /// that ask's card open and read.
     fn opened_on_the_ask<'a>(
@@ -26809,6 +26925,110 @@ mod tests {
         });
         assert_eq!(secret_field(&view, cx).0, "");
         nowhere(&view, cx, "given again");
+    }
+
+    /// A secret card's toggle draws what is typed as typed, for a look,
+    /// or as marks again, and never changes the value: Give sends what
+    /// was typed either way. It stands per card: a card left and opened
+    /// again starts hidden.
+    #[gpui::test]
+    fn a_secret_card_s_toggle_shows_what_is_typed_and_sends_it_as_ever(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        );
+        let marks = |n: usize| "\u{2022}".repeat(n);
+
+        // The toggle stands by the field, and the card starts hidden.
+        assert!(drawn(cx, "show bead-s 7"));
+        assert!(drawn(cx, "secret bead-s 7"));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        assert_eq!(secret_field(&view, cx).1, marks(VALUE.len()));
+
+        // Pressed, what is typed is drawn as typed; pressed again, as
+        // marks. The value is unchanged either way.
+        click_on(cx, "show bead-s 7");
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        assert_eq!(secret_field(&view, cx).1, VALUE);
+        click_on(cx, "show bead-s 7");
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        assert_eq!(secret_field(&view, cx).1, marks(VALUE.len()));
+
+        // A card left and opened again starts hidden: the toggle is per
+        // card, not remembered.
+        click_on(cx, "show bead-s 7");
+        assert_eq!(secret_field(&view, cx).1, VALUE);
+        cx.simulate_keystrokes("secondary-[");
+        cx.run_until_parked();
+        assert_eq!(secret_field(&view, cx).0, "");
+        cx.simulate_keystrokes("secondary-]");
+        wait(cx, "the card again", |cx| drawn(cx, "secret bead-s 7"));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        assert_eq!(secret_field(&view, cx).1, marks(VALUE.len()));
+
+        // Given while shown, the call carries what was typed: the toggle
+        // flips the drawing and never the value sent.
+        click_on(cx, "show bead-s 7");
+        assert_eq!(secret_field(&view, cx).1, VALUE);
+        click_on(cx, "secret bead-s 7");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "given while shown", |_| {
+            yard.asked("GiveSecret")
+                == [json!({"bead": "bead-s", "ask": 7,
+                            "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})]
+        });
+    }
+
+    /// A secret ask the yard marks no secret starts shown: what is typed
+    /// is drawn as typed, until the toggle is pressed. It is still a
+    /// secret: its value goes in its call, and nothing copies out.
+    #[gpui::test]
+    fn a_secret_card_marked_no_secret_starts_shown(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_an_unconcealed_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        );
+        let marks = |n: usize| "\u{2022}".repeat(n);
+
+        // Starts shown: what is typed is drawn as typed.
+        assert!(drawn(cx, "show bead-s 7"));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        assert_eq!(secret_field(&view, cx).1, VALUE);
+
+        // The toggle hides it, and still it is a secret: nothing copies
+        // out, and Give sends what was typed.
+        click_on(cx, "show bead-s 7");
+        assert_eq!(secret_field(&view, cx).1, marks(VALUE.len()));
+        cx.write_to_clipboard(ClipboardItem::new_string("before".to_string()));
+        cx.simulate_keystrokes("secondary-a secondary-c secondary-x");
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("before".to_string())
+        );
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        click_on(cx, "give bead-s 7");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "given unconcealed", |_| {
+            yard.asked("GiveSecret")
+                == [json!({"bead": "bead-s", "ask": 7,
+                            "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})]
+        });
     }
 
     /// Whether the jump control stands over the open conversation.
