@@ -36,7 +36,7 @@
 # ask, posed with a value typed and hidden), `secret-shown` (that
 # card where the yard marks the value no secret: typed and shown),
 # `secret-refused` (that card with the yard's refusal of its answer)
-# and `switcher` (the switcher's list open over two yards, one away).
+# and `switcher` (the switcher's list open over four yards, one away).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the

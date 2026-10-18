@@ -73,6 +73,7 @@ actions!(
         UsualSize,
         NextLook,
         SwitchYards,
+        AddYard,
         Yard1,
         Yard2,
         Yard3,
@@ -97,7 +98,8 @@ const CONTEXT: &str = "Footplate";
 /// those keys are the line's text.
 const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 /// Where the switcher's list is open: the arrows move in it, Enter opens
-/// the yard they are on and esc leaves it, and no key is a card's.
+/// the yard they are on, esc leaves it, + adds a yard, and no key is a
+/// card's.
 const SWITCH_CONTEXT: &str = "FootplateSwitch";
 
 /// How high an image of a mail stands in the conversation, whatever its own
@@ -123,6 +125,16 @@ const SECONDARY: &str = if cfg!(target_os = "macos") {
 } else {
     "ctrl"
 };
+
+/// A yard's number key, as the switcher's rows show it: ⌘1 opens the
+/// first yard on macOS, ctrl+1 elsewhere.
+fn number_key(place: usize) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌘{}", place + 1)
+    } else {
+        format!("ctrl+{}", place + 1)
+    }
+}
 
 /// An image a mail or a note names, by its hash.
 enum Picture {
@@ -1127,6 +1139,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", ChoiceDown, Some(SWITCH_CONTEXT)),
         KeyBinding::new("enter", Decide, Some(SWITCH_CONTEXT)),
         KeyBinding::new("escape", Leave, Some(SWITCH_CONTEXT)),
+        // `+` adds a yard from the list; `=` is the key it is on, which
+        // some platforms report instead, as with Larger.
+        KeyBinding::new("+", AddYard, Some(SWITCH_CONTEXT)),
+        KeyBinding::new("=", AddYard, Some(SWITCH_CONTEXT)),
     ]);
     // The away screen's details open on Enter from anywhere, as on a
     // click. The binding has no context, as the switcher's keys do, so it
@@ -1422,6 +1438,26 @@ impl Counts {
         match parts.is_empty() {
             true => "nothing waiting".to_string(),
             false => parts.join(", "),
+        }
+    }
+
+    /// What the switcher's row carries of these counts: the waiting
+    /// number with the tooltip's words, or none where the row carries no
+    /// count. The tooltip numbers each waiting kind, decisions first; a
+    /// notice asks nothing, so none alone carries a count.
+    fn switcher(&self) -> Option<(String, String)> {
+        let words = [
+            count_words(self.decisions, "decision", "decisions"),
+            count_words(self.mail, "mail", "mail"),
+            count_words(self.notices, "notice", "notices"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        match self.waiting() {
+            0 => None,
+            n => Some((n.to_string(), words)),
         }
     }
 
@@ -1909,8 +1945,8 @@ impl Footplate {
             this.first_run = Some(first_run);
         }
         // The switcher shot opens with the switcher's list standing, on
-        // the open yard's row: two yards are paired, and the shot is the
-        // list. A debug build's alone, as above.
+        // the open yard's row: four yards are paired, one of them away,
+        // and the shot is the list. A debug build's alone, as above.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("switcher") {
             let open = this
@@ -5970,6 +6006,19 @@ impl Footplate {
         window.focus(&self.focus.clone());
     }
 
+    /// From the switcher's list, by its key or its footer's button: the
+    /// list shuts, and the settings stand at their yards, where a further
+    /// yard is added.
+    fn add_yard_from_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switching = None;
+        if !self.settings_open {
+            self.toggle_settings(window, cx);
+        }
+        // The yards section, whatever stood open.
+        self.pick_section(Section::Yards, cx);
+        cx.notify();
+    }
+
     /// Opens the yard at place `n` of the settings' list, counted from
     /// nought: the switcher's row, and its key from anywhere.
     fn switch_nth(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -7567,11 +7616,26 @@ impl Footplate {
             )
     }
 
-    /// What the switcher and the settings say of a yard of the list after
-    /// its name and its kind: that it is not reached, with the short why,
-    /// that it is the open one, or what waits in it now. Every yard is
-    /// followed, so one that is not reached is asked again by itself, and
-    /// says so until it answers.
+    /// How a yard of the settings is reached, in words: a yard at an
+    /// address by it, with the signed-in account beside it where it has
+    /// one; a yard of this machine by its socket, this run's where it
+    /// names none. The switcher's second line and the settings' rows say it.
+    fn yard_reach(yard: &settings::Yard) -> String {
+        match (yard.is_far(), yard.socket.is_empty()) {
+            (true, _) if yard.is_hosted() && !yard.account.is_empty() => {
+                format!("{} · signed in as {}", yard.address, yard.account)
+            }
+            (true, _) => yard.address.clone(),
+            (false, true) => "by this run's socket".to_string(),
+            (false, false) => yard.socket.clone(),
+        }
+    }
+
+    /// What the settings say of a yard of the list after its name and its
+    /// kind: that it is not reached, with the short why, that it is the
+    /// open one, or what waits in it now. Every yard is followed, so one
+    /// that is not reached is asked again by itself, and says so until it
+    /// answers.
     fn yard_state(&self, yard: &settings::Yard) -> String {
         match yard.name == self.yard && !self.unreached.contains_key(&yard.name) {
             true => "open".to_string(),
@@ -7639,14 +7703,7 @@ impl Footplate {
             None => {
                 for listed in &self.settings.yards {
                     let name = listed.name.clone();
-                    let reach = match (listed.is_far(), listed.socket.is_empty()) {
-                        (true, _) if listed.is_hosted() && !listed.account.is_empty() => {
-                            format!("{} · signed in as {}", listed.address, listed.account)
-                        }
-                        (true, _) => listed.address.clone(),
-                        (false, true) => "by this run's socket".to_string(),
-                        (false, false) => listed.socket.clone(),
-                    };
+                    let reach = Self::yard_reach(listed);
                     let open = name == self.yard;
                     let button = |what: &str, text: &str| {
                         let at = format!("yard {what} {name}");
@@ -8594,16 +8651,116 @@ impl Footplate {
     }
 
     /// The switcher's list as a popover to the right of the rail's head:
-    /// a row for each yard of the settings, with its colour, its kind
-    /// and its state, which of one that is not open is what waits in it
-    /// now, the open one marked. A click opens a yard, as Enter does on
-    /// the row the arrows are on. It stands over whatever the window shows.
+    /// a row for each yard of the settings, on two lines. The first has
+    /// the yard's dot in its colour, its name, its kind, its waiting
+    /// count right-aligned in one column and its number key; the second
+    /// its address, dimmer. A yard that is not reached carries no count:
+    /// the second line says why in red, with the button that rights it
+    /// beside it. A click opens a yard, as Enter does on the row the
+    /// arrows are on; the footer's key opens the settings' yards. It
+    /// stands over whatever the window shows.
     fn switcher(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col().flex_none().py_1();
         for (place, yard) in self.settings.yards.iter().enumerate() {
             let name = yard.name.clone();
             let open = name == self.yard;
-            let mark = if open { "▸" } else { " " };
+            let why = self.unreached.get(&yard.name).copied();
+            let counts = match open {
+                true => self.model.as_ref(),
+                false => self.held.get(&name).and_then(|held| held.model.as_ref()),
+            }
+            .map(Counts::of);
+            // The count the row carries: the open yard says open, and a
+            // yard that is not reached carries none, since its second
+            // line says why. The waiting number's tooltip says it in
+            // words. The number keys stand last, all of a width, so the
+            // counts' right edges stand in one column.
+            let count = div()
+                .id(SharedString::from(format!("switch count {name}")))
+                .debug_selector({
+                    let name = name.clone();
+                    move || format!("switch count {name}")
+                })
+                .flex_none()
+                .text_right()
+                .text_color(palette.faint);
+            let count = match (why, open, counts.and_then(|counts| counts.switcher())) {
+                (None, true, _) => count.child("open"),
+                (None, false, Some((number, words))) => count
+                    .tooltip(move |_, cx| cx.new(|_| RailTip(words.clone())).into())
+                    .child(number),
+                _ => count,
+            };
+            let mut second = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                // The dot's room, so the line stands under the name.
+                .child(div().flex_none().size(px(8.)));
+            match why {
+                Some(why) => {
+                    second = second.child(
+                        div()
+                            .debug_selector({
+                                let name = yard.name.clone();
+                                move || format!("switch why {name}")
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(palette.warn)
+                            .child(format!("not reached: {why}")),
+                    );
+                    // The button that rights it: signing in again where
+                    // the session is what is out, else pairing again for
+                    // a yard at an address, as the away screen offers
+                    // them. A click rights the yard instead of opening it.
+                    if why == session::SIGN_IN_AGAIN {
+                        let again = name.clone();
+                        second = second.child(
+                            small_button("sign in again".to_string(), palette)
+                                .id(SharedString::from(format!("switch sign in {name}")))
+                                .debug_selector({
+                                    let name = name.clone();
+                                    move || format!("switch sign in {name}")
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.switching = None;
+                                    this.sign_in_again(&again, window, cx);
+                                })),
+                        );
+                    } else if yard.is_far() {
+                        let again = name.clone();
+                        second = second.child(
+                            small_button("pair again".to_string(), palette)
+                                .id(SharedString::from(format!("switch again {name}")))
+                                .debug_selector({
+                                    let name = name.clone();
+                                    move || format!("switch again {name}")
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.switching = None;
+                                    this.pair_again(Some(again.clone()), window, cx);
+                                })),
+                        );
+                    }
+                }
+                None => {
+                    second = second.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(palette.faint)
+                            .child(Self::yard_reach(yard)),
+                    );
+                }
+            }
             list = list.child(
                 div()
                     .id(SharedString::from(format!("switch {name}")))
@@ -8618,57 +8775,99 @@ impl Footplate {
                     .cursor_pointer()
                     .text_sm()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
+                    .flex_col()
                     .when(place == at, |el| el.bg(palette.open))
-                    // A yard that is not reached has nothing to open
-                    // it for, and is drawn so.
-                    .when(self.unreached.contains_key(&yard.name), |el| {
-                        el.text_color(palette.faint)
-                    })
                     .hover(|style| style.bg(palette.hover))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.switch_to(&name, window, cx)),
                     )
-                    // The yard's dot, in its colour: the row's name reads
-                    // with it, as the rail's chip and a card's header do.
                     .child(
                         div()
-                            .debug_selector({
-                                let name = yard.name.clone();
-                                move || format!("switch dot {name}")
-                            })
-                            .flex_none()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(yard_color(&yard.name, palette.dark)),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            // The yard's dot, in its colour: the row's
+                            // name reads with it, as the rail's chip and
+                            // a card's header do.
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let name = yard.name.clone();
+                                        move || format!("switch dot {name}")
+                                    })
+                                    .flex_none()
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .bg(yard_color(&yard.name, palette.dark)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(open, |el| el.font_weight(FontWeight::SEMIBOLD))
+                                    .child(yard.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let name = yard.name.clone();
+                                        move || format!("switch kind {name}")
+                                    })
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(palette.line)
+                                    .text_xs()
+                                    .text_color(palette.faint)
+                                    .child(yard.kind()),
+                            )
+                            .child(count)
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let name = yard.name.clone();
+                                        move || format!("switch key {name}")
+                                    })
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(palette.faint)
+                                    .child(number_key(place)),
+                            ),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(format!(
-                        "{mark} {} · {} · {}",
-                        yard.name,
-                        yard.kind(),
-                        self.yard_state(yard)
-                    ))),
+                    .child(second),
             );
         }
         list = list.child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
                 .px_3()
                 .py_1()
                 .text_xs()
                 .text_color(palette.faint)
-                .truncate()
-                .child(format!(
-                    "↑↓ enter opens · esc leaves · {SECONDARY}+1 to 9 from anywhere"
-                )),
+                .child("↑↓ move · ↵ open · esc close · ")
+                .child(
+                    div()
+                        .id("switch add")
+                        .debug_selector(|| "switch add".to_string())
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(palette.text))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_yard_from_switcher(window, cx)
+                        }))
+                        .child("+ add a yard"),
+                ),
         );
         div()
             .absolute()
             .left(px(RAIL + 8.))
             .top(px(8.))
-            .min_w(px(200.))
-            .max_w(px(320.))
+            .min_w(px(280.))
+            .max_w(px(360.))
             .debug_selector(|| "switcher".to_string())
             .rounded_lg()
             .border_1()
@@ -12843,6 +13042,11 @@ impl Render for Footplate {
                 cx.listener(|this, _: &Decide, window, cx| match this.switching {
                     Some(at) => this.switch_nth(at, window, cx),
                     None => this.decide(cx),
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &AddYard, window, cx| {
+                    this.add_yard_from_switcher(window, cx)
                 }),
             )
             .on_action(cx.listener(|this, _: &Approve, _, cx| this.approve(cx)))
@@ -21583,6 +21787,35 @@ mod tests {
     }
 
     #[test]
+    fn the_switcher_s_count_is_the_waiting_number_with_its_words() {
+        let counts = |mail, decisions, notices| Counts {
+            mail,
+            decisions,
+            notices,
+        };
+        // None where the row carries no count: nothing waiting, or
+        // notices alone, which ask nothing.
+        assert_eq!(counts(0, 0, 0).switcher(), None);
+        assert_eq!(counts(0, 0, 4).switcher(), None);
+        // The number with the tooltip's words, decisions first.
+        assert_eq!(
+            counts(2, 1, 0).switcher(),
+            Some(("3".to_string(), "1 decision · 2 mail".to_string()))
+        );
+        assert_eq!(
+            counts(12, 0, 0).switcher(),
+            Some(("12".to_string(), "12 mail".to_string()))
+        );
+        assert_eq!(
+            counts(1, 1, 1).switcher(),
+            Some((
+                "2".to_string(),
+                "1 decision · 1 mail · 1 notice".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn the_rail_s_glyphs_carry_the_mail_and_the_decisions() {
         let counts = |mail, decisions, notices| Counts {
             mail,
@@ -21993,7 +22226,7 @@ mod tests {
         let kinds: Vec<&str> = view.read_with(cx, |v, _| {
             v.settings.yards.iter().map(|y| y.kind()).collect()
         });
-        assert_eq!(kinds, ["on this machine", "on this machine", "paired"]);
+        assert_eq!(kinds, ["local", "local", "paired"]);
         // A click on a row opens that yard, and it is the one to open at
         // the next start.
         click_on(cx, "switch second home");
@@ -22054,6 +22287,105 @@ mod tests {
         // What was typed there is there again.
         assert_eq!(typed(&view, cx), "typed");
         assert_eq!(Settings::read(&file).open, "far");
+    }
+
+    /// The switcher's rows: two lines each, the name with its kind, its
+    /// waiting count in one column and its number key on the first, its
+    /// address dimmer on the second. The footer's `+` adds a yard, by key
+    /// or by click.
+    #[gpui::test]
+    fn the_switcher_s_rows_carry_kind_count_and_key(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        // Twelve mails afar, beside the second home's two: one and two
+        // figures in the counts' column.
+        let mail: Vec<_> = (0..12)
+            .map(|n| {
+                json!({"seq": 40 + n, "from": "yardmaster", "to": "jo",
+                       "text": format!("No. {} from afar.", n + 1), "read": false})
+            })
+            .collect();
+        far.answer(
+            "UserInbox",
+            &json!({"result": {"mail": mail, "unread": 12, "last": 51, "from": ["yardmaster"]}})
+                .to_string(),
+        );
+        let file = three_yards(dir.path(), &second, &far);
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the other yards", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+                && state_of(&view, cx, "far") == "12 mail"
+        });
+
+        // Each row its dot, its kind, its count and its key. The counts'
+        // right edges stand in one column, one and two figures alike, as
+        // the keys' do: a figure's width is the font's.
+        click_on(cx, "yard chip");
+        for row in ["this machine", "second home", "far"] {
+            assert!(drawn(cx, &format!("switch dot {row}")), "{row}");
+            assert!(drawn(cx, &format!("switch kind {row}")), "{row}");
+            assert!(drawn(cx, &format!("switch count {row}")), "{row}");
+            assert!(drawn(cx, &format!("switch key {row}")), "{row}");
+        }
+        let one = bounds_of(cx, "switch count second home");
+        let two = bounds_of(cx, "switch count far");
+        assert!(
+            (one.right() - two.right()).abs() < px(1.),
+            "the counts stand in one column: {one:?} {two:?}"
+        );
+        let one = bounds_of(cx, "switch key second home");
+        let two = bounds_of(cx, "switch key far");
+        assert!(
+            (one.right() - two.right()).abs() < px(1.),
+            "the keys stand in one column: {one:?} {two:?}"
+        );
+
+        // The footer's button adds a yard: the list shuts, and the
+        // settings stand at their yards, with the open yard as it was.
+        assert!(drawn(cx, "switch add"));
+        click_on(cx, "switch add");
+        assert_eq!(switching(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.section),
+            Section::Yards
+        );
+        assert_eq!(open_yard(&view, cx), "this machine");
+
+        // So does the footer's key, as `+` and as the `=` it shares its
+        // key with.
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
+        cx.simulate_keystrokes("secondary-y");
+        assert_eq!(switching(&view, cx), Some(0));
+        cx.simulate_keystrokes("+");
+        assert_eq!(switching(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.section),
+            Section::Yards
+        );
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("secondary-y");
+        cx.simulate_keystrokes("=");
+        assert_eq!(switching(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.section),
+            Section::Yards
+        );
     }
 
     /// What is written for one yard stays with it across a switch and is
@@ -23050,6 +23382,29 @@ mod tests {
         assert_eq!(away_why(&view, cx), "far · pair again");
         assert_eq!(state_of(&view, cx, "far"), "not reached: pair again");
         assert!(drawn(cx, "away why") && drawn(cx, "pair again"));
+
+        // The list's rows right their yards: the far one pairs again, as
+        // does the shop away from the network, as the away screen offers
+        // it; the stopped one of this machine has no button, and none
+        // signs in again. A click rights the yard instead of opening it.
+        cx.simulate_keystrokes("secondary-y");
+        assert_eq!(switching(&view, cx), Some(2));
+        assert!(drawn(cx, "switch why far") && drawn(cx, "switch why shop"));
+        assert!(drawn(cx, "switch again far"));
+        assert!(drawn(cx, "switch again shop"));
+        assert!(!drawn(cx, "switch again second home"));
+        assert!(!drawn(cx, "switch sign in far"));
+        click_on(cx, "switch again shop");
+        assert_eq!(switching(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.section),
+            Section::Yards
+        );
+        assert!(drawn(cx, "yard pair"));
+        assert_eq!(open_yard(&view, cx), "far");
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
         // Esc leaves the list, and the yard stays as it is.
         cx.simulate_keystrokes("secondary-y");
         assert!(drawn(cx, "switcher"));
@@ -23156,6 +23511,24 @@ mod tests {
         wait(cx, "that the session is not signed in", |cx| {
             state_of(&view, cx, "south") == "not reached: sign in again"
         });
+        // The list's row rights it: signing in again, and no pairing
+        // again, since the device is still paired. A click rights the
+        // yard instead of opening it.
+        click_on(cx, "yard chip");
+        assert!(drawn(cx, "switch why south"));
+        assert!(drawn(cx, "switch sign in south"));
+        assert!(!drawn(cx, "switch again south"));
+        click_on(cx, "switch sign in south");
+        assert_eq!(switching(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.section),
+            Section::Yards
+        );
+        assert!(drawn(cx, "yard sign in"));
+        assert_eq!(open_yard(&view, cx), "this machine");
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
         click_on(cx, "yard chip");
         click_on(cx, "switch south");
         wait(cx, "the hosted yard signed out", |cx| {

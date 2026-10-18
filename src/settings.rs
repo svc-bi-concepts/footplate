@@ -129,7 +129,7 @@ impl Yard {
     pub fn kind(&self) -> &'static str {
         match self.is_far() {
             true => "paired",
-            false => "on this machine",
+            false => "local",
         }
     }
 
@@ -197,7 +197,9 @@ impl Yard {
 }
 
 /// The name a far yard gets where none is typed, and the one yard of a
-/// file from before there were several: its address's host.
+/// file from before there were several: its address's host, shortened to
+/// the first label, which names the machine. An address with no labels
+/// in it keeps the whole host.
 pub fn host_of(address: &str) -> String {
     let rest = address.split_once("://").map_or(address, |(_, rest)| rest);
     let authority = rest.split('/').next().unwrap_or_default();
@@ -207,7 +209,10 @@ pub fn host_of(address: &str) -> String {
             .rsplit_once(':')
             .map_or(authority, |(host, _)| host),
     };
-    host.to_string()
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
+    host.split('.').next().unwrap_or_default().to_string()
 }
 
 /// One of the settings' six sections, as the side list shows them: how
@@ -438,19 +443,25 @@ impl From<Kept> for Settings {
 /// by hand may have both, and a yard is opened, paired and removed by its
 /// name: two of one name would be the first of them whichever was meant,
 /// with the other's address beside it in the list. The later one is called
-/// by its name and its place among them.
+/// by its name and its place among them. One the file names none for is
+/// called by its address's host, shortened, or "yard" with no address.
 fn told_apart(mut yards: Vec<Yard>) -> Vec<Yard> {
     for place in 0..yards.len() {
         let name = match yards[place].name.trim() {
-            "" => "yard",
-            name => name,
+            "" if yards[place].is_far() => host_of(&yards[place].address),
+            "" => String::new(),
+            name => name.to_string(),
+        };
+        let base = match name.is_empty() {
+            true => "yard".to_string(),
+            false => name,
         };
         let taken = |name: &str| yards[..place].iter().any(|other| other.name == name);
-        let mut told = name.to_string();
+        let mut told = base.clone();
         let mut n = 1;
         while taken(&told) {
             n += 1;
-            told = format!("{name} {n}");
+            told = format!("{base} {n}");
         }
         yards[place].name = told;
     }
@@ -1165,7 +1176,7 @@ mod tests {
             .opening("plantime");
         assert_eq!(set.opened().name, "plantime");
         assert_eq!(set.opened().kind(), "paired");
-        assert_eq!(set.yards[0].kind(), "on this machine");
+        assert_eq!(set.yards[0].kind(), "local");
         set.write(&file).unwrap();
         assert_eq!(Settings::read(&file), set);
         assert_eq!(
@@ -1220,9 +1231,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         // Paired with the yard at an address: that far yard first, called
-        // by the address's host, with the token file the pairing wrote
-        // then, and this machine's after it, which the window offered
-        // beside it before there was a list.
+        // by the address's host shortened to its first label, with the
+        // token file the pairing wrote then, and this machine's after it,
+        // which the window offered beside it before there was a list.
         fs::write(
             &file,
             "{\n  \"text\": 15,\n  \"look\": \"dark\",\n  \"remote\": true,\n  \"address\": \"https://mac.example.net:8443/yard\"\n}\n",
@@ -1232,21 +1243,17 @@ mod tests {
         assert_eq!(
             set.yards,
             [
-                Yard::far(
-                    "mac.example.net",
-                    "https://mac.example.net:8443/yard",
-                    "yard.token"
-                ),
+                Yard::far("mac", "https://mac.example.net:8443/yard", "yard.token"),
                 Yard::near(HERE, "")
             ]
         );
         assert_eq!(
             [set.yards[0].kind(), set.yards[1].kind()],
-            ["paired", "on this machine"]
+            ["paired", "local"]
         );
         assert_eq!((set.text, set.look), (15, Look::Dark));
         // The paired one opens, as it did.
-        assert_eq!(set.opened().name, "mac.example.net");
+        assert_eq!(set.opened().name, "mac");
         assert_eq!(set.opened().kind(), "paired");
         assert_eq!(
             yard::token_path(&set.opened().token_file, Some(&file)).unwrap(),
@@ -1261,7 +1268,7 @@ mod tests {
         )
         .unwrap();
         let moved = Settings::read(&file);
-        assert_eq!(moved.opened().name, "mac.example.net");
+        assert_eq!(moved.opened().name, "mac");
 
         // The next write keeps it as a list, and reads back the same.
         set.write(&file).unwrap();
@@ -1304,7 +1311,12 @@ mod tests {
         }
         assert_eq!(host_of("http://[::1]:8790"), "::1");
         assert_eq!(host_of("http://127.0.0.1:8790/"), "127.0.0.1");
-        assert_eq!(host_of("https://mac.example.net"), "mac.example.net");
+        assert_eq!(host_of("https://mac.example.net"), "mac");
+        assert_eq!(
+            host_of("https://adventuretime.tail5cf2e8.ts.net"),
+            "adventuretime"
+        );
+        assert_eq!(host_of("droplet"), "droplet");
     }
 
     #[test]
@@ -1325,10 +1337,9 @@ mod tests {
         .unwrap();
         let set = Settings::read(&file);
         let names: Vec<&str> = set.yards.iter().map(|yard| yard.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["mac", "mac 2", "mac 3", "mac 2 2", "yard", "yard 2"]
-        );
+        // The one with an address and no name is called by its host's
+        // first label; the one with neither is a yard.
+        assert_eq!(names, ["mac", "mac 2", "mac 3", "mac 2 2", "shop", "yard"]);
         // Each is itself by its name: the one the switcher's row opens,
         // and the one whose address stands beside it.
         for yard in &set.yards {

@@ -35,14 +35,15 @@ use crate::yard::Env;
 /// quiet lines, one arrival's bead open from the board, one
 /// line's flow open on its row, an open card of a secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
-/// refusal of its answer, and the switcher's list open over two yards.
+/// refusal of its answer, and the switcher's list open over four yards,
+/// one of them away.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
 /// signed-out yard from settings the state writes itself, against a
 /// throwaway config, with a session the edge no longer knows; the
-/// switcher's two yards from settings the state writes itself, the near
-/// one live at the shot's socket and a far one away; the
+/// switcher's four yards from settings the state writes itself, home live
+/// at the shot's socket, two more live at their listeners, and one away; the
 /// settings open over a running yard, each state on its section;
 /// the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
@@ -117,6 +118,9 @@ pub(super) struct ShotYard {
     /// the window opens the hosted yard through the edge, whose session
     /// is none the edge knows.
     edge: Option<(Yard, Router)>,
+    /// The switcher's other live yards, for `switcher` alone: office and
+    /// plantime at their listeners, held from the start beside home.
+    extra: Vec<std::sync::Arc<Yard>>,
 }
 
 impl ShotYard {
@@ -146,6 +150,7 @@ impl ShotYard {
                 yard: std::sync::Arc::new(yard),
                 directory,
                 edge: None,
+                extra: Vec::new(),
             },
         ))
     }
@@ -154,6 +159,9 @@ impl ShotYard {
 impl Drop for ShotYard {
     fn drop(&mut self) {
         self.yard.stop();
+        for extra in &self.extra {
+            extra.stop();
+        }
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -216,7 +224,15 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         shot.edge = Some((hosted, edge));
     }
     if state == "switcher" {
-        write_switcher_settings(&socket);
+        // The switcher's other live yards, held from the start: office
+        // with two mails and one decision, plantime with twelve mails, so
+        // the counts stand one and two figures in their column.
+        let office = Yard::start_tcp();
+        switcher_office(&office);
+        let plantime = Yard::start_tcp();
+        switcher_plantime(&plantime);
+        write_switcher_settings(office.address(), plantime.address());
+        shot.extra = vec![std::sync::Arc::new(office), std::sync::Arc::new(plantime)];
     }
     if state == "reconnecting" {
         // The yard answers, the window reads it, and then its server is
@@ -298,14 +314,14 @@ fn write_signedout_settings(address: &str) {
         });
 }
 
-/// The settings the `switcher` shot opens: two yards, the near one
-/// live at the shot's socket and a far one that is away, with the near
-/// one open. The far yard keeps no token, so it is never reached: the
-/// window asks nothing of the network for it. The shot script runs
-/// against a throwaway config, which keeps no settings; where a
-/// settings file already stands, the state is refused rather than
-/// overwrite it.
-fn write_switcher_settings(socket: &Path) {
+/// The settings the `switcher` shot opens: four yards, home live at
+/// the shot's socket and open, office and plantime live at their
+/// listeners, and droplet away. Droplet keeps no token, so it is never
+/// reached: the window asks nothing of the network for it. The shot
+/// script runs against a throwaway config, which keeps no settings;
+/// where a settings file already stands, the state is refused rather
+/// than overwrite it.
+fn write_switcher_settings(office_at: &str, plantime_at: &str) {
     let Some(file) = crate::settings::file() else {
         eprintln!("footplate: the switcher shot keeps no settings without a home");
         std::process::exit(1);
@@ -317,7 +333,10 @@ fn write_switcher_settings(socket: &Path) {
         );
         std::process::exit(2);
     }
-    let home = crate::settings::Yard::near("home", &socket.to_string_lossy());
+    // Home by this run's socket, which the shot points at the fake yard.
+    let home = crate::settings::Yard::near("home", "");
+    let office = crate::settings::Yard::far("office", office_at, "yard-office.token");
+    let plantime = crate::settings::Yard::far("plantime", plantime_at, "yard-plantime.token");
     let droplet =
         crate::settings::Yard::far("droplet", "https://droplet.example.net", "droplet.token");
     crate::settings::Settings {
@@ -329,6 +348,8 @@ fn write_switcher_settings(socket: &Path) {
         ..Default::default()
     }
     .with_yard(Some(crate::settings::HERE), home, Some(&file))
+    .and_then(|set| set.with_yard(None, office, Some(&file)))
+    .and_then(|set| set.with_yard(None, plantime, Some(&file)))
     .and_then(|set| set.with_yard(None, droplet, Some(&file)))
     .and_then(|set| {
         set.opening("home")
@@ -339,6 +360,60 @@ fn write_switcher_settings(socket: &Path) {
         eprintln!("footplate: the switcher shot keeps no settings: {error}");
         std::process::exit(1);
     });
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    for (token, at) in [
+        ("yard-office.token", office_at),
+        ("yard-plantime.token", plantime_at),
+    ] {
+        let edge = crate::api::Address::parse(at).unwrap_or_else(|error| {
+            eprintln!("footplate: the switcher shot's yard has no address: {error}");
+            std::process::exit(1);
+        });
+        crate::yard::token_place(&dir.join(token))
+            .and_then(|place| place.keep(crate::fake::TOKEN, &edge))
+            .unwrap_or_else(|error| {
+                eprintln!("footplate: the switcher shot keeps no token: {error}");
+                std::process::exit(1);
+            });
+    }
+}
+
+/// The office yard of the `switcher` shot: jo's, with two mails and one
+/// open decision, so its row carries 3 with "1 decision · 2 mail" in its
+/// tooltip.
+fn switcher_office(yard: &Yard) {
+    populate(yard, "switcher");
+    yard.answer(
+        "UserInbox",
+        r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "From the office.", "read": false},
+            {"seq": 13, "from": "assembly", "to": "jo", "text": "Assembled.", "read": false}], "unread": 2, "last": 13, "from": ["yardmaster", "assembly"]}}"#,
+    );
+    yard.answer(
+        "UserAsks",
+        r#"{"result": {"open": [
+            {"bead": "bead-a", "bead_title": "Move the links", "topic": "topic:linear-out",
+             "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+             "since": "2026-10-10T10:00:00Z"}], "decided": []}}"#,
+    );
+}
+
+/// The plantime yard of the `switcher` shot: jo's, with twelve mails, so
+/// its row carries 12 beside office's 3: one and two figures in the
+/// counts' column.
+fn switcher_plantime(yard: &Yard) {
+    populate(yard, "switcher");
+    let mail: Vec<_> = (0..12)
+        .map(|n| {
+            json!({"seq": 40 + n, "from": "yardmaster", "to": "jo",
+                   "text": format!("No. {} from plantime.", n + 1), "read": false})
+        })
+        .collect();
+    yard.answer(
+        "UserInbox",
+        &json!({"result": {"mail": mail, "unread": 12, "last": 51, "from": ["yardmaster"]}})
+            .to_string(),
+    );
+    yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
 }
 
 /// Doctor's answer for the `setup` shot: git and herdr installed, and
@@ -1284,5 +1359,21 @@ mod tests {
 
         drop(second);
         assert!(!second_directory.exists());
+    }
+
+    #[test]
+    fn the_switcher_shot_s_held_yards_wait_two_and_one_and_twelve() {
+        let office = Yard::start();
+        switcher_office(&office);
+        let loaded = session::load(&office.client(), "shot").unwrap();
+        assert_eq!(loaded.me, "jo");
+        assert_eq!(loaded.unread.len(), 2);
+        assert_eq!(loaded.asks.open.len(), 1);
+        let plantime = Yard::start();
+        switcher_plantime(&plantime);
+        let loaded = session::load(&plantime.client(), "shot").unwrap();
+        assert_eq!(loaded.me, "jo");
+        assert_eq!(loaded.unread.len(), 12);
+        assert!(loaded.asks.open.is_empty());
     }
 }

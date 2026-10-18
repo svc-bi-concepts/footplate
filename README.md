@@ -193,7 +193,7 @@ its flow), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
-its answer) and `switcher` (the switcher's list open over two
+its answer) and `switcher` (the switcher's list open over four
 yards, one of them away). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
