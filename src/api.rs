@@ -2563,7 +2563,13 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
         }
         Ok(n)
     };
-    read_line(&mut conn, &mut line)?;
+    if read_line(&mut conn, &mut line)? == 0 {
+        // The server went away over the call, as it does between two
+        // builds or over a connection it never served: nothing listens.
+        // Whether that reads as a hang-up or a refusal is the kernel's
+        // to say; either way the yard is down.
+        return Err(Error::Down(io::ErrorKind::UnexpectedEof.into()));
+    }
     // "HTTP/1.1 200 OK"
     let status = line
         .split_whitespace()
@@ -3107,10 +3113,7 @@ mod tests {
             // whether it wrote.
             yard.answer_nothing("GiveSecret");
             let err = give().unwrap_err();
-            assert!(
-                matches!(err, Error::Down(_) | Error::Protocol(_)),
-                "{way}: {err:?}"
-            );
+            assert!(matches!(err, Error::Down(_)), "{way}: {err:?}");
             without(&err);
             // And what is no reply.
             yard.answer("GiveSecret", "not json");
@@ -3172,10 +3175,7 @@ mod tests {
             // whether the command ran.
             yard.answer_nothing("ApproveAsk");
             let err = approve().unwrap_err();
-            assert!(
-                matches!(err, Error::Down(_) | Error::Protocol(_)),
-                "{way}: {err:?}"
-            );
+            assert!(matches!(err, Error::Down(_)), "{way}: {err:?}");
         }
     }
 
@@ -3455,7 +3455,8 @@ mod tests {
             yard.stop();
             assert!(events.next().is_none(), "{way}");
             // And nothing listens.
-            assert!(matches!(client.head(), Err(Error::Down(_))), "{way}");
+            let head = client.head();
+            assert!(matches!(head, Err(Error::Down(_))), "{way}: {head:?}");
             assert!(matches!(client.events(0), Err(Error::Down(_))), "{way}");
             assert!(matches!(client.blob(HASH), Err(Error::Down(_))), "{way}");
         }
