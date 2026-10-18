@@ -380,30 +380,45 @@ fn divider(palette: Palette) -> impl IntoElement {
 /// pixels, centred in the pane, as the review's sketch has it.
 const READING_WIDTH: f32 = 720.;
 
+/// A row of the reading column: full width, its content centred in
+/// the reading width.
+///
+/// The width stands on two divs, not one: a div that is `w_full` with
+/// a `max_w` keeps the height its text has at full width once the max
+/// clamps it, so the row below starts inside the text above wherever
+/// the text wraps. With the max on the inner div alone the row stands
+/// as tall as its text wraps.
+fn reading_column(row: AnyElement) -> Div {
+    div()
+        .w_full()
+        .child(div().max_w(px(READING_WIDTH)).mx_auto().child(row))
+}
+
 /// The day's separator: its name centred between two hairlines, in the
 /// reading column.
 fn day_break(day: String, palette: Palette) -> AnyElement {
-    div()
-        .debug_selector({
-            let day = day.clone();
-            move || format!("day {day}")
-        })
-        .mt_2()
-        .w_full()
-        .max_w(px(READING_WIDTH))
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(div().h(px(1.)).flex_1().bg(palette.line))
-        .child(div().text_sm().text_color(palette.faint).child(day))
-        .child(div().h(px(1.)).flex_1().bg(palette.line))
-        .into_any_element()
+    reading_column(
+        div()
+            .debug_selector({
+                let day = day.clone();
+                move || format!("day {day}")
+            })
+            .mt_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().h(px(1.)).flex_1().bg(palette.line))
+            .child(div().text_sm().text_color(palette.faint).child(day))
+            .child(div().h(px(1.)).flex_1().bg(palette.line))
+            .into_any_element(),
+    )
+    .into_any_element()
 }
 
 /// A conversation row in the reading column. Group heads stand farther
 /// from the mail before them; bodies in one group stand close together.
 fn reading_row(row: AnyElement, apart: bool) -> AnyElement {
-    let row = div().w_full().max_w(px(READING_WIDTH)).child(row);
+    let row = reading_column(row);
     if apart {
         row.mt_2().into_any_element()
     } else {
@@ -10342,18 +10357,17 @@ impl Footplate {
             .items_center()
             .gap_1();
         let mail = if entries.is_empty() {
-            mail.child(
+            mail.child(reading_column(
                 div()
-                    .w_full()
-                    .max_w(px(READING_WIDTH))
                     .text_color(palette.faint)
                     .child(if with == model.me() {
                         "No notes to yourself yet. What you write here is mail to yourself."
                             .to_string()
                     } else {
                         format!("No mail between you and {with} yet. What you write here is mail.")
-                    }),
-            )
+                    })
+                    .into_any_element(),
+            ))
         } else {
             // The line above the oldest mail is always the first child:
             // a mail keeps its place among the children but for the mails
@@ -10363,17 +10377,16 @@ impl Footplate {
                 Top::Start => "The conversation starts here.",
                 Top::Unread => "",
             };
-            mail.child(
+            mail.child(reading_column(
                 div()
                     .debug_selector(|| "conversation top".to_string())
-                    .w_full()
-                    .max_w(px(READING_WIDTH))
                     .flex()
                     .justify_center()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child(top),
-            )
+                    .child(top)
+                    .into_any_element(),
+            ))
             .children(self.mail_rows(entries, palette, cx))
         };
         // The jump control stands over the mail, at its bottom right,
@@ -19383,6 +19396,121 @@ mod tests {
                 "mail {seq} stands off the column's right: {text:?}"
             );
         }
+    }
+
+    /// A conversation of `n` mails from alternating senders, most of
+    /// them long enough to wrap in the reading column, each heading
+    /// its own group, one with an image. The yard holds it, and
+    /// answers it in pages.
+    fn wrapping_conversation(yard: &Yard, n: u64) {
+        yard.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+        );
+        let long = "New draft is in Gmail on Shai's thread: it says managers cannot change names today, people can edit their own, a manager option is coming with no date promised, and I'll let him know.";
+        yard.converse(
+            "yardmaster",
+            (1..=n)
+                .map(|seq| {
+                    let from = match seq % 2 == 0 {
+                        true => "yardmaster",
+                        false => "jo",
+                    };
+                    let to = match seq % 2 == 0 {
+                        true => "jo",
+                        false => "yardmaster",
+                    };
+                    let text = match seq % 3 == 0 {
+                        true => "can we get permission to edit?",
+                        false => long,
+                    };
+                    let mut mail = json!({"seq": seq, "at": mailed(seq - 1), "from": from,
+                        "to": to, "read": true, "text": text});
+                    if seq * 4 == n * 3 {
+                        mail["files"] = json!([{"hash": HASH, "type": "image/png", "bytes": 70}]);
+                    }
+                    mail
+                })
+                .collect(),
+        );
+    }
+
+    /// No two of the open conversation's rows overlap: each of the
+    /// scroll handle's children stands below the one before, and each
+    /// mail's head and text stand below the text before. Within a
+    /// pixel, for gpui's rounding to device pixels.
+    fn rows_tile(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        frames(cx);
+        let rows: Vec<Bounds<Pixels>> = view.read_with(cx, |v, _| {
+            let mut rows = Vec::new();
+            let mut ix = 0;
+            while let Some(bounds) = v.conversation.bounds_for_item(ix) {
+                rows.push(bounds);
+                ix += 1;
+            }
+            rows
+        });
+        assert!(!rows.is_empty(), "the conversation shows no rows");
+        for (ix, pair) in rows.windows(2).enumerate() {
+            assert!(
+                pair[1].top() + px(1.) >= pair[0].bottom(),
+                "row {} starts inside row {}: {:?} past {:?}",
+                ix + 1,
+                ix,
+                pair[1],
+                pair[0],
+            );
+        }
+        let mails: Vec<(u64, bool)> = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .map(|m| m.entries().into_iter().map(|e| (e.seq, e.head)).collect())
+                .unwrap_or_default()
+        });
+        let mut below = px(0.);
+        let mut first = true;
+        for (seq, headed) in mails {
+            let text = bounds_of(cx, &format!("text {seq}"));
+            if headed {
+                let head = bounds_of(cx, &format!("head {seq}"));
+                if !first {
+                    assert!(
+                        head.top() + px(1.) >= below,
+                        "mail {seq}'s head starts inside the mail above: {head:?} past {below:?}"
+                    );
+                }
+                assert!(
+                    text.top() + px(1.) >= head.bottom(),
+                    "mail {seq}'s text starts inside its head: {text:?} past {head:?}"
+                );
+            } else if !first {
+                assert!(
+                    text.top() + px(1.) >= below,
+                    "mail {seq}'s text starts inside the mail above: {text:?} past {below:?}"
+                );
+            }
+            first = false;
+            below = text.bottom();
+        }
+    }
+
+    /// A long wrapped thread from alternating senders, one mail with
+    /// an image: no row stands inside the one above, on first open or
+    /// after an older page loads. A row that stood `w_full` with
+    /// `max_w` kept the height its text had at full width, and the
+    /// mail below started inside it.
+    #[gpui::test]
+    fn a_wrapped_thread_overlaps_neither_on_open_nor_after_an_older_page(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.blob(HASH, &png());
+        wrapping_conversation(&yard, 100);
+        let (view, cx) = opened_on(&yard, 50, cx);
+        cx.simulate_resize(gpui::size(px(1920.), px(1080.)));
+        rows_tile(&view, cx);
+        scroll_to(&view, cx, 100.);
+        wait(cx, "the page before", |cx| texts(&view, cx).len() == 100);
+        rows_tile(&view, cx);
     }
 
     /// At the narrowest window the arrivals panes hold: the list's row
