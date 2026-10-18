@@ -30,7 +30,7 @@ use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
-use crate::theme::{Look, Palette, yard_color};
+use crate::theme::{Look, Palette, yard_color, yard_ink};
 use crate::yard::{self, Env};
 
 mod firstrun;
@@ -8977,7 +8977,7 @@ impl Footplate {
                 .size(px(40.))
                 .rounded_md()
                 .bg(yard_color(&self.yard, palette.dark))
-                .text_color(palette.on_accent)
+                .text_color(yard_ink(&self.yard, palette.dark))
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .flex()

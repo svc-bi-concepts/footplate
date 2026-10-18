@@ -60,36 +60,35 @@ impl Look {
 
 /// A yard's colour, by its name: the chip at the rail's head, the dot
 /// in a card's header and in a switcher row are this, so the open yard
-/// is unmistakable. It is stable: the same name is the same colour on
+/// is unmistakable. The shades come from the yard rust scale in the
+/// design system. It is stable: the same name is the same colour on
 /// every run and every machine, from a hash and not from the yard's
 /// place in the settings, which moving a yard would change. The name
-/// always stands beside it, so two yards that share a colour still
+/// always stands beside it, so two yards that share a shade still
 /// read apart.
 pub fn yard_color(name: &str, dark: bool) -> Rgba {
-    let [dark_ground, light_ground] = YARD_COLORS[slot(name) % YARD_COLORS.len()];
-    rgb(match dark {
-        true => dark_ground,
-        false => light_ground,
-    })
+    let colors = match dark {
+        true => &YARD_DARK_COLORS,
+        false => &YARD_LIGHT_COLORS,
+    };
+    rgb(colors[slot(name) % colors.len()])
 }
 
-/// A yard's colour as two grounds: on a dark ground first, on a light
-/// one after. Each reads with [`Palette::on_accent`] letters on it, as
-/// the rail's chip has them; the rest are dots, which carry no letters.
-/// None is the running green nor the error red, which are statuses and
-/// not yards.
-const YARD_COLORS: [[u32; 2]; 8] = [
-    [0xe2794a, 0xb54e22],
-    [0xe8a33d, 0xa8600a],
-    [0xd9b45c, 0x8a6d1f],
-    [0x5fb8a6, 0x2e7d6e],
-    [0x6fb3d8, 0x2f6e9e],
-    [0x7e93d6, 0x3d4fa3],
-    [0xd67e8c, 0xa83a52],
-    [0xc08a5e, 0x7a5226],
-];
+/// Brighter rust shades on a dark ground and deeper shades on a light
+/// one, from the design system's `yard-300` through `yard-700` tokens.
+const YARD_DARK_COLORS: [u32; 3] = [0xeba17e, 0xe2794a, 0xd3602f];
+const YARD_LIGHT_COLORS: [u32; 3] = [0xd3602f, 0xb54e22, 0x8f3c19];
 
-/// The colour's place in [`YARD_COLORS`]: FNV-1a over the name's bytes.
+/// The chip's letters, chosen to read against its yard shade at text
+/// contrast. Dots in cards and rows carry no letters.
+pub fn yard_ink(name: &str, dark: bool) -> Rgba {
+    match (dark, slot(name) % YARD_DARK_COLORS.len()) {
+        (true, _) | (false, 0) => rgb(0x161718),
+        (false, _) => rgb(0xffffff),
+    }
+}
+
+/// The colour's place in the yard shades: FNV-1a over the name's bytes.
 /// The standard hasher will not do: it is seeded anew every run.
 fn slot(name: &str) -> usize {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -227,18 +226,12 @@ mod tests {
 
     #[test]
     fn yards_keep_their_colours_and_read_with_letters_on_them() {
-        // The same name is the same colour, and a dark ground's is not
-        // a light one's.
-        assert_eq!(
-            yard_color("adventuretime", true),
-            yard_color("adventuretime", true)
-        );
-        assert_eq!(yard_color("plantime", false), yard_color("plantime", false));
-        assert_ne!(
-            yard_color("adventuretime", true),
-            yard_color("adventuretime", false)
-        );
-        // The two yards of the bead's Mac read apart, on either ground.
+        // Names are stable, and the two yards of the bead's Mac read
+        // apart in either look.
+        assert_eq!(yard_color("adventuretime", true), rgb(0xe2794a));
+        assert_eq!(yard_color("plantime", true), rgb(0xeba17e));
+        assert_eq!(yard_color("adventuretime", false), rgb(0xb54e22));
+        assert_eq!(yard_color("plantime", false), rgb(0xd3602f));
         assert_ne!(
             yard_color("adventuretime", true),
             yard_color("plantime", true)
@@ -247,32 +240,33 @@ mod tests {
             yard_color("adventuretime", false),
             yard_color("plantime", false)
         );
-        // Eight colours a side, each its own.
-        let darks: Vec<Rgba> = YARD_COLORS.iter().map(|[dark, _]| rgb(*dark)).collect();
-        let lights: Vec<Rgba> = YARD_COLORS.iter().map(|[_, light]| rgb(*light)).collect();
-        for pair in [darks.as_slice(), lights.as_slice()] {
-            for (one, another) in pair
+        // Each shade is a design token, and the three in each look differ.
+        assert_eq!(YARD_DARK_COLORS, [0xeba17e, 0xe2794a, 0xd3602f]);
+        assert_eq!(YARD_LIGHT_COLORS, [0xd3602f, 0xb54e22, 0x8f3c19]);
+        for colors in [&YARD_DARK_COLORS, &YARD_LIGHT_COLORS] {
+            let colors: Vec<Rgba> = colors.iter().map(|color| rgb(*color)).collect();
+            for (one, another) in colors
                 .iter()
                 .enumerate()
-                .flat_map(|(n, one)| pair.iter().skip(n + 1).map(move |another| (one, another)))
+                .flat_map(|(n, one)| colors.iter().skip(n + 1).map(move |another| (one, another)))
             {
                 assert_ne!(one, another, "{one:?} {another:?}");
             }
         }
-        // The chip's letters over each: three to one, as non-text wants.
-        // None is the running green nor the error red.
+        // The chip's letters pass 4.5:1, and its colour stands apart
+        // from the surface. None is the running green nor the error.
         for look in [Look::Dark, Look::Light] {
             let palette = Palette::of(look, WindowAppearance::Dark);
-            for [dark, light] in YARD_COLORS {
-                let ground = rgb(match palette.dark {
-                    true => dark,
-                    false => light,
-                });
-                assert!(
-                    contrast(palette.on_accent, ground) >= 3.,
-                    "{ground:?} under {:?}",
-                    palette.on_accent
-                );
+            for name in ["adventuretime", "plantime", "home", "droplet"] {
+                let ground = yard_color(name, palette.dark);
+                let ink = yard_ink(name, palette.dark);
+                assert!(contrast(ink, ground) >= 4.5, "{ground:?} under {:?}", ink);
+                for surface in [palette.side, palette.ground] {
+                    assert!(
+                        contrast(ground, surface) >= 3.,
+                        "{ground:?} against {surface:?}"
+                    );
+                }
                 assert_ne!(ground, palette.ok, "{ground:?}");
                 assert_ne!(ground, palette.warn, "{ground:?}");
             }
