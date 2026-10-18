@@ -9152,49 +9152,54 @@ impl Footplate {
                     ("way hosted", "open a hosted yard", Adding::Hosted),
                 ];
                 el.child(
-                    div()
-                        .w_full()
-                        .max_w(rems(32.5))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            // The ways stand one to a line, not beside
-                            // each other: a wrapping row under the
-                            // column's width keeps the height of one line
-                            // and spills the rest over whatever stands
-                            // under it.
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .gap_2()
-                                // The first way makes the yard that is
-                                // not there: this run's, and no other. It
-                                // stands filled, as the one to take.
-                                .children(setup_here.then(|| {
-                                    card_button(
-                                        "way here".to_string(),
-                                        "set up a yard here".to_string(),
-                                        palette,
-                                        Some(cx.listener(|this, _, window, cx| {
-                                            this.set_up_here(window, cx)
-                                        })),
-                                    )
-                                }))
-                                .children(ways.map(|(id, text, adding)| {
-                                    small_button(text.to_string(), palette)
-                                        .id(id)
-                                        .debug_selector(move || id.to_string())
-                                        .when(self.adding == Some(adding.clone()), |el| {
-                                            el.bg(palette.open)
-                                        })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.add_yard(adding.clone(), window, cx)
-                                        }))
-                                })),
-                        )
-                        .children(self.yard_asked(palette, cx)),
+                    // Two divs, not one, as reading_column has it:
+                    // `w_full` with `max_w` keeps the height its text
+                    // has at full width once the max clamps it.
+                    div().w_full().child(
+                        div()
+                            .max_w(rems(32.5))
+                            .mx_auto()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                // The ways stand one to a line, not beside
+                                // each other: a wrapping row under the
+                                // column's width keeps the height of one line
+                                // and spills the rest over whatever stands
+                                // under it.
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_start()
+                                    .gap_2()
+                                    // The first way makes the yard that is
+                                    // not there: this run's, and no other. It
+                                    // stands filled, as the one to take.
+                                    .children(setup_here.then(|| {
+                                        card_button(
+                                            "way here".to_string(),
+                                            "set up a yard here".to_string(),
+                                            palette,
+                                            Some(cx.listener(|this, _, window, cx| {
+                                                this.set_up_here(window, cx)
+                                            })),
+                                        )
+                                    }))
+                                    .children(ways.map(|(id, text, adding)| {
+                                        small_button(text.to_string(), palette)
+                                            .id(id)
+                                            .debug_selector(move || id.to_string())
+                                            .when(self.adding == Some(adding.clone()), |el| {
+                                                el.bg(palette.open)
+                                            })
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.add_yard(adding.clone(), window, cx)
+                                            }))
+                                    })),
+                            )
+                            .children(self.yard_asked(palette, cx)),
+                    ),
                 )
             })
             // The actions stand in their own row under the ways, in the
@@ -9209,29 +9214,34 @@ impl Footplate {
             // reached direct, and is signed in nowhere.
             .when(pair_again || sign_in_again, |el| {
                 el.child(
-                    div()
-                        .w_full()
-                        .max_w(rems(32.5))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .children(pair_again.then(|| {
-                            small_button("pair again".to_string(), palette)
-                                .id("pair again")
-                                .debug_selector(|| "pair again".to_string())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.pair_again(None, window, cx)
-                                }))
-                        }))
-                        .children(sign_in_again.then(|| {
-                            small_button("sign in again".to_string(), palette)
-                                .id("sign in again")
-                                .debug_selector(|| "sign in again".to_string())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let name = this.yard.clone();
-                                    this.sign_in_again(&name, window, cx)
-                                }))
-                        })),
+                    // Two divs, not one, as reading_column has it:
+                    // `w_full` with `max_w` keeps the height its text
+                    // has at full width once the max clamps it.
+                    div().w_full().child(
+                        div()
+                            .max_w(rems(32.5))
+                            .mx_auto()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(pair_again.then(|| {
+                                small_button("pair again".to_string(), palette)
+                                    .id("pair again")
+                                    .debug_selector(|| "pair again".to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pair_again(None, window, cx)
+                                    }))
+                            }))
+                            .children(sign_in_again.then(|| {
+                                small_button("sign in again".to_string(), palette)
+                                    .id("sign in again")
+                                    .debug_selector(|| "sign in again".to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let name = this.yard.clone();
+                                        this.sign_in_again(&name, window, cx)
+                                    }))
+                            })),
+                    ),
                 )
             })
     }
@@ -24799,6 +24809,70 @@ mod tests {
         click_on(cx, "setup go on");
         assert_eq!(step_of(&view, cx), Some(Step::Yard));
         (view, cx, program)
+    }
+
+    /// The first run on a wide window: its column stands as tall as its
+    /// rows wrap, and no row starts inside the one above. A column that
+    /// stood `w_full` with `max_w` kept the height its text had at full
+    /// width once the max clamped it, so the rows below started inside
+    /// wrapped text above. Within a pixel, for gpui's rounding to
+    /// device pixels.
+    #[gpui::test]
+    fn the_first_run_s_rows_tile_on_a_wide_window(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx, _) = at_yard(&dir, &standin::doctor_ready(), cx);
+        cx.simulate_resize(gpui::size(px(1920.), px(1080.)));
+        frames(cx);
+        // The max clamps: the column stands well under the window's
+        // width, so its prose wraps at the column, not the window.
+        let window = cx.update(|window, _| window.viewport_size());
+        let column = bounds_of(cx, "setup column");
+        assert!(
+            column.size.width * 2. < window.width,
+            "the column is not clamped: {column:?} in {window:?}"
+        );
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        // Each row below the one before: the style note under the
+        // style buttons, the yardmaster note under the line about
+        // changing it later, and the create button under that note.
+        let style = bounds_of(cx, "setup style note");
+        for key in ["guide", "show", "work", "report"] {
+            let button = bounds_of(cx, &format!("setup style {key}"));
+            assert!(
+                style.top() + px(1.) >= button.bottom(),
+                "the style note starts inside the {key} button: {style:?} past {button:?}"
+            );
+        }
+        let about = bounds_of(cx, "setup about you");
+        assert!(
+            about.top() + px(1.) >= style.bottom(),
+            "the about field starts inside the style note: {about:?} past {style:?}"
+        );
+        let later = bounds_of(cx, "setup change later");
+        let note = bounds_of(cx, "setup yardmaster note");
+        assert!(
+            note.top() + px(1.) >= later.bottom(),
+            "the yardmaster note starts inside the line above: {note:?} past {later:?}"
+        );
+        let create = bounds_of(cx, "setup create");
+        assert!(
+            create.top() + px(1.) >= note.bottom(),
+            "the create button starts inside the yardmaster note: {create:?} past {note:?}"
+        );
+        // The column holds its rows: it starts at or above the step
+        // line and ends at or below the create button.
+        let step = bounds_of(cx, "setup step");
+        assert!(
+            column.top() <= step.top() + px(1.),
+            "the column starts below its first row: {column:?} past {step:?}"
+        );
+        assert!(
+            column.bottom() + px(1.) >= create.bottom(),
+            "the column ends above its last row: {column:?} past {create:?}"
+        );
     }
 
     /// A fetch is a Mac road from yardr's data. Even if a doctor answer

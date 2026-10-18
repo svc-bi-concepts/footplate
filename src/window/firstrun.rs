@@ -1156,7 +1156,14 @@ impl FirstRun {
                         .children(styles)
                         .into_any_element(),
                 );
-                body.push(faint(setup::STYLES[self.style].2));
+                body.push(
+                    div()
+                        .debug_selector(|| "setup style note".to_string())
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child(setup::STYLES[self.style].2.to_string())
+                        .into_any_element(),
+                );
                 body.push(self.typed("about you", &self.about, palette, cx));
                 body.push(
                     div()
@@ -1166,9 +1173,14 @@ impl FirstRun {
                         .child("You can change this and the line about you later, in the settings.")
                         .into_any_element(),
                 );
-                body.push(faint(
-                    "The yardmaster is the agent you talk with: it should run on the strongest model you have. The override and the line about you may stay empty.",
-                ));
+                body.push(
+                    div()
+                        .debug_selector(|| "setup yardmaster note".to_string())
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child("The yardmaster is the agent you talk with: it should run on the strongest model you have. The override and the line about you may stay empty.")
+                        .into_any_element(),
+                );
                 body.push(
                     div()
                         .flex()
@@ -1453,59 +1465,66 @@ impl Render for FirstRun {
             .items_center()
             .p_8()
             .child(
-                div()
-                    .w_full()
-                    .max_w(rems(36.))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(palette.faint)
-                                            .child("Set up a yard on this machine"),
-                                    )
-                                    .child(
-                                        div()
-                                            .debug_selector(|| "setup step".to_string())
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(format!(
-                                                "{} of 5 · {}",
-                                                self.step.number(),
-                                                self.step.title()
-                                            )),
-                                    ),
-                            )
-                            .child(
-                                small_button("leave (esc)".to_string(), palette)
-                                    .id("setup leave")
-                                    .debug_selector(|| "setup leave".to_string())
-                                    .on_click(cx.listener(|this, _, _, cx| this.leave(cx))),
-                            ),
-                    )
-                    .children(self.body(palette, cx))
-                    .children(self.busy.as_ref().map(|busy| {
-                        div()
-                            .debug_selector(|| "setup busy".to_string())
-                            .text_color(palette.faint)
-                            .child(busy.clone())
-                    }))
-                    .children(self.said.as_ref().map(|said| {
-                        div()
-                            .debug_selector(|| "setup said".to_string())
-                            .child(said.clone())
-                    })),
+                // Two divs, not one (reading_column in window.rs stands
+                // the same shape): `w_full` with `max_w` keeps the height
+                // its text has at full width once the max clamps it,
+                // short of the rows it holds.
+                div().w_full().child(
+                    div()
+                        .debug_selector(|| "setup column".to_string())
+                        .max_w(rems(36.))
+                        .mx_auto()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(palette.faint)
+                                                .child("Set up a yard on this machine"),
+                                        )
+                                        .child(
+                                            div()
+                                                .debug_selector(|| "setup step".to_string())
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(format!(
+                                                    "{} of 5 · {}",
+                                                    self.step.number(),
+                                                    self.step.title()
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    small_button("leave (esc)".to_string(), palette)
+                                        .id("setup leave")
+                                        .debug_selector(|| "setup leave".to_string())
+                                        .on_click(cx.listener(|this, _, _, cx| this.leave(cx))),
+                                ),
+                        )
+                        .children(self.body(palette, cx))
+                        .children(self.busy.as_ref().map(|busy| {
+                            div()
+                                .debug_selector(|| "setup busy".to_string())
+                                .text_color(palette.faint)
+                                .child(busy.clone())
+                        }))
+                        .children(self.said.as_ref().map(|said| {
+                            div()
+                                .debug_selector(|| "setup said".to_string())
+                                .child(said.clone())
+                        })),
+                ),
             )
     }
 }
