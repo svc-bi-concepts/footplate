@@ -1155,7 +1155,10 @@ fn checkmark(color: Rgba) -> impl IntoElement {
         move |bounds, _, window, _| {
             let scale = f32::from(bounds.size.width) / 16.;
             let at = |x: f32, y: f32| {
-                gpui::point(bounds.origin.x + px(x * scale), bounds.origin.y + px(y * scale))
+                gpui::point(
+                    bounds.origin.x + px(x * scale),
+                    bounds.origin.y + px(y * scale),
+                )
             };
             let mut path = gpui::PathBuilder::stroke(px(1.8 * scale));
             path.move_to(at(3.2, 8.2));
@@ -1193,7 +1196,7 @@ fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
                     el.bg(palette.accent)
                         .border_color(palette.accent)
                         .child(checkmark(palette.on_accent))
-                })
+                }),
         )
         .child(div().text_sm().child(label))
 }
