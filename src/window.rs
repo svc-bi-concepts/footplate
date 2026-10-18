@@ -30,7 +30,7 @@ use crate::select::{self, Selection};
 use crate::session::{self, Update};
 use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
-use crate::theme::{Look, Palette};
+use crate::theme::{Look, Palette, yard_color};
 use crate::yard::{self, Env};
 
 mod firstrun;
@@ -587,6 +587,7 @@ fn run_runs(yard: &str, user: &str) -> String {
 
 /// The header of a card: the yard it is of first, then the bead and how
 /// long it waits or which ask it is. No card is read without its yard.
+/// The yard's dot stands before it, in its colour.
 fn card_head(yard: &str, bead: &str, rest: &str) -> String {
     format!("{yard} · {bead} · {rest}")
 }
@@ -928,8 +929,8 @@ fn glyph_circle(
     path.arc_to(radii, px(0.), false, true, at(cx - r, cy));
 }
 
-/// The kit's track glyph: two rails with three sleepers, the mark's and
-/// the timetable's. Its strokes are the track-icon asset's (two rails 10
+/// The kit's track glyph: two rails with three sleepers, the
+/// timetable's. Its strokes are the track-icon asset's (two rails 10
 /// apart, three sleepers, 24 by 24).
 fn track_glyph(color: Rgba) -> impl IntoElement {
     glyph_canvas(move |o, s, window| {
@@ -1589,7 +1590,7 @@ pub struct Footplate {
     /// What there was to say while a yard was being opened and nothing
     /// showed to say it in: it is said when the yard shows.
     late: Option<String>,
-    /// The switcher's list is shown as a popover at the rail's foot: the
+    /// The switcher's list is shown as a popover at the rail's head: the
     /// row of it the keys are on.
     switching: Option<usize>,
     /// The rail's mode icon the pointer stands on, if any: its glyph
@@ -1877,6 +1878,19 @@ impl Footplate {
                 )
             });
             this.first_run = Some(first_run);
+        }
+        // The switcher shot opens with the switcher's list standing, on
+        // the open yard's row: two yards are paired, and the shot is the
+        // list. A debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("switcher") {
+            let open = this
+                .settings
+                .yards
+                .iter()
+                .position(|yard| yard.name == this.yard)
+                .unwrap_or(0);
+            this.switching = Some(open);
         }
         this
     }
@@ -5891,7 +5905,7 @@ impl Footplate {
         cx.notify();
     }
 
-    /// The switcher's list at the rail's foot, or no longer: the yards
+    /// The switcher's list at the rail's head, or no longer: the yards
     /// the settings list, to open one of. While it shows, the window
     /// holds the keys, on the row of the open yard first. With one yard
     /// named by the environment there is nothing to switch between. A
@@ -8543,11 +8557,11 @@ impl Footplate {
             )
     }
 
-    /// The switcher's list as a popover to the right of the rail's foot:
-    /// a row for each yard of the settings, with its kind and its state,
-    /// which of one that is not open is what waits in it now, the open
-    /// one marked. A click opens a yard, as Enter does on the row the
-    /// arrows are on. It stands over whatever the window shows.
+    /// The switcher's list as a popover to the right of the rail's head:
+    /// a row for each yard of the settings, with its colour, its kind
+    /// and its state, which of one that is not open is what waits in it
+    /// now, the open one marked. A click opens a yard, as Enter does on
+    /// the row the arrows are on. It stands over whatever the window shows.
     fn switcher(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = div().flex().flex_col().flex_none().py_1();
         for (place, yard) in self.settings.yards.iter().enumerate() {
@@ -8567,7 +8581,10 @@ impl Footplate {
                     .rounded_md()
                     .cursor_pointer()
                     .text_sm()
-                    .truncate()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .when(place == at, |el| el.bg(palette.open))
                     // A yard that is not reached has nothing to open
                     // it for, and is drawn so.
@@ -8578,12 +8595,25 @@ impl Footplate {
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.switch_to(&name, window, cx)),
                     )
-                    .child(format!(
+                    // The yard's dot, in its colour: the row's name reads
+                    // with it, as the rail's chip and a card's header do.
+                    .child(
+                        div()
+                            .debug_selector({
+                                let name = yard.name.clone();
+                                move || format!("switch dot {name}")
+                            })
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(yard_color(&yard.name, palette.dark)),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(format!(
                         "{mark} {} · {} · {}",
                         yard.name,
                         yard.kind(),
                         self.yard_state(yard)
-                    )),
+                    ))),
             );
         }
         list = list.child(
@@ -8600,7 +8630,7 @@ impl Footplate {
         div()
             .absolute()
             .left(px(RAIL + 8.))
-            .bottom(px(8.))
+            .top(px(8.))
             .min_w(px(200.))
             .max_w(px(320.))
             .debug_selector(|| "switcher".to_string())
@@ -8712,7 +8742,7 @@ impl Footplate {
     /// paired again from here. One whose session the edge no longer lets
     /// in says to sign in again, and pairing is not offered. A yard that
     /// is only stopped says that, and points at Start at the top of the
-    /// list. It stands beside the rail, whose foot opens another yard;
+    /// list. It stands beside the rail, whose head opens another yard;
     /// the one yard the environment names has no other. Under the words
     /// are the ways to a yard from here, which are
     /// the settings' own: each asks for what the settings ask for a yard
@@ -8898,17 +8928,18 @@ impl Footplate {
             })
     }
 
-    /// The rail on the window's far left: the footplate mark on top, the
-    /// three mode icons, and at the foot the switcher's tile with the
-    /// open yard's first two letters and the settings' gear. The open
-    /// mode's icon stands in the accent on the open ground, as the open
-    /// row does; the others stand quiet and brighten on hover, as quiet
-    /// text does. The chat and decisions icons carry what waits in them
-    /// as a badge, and in words in their tooltips; the timetable's
-    /// carries a dot where one of the person's beads changed since they
-    /// last had Timetable open. While the yard is away the modes stand
-    /// dimmed and inert, and the foot stays alive, because leaving is
-    /// its job.
+    /// The rail on the window's far left: the open yard's chip on top,
+    /// the three mode icons, and at the foot the settings' gear. The
+    /// chip is the yard's first two letters on its colour, so the yard
+    /// picks and approvals count in is unmistakable; a click opens the
+    /// switcher. The open mode's icon stands in the accent on the open
+    /// ground, as the open row does; the others stand quiet and
+    /// brighten on hover, as quiet text does. The chat and decisions
+    /// icons carry what waits in them as a badge, and in words in their
+    /// tooltips; the timetable's carries a dot where one of the
+    /// person's beads changed since they last had Timetable open. While
+    /// the yard is away the modes stand dimmed and inert, and the chip
+    /// and the foot stay alive, because leaving is their job.
     fn rail(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.mode();
         // The modes answer where a yard's rows are there to show.
@@ -8931,18 +8962,34 @@ impl Footplate {
             .bg(palette.side)
             .border_r_1()
             .border_color(palette.line);
-        // The vivid app icon, doing nothing: orientation at the rail's
-        // head, as the mark was.
+        // The open yard's chip: its first two letters on its colour.
+        // The one yard the environment names has no switcher, but it
+        // still has its chip, with its name alone for its words.
+        let letters: String = self.yard.chars().take(2).collect();
+        let tip = match self.env.yard.is_some() {
+            true => self.yard.clone(),
+            false => format!("{} — switch yards ({}+y)", self.yard, SECONDARY),
+        };
         rail = rail.child(
             div()
-                .id("rail mark")
-                .debug_selector(|| "rail mark".to_string())
+                .id("yard chip")
+                .debug_selector(|| "yard chip".to_string())
                 .size(px(40.))
+                .rounded_md()
+                .bg(yard_color(&self.yard, palette.dark))
+                .text_color(palette.on_accent)
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
                 .flex()
                 .items_center()
                 .justify_center()
-                .tooltip(|_, cx| cx.new(|_| RailTip("footplate".to_string())).into())
-                .child(img(self.icon.clone()).size(px(40.))),
+                .when(self.env.yard.is_none(), |el| {
+                    el.cursor_pointer().on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)),
+                    )
+                })
+                .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+                .child(letters),
         );
         for (n, m) in Mode::ALL.into_iter().enumerate() {
             let open = live && m == mode;
@@ -9046,33 +9093,8 @@ impl Footplate {
                 );
         }
         rail = rail.child(div().flex_1().min_h_0());
-        // The foot: the switcher's tile with the open yard's first two
-        // letters, and the settings' gear. The one yard the environment
-        // names has no tile, as it had no switcher.
-        if self.env.yard.is_none() {
-            let letters: String = self.yard.chars().take(2).collect();
-            let tip = format!("{} — switch yards ({}+y)", self.yard, SECONDARY);
-            rail = rail.child(
-                div()
-                    .id("switch tile")
-                    .debug_selector(|| "switch tile".to_string())
-                    .size(px(40.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(palette.line)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(palette.hover))
-                    .when(self.switching.is_some(), |el| el.bg(palette.open))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_switcher(window, cx)))
-                    .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
-                    .child(letters),
-            );
-        }
+        // The foot: the settings' gear. The yards are switched from the
+        // chip at the rail's head.
         rail.child(
             div()
                 .id("settings")
@@ -11476,8 +11498,8 @@ impl Footplate {
         let ask_seq = ask.ask;
         let current = ask.current;
         let mut card = div().flex().flex_col().gap_2();
-        // The question, with the yard, the bead small and how long it
-        // waits.
+        // The question, with the yard's dot, the bead small and how
+        // long it waits.
         let short = detail
             .bead
             .rsplit('-')
@@ -11511,6 +11533,20 @@ impl Footplate {
                         .flex_none()
                         .text_sm()
                         .text_color(palette.faint)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .debug_selector(|| {
+                                    format!("in {} {bead_id} {ask_seq} dot", self.yard)
+                                })
+                                .flex_none()
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(yard_color(&self.yard, palette.dark)),
+                        )
                         .child(card_head(&self.yard, short, &ask.waits)),
                 ),
         );
@@ -12080,6 +12116,18 @@ impl Footplate {
                     .debug_selector(|| format!("in {} {bead} {ask}", self.yard))
                     .text_sm()
                     .text_color(palette.faint)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .debug_selector(|| format!("in {} {bead} {ask} dot", self.yard))
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(yard_color(&self.yard, palette.dark)),
+                    )
                     .child(card_head(&self.yard, &detail.bead, &format!("ask {ask}"))),
             );
         let mut body = div()
@@ -12621,7 +12669,7 @@ impl Render for Footplate {
             (None, None) => root,
         };
         // The switcher's list stands over whatever shows, to the right
-        // of the rail's foot; the image open over the window, where one
+        // of the rail's head; the image open over the window, where one
         // is, over that: over whatever shows, the settings and the first
         // run with it.
         let shown = shown.children(self.switching.map(|at| self.switcher(at, palette, cx)));
@@ -16753,6 +16801,10 @@ mod tests {
         open_decided(&view, cx, "bead-d", 11);
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-d"));
 
+        // The decided card's header names the yard, with its dot.
+        assert!(drawn(cx, "in this machine bead-d 11"));
+        assert!(drawn(cx, "in this machine bead-d 11 dot"));
+
         // Each state in plain words with who and when, and the pick.
         let d = decided_detail_of(&view, cx, "bead-d", 11);
         assert_eq!(d.picked, 1);
@@ -18640,7 +18692,7 @@ mod tests {
                 (rail.size.width - px(56.)).abs() < px(1.),
                 "at {text} px the rail is {rail:?}, not 56 wide"
             );
-            for target in ["rail mark", "rail chat", "switch tile", "settings"] {
+            for target in ["yard chip", "rail chat", "settings"] {
                 let at = bounds_of(cx, target);
                 assert!(
                     (at.size.width - px(40.)).abs() < px(1.)
@@ -19619,12 +19671,11 @@ mod tests {
     }
 
     /// The rail stands 56 pixels wide on the window's far left: the
-    /// inert mark on top, the three modes under it in order, the
-    /// switcher's tile and the settings' gear at the foot. A click on a
-    /// mode opens it, on the tile the switcher, on the gear the settings;
-    /// on the mark nothing.
+    /// open yard's chip on top, the three modes under it in order, the
+    /// settings' gear at the foot. A click on a mode opens it, on the
+    /// chip the switcher, on the gear the settings.
     #[gpui::test]
-    fn the_rail_holds_the_modes_with_the_mark_and_the_foot(cx: &mut TestAppContext) {
+    fn the_rail_holds_the_yard_s_chip_the_modes_and_the_foot(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         cx.update(|cx| {
@@ -19646,15 +19697,14 @@ mod tests {
             (rail.size.width - px(56.)).abs() < px(1.),
             "the rail is {rail:?}, not 56 wide"
         );
-        // The mark, the modes in order, the foot's tile and gear: each
-        // under the last, each within the rail.
+        // The chip, the modes in order, the gear: each under the
+        // last, each within the rail.
         let mut tops = Vec::new();
         for target in [
-            "rail mark",
+            "yard chip",
             "rail chat",
             "rail decisions",
             "rail timetable",
-            "switch tile",
             "settings",
         ] {
             let at = bounds_of(cx, target);
@@ -19679,21 +19729,19 @@ mod tests {
             rail.bottom() - gear.bottom() < px(16.),
             "the gear stands off the rail's foot: {gear:?} {rail:?}"
         );
-        let mark = bounds_of(cx, "rail mark");
+        let chip = bounds_of(cx, "yard chip");
         assert!(
-            mark.top() - rail.top() < px(16.),
-            "the mark stands off the rail's top: {mark:?} {rail:?}"
+            chip.top() - rail.top() < px(16.),
+            "the chip stands off the rail's top: {chip:?} {rail:?}"
         );
-        // A click on a mode opens it; on the mark nothing.
+        // A click on a mode opens it.
         assert_eq!(rail_mode(&view, cx), Mode::Chat);
         click_on(cx, "rail timetable");
         assert_eq!(rail_mode(&view, cx), Mode::Timetable);
         click_on(cx, "rail decisions");
         assert_eq!(rail_mode(&view, cx), Mode::Decisions);
-        click_on(cx, "rail mark");
-        assert_eq!(rail_mode(&view, cx), Mode::Decisions);
-        // The tile opens the switcher.
-        click_on(cx, "switch tile");
+        // The chip opens the switcher.
+        click_on(cx, "yard chip");
         assert!(switching(&view, cx).is_some());
         assert!(drawn(cx, "switcher"));
         cx.simulate_keystrokes("escape");
@@ -20910,7 +20958,7 @@ mod tests {
         view.read_with(cx, |v, _| v.which_yard())
     }
 
-    /// The name of the yard that is open, as the rail's tile names it.
+    /// The name of the yard that is open, as the rail's chip names it.
     fn open_yard(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| v.which_yard_short())
     }
@@ -21108,7 +21156,7 @@ mod tests {
         });
         assert_eq!(which_yard(&view, cx), "this machine's yard");
         assert_eq!(open_yard(&view, cx), "this machine");
-        assert!(drawn(cx, "switch tile"));
+        assert!(drawn(cx, "yard chip"));
         assert_eq!(far.requests(), 0);
 
         // The settings list it, say what a pairing gives over a peer link,
@@ -21377,14 +21425,14 @@ mod tests {
         file
     }
 
-    /// The tile at the rail's foot names the open yard and switches: a
-    /// click or its key opens the list of the yards to the right of the
-    /// rail, each with its kind and what waits in it now; a click on a
-    /// row, Enter on the row the arrows are on, or a yard's own key from
-    /// anywhere opens it, as it stands: every yard is followed from the
-    /// start.
+    /// The chip at the rail's head names the open yard and switches:
+    /// a click or its key opens the list of the yards to the right of
+    /// the rail, each with its colour, its kind and what waits in it
+    /// now; a click on a row, Enter on the row the arrows are on, or a
+    /// yard's own key from anywhere opens it, as it stands: every yard
+    /// is followed from the start.
     #[gpui::test]
-    fn the_tile_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
+    fn the_chip_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let near = Yard::start();
         a_yard_of_jo(&near);
@@ -21409,22 +21457,24 @@ mod tests {
         });
         assert!(!drawn(cx, "switcher"));
 
-        // A click on the tile opens the list: each yard, its kind, and
-        // its state, in a popover to the right of the rail's foot.
-        click_on(cx, "switch tile");
+        // A click on the chip opens the list: each yard, its colour,
+        // its kind, and its state, in a popover to the right of the
+        // rail's head.
+        click_on(cx, "yard chip");
         assert_eq!(switching(&view, cx), Some(0));
         assert!(drawn(cx, "switcher"));
         assert!(drawn(cx, "switch this machine") && drawn(cx, "switch far"));
+        assert!(drawn(cx, "switch dot this machine") && drawn(cx, "switch dot far"));
         let rail = bounds_of(cx, "rail");
-        let tile = bounds_of(cx, "switch tile");
+        let chip = bounds_of(cx, "yard chip");
         let popover = bounds_of(cx, "switcher");
         assert!(
             rail.right() < popover.left() && popover.left() - rail.right() < px(16.),
             "the list stands off the rail: {popover:?} {rail:?}"
         );
         assert!(
-            rail.bottom() - popover.bottom() < px(16.) && tile.top() < popover.bottom(),
-            "the list stands off the rail's foot: {popover:?} {tile:?} {rail:?}"
+            popover.top() - rail.top() < px(16.) && popover.top() < chip.bottom(),
+            "the list stands off the rail's head: {popover:?} {chip:?} {rail:?}"
         );
         assert_eq!(state_of(&view, cx, "this machine"), "open");
         let kinds: Vec<&str> = view.read_with(cx, |v, _| {
@@ -22165,8 +22215,11 @@ mod tests {
         });
         assert_eq!(near.requests(), 0);
         assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
-        // No switcher: no tile, and no key opens another yard.
-        assert!(!drawn(cx, "switch tile"));
+        // No switcher: the chip stands, but no click or key opens
+        // another yard.
+        assert!(drawn(cx, "yard chip"));
+        assert_eq!(switching(&view, cx), None);
+        click_on(cx, "yard chip");
         assert_eq!(switching(&view, cx), None);
         cx.simulate_keystrokes("secondary-y secondary-1 secondary-2");
         cx.run_until_parked();
@@ -22450,15 +22503,15 @@ mod tests {
             "not reached: nothing answers"
         );
         assert!(view.read_with(cx, |v, _| v.reconnecting()));
-        assert!(drawn(cx, "switch tile") && drawn(cx, "rows"));
+        assert!(drawn(cx, "yard chip") && drawn(cx, "rows"));
         assert!(drawn(cx, "reconnecting"));
         assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
         // What the yard that answers has is as it was left.
         assert_eq!(state_of(&view, cx, "this machine"), "nothing waiting");
 
-        // The tile is the switcher there too: a click lists the yards,
+        // The chip is the switcher there too: a click lists the yards,
         // the arrows move, and Enter opens the one away from the network.
-        click_on(cx, "switch tile");
+        click_on(cx, "yard chip");
         assert_eq!(switching(&view, cx), Some(1));
         assert!(drawn(cx, "switcher") && drawn(cx, "switch this machine"));
         cx.simulate_keystrokes("down down enter");
@@ -22494,7 +22547,7 @@ mod tests {
         // Back to the yard that answers by a click on its row, with no
         // settings: what was typed there is in its line, and the three
         // that were not reached are said so, each with its own why.
-        click_on(cx, "switch tile");
+        click_on(cx, "yard chip");
         click_on(cx, "switch this machine");
         wait(cx, "this machine's yard again", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
@@ -22590,7 +22643,7 @@ mod tests {
         wait(cx, "that the session is not signed in", |cx| {
             state_of(&view, cx, "south") == "not reached: sign in again"
         });
-        click_on(cx, "switch tile");
+        click_on(cx, "yard chip");
         click_on(cx, "switch south");
         wait(cx, "the hosted yard signed out", |cx| {
             view.read_with(cx, |v, _| v.away == Away::SignedOut)
@@ -23216,15 +23269,15 @@ mod tests {
             })
         });
         assert!(drawn(cx, "away why") && drawn(cx, "settings"));
-        assert!(!drawn(cx, "switch tile"));
+        assert!(drawn(cx, "yard chip"));
         // Nor a way to another yard: it is the one there is.
         assert!(!drawn(cx, "way near") && !drawn(cx, "way far") && !drawn(cx, "way hosted"));
         assert!(!drawn(cx, "way here"));
         cx.simulate_keystrokes("secondary-y");
         assert_eq!(switching(&view, cx), None);
-        // The rail stands with the mark and the three modes, dimmed and
-        // inert: a click and the brackets change nothing.
-        assert!(drawn(cx, "rail mark"));
+        // The rail stands with the chip and the three modes, dimmed
+        // and inert: a click and the brackets change nothing.
+        assert!(drawn(cx, "yard chip"));
         assert!(drawn(cx, "rail chat") && drawn(cx, "rail decisions"));
         assert!(drawn(cx, "rail timetable"));
         click_on(cx, "rail timetable");
@@ -26440,9 +26493,10 @@ mod tests {
         );
     }
 
-    /// Every card names the yard it is of, and a run ask's block and its
-    /// control name it again; with one yard in the settings as with
-    /// several. The approval goes to the yard the card names and to no
+    /// Every card names the yard it is of, with its dot in its colour,
+    /// and a run ask's block and its control name it again; with one yard
+    /// in the settings as with several. The approval goes to the yard the
+    /// card names and to no
     /// other, after a switch too: each yard here holds the same ask on the
     /// same bead, so only the yard tells them apart.
     #[gpui::test]
@@ -26497,7 +26551,9 @@ mod tests {
                 v.yard == name && v.model.as_ref().is_some_and(|m| m.has_bead("bead-s"))
             });
             cx.update(|window, _| window.refresh());
-            read && drawn(cx, &format!("in {name} bead-s 7")) && drawn(cx, &run_runs(name, "jo"))
+            read && drawn(cx, &format!("in {name} bead-s 7"))
+                && drawn(cx, &format!("in {name} bead-s 7 dot"))
+                && drawn(cx, &run_runs(name, "jo"))
         }
 
         // One yard in the settings: its name is on the card all the same.

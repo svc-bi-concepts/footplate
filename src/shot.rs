@@ -33,13 +33,15 @@ use crate::yard::Env;
 /// screen of a hosted yard that is signed out, the arrivals board open
 /// on the arrivals row, one arrival's bead open from the board, one
 /// line's flow open on its row, an open card of a secret ask posed
-/// with a value typed, hidden and shown, and that card with the yard's
-/// refusal of its answer.
+/// with a value typed, hidden and shown, that card with the yard's
+/// refusal of its answer, and the switcher's list open over two yards.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
 /// signed-out yard from settings the state writes itself, against a
 /// throwaway config, with a session the edge no longer knows; the
+/// switcher's two yards from settings the state writes itself, the near
+/// one live at the shot's socket and a far one away; the
 /// settings open over a running yard, each state on its section;
 /// the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
@@ -83,6 +85,7 @@ pub const STATES: &[&str] = &[
     "secret",
     "secret-shown",
     "secret-refused",
+    "switcher",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -211,6 +214,9 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         write_signedout_settings(edge.address());
         shot.edge = Some((hosted, edge));
     }
+    if state == "switcher" {
+        write_switcher_settings(&socket);
+    }
     if state == "reconnecting" {
         // The yard answers, the window reads it, and then its server is
         // stopped: the shot is the reconnecting state. The stop waits for
@@ -287,6 +293,42 @@ fn write_signedout_settings(address: &str) {
     crate::yard::keep_session(&dir.join("yard-south.session"), crate::fake::SESSION, &edge)
         .unwrap_or_else(|error| {
             eprintln!("footplate: the signedout shot keeps no session: {error}");
+            std::process::exit(1);
+        });
+}
+
+/// The settings the `switcher` shot opens: two yards, the near one
+/// live at the shot's socket and a far one that is away, with the near
+/// one open. The far yard keeps no token, so it is never reached: the
+/// window asks nothing of the network for it. The shot script runs
+/// against a throwaway config, which keeps no settings; where a
+/// settings file already stands, the state is refused rather than
+/// overwrite it.
+fn write_switcher_settings(socket: &Path) {
+    let Some(file) = crate::settings::file() else {
+        eprintln!("footplate: the switcher shot keeps no settings without a home");
+        std::process::exit(1);
+    };
+    if file.exists() {
+        eprintln!(
+            "footplate: the switcher shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh does",
+            file.display()
+        );
+        std::process::exit(2);
+    }
+    let home = crate::settings::Yard::near("home", &socket.to_string_lossy());
+    let droplet =
+        crate::settings::Yard::far("droplet", "https://droplet.example.net", "droplet.token");
+    crate::settings::Settings::default()
+        .with_yard(Some(crate::settings::HERE), home, Some(&file))
+        .and_then(|set| set.with_yard(None, droplet, Some(&file)))
+        .and_then(|set| {
+            set.opening("home")
+                .write(&file)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the switcher shot keeps no settings: {error}");
             std::process::exit(1);
         });
 }
@@ -432,8 +474,9 @@ fn populate(yard: &Yard, state: &str) {
         // conversation, as does the yard that is stopped once it is
         // read, the one that answers under the first screen's open
         // fields, the signed-out yard's, which the window never reaches
-        // past the edge, and the timetable states', which the window
-        // opens on the board, the bead and the flow.
+        // past the edge, the timetable states', which the window
+        // opens on the board, the bead and the flow, and the switcher's,
+        // which the window opens with the switcher's list standing.
         "yardmaster"
         | "far"
         | "settings"
@@ -447,7 +490,8 @@ fn populate(yard: &Yard, state: &str) {
         | "signedout"
         | "arrivals"
         | "arrival"
-        | "flow" => {
+        | "flow"
+        | "switcher" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
             // grouping and the separators.
@@ -909,7 +953,8 @@ mod tests {
                 | "settings-connection"
                 | "reconnecting"
                 | "answered"
-                | "signedout" => {
+                | "signedout"
+                | "switcher" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 6, "{state}");
