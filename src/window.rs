@@ -5746,7 +5746,12 @@ impl Footplate {
     /// `/` types in the history's filter: the folded history stands open
     /// for it. Elsewhere than decisions the key is nothing.
     fn focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode() != Mode::Decisions {
+        if self.mode() != Mode::Decisions
+            || !self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.decided_count() > 0)
+        {
             return;
         }
         self.change(cx, |m| {
@@ -18051,6 +18056,44 @@ mod tests {
         cx.run_until_parked();
         let rows: Vec<u64> = decided_all(&view, cx).into_iter().map(|r| r.ask).collect();
         assert_eq!(rows, [11]);
+    }
+
+    /// There is no filter to focus before the yard has decided any asks:
+    /// it is not drawn until the history has a row.
+    #[gpui::test]
+    fn slash_does_not_open_an_empty_history_filter(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": []}}).to_string(),
+        );
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the empty decisions", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|model| model.decided_count() == 0)
+            })
+        });
+        to_decisions(&view, cx);
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+
+        assert!(!drawn(cx, "decided filter"));
+        view.read_with(cx, |v, _| {
+            assert!(!v.model.as_ref().unwrap().decided_expanded());
+        });
     }
 
     /// A topic's head stands only where two asks or more share the topic: a
