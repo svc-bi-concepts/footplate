@@ -403,18 +403,20 @@ pub enum AnswerAction {
     Note { words: String },
 }
 
-/// One bead's row among the decisions: the question's first line in plain
-/// words, or the bead's title with how many it asks, with every ask
-/// expanded beneath it.
+/// One bead's row among the decisions: the question in plain words, or
+/// the bead's title with how many it asks, with every ask expanded
+/// beneath it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRow {
     /// The bead's id, whole; `short` is what the row ends with.
     pub bead: String,
-    /// The question's first line, or `<title>: <n> questions`.
+    /// The question in plain words, or `<title>: <n> questions`.
     pub head: String,
-    /// Every open ask expanded, in ask order.
+    /// Every open ask expanded, in ask order: empty where one ask is the
+    /// row, whose head and sub already say it.
     pub asks: Vec<DecisionRowAsk>,
-    /// `<asker> · <waits>`, or `<waits>` when several ask.
+    /// `<asker> · <wants> · <waits>`, or `<waits>` when several ask, whose
+    /// own lines say the rest.
     pub sub: String,
     /// The bead's id small, at the row's end: past its last `-`.
     pub short: String,
@@ -422,20 +424,16 @@ pub struct DecisionRow {
 }
 
 /// One ask of a bead's open row, as its expanded row shows it: the
-/// question's first line with its numbered options from the Bead read, or
-/// what its card shows where it has none.
+/// question with whose it is, what it wants and how long it waits. The
+/// options themselves are the open card's alone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRowAsk {
     /// The ask note's seq: what an answer names.
     pub ask: u64,
-    /// The question's first line in plain words.
+    /// The question in plain words.
     pub head: String,
-    /// The numbered options' words, from the Bead read: empty until read.
-    pub options: Vec<(u64, String)>,
-    /// What a secret ask asks for, in the yard's words; none on any other.
-    pub secret: Option<String>,
-    /// The command a run ask proposes, whole; none on any other.
-    pub run: Option<String>,
+    /// `<asker> · <wants> · <waits>`.
+    pub meta: String,
 }
 
 /// One topic's beads, in the order their oldest ask waits.
@@ -446,17 +444,111 @@ pub struct TopicGroup {
     pub rows: Vec<DecisionRow>,
 }
 
-/// One dealt with, with its pick.
+/// What became of a dealt with ask, as the history's icons and chips
+/// name it: a pick approved, words or a secret given, taken back, put
+/// aside, or declined. A declined ask has no chip of its own: it shows
+/// under All.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Approved,
+    Words,
+    TakenBack,
+    PutAside,
+    Declined,
+}
+
+impl Outcome {
+    /// The chips after All, in their order.
+    pub const CHIPS: [Outcome; 4] = [
+        Outcome::Approved,
+        Outcome::Words,
+        Outcome::TakenBack,
+        Outcome::PutAside,
+    ];
+
+    /// The history's icon, first on its rows: each draws in the
+    /// system's fonts on macOS and Linux. A put-aside stands as two
+    /// bars, not the pause mark, which Linux's fonts have no glyph for.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Outcome::Approved => "✓",
+            Outcome::Words => "✎",
+            Outcome::TakenBack => "↩",
+            Outcome::PutAside => "‖",
+            Outcome::Declined => "✕",
+        }
+    }
+
+    /// The chip's word.
+    pub fn chip(self) -> &'static str {
+        match self {
+            Outcome::Approved => "Approved",
+            Outcome::Words => "Words",
+            Outcome::TakenBack => "Taken back",
+            Outcome::PutAside => "Put aside",
+            Outcome::Declined => "Declined",
+        }
+    }
+
+    /// The outcome's word on a folded row, where no one ask's words stand.
+    pub fn word(self) -> &'static str {
+        match self {
+            Outcome::Approved => "approved",
+            Outcome::Words => "words",
+            Outcome::TakenBack => "taken back",
+            Outcome::PutAside => "put aside",
+            Outcome::Declined => "declined",
+        }
+    }
+}
+
+/// One dealt with, with its outcome.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecidedRow {
     pub bead: String,
     pub ask: u64,
     /// The question's first line in plain words.
     pub head: String,
-    /// `<asker> · <pick|declined|put aside|taken back by ...>`.
-    pub sub: String,
+    /// The outcome's icon with its words: `✓approved`.
+    pub outcome: String,
+    /// `<asker> · <asked at>`.
+    pub detail: String,
     pub short: String,
     pub selected: bool,
+}
+
+/// One row of a decided day: one dealt with, or several look-alikes
+/// folded into one row with their count, opened to show them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecidedEntry {
+    One(DecidedRow),
+    Fold(DecidedFold),
+}
+
+/// Several consecutive look-alikes folded: the first's question, with
+/// the count at the row's end, past what the head's cut would hide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecidedFold {
+    /// The first folded ask: the fold's key, what opens it.
+    pub bead: String,
+    pub ask: u64,
+    /// The first's head in plain words.
+    pub head: String,
+    /// The shared outcome's icon with its word: `↩taken back`.
+    pub outcome: String,
+    /// The shared asker.
+    pub detail: String,
+    /// Whether the fold stands open, with its rows under it.
+    pub open: bool,
+    pub rows: Vec<DecidedRow>,
+}
+
+/// One day of dealt with asks, newest day first: its head with its rows,
+/// look-alikes folded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecidedGroup {
+    pub day: String,
+    pub rows: Vec<DecidedEntry>,
 }
 
 /// One platform's arrivals, with the served rows that stand at it, in
@@ -795,6 +887,12 @@ pub struct Model {
     decided: Vec<DecidedAsk>,
     /// Whether the folded "Decided" stands open.
     decided_expanded: bool,
+    /// The history's chip: `None` shows every outcome.
+    decided_chip: Option<Outcome>,
+    /// The history's filter, as typed: matches question, asker and outcome.
+    decided_filter: String,
+    /// The folded history rows standing open, by their first ask.
+    decided_folds: HashSet<(String, u64)>,
     /// Whether the timetable's quiet lines stand unfolded.
     quiet_expanded: bool,
     /// One bead whole, by id, as the cards show it: read when a decision
@@ -1272,7 +1370,7 @@ impl Model {
                     out.push(Selected::Decision(bead));
                 }
                 if self.decided_expanded {
-                    for ask in &self.decided {
+                    for ask in self.visible_decided() {
                         out.push(Selected::Decided(ask.bead.clone(), ask.ask));
                     }
                 }
@@ -1443,29 +1541,28 @@ impl Model {
         for (bead, asks) in self.decision_beads() {
             let first = asks[0];
             let cached = self.beads.get(&bead);
+            let options_of = |ask: &OpenAsk| {
+                cached
+                    .and_then(|b| b.asks.iter().find(|full| full.ask == ask.ask))
+                    .map_or(0, |full| full.options.len())
+            };
+            // One ask is the row: its head and sub say it, and nothing
+            // stands expanded beneath. Several expand, each with its own
+            // question and line.
+            let expanded = asks.len() > 1;
             let row = DecisionRow {
                 bead: bead.clone(),
                 head: decision_head(first, &asks),
                 asks: asks
                     .iter()
-                    .map(|ask| {
-                        let full =
-                            cached.and_then(|b| b.asks.iter().find(|full| full.ask == ask.ask));
-                        DecisionRowAsk {
-                            ask: ask.ask,
-                            head: row_head(&ask.question),
-                            options: full.map_or(Vec::new(), |full| {
-                                card_options(full)
-                                    .into_iter()
-                                    .map(|option| (option.number, option.label))
-                                    .collect()
-                            }),
-                            secret: ask.secret.as_ref().map(|secret| secret.line.clone()),
-                            run: ask.run.as_ref().map(|run| plain(&run.line())),
-                        }
+                    .filter(|_| expanded)
+                    .map(|ask| DecisionRowAsk {
+                        ask: ask.ask,
+                        head: plain(&ask.question),
+                        meta: decision_meta(ask, options_of(ask), now),
                     })
                     .collect(),
-                sub: decision_sub(first, &asks, now),
+                sub: decision_sub(first, &asks, options_of(first), now),
                 short: short_bead(&bead),
                 selected: self.selected.as_ref() == Some(&Selected::Decision(bead)),
             };
@@ -1919,19 +2016,183 @@ impl Model {
     }
 
     /// The dealt with, newest first, with their picks.
-    pub fn decided_rows(&self) -> Vec<DecidedRow> {
+    /// The history's chip: `None` shows every outcome.
+    pub fn decided_chip(&self) -> Option<Outcome> {
+        self.decided_chip
+    }
+
+    pub fn set_decided_chip(&mut self, chip: Option<Outcome>) {
+        self.decided_chip = chip;
+    }
+
+    /// Types the history's filter. Whether it changed: the window draws
+    /// again only then.
+    pub fn set_decided_filter(&mut self, filter: &str) -> bool {
+        if self.decided_filter == filter {
+            return false;
+        }
+        self.decided_filter = filter.to_string();
+        true
+    }
+
+    /// The folded history rows standing open, by their first ask.
+    pub fn decided_folds(&self) -> &HashSet<(String, u64)> {
+        &self.decided_folds
+    }
+
+    /// Opens a folded history row, or folds it shut again.
+    pub fn toggle_decided_fold(&mut self, bead: &str, ask: u64) {
+        let key = (bead.to_string(), ask);
+        if !self.decided_folds.remove(&key) {
+            self.decided_folds.insert(key);
+        }
+    }
+
+    /// The folds of `asks` stand open too: those that did before the yard
+    /// was left for another.
+    pub fn show_folds(&mut self, asks: &HashSet<(String, u64)>) {
+        self.decided_folds.extend(asks.iter().cloned());
+    }
+
+    /// How many dealt with asks the filter leaves for each chip: All with
+    /// the four outcomes after it, in their order. The text counts, the
+    /// chip does not: each chip says what choosing it would show.
+    pub fn decided_chip_counts(&self) -> Vec<(Option<Outcome>, usize)> {
+        let mut counts = vec![(None, 0)];
+        counts.extend(Outcome::CHIPS.iter().map(|chip| (Some(*chip), 0)));
+        for ask in &self.decided {
+            if !decided_matches(ask, None, &self.decided_filter) {
+                continue;
+            }
+            counts[0].1 += 1;
+            let outcome = outcome_of(ask);
+            if let Some((_, n)) = counts.iter_mut().find(|(chip, _)| *chip == Some(outcome)) {
+                *n += 1;
+            }
+        }
+        counts
+    }
+
+    /// The dealt with asks matching the chip, in the order the rows step
+    /// through them. The text counts too; folds do not: every member
+    /// stays in reach of the keys, and opening one opens its fold.
+    fn visible_decided(&self) -> Vec<&DecidedAsk> {
         self.decided
             .iter()
-            .map(|ask| DecidedRow {
-                bead: ask.bead.clone(),
-                ask: ask.ask,
-                head: row_head(&ask.question),
-                sub: decided_sub(ask),
-                short: short_bead(&ask.bead),
-                selected: self.selected.as_ref()
-                    == Some(&Selected::Decided(ask.bead.clone(), ask.ask)),
+            .filter(|ask| decided_matches(ask, self.decided_chip, &self.decided_filter))
+            .collect()
+    }
+
+    /// The dealt with asks as the history shows them: matching the chip
+    /// and the filter, grouped by the day they were asked — the yard
+    /// serves no decided-at time — newest day first, look-alikes folded.
+    /// A fold with the open ask in it stands open.
+    pub fn decided_groups<Tz: TimeZone>(&self, now: &DateTime<Tz>) -> Vec<DecidedGroup>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let zone = now.timezone();
+        let today = now.date_naive();
+        // First-appearance order is the served one, newest first; the sort
+        // below keeps it within each day.
+        let mut days: Vec<(Option<NaiveDate>, Vec<&DecidedAsk>)> = Vec::new();
+        for ask in self.visible_decided() {
+            let day = day_of(&ask.since, &zone);
+            match days.iter_mut().find(|(d, _)| d == &day) {
+                Some((_, asks)) => asks.push(ask),
+                None => days.push((day, vec![ask])),
+            }
+        }
+        // Newest day first; what has no day stands last, on its own.
+        days.sort_by(|a, b| match (&a.0, &b.0) {
+            (Some(a), Some(b)) => b.cmp(a),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        days.into_iter()
+            .map(|(day, asks)| DecidedGroup {
+                day: decided_day(day, today),
+                rows: self.fold_decided(asks, &zone),
             })
             .collect()
+    }
+
+    /// One day's dealt with asks as its rows: consecutive look-alikes as
+    /// one folded row, the rest one by one.
+    fn fold_decided<Tz: TimeZone>(&self, asks: Vec<&DecidedAsk>, zone: &Tz) -> Vec<DecidedEntry>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let mut rows: Vec<DecidedEntry> = Vec::new();
+        let mut run: Vec<&DecidedAsk> = Vec::new();
+        let flush = |run: &mut Vec<&DecidedAsk>, rows: &mut Vec<DecidedEntry>| {
+            if run.len() < 2 {
+                rows.extend(
+                    run.drain(..)
+                        .map(|ask| DecidedEntry::One(self.decided_row(ask, zone))),
+                );
+                return;
+            }
+            let first = run[0];
+            let members: Vec<DecidedRow> = run
+                .drain(..)
+                .map(|ask| self.decided_row(ask, zone))
+                .collect();
+            let open = self
+                .decided_folds
+                .contains(&(first.bead.clone(), first.ask))
+                || members.iter().any(|row| row.selected);
+            let outcome = outcome_of(first);
+            rows.push(DecidedEntry::Fold(DecidedFold {
+                bead: first.bead.clone(),
+                ask: first.ask,
+                head: row_head(&first.question),
+                outcome: format!("{}{}", outcome.icon(), outcome.word()),
+                detail: first.asker.clone(),
+                open,
+                rows: members,
+            }));
+        };
+        for ask in asks {
+            let alike = run.last().is_some_and(|last| look_alike(last, ask));
+            if !alike && !run.is_empty() {
+                flush(&mut run, &mut rows);
+            }
+            run.push(ask);
+        }
+        flush(&mut run, &mut rows);
+        rows
+    }
+
+    /// One dealt with as its history row: the question's first line, the
+    /// outcome's icon with its words, and whose it was with when it was
+    /// asked.
+    fn decided_row<Tz: TimeZone>(&self, ask: &DecidedAsk, zone: &Tz) -> DecidedRow
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let outcome = outcome_of(ask);
+        let words = decided_outcome(ask);
+        // `left to <asker>` already names whose: the asker is not said
+        // twice.
+        let mut detail = match ask.state.as_str() {
+            "answered" if ask.option_label == YOU_DECIDE => Vec::new(),
+            _ => vec![ask.asker.as_str()],
+        };
+        let at = asked_clock(&ask.since, zone);
+        if !at.is_empty() {
+            detail.push(&at);
+        }
+        DecidedRow {
+            bead: ask.bead.clone(),
+            ask: ask.ask,
+            head: row_head(&ask.question),
+            outcome: format!("{}{}", outcome.icon(), words),
+            detail: detail.join(" · "),
+            short: short_bead(&ask.bead),
+            selected: self.selected.as_ref() == Some(&Selected::Decided(ask.bead.clone(), ask.ask)),
+        }
     }
 
     /// One bead whole, as the cards read it, when it was read.
@@ -3725,23 +3986,47 @@ impl Model {
         self.chosen.retain(|(bead, _), _| keep.contains(bead));
         self.expanded.retain(|(bead, _)| keep.contains(bead));
         self.current.retain(|bead, _| keep.contains(bead));
-        let effects = self.reselect();
+        let mut effects = self.reselect();
         // Which row is open is known only now.
         let selected = self.selected.clone();
         for n in &mut self.news[news..] {
             n.open = selected.as_ref() == Some(&n.target);
         }
-        if !effects.is_empty() {
+        if effects.is_empty() {
+            // The open bead stayed: it is newly in the queue, or newly without
+            // a read bead. It is read when it is not yet.
+            if let Some(Selected::Decision(_) | Selected::Decided(_, _) | Selected::Bead(_)) =
+                self.selected.as_ref()
+            {
+                effects.extend(self.open());
+            }
+        }
+        // Every bead with open asks is read for its rows' counts, once:
+        // the open bead is already asked above, and what the cache has is
+        // not asked again. None of a yard the window does not show: its
+        // rows are not drawn.
+        if self.aside {
             return effects;
         }
-        // The open bead stayed: it is newly in the queue, or newly without
-        // a read bead. It is read when it is not yet.
-        match self.selected.as_ref() {
-            Some(Selected::Decision(_) | Selected::Decided(_, _) | Selected::Bead(_)) => {
-                self.open()
+        let open_bead = match selected {
+            Some(Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead)) => {
+                Some(bead)
             }
-            _ => Vec::new(),
+            _ => None,
+        };
+        let mut read: HashSet<&str> = HashSet::new();
+        for ask in &self.open {
+            if self.beads.contains_key(&ask.bead)
+                || open_bead.as_deref() == Some(ask.bead.as_str())
+                || !read.insert(ask.bead.as_str())
+            {
+                continue;
+            }
+            effects.push(Effect::Bead {
+                bead: ask.bead.clone(),
+            });
         }
+        effects
     }
 
     /// When a put-aside ask comes back next, if one waits: the window reads
@@ -3879,11 +4164,11 @@ pub fn foreign_bead(bead: &str) -> bool {
     bead.contains('@')
 }
 
-/// A bead's row head: the question's first line in plain words, or the
-/// bead's title with how many it asks.
+/// A bead's row head: the question in plain words, wrapped to two lines
+/// where it is drawn, or the bead's title with how many it asks.
 fn decision_head(first: &OpenAsk, asks: &[&OpenAsk]) -> String {
     if asks.len() == 1 {
-        return row_head(&first.question);
+        return plain(&first.question);
     }
     let title = if first.bead_title.is_empty() {
         first.bead.clone()
@@ -3901,52 +4186,162 @@ fn row_head(question: &str) -> String {
     asker_lines(question).into_iter().next().unwrap_or_default()
 }
 
-/// A bead's row sub: whose it is and how long it waits, or how long the
-/// oldest of several waits.
-fn decision_sub<Tz: TimeZone>(first: &OpenAsk, asks: &[&OpenAsk], now: &DateTime<Tz>) -> String
+/// A bead's row sub: whose one ask is, what it wants and how long it
+/// waits, or how long the oldest of several waits, whose own lines say
+/// the rest. `options` is what the Bead read holds for the ask, 0 where
+/// it was not read yet.
+fn decision_sub<Tz: TimeZone>(
+    first: &OpenAsk,
+    asks: &[&OpenAsk],
+    options: usize,
+    now: &DateTime<Tz>,
+) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
-    let waits = waits(&first.since, now);
     if asks.len() == 1 {
-        return format!("{} · {waits}", first.asker);
+        return decision_meta(first, options, now);
     }
-    waits
+    waits(&first.since, now)
 }
 
-/// A dealt with row sub: whose it was and its pick.
-fn decided_sub(ask: &DecidedAsk) -> String {
-    let mut sub = ask.asker.clone();
+/// One open ask's line: whose it is, what it wants and how long it waits.
+/// `options` is what the Bead read holds for the ask: 0 where it was not
+/// read yet, where an ask with options reads as wanting words until then.
+fn decision_meta<Tz: TimeZone>(ask: &OpenAsk, options: usize, now: &DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let wants = match options {
+        1 => "1 option".to_string(),
+        options if options > 1 => format!("{options} options"),
+        _ if ask.secret.is_some() => "secret wanted".to_string(),
+        _ if ask.run.is_some() => "approval wanted".to_string(),
+        _ => "words wanted".to_string(),
+    };
+    [
+        ask.asker.as_str(),
+        wants.as_str(),
+        waits(&ask.since, now).as_str(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// What became of a dealt with ask, as the history's icons and chips
+/// name it. A pick is approved, even `you decide`, which leaves it to
+/// the asker; a secret given and a words answer are words.
+pub fn outcome_of(ask: &DecidedAsk) -> Outcome {
     match ask.state.as_str() {
-        "answered" if !ask.option_label.is_empty() => {
-            sub = format!("{sub} · {}", plain(&ask.option_label));
-            if !ask.words.is_empty() {
-                sub = format!("{sub} · {}", plain(&ask.words));
+        "answered" if !ask.given.is_empty() => Outcome::Words,
+        "answered" if ask.run.is_some() || ask.ran.is_some() => Outcome::Approved,
+        "answered" if ask.option != 0 => Outcome::Approved,
+        "answered" => Outcome::Words,
+        "taken back" => Outcome::TakenBack,
+        "declined" => Outcome::Declined,
+        _ => Outcome::PutAside,
+    }
+}
+
+/// A dealt with row's outcome in words, after its icon: `approved`, the
+/// words answer, `gave <names>`, what took it back, `put aside`, or what
+/// declined it.
+fn decided_outcome(ask: &DecidedAsk) -> String {
+    match ask.state.as_str() {
+        "answered" if ask.option_label == YOU_DECIDE => format!("left to {}", ask.asker),
+        "answered" if ask.option != 0 || ask.run.is_some() || ask.ran.is_some() => {
+            "approved".to_string()
+        }
+        "answered" if !ask.given.is_empty() => format!("gave {}", ask.given.join(", ")),
+        "answered" if !ask.words.is_empty() => plain(&ask.words),
+        "answered" => "answered".to_string(),
+        "declined" if ask.words.is_empty() => "declined".to_string(),
+        "declined" => format!("declined: {}", plain(&ask.words)),
+        "taken back" => taken_back(ask),
+        _ => "put aside".to_string(),
+    }
+}
+
+/// Whether a dealt with ask matches the history's filter: the chip's
+/// outcome, and every word of the text in its question, asker or outcome,
+/// in any case.
+fn decided_matches(ask: &DecidedAsk, chip: Option<Outcome>, filter: &str) -> bool {
+    if chip.is_some_and(|chip| outcome_of(ask) != chip) {
+        return false;
+    }
+    let words: Vec<String> = filter.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return true;
+    }
+    let hay = format!(
+        "{} {} {} {}",
+        ask.question,
+        ask.asker,
+        decided_outcome(ask),
+        outcome_of(ask).word(),
+    )
+    .to_lowercase();
+    words.iter().all(|word| hay.contains(word))
+}
+
+/// A question's shape: digit runs as one `#`, so questions differing only
+/// in numbers share it.
+fn shape_of(question: &str) -> String {
+    let mut shape = String::with_capacity(question.len());
+    let mut in_number = false;
+    for c in question.chars() {
+        if c.is_ascii_digit() {
+            if !in_number {
+                shape.push('#');
+                in_number = true;
             }
-        }
-        "answered" if !ask.given.is_empty() => {
-            sub = format!("{sub} · gave {}", ask.given.join(", "));
-        }
-        "answered" if ask.ran.is_some() => {
-            sub = format!("{sub} · approved");
-        }
-        "answered" => {
-            sub = format!("{sub} · {}", plain(&ask.words));
-        }
-        "declined" => {
-            sub = format!("{sub} · declined");
-            if !ask.words.is_empty() {
-                sub = format!("{sub} · {}", plain(&ask.words));
-            }
-        }
-        "taken back" => {
-            sub = format!("{sub} · {}", taken_back(ask));
-        }
-        _ => {
-            sub = format!("{sub} · put aside");
+        } else {
+            shape.push(c);
+            in_number = false;
         }
     }
-    sub
+    shape
+}
+
+/// Whether two dealt with asks fold into one history row: the same asker,
+/// the same outcome, and questions differing only in numbers.
+fn look_alike(a: &DecidedAsk, b: &DecidedAsk) -> bool {
+    a.asker == b.asker
+        && outcome_of(a) == outcome_of(b)
+        && shape_of(&a.question) == shape_of(&b.question)
+}
+
+/// A decided day's head: `Today`, `Yesterday`, else the day and the month
+/// (`17 Oct`, with the year where it is not this one); `Earlier` for an
+/// ask whose time cannot be read.
+fn decided_day(day: Option<NaiveDate>, today: NaiveDate) -> String {
+    let Some(day) = day else {
+        return "Earlier".to_string();
+    };
+    if day == today {
+        return "Today".to_string();
+    }
+    if day == today.pred_opt().unwrap_or(day) {
+        return "Yesterday".to_string();
+    }
+    if day.year() == today.year() {
+        return format!("{} {}", day.day(), day.format("%b"));
+    }
+    format!("{} {} {}", day.day(), day.format("%b"), day.year())
+}
+
+/// An ask's asked time as the history's rows show it: `11:53` in the zone
+/// of the person reading. Nothing for a time that cannot be read.
+fn asked_clock<Tz: TimeZone>(since: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match DateTime::parse_from_rfc3339(since) {
+        Ok(t) => t.with_timezone(zone).format("%H:%M").to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 /// What became of an ask its asker asks no more: `taken back by <by>:
@@ -7833,6 +8228,19 @@ mod tests {
             .with_timezone(&chrono::Utc)
     }
 
+    /// Every decided row of every day, folds' members with them: what the
+    /// history holds, without its shape.
+    fn decided_all(m: &Model) -> Vec<DecidedRow> {
+        m.decided_groups(&noon())
+            .into_iter()
+            .flat_map(|group| group.rows)
+            .flat_map(|entry| match entry {
+                DecidedEntry::One(row) => vec![row],
+                DecidedEntry::Fold(fold) => fold.rows,
+            })
+            .collect()
+    }
+
     /// That evening's asks, oldest first: two topics and one with none.
     fn evening() -> Vec<OpenAsk> {
         vec![
@@ -7954,13 +8362,14 @@ mod tests {
         let (m, _) = Model::new(state, Mode::Chat, None);
         let groups = m.decision_groups(&noon());
         let row = &groups[0].rows[0];
-        assert_eq!(row.sub, "yardmaster · 2h");
+        // Its bead not read yet: what it wants reads as words until then.
+        assert_eq!(row.sub, "yardmaster · words wanted · 2h");
         assert_eq!(row.short, "n8ta");
         assert_eq!(row.bead, "yardr-n8ta");
         // No row reads "<id> go?".
         assert!(!row.head.contains("yardr-n8ta"), "{}", row.head);
         // A day's wait.
-        assert_eq!(groups[1].rows[0].sub, "assembly · 1d");
+        assert_eq!(groups[1].rows[0].sub, "assembly · words wanted · 1d");
     }
 
     #[test]
@@ -8014,6 +8423,21 @@ mod tests {
         // How long the oldest waits; no one asker.
         assert_eq!(row.sub, "1d");
         assert_eq!(row.short, "me78");
+        // Each ask beneath with its own question and line.
+        let metas: Vec<(&str, &str)> = row
+            .asks
+            .iter()
+            .map(|ask| (ask.head.as_str(), ask.meta.as_str()))
+            .collect();
+        assert_eq!(
+            metas,
+            [
+                ("First?", "yardmaster · words wanted · 1d"),
+                ("Second?", "yardmaster · words wanted · 1h"),
+                ("Third?", "assembly · words wanted · 30m"),
+                ("Fourth?", "yardmaster · words wanted · 15m"),
+            ]
+        );
         // The open row shows each ask oldest first.
         let detail = m.decision_detail("yardr-me78", &noon()).unwrap();
         assert_eq!(detail.title, "Depot rules");
@@ -8078,12 +8502,17 @@ mod tests {
 
         m.toggle_decided();
         assert!(m.decided_expanded());
-        let rows = m.decided_rows();
+        let groups = m.decided_groups(&noon());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].day, "8 Oct");
+        let rows = decided_all(&m);
         assert_eq!(rows[0].head, "Send them to build?");
-        assert_eq!(rows[0].sub, "yardmaster · Send them · tonight");
-        assert_eq!(rows[1].sub, "yardmaster · warmly");
-        assert_eq!(rows[2].sub, "yardmaster · declined · not mine");
-        assert_eq!(rows[3].sub, "yardmaster · put aside");
+        assert_eq!(rows[0].outcome, "✓approved");
+        assert_eq!(rows[0].detail, "yardmaster · 09:30");
+        assert_eq!(rows[1].outcome, "✎warmly");
+        assert_eq!(rows[1].detail, "yardmaster · 09:30");
+        assert_eq!(rows[2].outcome, "✕declined: not mine");
+        assert_eq!(rows[3].outcome, "‖put aside");
         // Open: its rows stand in the decisions' tab order, after the
         // open ones.
         m.select(Selected::Decided("yd-links".into(), 6));
@@ -8102,6 +8531,421 @@ mod tests {
         assert_eq!(detail.pick, "Send them");
         assert_eq!(detail.words, "tonight");
         assert_eq!(detail.state_line, "you picked 1 · Send them");
+    }
+
+    /// A dealt with ask as `decided_ask` makes it, with its asker and time.
+    #[allow(clippy::too_many_arguments)]
+    fn decided_when(
+        bead: &str,
+        ask: u64,
+        question: &str,
+        asker: &str,
+        since: &str,
+        state: &str,
+        option_label: &str,
+        words: &str,
+        return_at: &str,
+    ) -> DecidedAsk {
+        DecidedAsk {
+            asker: asker.into(),
+            since: since.into(),
+            ..decided_ask(bead, ask, question, state, option_label, words, return_at)
+        }
+    }
+
+    /// A week's history, newest first: an approval and a look-alike pair
+    /// asked today and yesterday, a secret given, a decline, a put-aside
+    /// with no time, and a look-alike asked today that stands on its own,
+    /// its pair a day away.
+    fn week() -> Vec<DecidedAsk> {
+        vec![
+            decided_when(
+                "yd-cal",
+                7,
+                "Raise Google Docs to 3000 calls",
+                "mayor",
+                "2026-10-10T09:00:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+            decided_when(
+                "yd-cal",
+                1,
+                "Let the yardmaster read your calendar",
+                "mayor",
+                "2026-10-10T08:00:00Z",
+                "answered",
+                "Let them",
+                "",
+                "",
+            ),
+            decided_when(
+                "yd-cal",
+                3,
+                "Raise Google Docs to 2000 calls",
+                "mayor",
+                "2026-10-09T20:18:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+            decided_when(
+                "yd-cal",
+                2,
+                "Raise Google Docs to 1000 calls",
+                "mayor",
+                "2026-10-09T20:17:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+            DecidedAsk {
+                given: vec!["GOOGLE_ACCOUNT".into()],
+                ..decided_when(
+                    "yd-cal",
+                    4,
+                    "Which Google account should the source use?",
+                    "mayor",
+                    "2026-10-09T09:00:00Z",
+                    "answered",
+                    "",
+                    "",
+                    "",
+                )
+            },
+            decided_when(
+                "bead-d",
+                5,
+                "Take the release train?",
+                "assembly",
+                "2026-10-08T11:07:00Z",
+                "declined",
+                "",
+                "not mine",
+                "",
+            ),
+            decided_when(
+                "bead-d",
+                6,
+                "Rebuild the index tonight?",
+                "mayor",
+                "",
+                "put aside",
+                "",
+                "",
+                "",
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_history_groups_by_day_newest_first_with_look_alikes_folded() {
+        let mut state = yard(&[]);
+        state.asks.decided = week();
+        let (m, _) = Model::new(state, Mode::Chat, None);
+        let groups = m.decided_groups(&noon());
+        let days: Vec<&str> = groups.iter().map(|g| g.day.as_str()).collect();
+        assert_eq!(days, ["Today", "Yesterday", "8 Oct", "Earlier"]);
+        // Today: the lone look-alike with the approval, one by one.
+        assert_eq!(groups[0].rows.len(), 2);
+        assert!(matches!(groups[0].rows[0], DecidedEntry::One(_)));
+        assert!(matches!(groups[0].rows[1], DecidedEntry::One(_)));
+        // Yesterday: the pair folded, the secret given after it.
+        assert_eq!(groups[1].rows.len(), 2);
+        let DecidedEntry::Fold(fold) = &groups[1].rows[0] else {
+            panic!("the pair folds: {:?}", groups[1].rows[0]);
+        };
+        assert_eq!(fold.bead, "yd-cal");
+        assert_eq!(fold.ask, 3);
+        assert_eq!(fold.head, "Raise Google Docs to 2000 calls");
+        assert_eq!(fold.outcome, "✓approved");
+        assert_eq!(fold.detail, "mayor");
+        assert!(!fold.open);
+        assert_eq!(fold.rows.len(), 2);
+        assert_eq!(fold.rows[0].ask, 3);
+        assert_eq!(fold.rows[1].ask, 2);
+        let DecidedEntry::One(row) = &groups[1].rows[1] else {
+            panic!("the secret stands alone: {:?}", groups[1].rows[1]);
+        };
+        assert_eq!(row.outcome, "✎gave GOOGLE_ACCOUNT");
+        assert_eq!(row.detail, "mayor · 09:00");
+        // The decline and the timeless put-aside, one by one.
+        assert_eq!(groups[2].rows.len(), 1);
+        assert_eq!(groups[3].rows.len(), 1);
+    }
+
+    #[test]
+    fn a_decided_day_reads_today_yesterday_date_and_earlier() {
+        let today = noon().date_naive();
+        assert_eq!(decided_day(Some(today), today), "Today");
+        let yesterday = today.pred_opt().unwrap();
+        assert_eq!(decided_day(Some(yesterday), today), "Yesterday");
+        let day = NaiveDate::from_ymd_opt(2026, 10, 8).unwrap();
+        assert_eq!(decided_day(Some(day), today), "8 Oct");
+        // Another year names it.
+        let last = NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
+        assert_eq!(decided_day(Some(last), today), "31 Dec 2025");
+        assert_eq!(decided_day(None, today), "Earlier");
+    }
+
+    #[test]
+    fn look_alikes_fold_only_consecutive_same_asker_same_outcome_same_day() {
+        // Another asker's between them: no fold.
+        let mut state = yard(&[]);
+        state.asks.decided = vec![
+            decided_when(
+                "yd-cal",
+                1,
+                "Raise Google Docs to 1000 calls",
+                "mayor",
+                "2026-10-10T09:00:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+            decided_when(
+                "yd-cal",
+                2,
+                "Raise Google Docs to 2000 calls",
+                "assembly",
+                "2026-10-10T09:01:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+            decided_when(
+                "yd-cal",
+                3,
+                "Raise Google Docs to 3000 calls",
+                "mayor",
+                "2026-10-10T09:02:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+        ];
+        let (m, _) = Model::new(state, Mode::Chat, None);
+        let groups = m.decided_groups(&noon());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].rows.len(), 3);
+        assert!(
+            groups[0]
+                .rows
+                .iter()
+                .all(|row| matches!(row, DecidedEntry::One(_)))
+        );
+        // Same words, another outcome: no fold either.
+        let mut state = yard(&[]);
+        let mut asks = vec![
+            decided_when(
+                "yd-cal",
+                1,
+                "Raise Google Docs to 1000 calls",
+                "mayor",
+                "2026-10-10T09:00:00Z",
+                "answered",
+                "Raise them",
+                "",
+                "",
+            ),
+            decided_when(
+                "yd-cal",
+                2,
+                "Raise Google Docs to 2000 calls",
+                "mayor",
+                "2026-10-10T09:01:00Z",
+                "declined",
+                "",
+                "not now",
+                "",
+            ),
+        ];
+        // Docs against Slides: more than numbers differ.
+        asks.push(decided_when(
+            "yd-cal",
+            3,
+            "Raise Google Slides to 3000 calls",
+            "mayor",
+            "2026-10-10T09:02:00Z",
+            "answered",
+            "Raise them",
+            "",
+            "",
+        ));
+        state.asks.decided = asks;
+        let (m, _) = Model::new(state, Mode::Chat, None);
+        let groups = m.decided_groups(&noon());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].rows.len(), 3);
+        assert!(
+            groups[0]
+                .rows
+                .iter()
+                .all(|row| matches!(row, DecidedEntry::One(_)))
+        );
+    }
+
+    #[test]
+    fn a_fold_opens_on_a_toggle_and_with_the_open_ask_in_it() {
+        let mut state = yard(&[]);
+        state.asks.decided = week();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        let open = |m: &Model| match &m.decided_groups(&noon())[1].rows[0] {
+            DecidedEntry::Fold(fold) => fold.open,
+            entry => panic!("the pair folds: {entry:?}"),
+        };
+        assert!(!open(&m));
+        m.toggle_decided_fold("yd-cal", 3);
+        assert!(open(&m));
+        m.toggle_decided_fold("yd-cal", 3);
+        assert!(!open(&m));
+        // A fold the keys are not told of still opens for its open ask.
+        m.toggle_decided();
+        m.select(Selected::Decided("yd-cal".into(), 3));
+        assert!(open(&m));
+    }
+
+    #[test]
+    fn the_chips_count_and_choose_an_outcome_with_the_declined_under_all() {
+        let mut state = yard(&[]);
+        state.asks.decided = week();
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        assert_eq!(
+            m.decided_chip_counts(),
+            [
+                (None, 7),
+                (Some(Outcome::Approved), 4),
+                (Some(Outcome::Words), 1),
+                (Some(Outcome::TakenBack), 0),
+                (Some(Outcome::PutAside), 1),
+            ]
+        );
+        // The declined one counts in All alone: it has no chip.
+        m.set_decided_chip(Some(Outcome::Approved));
+        assert_eq!(decided_all(&m).len(), 4);
+        m.set_decided_chip(Some(Outcome::Words));
+        assert_eq!(decided_all(&m).len(), 1);
+        m.set_decided_chip(Some(Outcome::TakenBack));
+        assert!(decided_all(&m).is_empty());
+        m.set_decided_chip(Some(Outcome::PutAside));
+        assert_eq!(decided_all(&m).len(), 1);
+        m.set_decided_chip(None);
+        assert_eq!(decided_all(&m).len(), 7);
+    }
+
+    #[test]
+    fn the_filter_matches_question_asker_and_outcome_in_any_case() {
+        let mut state = yard(&[]);
+        state.asks.decided = week();
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        let asks = |m: &Model| {
+            decided_all(m)
+                .into_iter()
+                .map(|row| row.ask)
+                .collect::<Vec<_>>()
+        };
+        assert!(m.set_decided_filter("calendar"));
+        assert_eq!(asks(&m), [1]);
+        assert!(m.set_decided_filter("ASSEMBLY"));
+        assert_eq!(asks(&m), [5]);
+        assert!(m.set_decided_filter("gave"));
+        assert_eq!(asks(&m), [4]);
+        assert!(m.set_decided_filter("approved"));
+        assert_eq!(asks(&m), [7, 1, 3, 2]);
+        // Every word counts, across the fields.
+        assert!(m.set_decided_filter("mayor calendar"));
+        assert_eq!(asks(&m), [1]);
+        assert!(m.set_decided_filter("mayor train"));
+        assert!(asks(&m).is_empty());
+        assert!(m.set_decided_filter("declined"));
+        assert_eq!(asks(&m), [5]);
+        // Typing what stands changes nothing.
+        assert!(!m.set_decided_filter("declined"));
+        assert!(m.set_decided_filter(""));
+        assert_eq!(asks(&m), [7, 1, 3, 2, 4, 5, 6]);
+        // The chips count what the text leaves.
+        assert!(m.set_decided_filter("mayor"));
+        assert_eq!(
+            m.decided_chip_counts(),
+            [
+                (None, 6),
+                (Some(Outcome::Approved), 4),
+                (Some(Outcome::Words), 1),
+                (Some(Outcome::TakenBack), 0),
+                (Some(Outcome::PutAside), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tab_order_skips_what_the_chip_and_the_filter_hide() {
+        let mut state = yard(&[]);
+        state.asks.decided = week();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        m.toggle_decided();
+        m.set_decided_chip(Some(Outcome::Approved));
+        assert!(m.has_row(&Selected::Decided("yd-cal".into(), 1)));
+        assert!(!m.has_row(&Selected::Decided("yd-cal".into(), 4)));
+        assert!(!m.has_row(&Selected::Decided("bead-d".into(), 5)));
+        m.set_decided_chip(None);
+        assert!(m.set_decided_filter("train"));
+        assert!(m.has_row(&Selected::Decided("bead-d".into(), 5)));
+        assert!(!m.has_row(&Selected::Decided("yd-cal".into(), 1)));
+        // A fold's members stay in reach of the keys.
+        assert!(m.set_decided_filter(""));
+        assert!(m.has_row(&Selected::Decided("yd-cal".into(), 2)));
+        assert!(m.has_row(&Selected::Decided("yd-cal".into(), 3)));
+    }
+
+    #[test]
+    fn the_queue_reads_every_bead_with_open_asks_once() {
+        let mut state = yard(&[]);
+        state.asks.open = evening();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        let beads = |effects: Vec<Effect>| {
+            effects
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::Bead { bead } => Some(bead),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // The open bead with every other, each once.
+        let open = evening();
+        assert_eq!(
+            beads(m.asks(Asks {
+                open: open.clone(),
+                decided: vec![],
+            })),
+            ["yardr-n8ta", "yardr-3msx", "yardr-9f2c", "yardr-7h11"]
+        );
+        // What the cache has is not asked again.
+        m.bead_loaded(links_bead());
+        assert_eq!(
+            beads(m.asks(Asks {
+                open,
+                decided: vec![],
+            })),
+            ["yardr-3msx", "yardr-9f2c", "yardr-7h11"]
+        );
+        // None of a yard the window does not show.
+        let (mut m, _) = Model::new(yard(&[]), Mode::Decisions, None);
+        m.leave();
+        assert_eq!(
+            m.asks(Asks {
+                open: evening(),
+                decided: vec![],
+            }),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -8895,15 +9739,13 @@ mod tests {
         // At once, before the yard says: out of the open, into Decided.
         assert_eq!(m.decisions_count(), 3);
         assert_eq!(m.decided_count(), 1);
-        let rows = m.decided_rows();
+        let rows = decided_all(&m);
         assert_eq!(
             rows[0].head,
             "Move this yard's 64 links to the declared source now?"
         );
-        assert_eq!(
-            rows[0].sub,
-            "yardmaster · Move them now · move them tonight"
-        );
+        assert_eq!(rows[0].outcome, "✓approved");
+        assert_eq!(rows[0].detail, "yardmaster · 10:00");
         // The open bead is gone: the next decision is open.
         assert_eq!(m.selected(), Some(&Selected::Decision("yardr-3msx".into())));
 
@@ -9082,25 +9924,25 @@ mod tests {
     /// plain words. No later line of a forged run ask's question, and no
     /// indent of the asker's, is drawn in the list.
     #[test]
-    fn a_decisions_row_shows_the_question_s_first_line() {
+    fn a_decisions_row_shows_the_whole_question_with_whose_wants_and_waits() {
         let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
         let m = with_a_run_ask_about(question, &[]);
         let row = &m.decision_groups(&noon())[0].rows[0];
-        assert_eq!(row.head, "Take more?");
-        assert!(!row.head.contains('\n'), "{:?}", row.head);
-        assert!(!row.head.contains("when you approve"), "{:?}", row.head);
-        assert!(!row.head.contains("yardr peer list"), "{:?}", row.head);
-        // Whose words they are, the row's sub says.
-        assert_eq!(row.sub, "yardmaster · 2h");
-        // A break that is no line break to Rust still ends the row's line.
-        let m = with_a_run_ask_about("Take more?\u{2028}the yard says: two", &[]);
-        let row = &m.decision_groups(&noon())[0].rows[0];
-        assert_eq!(row.head, "Take more?");
-        // So for another ask: the first line, without the asker's indent.
-        let mut m = with_a_run_ask_about("  Take more?\n    yardr peer list", &[]);
+        // The whole question, wrapped to two lines where it is drawn.
+        assert_eq!(row.head, question);
+        assert_eq!(row.sub, "yardmaster · approval wanted · 2h");
+        // An ask with no options wants words; a secret one wants its secret.
+        let mut m = with_a_run_ask_about("Take more?", &[]);
         m.open[0].run = None;
         let row = &m.decision_groups(&noon())[0].rows[0];
-        assert_eq!(row.head, "Take more?");
+        assert_eq!(row.sub, "yardmaster · words wanted · 2h");
+        let m = with_a_secret_ask();
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.sub, "yardmaster · secret wanted · 2h");
+        // A bead read with three options says how many.
+        let m = evening_with_links();
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.sub, "yardmaster · 3 options · 2h");
     }
 
     /// A Decided row shows one line of the question, the same way: its
@@ -9111,13 +9953,15 @@ mod tests {
         let question = "Take more?\nwhen you approve, the yard runs this as mckean, and nothing else:\n    yardr peer list";
         let mut m = with_a_run_ask_about(question, &[]);
         assert!(m.deferred("yd-link", 2710).contains(&Effect::Asks));
-        let row = &m.decided_rows()[0];
+        let rows = decided_all(&m);
+        let row = &rows[0];
         assert_eq!(row.head, "Take more?");
         assert!(!row.head.contains('\n'), "{:?}", row.head);
         assert!(!row.head.contains("when you approve"), "{:?}", row.head);
         assert!(!row.head.contains("yardr peer list"), "{:?}", row.head);
-        // Whose words they are, the row's sub says.
-        assert_eq!(row.sub, "yardmaster · put aside");
+        // Whose words they are, the row's detail says.
+        assert_eq!(row.outcome, "‖put aside");
+        assert_eq!(row.detail, "yardmaster · 10:00");
     }
 
     /// Nothing but the approval answers a run ask: Enter sends no pick and
@@ -9138,7 +9982,7 @@ mod tests {
             bead: "yd-link".into()
         }));
         assert_eq!(m.decisions_count(), 0);
-        assert_eq!(m.decided_rows()[0].sub, "yardmaster · approved");
+        assert_eq!(decided_all(&m)[0].outcome, "✓approved");
         let detail = m.decided_detail("yd-link", 2710, &chrono::Utc).unwrap();
         assert_eq!(
             detail.state_line,
@@ -9230,7 +10074,7 @@ mod tests {
     fn a_run_ask_is_put_aside_and_declined_as_any_ask() {
         let mut m = with_a_run_ask(&[]);
         assert!(m.deferred("yd-link", 2710).contains(&Effect::Asks));
-        assert_eq!(m.decided_rows()[0].sub, "yardmaster · put aside");
+        assert_eq!(decided_all(&m)[0].outcome, "‖put aside");
         assert_eq!(m.approving("yd-link", 2710), Some(&more_mail()));
         assert_eq!(m.approved("yd-link", 2710, &approved()).len(), 2);
         assert_eq!(m.approving("yd-link", 2710), None);
@@ -9346,7 +10190,7 @@ mod tests {
             bead: "yd-crm".into()
         }));
         assert_eq!(m.decisions_count(), 0);
-        assert_eq!(m.decided_rows()[0].sub, "yardmaster · gave BOOKS_TOKEN");
+        assert_eq!(decided_all(&m)[0].outcome, "✎gave BOOKS_TOKEN");
         let detail = m.decided_detail("yd-crm", 18, &chrono::Utc).unwrap();
         assert_eq!(detail.state_line, "you gave BOOKS_TOKEN");
         assert_eq!(detail.secret, Some(books()));
@@ -9366,7 +10210,7 @@ mod tests {
         assert_eq!(m.decisions_count(), 0);
         let detail = m.decided_detail("yd-crm", 18, &chrono::Utc).unwrap();
         assert_eq!(detail.state_line, "you declined");
-        assert_eq!(m.decided_rows()[0].sub, "yardmaster · declined");
+        assert_eq!(decided_all(&m)[0].outcome, "✕declined");
         assert_eq!(m.secret("yd-crm", 18), Some(&books()));
         assert_eq!(m.giving("yd-crm", 18), None);
         // Put aside, it is given still.
@@ -9428,15 +10272,10 @@ mod tests {
         state.asks.decided = vec![taken, foreign];
         let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.toggle_decided();
-        let rows = m.decided_rows();
-        assert_eq!(
-            rows[0].sub,
-            "yardmaster · taken back by mayor: the train left"
-        );
-        assert_eq!(
-            rows[1].sub,
-            "yardmaster · it was taken back in north's yard"
-        );
+        let rows = decided_all(&m);
+        assert_eq!(rows[0].outcome, "↩taken back by mayor: the train left");
+        assert_eq!(rows[0].detail, "yardmaster · 09:30");
+        assert_eq!(rows[1].outcome, "↩it was taken back in north's yard");
         let line = |ask: u64| {
             m.decided_detail("yd-links", ask, &chrono::Utc)
                 .unwrap()
@@ -9547,7 +10386,7 @@ mod tests {
         assert!(effects.contains(&Effect::Asks));
         assert_eq!(m.decisions_count(), 3);
         assert_eq!(m.decided_count(), 1);
-        assert_eq!(m.decided_rows()[0].sub, "yardmaster · put aside");
+        assert_eq!(decided_all(&m)[0].outcome, "‖put aside");
 
         // Decline without words changes nothing: it asks for words.
         assert_eq!(m.declined("yardr-3msx", 4, "  "), Vec::new());
