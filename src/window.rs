@@ -1155,6 +1155,7 @@ fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
         .flex()
         .items_center()
         .gap_2()
+        .min_h(px(32.))
         .cursor_pointer()
         .child(
             div()
@@ -8118,9 +8119,10 @@ impl Footplate {
         }
         let at = format!("yard menu {name}");
         actions = actions.child(
-            small_button("⋯".to_string(), palette)
+            small_button("…".to_string(), palette)
                 .id(SharedString::from(at.clone()))
                 .debug_selector(move || at.clone())
+                .tooltip(|_, cx| cx.new(|_| RailTip("Yard actions".to_string())).into())
                 .on_click(cx.listener({
                     let name = name.clone();
                     move |this, _, _, cx| this.toggle_menu(&name, cx)
@@ -8159,10 +8161,26 @@ impl Footplate {
                             )
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(palette.faint)
-                                    .truncate()
-                                    .child(format!("{} · {state}", listed.kind())),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_sm()
+                                            .text_color(palette.faint)
+                                            .child(listed.kind()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_right()
+                                            .text_sm()
+                                            .text_color(palette.faint)
+                                            .child(state),
+                                    ),
                             ),
                     )
                     .child(actions),
@@ -8183,6 +8201,7 @@ impl Footplate {
                     })
                     .text_sm()
                     .text_color(palette.faint)
+                    .text_right()
                     .child(count),
             );
         }
@@ -22266,6 +22285,7 @@ mod tests {
         assert!(!drawn(cx, "notify mail"));
         click_on(cx, "notify on");
         assert!(settings_of(&view, cx).notifications.on);
+        assert!(bounds_of(cx, "notify mail").size.height >= px(32.));
         assert!(Settings::read(&file).notifications.on);
         assert_eq!(told.asked.get(), 1);
         assert!(drawn(cx, "notify said"));
