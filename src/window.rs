@@ -5,6 +5,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -21,9 +22,9 @@ use crate::api::{CrewMember, Flow, FlowBead, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
-    self, AnswerAction, ArrivalDetail, ArrivalGroup, DecidedDetail, DecidedRow, DecisionAsk,
-    DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model, News, Route,
-    Row, Selected, Target, Top, late_line, state_of, you_first,
+    self, AnswerAction, ArrivalDetail, ArrivalGroup, AskPreview, DecidedDetail, DecidedRow,
+    DecisionAsk, DecisionDetail, DecisionRow, DecisionRowAsk, Effect, Entry, Kind, Mode, Model,
+    News, Route, Row, Selected, Target, Top, late_line, state_of, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -591,6 +592,20 @@ fn asked_age(waits: &str) -> String {
         true => String::new(),
         false => format!("asked {waits}"),
     }
+}
+
+/// What an inline ask's preview says over its question: that it waits on
+/// the person reading, which ask, and how long it waits.
+fn ask_preview_head(kind: &str, ask: u64, waits: &str) -> String {
+    [
+        "Waiting on you".to_string(),
+        format!("{kind} {ask}"),
+        asked_age(waits),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 /// The head of a bead's open asks: the yard, the bead and the topic, once
@@ -5380,6 +5395,43 @@ impl Footplate {
             None => self.focus.clone(),
         };
         window.focus(&focus);
+    }
+
+    /// Opens what an ask or bead id in mail names: an open ask's card in
+    /// Decide, with the ask current, a dealt-with ask where it stands,
+    /// or the bead whole. The selection leads and the mode follows, as
+    /// anywhere.
+    fn open_reference(
+        &mut self,
+        target: select::RefTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            select::RefTarget::Ask {
+                bead,
+                ask,
+                open: true,
+            } => {
+                self.select(Selected::Decision(bead.clone()), window, cx);
+                self.select_ask(bead, ask, cx);
+            }
+            select::RefTarget::Ask {
+                bead,
+                ask,
+                open: false,
+            } => {
+                // A folded "Decided" has no row to select: unfold it, as
+                // opening the row from the list does.
+                if self.model.as_ref().is_some_and(|m| !m.decided_expanded()) {
+                    self.toggle_decided(cx);
+                }
+                self.select(Selected::Decided(bead, ask), window, cx);
+            }
+            select::RefTarget::Bead { bead } => {
+                self.select(Selected::Bead(bead), window, cx);
+            }
+        }
     }
 
     /// Copies what is selected of the messages. The line copies its own
@@ -10651,13 +10703,20 @@ impl Footplate {
             .when(!entry.text.is_empty(), |el| {
                 // The margin is outside the text's bounds, so that these
                 // are where the text is.
-                el.child(
-                    div()
-                        .ml_4()
-                        .debug_selector(|| format!("text {seq}"))
-                        .child(select::text(seq, entry.text, &self.selection)),
-                )
+                let open = cx.entity();
+                let on_ref: select::RefClick = Rc::new(move |target, window, cx| {
+                    open.update(cx, |this, cx| this.open_reference(target, window, cx));
+                });
+                el.child(div().ml_4().debug_selector(|| format!("text {seq}")).child(
+                    select::text_with_refs(seq, entry.text, entry.refs, on_ref, &self.selection),
+                ))
             })
+            .children(
+                entry
+                    .asks
+                    .iter()
+                    .map(|ask| self.ask_preview(ask, palette, cx)),
+            )
             .children(entry.files.iter().map(|file| {
                 div()
                     .pl_4()
@@ -10683,6 +10742,55 @@ impl Footplate {
             .flex_col()
             .when(head, |el| el.child(self.entry_head(&entry, palette)))
             .child(self.entry_body(entry, palette, cx))
+            .into_any_element()
+    }
+
+    /// An open ask a mail names, under the mail: what it asks with how
+    /// long it waits, and the one action, which opens the card in
+    /// Decide. The card itself stays there: one source of truth.
+    fn ask_preview(
+        &self,
+        ask: &AskPreview,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let bead = ask.bead.clone();
+        let ask_seq = ask.ask;
+        div()
+            .pl_4()
+            .pt_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(ask_preview_head(&ask.kind, ask.ask, &ask.waits)),
+            )
+            .child(div().child(ask.question.clone()))
+            .child(
+                div().flex().flex_row().child(
+                    small_button("Open card".to_string(), palette)
+                        .id(SharedString::from(format!("open card {bead} {ask_seq}")))
+                        .debug_selector({
+                            let bead = bead.clone();
+                            move || format!("open card {bead} {ask_seq}")
+                        })
+                        .text_color(palette.accent)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_reference(
+                                select::RefTarget::Ask {
+                                    bead: bead.clone(),
+                                    ask: ask_seq,
+                                    open: true,
+                                },
+                                window,
+                                cx,
+                            )
+                        })),
+                ),
+            )
             .into_any_element()
     }
 
@@ -14745,6 +14853,93 @@ mod tests {
         assert_eq!(
             selected(&view, cx).as_deref(),
             Some("https://example.org/a")
+        );
+    }
+
+    #[gpui::test]
+    fn a_click_on_an_ask_chip_opens_the_right_card(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        let mail = "its card is ask 4 now";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+
+        // A click on the text beside the chip opens nothing.
+        click(cx, 12, mail, 1, 1.);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+        // A click on the chip opens the bead's card in Decide, with the
+        // named ask current rather than the first.
+        click(cx, 12, mail, 12, 1.);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Decision("bead-a".into()))
+        );
+        assert_eq!(current_ask_of(&view, cx), 4);
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Decisions);
+        wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_bead_chip_opens_the_bead(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        let mail = "over in bead-a now";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+
+        click(cx, 12, mail, 8, 1.);
+        assert_eq!(open_row(&view, cx), Some(Selected::Bead("bead-a".into())));
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Timetable);
+        wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+    }
+
+    #[gpui::test]
+    fn an_open_ask_named_in_mail_stands_under_it_with_open_card(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links",
+                 "ask": 4, "question": "Send them to build?", "asker": "yardmaster",
+                 "since": "2026-10-10T11:00:00Z"},
+            ], "decided": [
+                {"bead": "bead-a", "ask": 2, "question": "Move them?",
+                 "asker": "yardmaster", "since": "2026-10-08T09:30:00Z",
+                 "state": "answered"},
+            ]}})
+            .to_string(),
+        );
+        yard.answer("Bead", &bead_three());
+        let mail = "after ask 2 comes ask 4";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+
+        // The open ask stands under the mail with its one action; the
+        // dealt-with one chips without a preview.
+        assert!(drawn(cx, "open card bead-a 4"));
+        click_on(cx, "open card bead-a 4");
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Decision("bead-a".into()))
+        );
+        assert_eq!(current_ask_of(&view, cx), 4);
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| {
+                m.select(Selected::Conversation("yardmaster".into()))
+            })
+        });
+        click(cx, 12, mail, 6, 1.);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Decided("bead-a".into(), 2))
         );
     }
 

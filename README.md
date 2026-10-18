@@ -195,8 +195,10 @@ its flow), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
-its answer) and `switcher` (the switcher's list open over four
-yards, one of them away). With no state the first
+its answer), `switcher` (the switcher's list open over four
+yards, one of them away) and `refs` (the conversation with the
+yardmaster, naming an ask and two bead ids: the ask's chip with its
+preview under the mail). With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read

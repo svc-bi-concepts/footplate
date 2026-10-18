@@ -38,8 +38,9 @@ use crate::yard::Env;
 /// quiet lines, one arrival's bead open from the board, one
 /// line's flow open on its row, an open card of a secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
-/// refusal of its answer, and the switcher's list open over four yards,
-/// one of them away.
+/// refusal of its answer, the switcher's list open over four yards, one
+/// of them away, and the yardmaster's conversation naming an ask and two
+/// bead ids.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -92,6 +93,7 @@ pub const STATES: &[&str] = &[
     "secret-shown",
     "secret-refused",
     "switcher",
+    "refs",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -846,6 +848,47 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         }
+        "refs" => {
+            // The yardmaster's conversation naming an ask and two bead
+            // ids: the ask's chip with its preview under the mail, and
+            // the beads' chips. The ask is a run ask's, as the grant in
+            // the review is; yardr-e9f0 is its own bead, and yd-zulu
+            // travels on the board every state serves.
+            yard.answer(
+                "UserInbox",
+                &json!({"result": {"mail": [
+                    {"seq": 12, "from": "yardmaster", "to": "jo",
+                     "text": "I put the grant to you as a card (ask 6926).",
+                     "read": false},
+                ], "unread": 1, "last": 12, "from": ["yardmaster"]}})
+                .to_string(),
+            );
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": "2026-10-14T08:00:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "I put the grant to you as a card (ask 6926).",
+                     "read": false},
+                    {"seq": 13, "at": "2026-10-14T08:02:00Z", "from": "jo", "to": "yardmaster",
+                     "text": "On it. Is the turn (yd-zulu) still waiting?",
+                     "read": false},
+                    {"seq": 14, "at": "2026-10-14T08:05:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "It waits on the grant. The grant's bead (yardr-e9f0) holds it.",
+                     "read": false},
+                ]})
+                .to_string(),
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [
+                    {"bead": "yardr-e9f0", "bead_title": "Docs grant",
+                     "ask": 6926, "question": "Grant yardmaster \"replace\" on google-docs?",
+                     "asker": "yardmaster", "since": "2026-10-14T07:55:00Z",
+                     "run": run_of()},
+                ], "decided": []}})
+                .to_string(),
+            );
+        }
         "mail" | "image" => {
             // The yardmaster's mail carries a page and an image, as the
             // bead's note does in the page state: the yard holds the
@@ -1423,6 +1466,20 @@ mod tests {
                     assert_eq!(letters[0].files.len(), 2, "{state}");
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
                     assert!(!crate::model::is_page(&letters[0].files[1]), "{state}");
+                }
+                "refs" => {
+                    // The run ask the first mail names, and the two bead
+                    // ids the mails name: the ask's own, and yd-zulu's
+                    // from the board.
+                    assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    assert_eq!(loaded.asks.open[0].ask, 6926, "{state}");
+                    assert_eq!(loaded.asks.open[0].bead, "yardr-e9f0", "{state}");
+                    assert!(loaded.asks.open[0].run.is_some(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 3, "{state}");
+                    assert!(letters[0].text.contains("ask 6926"), "{state}");
+                    assert!(letters[1].text.contains("yd-zulu"), "{state}");
+                    assert!(letters[2].text.contains("yardr-e9f0"), "{state}");
                 }
                 "undelivered" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

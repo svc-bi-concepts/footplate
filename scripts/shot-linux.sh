@@ -36,8 +36,10 @@
 # (yardr's line open on its flow), `secret` (an open card of a secret
 # ask, posed with a value typed and hidden), `secret-shown` (that
 # card where the yard marks the value no secret: typed and shown),
-# `secret-refused` (that card with the yard's refusal of its answer)
-# and `switcher` (the switcher's list open over four yards, one away).
+# `secret-refused` (that card with the yard's refusal of its answer),
+# `switcher` (the switcher's list open over four yards, one away) and
+# `refs` (the conversation naming an ask and two bead ids, the ask's
+# chip with its preview under the mail).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the
@@ -56,7 +58,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread plain lines run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher"
+states="yardmaster crew thread plain lines run stopped far settings settings-yards settings-agents settings-crew settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher refs"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

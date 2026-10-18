@@ -16,6 +16,8 @@ use crate::api::{
     DecidedAsk, Event, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer, Ran,
     Run, Secret, User,
 };
+use crate::markdown;
+use crate::select;
 
 /// The kind of message a link must carry out for mail to be written.
 const PEER_MAIL: &str = "mail";
@@ -269,6 +271,27 @@ pub struct Entry {
     /// The day's separator above it, where the day changes: `Today`, or
     /// the weekday with the day and the month.
     pub day: Option<String>,
+    /// The asks and bead ids its text names that the yard said, each
+    /// where it stands in its block: the chips, and what opening one
+    /// shows.
+    pub refs: Vec<select::RefSpan>,
+    /// The open asks its text names, each once, in order: the previews
+    /// under it, each with its card a tap away.
+    pub asks: Vec<AskPreview>,
+}
+
+/// An open ask a mail names, as the preview under it shows it: the
+/// question's first line, who asked and how long it waits. The card
+/// itself stays in Decide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AskPreview {
+    pub bead: String,
+    pub ask: u64,
+    pub question: String,
+    pub asker: String,
+    pub waits: String,
+    /// What the head calls it: `ask`, `run ask` or `secret ask`.
+    pub kind: String,
 }
 
 /// Where what is typed goes.
@@ -2666,6 +2689,185 @@ impl Model {
         ))
     }
 
+    /// The beads an id named in mail opens as: the open and dealt-with
+    /// asks' beads, the travelling beads, and the beads read whole. Only
+    /// these chip: any other id stays plain text, as `re-ask` does.
+    fn known_beads(&self) -> HashSet<String> {
+        let mut known = HashSet::new();
+        known.extend(self.open.iter().map(|a| a.bead.clone()));
+        known.extend(self.decided.iter().map(|a| a.bead.clone()));
+        known.extend(self.arrivals.iter().map(|r| r.bead.clone()));
+        for depot in &self.flows.depots {
+            for flow in &depot.flows {
+                for stage in &flow.stages {
+                    known.extend(stage.beads.iter().map(|b| b.bead.clone()));
+                }
+            }
+            known.extend(depot.elsewhere.iter().map(|b| b.bead.clone()));
+        }
+        known.extend(self.flows.unassigned.iter().map(|b| b.bead.clone()));
+        known.extend(self.beads.keys().cloned());
+        known
+    }
+
+    /// The bead `id` opens as, when footplate knows it: itself, or the
+    /// one known bead of another yard it names without its peer. None
+    /// where none is known, or where several yards' are.
+    fn resolve_bead(&self, known: &HashSet<String>, id: &str) -> Option<String> {
+        if known.contains(id) {
+            return Some(id.to_string());
+        }
+        if id.contains('@') {
+            return None;
+        }
+        let mut peered = known.iter().filter(|bead| {
+            bead.strip_prefix(id)
+                .is_some_and(|peer| peer.starts_with('@') && peer.len() > 1)
+        });
+        let bead = peered.next()?;
+        peered.next().is_none().then(|| bead.clone())
+    }
+
+    /// Whether the ask is open for the viewer or dealt with: what its
+    /// chip opens. None where it is neither.
+    fn ask_state(&self, bead: &str, ask: u64) -> Option<bool> {
+        if self.open.iter().any(|a| a.bead == bead && a.ask == ask) {
+            return Some(true);
+        }
+        if self.decided.iter().any(|a| a.bead == bead && a.ask == ask) {
+            return Some(false);
+        }
+        None
+    }
+
+    /// The card the number `ask` opens as, when one ask of that number is
+    /// the viewer's: the open one where any is open, else the dealt-with
+    /// one. None where none is, or where several beads' are.
+    fn resolve_ask(&self, ask: u64) -> Option<(String, bool)> {
+        let open: Vec<&str> = self
+            .open
+            .iter()
+            .filter(|a| a.ask == ask)
+            .map(|a| a.bead.as_str())
+            .collect();
+        match open.as_slice() {
+            [bead] => return Some((bead.to_string(), true)),
+            [] => {}
+            _ => return None,
+        }
+        let decided: Vec<&str> = self
+            .decided
+            .iter()
+            .filter(|a| a.ask == ask)
+            .map(|a| a.bead.as_str())
+            .collect();
+        match decided.as_slice() {
+            [bead] => Some((bead.to_string(), false)),
+            _ => None,
+        }
+    }
+
+    /// The open ask's preview, as it stands under a mail that names it.
+    fn ask_preview<Tz: TimeZone>(
+        &self,
+        bead: &str,
+        ask: u64,
+        now: &DateTime<Tz>,
+    ) -> Option<AskPreview>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let open = self.open.iter().find(|a| a.bead == bead && a.ask == ask)?;
+        Some(AskPreview {
+            bead: bead.to_string(),
+            ask,
+            question: row_head(&open.question),
+            asker: open.asker.clone(),
+            waits: waits(&open.since, now),
+            kind: match (&open.run, &open.secret) {
+                (Some(_), _) => "run ask".to_string(),
+                (_, Some(_)) => "secret ask".to_string(),
+                _ => "ask".to_string(),
+            },
+        })
+    }
+
+    /// The references `text` names that the yard said, each where it
+    /// stands in its block, with the open asks among them for the
+    /// previews under it. `known` is [`Model::known_beads`].
+    fn entry_refs<Tz: TimeZone>(
+        &self,
+        text: &str,
+        known: &HashSet<String>,
+        now: &DateTime<Tz>,
+    ) -> (Vec<select::RefSpan>, Vec<AskPreview>)
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let mut spans = Vec::new();
+        let mut previews = Vec::new();
+        let mut previewed: HashSet<(String, u64)> = HashSet::new();
+        for (ix, block) in markdown::blocks(text).iter().enumerate() {
+            for found in select::refs(&block.text) {
+                // An ask's whole reference chips, or the bead's own
+                // where the ask is none the yard said.
+                let (range, target) = match &found.kind {
+                    select::RefKind::Ask(ask) => match self.resolve_ask(*ask) {
+                        Some((bead, open)) => (
+                            found.range.clone(),
+                            select::RefTarget::Ask {
+                                bead,
+                                ask: *ask,
+                                open,
+                            },
+                        ),
+                        None => continue,
+                    },
+                    select::RefKind::AskOn {
+                        ask,
+                        bead,
+                        bead_range,
+                    } => {
+                        let Some(id) = self.resolve_bead(known, bead) else {
+                            continue;
+                        };
+                        match self.ask_state(&id, *ask) {
+                            Some(open) => (
+                                found.range.clone(),
+                                select::RefTarget::Ask {
+                                    bead: id,
+                                    ask: *ask,
+                                    open,
+                                },
+                            ),
+                            None => (bead_range.clone(), select::RefTarget::Bead { bead: id }),
+                        }
+                    }
+                    select::RefKind::Bead(bead) => match self.resolve_bead(known, bead) {
+                        Some(id) => (found.range.clone(), select::RefTarget::Bead { bead: id }),
+                        None => continue,
+                    },
+                };
+                if let select::RefTarget::Ask {
+                    bead,
+                    ask,
+                    open: true,
+                } = &target
+                    && previewed.insert((bead.clone(), *ask))
+                    && let Some(preview) = self.ask_preview(bead, *ask, now)
+                {
+                    previews.push(preview);
+                }
+                spans.push(select::RefSpan {
+                    block: ix,
+                    range,
+                    target,
+                });
+            }
+        }
+        (spans, previews)
+    }
+
     /// The open conversation, oldest first.
     pub fn entries(&self) -> Vec<Entry> {
         match self.selected.as_ref() {
@@ -2678,7 +2880,9 @@ impl Model {
     fn entries_of(&self, sel: &Selected) -> Vec<Entry> {
         let letters = self.letters(sel);
         let zone = chrono::Local;
-        let today = chrono::Local::now().date_naive();
+        let now = chrono::Local::now();
+        let today = now.date_naive();
+        let known = self.known_beads();
         let mut out: Vec<Entry> = Vec::with_capacity(letters.len());
         let mut before: Option<&Letter> = None;
         for l in letters {
@@ -2706,16 +2910,20 @@ impl Model {
                 _ => None,
             };
             before = Some(l);
+            let text = plain(&l.text);
+            let (refs, asks) = self.entry_refs(&text, &known, &now);
             out.push(Entry {
                 seq: l.seq,
                 at: l.at.clone(),
                 from: l.from.clone(),
-                text: plain(&l.text),
+                text,
                 files: l.files.clone(),
                 mine,
                 standing,
                 head,
                 day,
+                refs,
+                asks,
             });
         }
         out
@@ -5322,6 +5530,251 @@ mod tests {
         assert_eq!(day_words(saturday, today), "Saturday 17 Oct");
         let friday = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
         assert_eq!(day_words(friday, today), "Friday 9 Oct");
+    }
+
+    /// A yard whose yardmaster wrote `texts` to jo, with the asks given
+    /// and one arrival travelling: the conversation open.
+    fn refs_model(texts: &[&str], open: Vec<OpenAsk>, decided: Vec<DecidedAsk>) -> Model {
+        let mut state = yard(&[]);
+        state.asks.open = open;
+        state.asks.decided = decided;
+        state.arrivals = board(
+            vec![arrival("yd-zulu", "new", "yardr", "5h–8h", "late", "amber")],
+            &["new"],
+        );
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        m.select(Selected::Conversation("yardmaster".into()));
+        let letters: Vec<Letter> = texts
+            .iter()
+            .enumerate()
+            .map(|(n, text)| {
+                letter_at(
+                    12 + n as u64,
+                    "yardmaster",
+                    "jo",
+                    "2026-10-08T09:30:00Z",
+                    text,
+                )
+            })
+            .collect();
+        m.conversation("yardmaster", letters);
+        m
+    }
+
+    /// When the asks below were asked: seven minutes ago, so their
+    /// previews wait `7m` whatever the clock says.
+    fn refs_since() -> String {
+        (chrono::Utc::now() - chrono::TimeDelta::minutes(7)).to_rfc3339()
+    }
+
+    fn refs_open(bead: &str, ask: u64) -> OpenAsk {
+        open_ask(
+            bead,
+            "The grant",
+            "",
+            ask,
+            "Grant yardmaster replace on google-docs?",
+            "yardmaster",
+            &refs_since(),
+        )
+    }
+
+    #[test]
+    fn an_ask_number_and_a_bead_id_chip_and_the_open_ask_stands_under_it() {
+        let m = refs_model(
+            &[
+                "I put the grant to you as a card (ask 3).",
+                "The turn (yd-zulu) waits, and re-ask 4 stands plain.",
+                "First.\n\n- See ask 3 again.",
+            ],
+            vec![refs_open("yardr-n8ta", 3)],
+            vec![],
+        );
+        let entries = m.entries();
+        assert_eq!(entries.len(), 3);
+        // The ask's chip opens its card in Decide.
+        let ask = select::RefTarget::Ask {
+            bead: "yardr-n8ta".into(),
+            ask: 3,
+            open: true,
+        };
+        assert_eq!(
+            entries[0].refs,
+            [select::RefSpan {
+                block: 0,
+                range: 34..39,
+                target: ask.clone(),
+            }]
+        );
+        // The open ask stands under the mail that names it, once.
+        assert_eq!(
+            entries[0].asks,
+            [AskPreview {
+                bead: "yardr-n8ta".into(),
+                ask: 3,
+                question: "Grant yardmaster replace on google-docs?".into(),
+                asker: "yardmaster".into(),
+                waits: "7m".into(),
+                kind: "ask".into(),
+            }]
+        );
+        // The travelling bead's chip opens the bead; `re-ask` is shaped
+        // as a bead id is, but the yard said no such bead.
+        assert_eq!(
+            entries[1].refs,
+            [select::RefSpan {
+                block: 0,
+                range: 10..17,
+                target: select::RefTarget::Bead {
+                    bead: "yd-zulu".into()
+                },
+            }]
+        );
+        assert!(entries[1].asks.is_empty());
+        // In the list below: the ask in the second block.
+        assert_eq!(
+            entries[2].refs,
+            [select::RefSpan {
+                block: 1,
+                range: 4..9,
+                target: ask,
+            }]
+        );
+        assert_eq!(entries[2].asks.len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_or_ambiguous_ask_stays_plain() {
+        let m = refs_model(
+            &["ask 3, ask 99 and ask 2."],
+            vec![refs_open("yardr-n8ta", 3), refs_open("yardr-3msx", 3)],
+            vec![decided_ask(
+                "yardr-n8ta",
+                2,
+                "Move them?",
+                "answered",
+                "",
+                "",
+                "",
+            )],
+        );
+        let entries = m.entries();
+        // Ask 3 is two beads': no chip. Ask 99 is none the yard said.
+        // Ask 2 was dealt with: its chip opens where it stands, with no
+        // preview under it.
+        assert_eq!(
+            entries[0].refs,
+            [select::RefSpan {
+                block: 0,
+                range: 18..23,
+                target: select::RefTarget::Ask {
+                    bead: "yardr-n8ta".into(),
+                    ask: 2,
+                    open: false,
+                },
+            }]
+        );
+        assert!(entries[0].asks.is_empty());
+        // With its bead, ask 3 is one ask again.
+        let m = refs_model(
+            &["ask 3 on yardr-n8ta is yours."],
+            vec![refs_open("yardr-n8ta", 3), refs_open("yardr-3msx", 3)],
+            vec![],
+        );
+        let entries = m.entries();
+        assert_eq!(entries[0].refs.len(), 1);
+        assert_eq!(
+            entries[0].refs[0].target,
+            select::RefTarget::Ask {
+                bead: "yardr-n8ta".into(),
+                ask: 3,
+                open: true,
+            }
+        );
+        assert_eq!(
+            &entries[0].text[entries[0].refs[0].range.clone()],
+            "ask 3 on yardr-n8ta"
+        );
+        assert_eq!(entries[0].asks.len(), 1);
+    }
+
+    #[test]
+    fn a_qualified_ask_falls_back_to_its_bead() {
+        let m = refs_model(&["ask 9 on yd-zulu, never asked."], vec![], vec![]);
+        let entries = m.entries();
+        // Ask 9 is none the yard said, but the bead travels: its own
+        // words chip, and no preview stands under them.
+        assert_eq!(
+            entries[0].refs,
+            [select::RefSpan {
+                block: 0,
+                range: 9..16,
+                target: select::RefTarget::Bead {
+                    bead: "yd-zulu".into()
+                },
+            }]
+        );
+        assert!(entries[0].asks.is_empty());
+        // Where the bead is none the yard said either, nothing chips.
+        let m = refs_model(&["ask 9 on yd-nowhere."], vec![], vec![]);
+        assert!(m.entries()[0].refs.is_empty());
+    }
+
+    #[test]
+    fn another_yard_s_bead_opens_with_its_peer() {
+        let m = refs_model(
+            &["see yardr-e9f0, and yardr-e9f0@north whole."],
+            vec![refs_open("yardr-e9f0@north", 8)],
+            vec![],
+        );
+        let entries = m.entries();
+        // Named with and without its peer: the one known bead.
+        let target = select::RefTarget::Bead {
+            bead: "yardr-e9f0@north".into(),
+        };
+        assert_eq!(entries[0].refs.len(), 2);
+        assert_eq!(entries[0].refs[0].target, target);
+        assert_eq!(
+            &entries[0].text[entries[0].refs[0].range.clone()],
+            "yardr-e9f0"
+        );
+        assert_eq!(entries[0].refs[1].target, target);
+        assert_eq!(
+            &entries[0].text[entries[0].refs[1].range.clone()],
+            "yardr-e9f0@north"
+        );
+        // Two yards' beads of one id: the bare id chips nowhere.
+        let m = refs_model(
+            &["see yardr-e9f0."],
+            vec![refs_open("yardr-e9f0@north", 8)],
+            vec![decided_ask(
+                "yardr-e9f0@south",
+                8,
+                "Move them?",
+                "answered",
+                "",
+                "",
+                "",
+            )],
+        );
+        assert!(m.entries()[0].refs.is_empty());
+    }
+
+    #[test]
+    fn a_run_or_secret_ask_s_preview_says_what_it_is() {
+        let mut run = refs_open("yardr-n8ta", 3);
+        run.run = Some(Run::default());
+        let mut secret = refs_open("yardr-3msx", 4);
+        secret.secret = Some(Secret::default());
+        let m = refs_model(&["ask 3 and ask 4."], vec![run, secret], vec![]);
+        let entries = m.entries();
+        assert_eq!(entries[0].refs.len(), 2);
+        let kinds: Vec<&str> = entries[0]
+            .asks
+            .iter()
+            .map(|ask| ask.kind.as_str())
+            .collect();
+        assert_eq!(kinds, ["run ask", "secret ask"]);
     }
 
     #[test]

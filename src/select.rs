@@ -2,7 +2,8 @@
 //! text and wraps it, and keeps no selection. The talk has one selection at
 //! a time, so it is kept beside the texts and not in each of them; a text
 //! draws its part of it and changes it with the mouse. A link in the text is
-//! drawn as one, and a click on it opens it.
+//! drawn as one, and a click on it opens it, as a click on an ask or bead
+//! id the model resolved opens the card or the bead.
 //!
 //! The text is drawn as the blocks its light Markdown makes of it, one
 //! under the other and without their marks. What is selected is still a
@@ -46,6 +47,14 @@ pub struct Selection {
 /// Where the copy controls of one text were last drawn, by block.
 type Chips = Vec<(usize, Bounds<Pixels>)>;
 
+/// What a press was on that a release on the same opens: a link, or an
+/// ask or bead id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Clicked {
+    Link(SharedString),
+    Ref(RefTarget),
+}
+
 struct Selected {
     /// The text it is in, and that text as it was when it was pressed on.
     key: u64,
@@ -55,9 +64,9 @@ struct Selected {
     anchor: Range<usize>,
     word: bool,
     range: Range<usize>,
-    /// The link the press was on, until the pointer selects something: a
-    /// release on it then is a click.
-    link: Option<SharedString>,
+    /// What the press was on that a release on the same opens, until the
+    /// pointer selects something: a drag is no click.
+    clicked: Option<Clicked>,
     /// The button is still down.
     selecting: bool,
 }
@@ -90,14 +99,14 @@ impl Selection {
     }
 
     /// A press on the text `key` at `place`: what was selected is dropped,
-    /// wherever it was. A second press selects the word there. `link` is
-    /// the link under the pointer.
+    /// wherever it was. A second press selects the word there. `clicked`
+    /// is the link or reference under the pointer.
     fn press(
         &mut self,
         key: u64,
         text: SharedString,
         place: Range<usize>,
-        link: Option<SharedString>,
+        clicked: Option<Clicked>,
         clicks: usize,
         cx: &mut Context<Self>,
     ) {
@@ -112,7 +121,7 @@ impl Selection {
             key,
             text,
             // The first press of the two has opened it already.
-            link: link.filter(|_| clicks == 1),
+            clicked: clicked.filter(|_| clicks == 1),
             range: anchor.start..if word { anchor.end } else { anchor.start },
             anchor,
             word,
@@ -146,17 +155,17 @@ impl Selection {
         if at.range != range {
             at.range = range;
             // A drag selects, also when it comes back to where it began.
-            at.link = None;
+            at.clicked = None;
             cx.notify();
         }
     }
 
-    /// The button came up: the link that was pressed on, if nothing was
-    /// dragged since.
-    fn release(&mut self) -> Option<SharedString> {
+    /// The button came up: what was pressed on, if nothing was dragged
+    /// since.
+    fn release(&mut self) -> Option<Clicked> {
         let at = self.at.as_mut()?;
         at.selecting = false;
-        at.link.take()
+        at.clicked.take()
     }
 
     /// A press that was not on the text `key`: what is selected in it is
@@ -271,6 +280,225 @@ pub fn links(text: &str) -> Vec<Range<usize>> {
     links
 }
 
+/// What opening a resolved reference shows: an ask's card, or a bead
+/// whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefTarget {
+    /// An ask's card: an open one opens in Decide, a dealt-with one where
+    /// it stands.
+    Ask { bead: String, ask: u64, open: bool },
+    /// A bead whole, as the timetable shows it.
+    Bead { bead: String },
+}
+
+/// A resolved reference in one of a text's blocks: where it stands in the
+/// block's drawn text, and what opening it shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefSpan {
+    /// The block it stands in, as `markdown::blocks` numbers them.
+    pub block: usize,
+    pub range: Range<usize>,
+    pub target: RefTarget,
+}
+
+/// What a click on a resolved reference does: the window opens the card
+/// or the bead.
+pub type RefClick = Rc<dyn Fn(RefTarget, &mut Window, &mut App)>;
+
+/// An ask or bead id named in drawn text, before the model resolves it
+/// against what the yard said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ref {
+    /// Where it stands, a qualified ask's bead included.
+    pub range: Range<usize>,
+    pub kind: RefKind,
+}
+
+/// What the text names: an ask's number, with its bead where the text
+/// says which bead's, or a bead id alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    /// `ask 6926`: the number alone.
+    Ask(u64),
+    /// `ask 18 on yd-crm`: the number with its bead, and where the bead
+    /// stands, so the bead alone still opens where the ask is none the
+    /// yard said.
+    AskOn {
+        ask: u64,
+        bead: String,
+        bead_range: Range<usize>,
+    },
+    /// `yardr-e9f0`: a bead id alone.
+    Bead(String),
+}
+
+/// Whether the byte may stand inside a word an ask reference abuts: the
+/// ask in `re-ask 5` is none, and neither is one in `asked 5`.
+fn word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+/// Whether the byte may stand inside a bead id: an id's own characters
+/// with the `@` of another yard's.
+fn bead_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'@')
+}
+
+/// A bead id at `start`: its own characters with one `@peer` at most,
+/// without what closes the sentence after it. None where no bead id
+/// starts here: one has a dash, and neither it nor its peer is empty.
+fn bead_token(text: &str, start: usize) -> Option<(String, usize)> {
+    if !text
+        .as_bytes()
+        .get(start)
+        .is_some_and(|b| b.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let mut end = start;
+    while end < text.len() && bead_byte(text.as_bytes()[end]) {
+        end += 1;
+    }
+    let token = text[start..end].trim_end_matches(['.', '-', '@']);
+    if token.is_empty() {
+        return None;
+    }
+    let end = start + token.len();
+    let (head, peer) = match token.split_once('@') {
+        None => (token, None),
+        Some((head, peer)) => (head, Some(peer)),
+    };
+    if peer.is_some_and(|peer| peer.is_empty() || peer.contains('@')) {
+        return None;
+    }
+    if !head.contains('-') || head.starts_with('-') || head.starts_with('.') {
+        return None;
+    }
+    Some((token.to_string(), end))
+}
+
+/// An ask reference at `start`: `ask` in any case, then whitespace, then
+/// the number, then `on` with a bead id where one follows. None where no
+/// reference starts here.
+fn ask_at(text: &str, start: usize) -> Option<Ref> {
+    let bytes = text.as_bytes();
+    if start > 0 && word_byte(bytes[start - 1]) {
+        return None;
+    }
+    if !text[start..]
+        .get(..3)
+        .is_some_and(|w| w.eq_ignore_ascii_case("ask"))
+    {
+        return None;
+    }
+    let mut at = start + 3;
+    let spaces = bytes[at..]
+        .iter()
+        .take_while(|b| b.is_ascii_whitespace())
+        .count();
+    if spaces == 0 {
+        return None;
+    }
+    at += spaces;
+    let digits = bytes[at..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    if bytes
+        .get(at + digits)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    {
+        return None;
+    }
+    let ask: u64 = text[at..at + digits].parse().ok()?;
+    let end = at + digits;
+    // `on` with a bead id where one follows; else the number alone.
+    let mut after = end;
+    after += bytes[after..]
+        .iter()
+        .take_while(|b| b.is_ascii_whitespace())
+        .count();
+    if text[after..]
+        .get(..2)
+        .is_some_and(|w| w.eq_ignore_ascii_case("on"))
+        && bytes
+            .get(after + 2)
+            .is_some_and(|b| b.is_ascii_whitespace())
+    {
+        after += 2;
+        after += bytes[after..]
+            .iter()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count();
+        if let Some((bead, bead_end)) = bead_token(text, after) {
+            return Some(Ref {
+                range: start..bead_end,
+                kind: RefKind::AskOn {
+                    ask,
+                    bead,
+                    bead_range: after..bead_end,
+                },
+            });
+        }
+    }
+    Some(Ref {
+        range: start..end,
+        kind: RefKind::Ask(ask),
+    })
+}
+
+/// Whether `range` stands inside one of `ranges` at any character.
+fn overlaps(ranges: &[Range<usize>], range: &Range<usize>) -> bool {
+    ranges
+        .iter()
+        .any(|other| range.start < other.end && other.start < range.end)
+}
+
+/// The asks and bead ids `text` names: `ask 6926`, `ask 18 on yd-crm`,
+/// and bead ids alone, each where they stand. A qualified ask's bead is
+/// no bead id of its own, and a link's words are none of these: the link
+/// opens whole.
+pub fn refs(text: &str) -> Vec<Ref> {
+    let links = links(text);
+    // Past the character at `at`: every match ends on a boundary, and a
+    // step past a miss must too.
+    let step = |at: usize| text[at..].chars().next().map_or(1, |c| c.len_utf8());
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 3 <= text.len() {
+        match ask_at(text, at) {
+            Some(found) if !overlaps(&links, &found.range) => {
+                at = found.range.end;
+                out.push(found);
+            }
+            _ => at += step(at),
+        }
+    }
+    let asked: Vec<Range<usize>> = out.iter().map(|found| found.range.clone()).collect();
+    let mut at = 0;
+    while at < text.len() {
+        let starts = at == 0 || !bead_byte(text.as_bytes()[at - 1]);
+        match starts.then(|| bead_token(text, at)).flatten() {
+            Some((bead, end)) => {
+                let range = at..end;
+                if !overlaps(&links, &range) && !overlaps(&asked, &range) {
+                    out.push(Ref {
+                        range,
+                        kind: RefKind::Bead(bead),
+                    });
+                }
+                at = end;
+            }
+            None => at += step(at),
+        }
+    }
+    out.sort_by_key(|found| found.range.start);
+    out
+}
+
 /// Where in `text` a pointer at `position` is: the boundary between two
 /// characters that is closest to it, as in the typed line. Above the text
 /// that is its start, below it its end.
@@ -305,6 +533,8 @@ struct Shown {
     /// The block's text, as gpui takes it, and the links in it.
     text: SharedString,
     links: Vec<Range<usize>>,
+    /// The resolved references in it, each with what opening it shows.
+    refs: Vec<(Range<usize>, RefTarget)>,
     /// An exact copy payload for a code block whose displayed form was
     /// sanitized before it reached the markdown reader.
     copy_override: Option<SharedString>,
@@ -313,7 +543,7 @@ struct Shown {
 /// The text `text` of the talk, which `selection` may be in. `key` tells it
 /// from the other texts.
 pub fn text(key: u64, text: impl Into<SharedString>, selection: &Entity<Selection>) -> Text {
-    text_inner(key, text.into(), None, selection)
+    text_inner(key, text.into(), None, Vec::new(), None, selection)
 }
 
 /// Like [`text`], but the first code block copies `copy_text` exactly. The
@@ -325,18 +555,40 @@ pub fn text_with_code_copy(
     copy_text: impl Into<SharedString>,
     selection: &Entity<Selection>,
 ) -> Text {
-    text_inner(key, text.into(), Some(copy_text.into()), selection)
+    text_inner(
+        key,
+        text.into(),
+        Some(copy_text.into()),
+        Vec::new(),
+        None,
+        selection,
+    )
+}
+
+/// Like [`text`], with resolved references: each stands in its block as a
+/// chip, and a click on one calls `on_ref` with what it opens.
+pub fn text_with_refs(
+    key: u64,
+    text: impl Into<SharedString>,
+    refs: Vec<RefSpan>,
+    on_ref: RefClick,
+    selection: &Entity<Selection>,
+) -> Text {
+    text_inner(key, text.into(), None, refs, Some(on_ref), selection)
 }
 
 fn text_inner(
     key: u64,
     text: SharedString,
     mut code_copy: Option<SharedString>,
+    refs: Vec<RefSpan>,
+    on_ref: Option<RefClick>,
     selection: &Entity<Selection>,
 ) -> Text {
     let blocks = markdown::blocks(&text)
         .into_iter()
-        .map(|block| Shown {
+        .enumerate()
+        .map(|(ix, block)| Shown {
             copy_override: if block.kind == Kind::Code {
                 code_copy.take()
             } else {
@@ -344,6 +596,11 @@ fn text_inner(
             },
             text: block.text.clone().into(),
             links: links(&block.text),
+            refs: refs
+                .iter()
+                .filter(|span| span.block == ix)
+                .map(|span| (span.range.clone(), span.target.clone()))
+                .collect(),
             block,
         })
         .collect();
@@ -351,6 +608,7 @@ fn text_inner(
         key,
         text,
         blocks,
+        on_ref,
         selection: selection.clone(),
     }
 }
@@ -441,21 +699,23 @@ fn face(kind: &Kind, base: &TextStyle, mono: Option<&SharedString>, rem: Pixels)
 
 /// The runs `block` is drawn in, in the face `face` of its kind: bold,
 /// italic and inline code as its marks say, with a quiet ground under the
-/// code; a link as one; and `selected` of it on the selection's ground. A
-/// selection may begin or end inside a link or a mark: the runs do not
-/// overlap.
+/// code; a link as one; a reference as a chip, in the code's face on its
+/// ground but in the accent, with no underline; and `selected` of it on
+/// the selection's ground. A selection may begin or end inside a link or
+/// a mark: the runs do not overlap.
 fn runs(
     block: &Block,
     face: &TextStyle,
     palette: &Palette,
     mono: Option<&SharedString>,
     links: &[Range<usize>],
+    refs: &[Range<usize>],
     selected: Option<Range<usize>>,
 ) -> Vec<TextRun> {
     let selected = selected.filter(|selected| !selected.is_empty());
     let mut cuts = vec![0, block.text.len()];
     let marked = block.marks.iter().map(|(range, _)| range);
-    for range in marked.chain(links).chain(&selected) {
+    for range in marked.chain(links).chain(refs).chain(&selected) {
         cuts.extend([range.start, range.end]);
     }
     cuts.sort_unstable();
@@ -486,6 +746,13 @@ fn runs(
                 color: Some(palette.accent.into()),
                 wavy: false,
             });
+        }
+        if refs.iter().any(|reference| within(reference, start)) {
+            if let Some(mono) = mono {
+                run.font.family = mono.clone();
+            }
+            run.color = palette.accent.into();
+            run.background_color = Some(palette.code.into());
         }
         if selected.as_ref().is_some_and(|s| within(s, start)) {
             run.background_color = Some(palette.selection.into());
@@ -594,14 +861,20 @@ impl Drawn {
         shown.block.source_at(index)
     }
 
-    /// The link the pointer is over: the character under it counts here,
-    /// not the closest boundary.
-    fn link_at(&self, position: Point<Pixels>) -> Option<SharedString> {
+    /// The link or reference the pointer is over: the character under
+    /// it counts here, not the closest boundary.
+    fn clicked_at(&self, position: Point<Pixels>) -> Option<Clicked> {
         let ix = self.block_at(position)?;
         let shown = &self.blocks[ix];
         let index = self.layouts[ix].index_for_position(position).ok()?;
-        let link = shown.links.iter().find(|link| link.contains(&index))?;
-        Some(shown.text[link.clone()].to_string().into())
+        if let Some(link) = shown.links.iter().find(|link| link.contains(&index)) {
+            return Some(Clicked::Link(shown.text[link.clone()].to_string().into()));
+        }
+        shown
+            .refs
+            .iter()
+            .find(|(range, _)| range.contains(&index))
+            .map(|(_, target)| Clicked::Ref(target.clone()))
     }
 
     /// The code block the pointer is over, if it is over one's ground:
@@ -626,6 +899,7 @@ pub struct Text {
     /// The text as it was written: what is selected is a stretch of this.
     text: SharedString,
     blocks: Rc<[Shown]>,
+    on_ref: Option<RefClick>,
     selection: Entity<Selection>,
 }
 
@@ -675,12 +949,15 @@ impl Element for Text {
             let block = &shown.block;
             let face = face(&block.kind, &base, mono.as_ref(), rem);
             let selected = selected.clone().map(|selected| block.shown(selected));
+            let refs: Vec<Range<usize>> =
+                shown.refs.iter().map(|(range, _)| range.clone()).collect();
             let runs = runs(
                 block,
                 &face,
                 &palette,
                 mono.as_ref(),
                 &shown.links,
+                &refs,
                 selected,
             );
             let mut styled = StyledText::new(shown.text.clone()).with_runs(runs);
@@ -830,19 +1107,20 @@ impl Element for Text {
             let _ = shaped.paint(at, height, window, cx);
         }
 
-        // The link under the pointer, where the text is not covered.
+        // The link or reference under the pointer, where the text is
+        // not covered.
         let over = {
             let (drawn, hitbox) = (drawn.clone(), hitbox.clone());
             move |position: Point<Pixels>, window: &Window| {
                 hitbox
                     .is_hovered(window)
-                    .then(|| drawn.link_at(position))
+                    .then(|| drawn.clicked_at(position))
                     .flatten()
             }
         };
-        let on_link = over(window.mouse_position(), window).is_some();
+        let on_open = over(window.mouse_position(), window).is_some();
         let on_copy = drawn.copy_at(window.mouse_position()).is_some();
-        let cursor = if on_link || on_copy {
+        let cursor = if on_open || on_copy {
             CursorStyle::PointingHand
         } else {
             CursorStyle::IBeam
@@ -874,9 +1152,9 @@ impl Element for Text {
                         return;
                     }
                     let place = drawn.place_at(event.position);
-                    let link = over(event.position, window);
+                    let clicked = over(event.position, window);
                     selection.update(cx, |selection, cx| {
-                        selection.press(key, text.clone(), place, link, event.click_count, cx)
+                        selection.press(key, text.clone(), place, clicked, event.click_count, cx)
                     });
                 } else if selection.read(cx).chip_at(event.position).is_none() {
                     // A click on another text's copy control is no press
@@ -894,14 +1172,14 @@ impl Element for Text {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                // The pointer came onto a link, a code block or a copy
-                // control, or left one: the cursor and the controls are set
-                // when the text is drawn.
+                // The pointer came onto a link, a reference, a code
+                // block or a copy control, or left one: the cursor and the
+                // controls are set when the text is drawn.
                 let hovered_now = hitbox
                     .is_hovered(window)
                     .then(|| drawn.hovered_code(event.position))
                     .flatten();
-                if over(event.position, window).is_some() != on_link
+                if over(event.position, window).is_some() != on_open
                     || hovered_now != hovered
                     || drawn.copy_at(event.position).is_some() != on_copy
                 {
@@ -922,6 +1200,7 @@ impl Element for Text {
         });
         window.on_mouse_event({
             let selection = self.selection.clone();
+            let on_ref = self.on_ref.clone();
             move |event: &MouseUpEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble
                     || event.button != MouseButton::Left
@@ -929,13 +1208,20 @@ impl Element for Text {
                 {
                     return;
                 }
-                // A click on a link: pressed and released on it, and
-                // nothing dragged between the two.
+                // A click on a link or a reference: pressed and released
+                // on it, and nothing dragged between the two.
                 let pressed = selection.update(cx, |selection, _| selection.release());
-                if let Some(url) = pressed
-                    && over(event.position, window).as_ref() == Some(&url)
-                {
-                    cx.open_url(&url);
+                let released = over(event.position, window);
+                match (pressed, released) {
+                    (Some(clicked), Some(at)) if clicked == at => match clicked {
+                        Clicked::Link(url) => cx.open_url(&url),
+                        Clicked::Ref(target) => {
+                            if let Some(on_ref) = &on_ref {
+                                on_ref(target, window, cx);
+                            }
+                        }
+                    },
+                    _ => {}
                 }
             }
         });
@@ -984,13 +1270,23 @@ mod tests {
 
     /// The runs of the one block of `text`, as (what is drawn, the run).
     fn drawn(text: &str, selected: Option<Range<usize>>) -> Vec<(String, TextRun)> {
+        drawn_refs(text, selected, &[])
+    }
+
+    /// The runs of the one block of `text` with resolved references at
+    /// `refs`, as (what is drawn, the run).
+    fn drawn_refs(
+        text: &str,
+        selected: Option<Range<usize>>,
+        refs: &[Range<usize>],
+    ) -> Vec<(String, TextRun)> {
         let block = one(text);
         let (base, mono) = (base(), mono_face());
         let face = face(&block.kind, &base, Some(&mono), px(16.));
         let links = links(&block.text);
         let selected = selected.map(|selected| block.shown(selected));
         let mut at = 0;
-        runs(&block, &face, &dark(), Some(&mono), &links, selected)
+        runs(&block, &face, &dark(), Some(&mono), &links, refs, selected)
             .into_iter()
             .map(|run| {
                 let words = block.text[at..at + run.len].to_string();
@@ -1038,7 +1334,7 @@ mod tests {
             }
             runs
         };
-        let now = |selected| runs(&block, &face, &palette, None, &links(text), selected);
+        let now = |selected| runs(&block, &face, &palette, None, &links(text), &[], selected);
 
         assert_eq!(now(None), before(vec![(4..25, link)]));
         assert_eq!(now(None).len(), 3);
@@ -1051,11 +1347,11 @@ mod tests {
         // Nothing in it: one run, the text's own.
         let plain = one("Land it today.");
         assert_eq!(
-            runs(&plain, &base, &palette, None, &[], None),
+            runs(&plain, &base, &palette, None, &[], &[], None),
             [base.to_run(14)]
         );
         assert_eq!(
-            runs(&one(""), &base, &palette, None, &[], None),
+            runs(&one(""), &base, &palette, None, &[], &[], None),
             [base.to_run(0)]
         );
     }
@@ -1077,7 +1373,7 @@ mod tests {
         assert_eq!(face.font_family, mono);
         assert_eq!(face.font_size, base.font_size);
         assert_eq!(face.font_weight, base.font_weight);
-        let all = runs(&code, &face, &palette, Some(&mono), &[], None);
+        let all = runs(&code, &face, &palette, Some(&mono), &[], &[], None);
         assert_eq!(all, [face.to_run(code.text.len())]);
         assert_eq!(
             (&all[0].font.family, all[0].background_color),
@@ -1100,7 +1396,7 @@ mod tests {
 
         // A machine without one of the faces has the ground alone.
         let block = one("run `yardr prime` now");
-        let all = runs(&block, &base, &palette, None, &[], None);
+        let all = runs(&block, &base, &palette, None, &[], &[], None);
         assert_eq!(all[1].font, base.to_run(0).font);
         assert_eq!(all[1].background_color, quiet);
     }
@@ -1126,7 +1422,7 @@ mod tests {
             let face = face(&block.kind, &base, Some(&mono), px(16.));
             assert_eq!(face.font_weight, FontWeight::BOLD);
             assert_eq!(face.font_family, base.font_family);
-            let all = runs(&block, &face, &dark(), Some(&mono), &[], None);
+            let all = runs(&block, &face, &dark(), Some(&mono), &[], &[], None);
             assert_eq!(all, [face.to_run(block.text.len())]);
             assert_eq!(all[0].font.weight, FontWeight::BOLD);
             larger.push(face.font_size.to_pixels(px(16.)));
@@ -1320,5 +1616,164 @@ mod tests {
         // The scheme alone names nothing.
         assert!(linked("https:// and (http://).").is_empty());
         assert_eq!(linked("httpx http://a.example"), ["http://a.example"]);
+    }
+
+    /// What `refs` names in `text`: each where it stands, with what it is.
+    fn reffed(text: &str) -> Vec<(&str, RefKind)> {
+        refs(text)
+            .into_iter()
+            .map(|found| (&text[found.range], found.kind))
+            .collect()
+    }
+
+    #[test]
+    fn an_ask_is_its_number_after_ask() {
+        assert_eq!(reffed("ask 6926"), [("ask 6926", RefKind::Ask(6926))]);
+        assert_eq!(
+            reffed("its card (ask 6926)."),
+            [("ask 6926", RefKind::Ask(6926))]
+        );
+        // In any case, after any space, with leading zeroes.
+        assert_eq!(reffed("Ask 007?"), [("Ask 007", RefKind::Ask(7))]);
+        assert_eq!(reffed("ASK\t42"), [("ASK\t42", RefKind::Ask(42))]);
+        // Two asks, in order.
+        assert_eq!(
+            reffed("ask 6893, not ask 6891."),
+            [
+                ("ask 6893", RefKind::Ask(6893)),
+                ("ask 6891", RefKind::Ask(6891)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ask_with_its_bead_is_one_reference() {
+        assert_eq!(
+            reffed("ask 18 on yd-crm is declined"),
+            [(
+                "ask 18 on yd-crm",
+                RefKind::AskOn {
+                    ask: 18,
+                    bead: "yd-crm".to_string(),
+                    bead_range: 10..16,
+                }
+            )]
+        );
+        // The bead alone still opens where the ask is none the yard said.
+        let found = &refs("ask 18 on yd-crm")[0];
+        assert_eq!(
+            &"ask 18 on yd-crm"[match &found.kind {
+                RefKind::AskOn { bead_range, .. } => bead_range.clone(),
+                _ => panic!("{found:?}"),
+            }],
+            "yd-crm"
+        );
+    }
+
+    #[test]
+    fn ask_without_a_number_is_no_ask() {
+        assert!(refs("").is_empty());
+        assert!(refs("ask yardmaster, ask about this").is_empty());
+        assert!(refs("asked 5, asks 5, ask5, task 5").is_empty());
+        assert!(refs("ask five, ask 5x, ask 99999999999999999999999").is_empty());
+        // `on` without a bead id leaves the number alone.
+        assert_eq!(reffed("ask 5 on Friday"), [("ask 5", RefKind::Ask(5))]);
+        // `re-ask` is shaped as a bead id is: the model, which knows the
+        // yard's beads, leaves it plain.
+        assert_eq!(
+            reffed("re-ask 5"),
+            [("re-ask", RefKind::Bead("re-ask".to_string()))]
+        );
+    }
+
+    #[test]
+    fn a_bead_id_is_an_id_with_a_dash() {
+        assert_eq!(
+            reffed("over the limit (yardr-e9f0), so run:"),
+            [("yardr-e9f0", RefKind::Bead("yardr-e9f0".to_string()))]
+        );
+        assert_eq!(
+            reffed("see footplate-ky46 and yd-zulu."),
+            [
+                (
+                    "footplate-ky46",
+                    RefKind::Bead("footplate-ky46".to_string())
+                ),
+                ("yd-zulu", RefKind::Bead("yd-zulu".to_string())),
+            ]
+        );
+        // Another yard's, with its peer; a short test id; what the
+        // sentence puts after it is no part of it.
+        assert_eq!(
+            reffed("ask 3 on bead-a@north, bead-s, yd-zulu's turn."),
+            [
+                (
+                    "ask 3 on bead-a@north",
+                    RefKind::AskOn {
+                        ask: 3,
+                        bead: "bead-a@north".to_string(),
+                        bead_range: 9..21,
+                    }
+                ),
+                ("bead-s", RefKind::Bead("bead-s".to_string())),
+                ("yd-zulu", RefKind::Bead("yd-zulu".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_has_no_dash_is_no_bead_id() {
+        assert!(refs("no bead here").is_empty());
+        assert!(refs("clerk@north, jo, yardmaster@droplet").is_empty());
+        assert!(refs("a@b@c-d, -x, up- -to- -date").is_empty());
+        // Whole words: no bead id hides in a longer one.
+        assert_eq!(
+            reffed("xfootplate-ky46 stands whole"),
+            [(
+                "xfootplate-ky46",
+                RefKind::Bead("xfootplate-ky46".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_link_s_words_are_no_reference() {
+        assert!(refs("see https://example.org/ask 5 now").is_empty());
+        assert_eq!(
+            linked("see https://example.org/a-b now"),
+            ["https://example.org/a-b"]
+        );
+        assert!(refs("see https://example.org/a-b now").is_empty());
+        // Beside a link, a reference still stands.
+        assert_eq!(
+            reffed("ask 5: https://example.org/a"),
+            [("ask 5", RefKind::Ask(5))]
+        );
+    }
+
+    #[test]
+    fn a_reference_is_a_chip_in_the_accent_on_the_code_s_ground() {
+        let (palette, mono) = (dark(), mono_face());
+        let text = "its card (ask 6926).";
+        let span = [Range { start: 10, end: 18 }];
+        let all = drawn_refs(text, None, &span);
+        assert_eq!(all.len(), 3);
+        let chip = &all[1];
+        assert_eq!(chip.0, "ask 6926");
+        assert_eq!(chip.1.color, palette.accent.into());
+        assert_eq!(chip.1.background_color, Some(palette.code.into()));
+        assert_eq!(chip.1.font.family, mono);
+        assert!(chip.1.underline.is_none());
+        // A selection over it keeps the accent on its own ground.
+        let all = drawn_refs(text, Some(12..14), &span);
+        let words: Vec<&str> = all.iter().map(|(words, _)| words.as_str()).collect();
+        assert_eq!(words, ["its card (", "as", "k ", "6926", ")."]);
+        assert_eq!(all[2].1.color, palette.accent.into());
+        assert_eq!(all[2].1.background_color, Some(palette.selection.into()));
+        // And a bold reference keeps its weight.
+        let all = drawn_refs("its card (**ask 6926**).", None, &span);
+        assert_eq!(all[1].0, "ask 6926");
+        assert_eq!(all[1].1.font.weight, FontWeight::BOLD);
+        assert_eq!(all[1].1.color, palette.accent.into());
     }
 }
