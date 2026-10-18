@@ -1491,30 +1491,66 @@ impl Model {
     /// first and then the complete Flows order. Arrivals is capped, so
     /// the flows also supply waits beyond the rows the table can show.
     pub fn waiting_on_you(&self) -> Vec<(&str, &str)> {
-        let mut waiting = Vec::new();
-        let mut seen = HashSet::new();
-        let mut include = |bead: &str, title: &str, remark: &str| {
-            if waits_on_you(remark, &self.me) && seen.insert(bead) {
+        fn include<'a>(
+            waiting: &mut Vec<(&'a str, &'a str)>,
+            seen: &mut HashSet<&'a str>,
+            me: &str,
+            bead: &'a str,
+            title: &'a str,
+            remark: &str,
+        ) {
+            if waits_on_you(remark, me) && seen.insert(bead) {
                 waiting.push((bead, title));
             }
-        };
+        }
+
+        let mut waiting = Vec::new();
+        let mut seen = HashSet::new();
         for row in &self.arrivals {
-            include(&row.bead, &row.title, &row.remark);
+            include(
+                &mut waiting,
+                &mut seen,
+                &self.me,
+                &row.bead,
+                &row.title,
+                &row.remark,
+            );
         }
         for depot in &self.flows.depots {
             for flow in &depot.flows {
                 for stage in &flow.stages {
                     for bead in &stage.beads {
-                        include(&bead.bead, &bead.title, &bead.remark);
+                        include(
+                            &mut waiting,
+                            &mut seen,
+                            &self.me,
+                            &bead.bead,
+                            &bead.title,
+                            &bead.remark,
+                        );
                     }
                 }
             }
             for bead in &depot.elsewhere {
-                include(&bead.bead, &bead.title, &bead.remark);
+                include(
+                    &mut waiting,
+                    &mut seen,
+                    &self.me,
+                    &bead.bead,
+                    &bead.title,
+                    &bead.remark,
+                );
             }
         }
         for bead in &self.flows.unassigned {
-            include(&bead.bead, &bead.title, &bead.remark);
+            include(
+                &mut waiting,
+                &mut seen,
+                &self.me,
+                &bead.bead,
+                &bead.title,
+                &bead.remark,
+            );
         }
         waiting
     }
