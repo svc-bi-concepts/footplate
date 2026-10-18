@@ -9506,8 +9506,10 @@ impl Footplate {
 
     /// One bead's route as a strip: one dot per stage of its flow in
     /// travel order, each with the stage's name. The stages behind the
-    /// bead read done, the bead's own reads current, and a stage ahead
-    /// whose turn is a person's reads waiting, apart from the rest.
+    /// bead read done, the bead's own reads current in the text colour,
+    /// and a stage ahead whose turn is a person's reads waiting, apart
+    /// from the rest. The current dot is not the accent: that is kept
+    /// for what waits on the person reading, and the strip is not that.
     fn route_strip(&self, route: &Route, bead: &str, palette: Palette) -> impl IntoElement + use<> {
         let mut strip = div()
             .flex()
@@ -9524,7 +9526,7 @@ impl Footplate {
                 strip = strip.child(div().h_px().w_3().flex_none().bg(palette.line));
             }
             let (fill, edge, label) = match n == route.current {
-                true => (palette.accent, palette.accent, palette.text),
+                true => (palette.text, palette.text, palette.text),
                 false if n < route.current => (palette.faint, palette.faint, palette.faint),
                 false if stage.human => (rgba(0x00000000), palette.accent, palette.faint),
                 false => (rgba(0x00000000), palette.faint, palette.faint),
