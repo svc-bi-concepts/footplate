@@ -4263,8 +4263,8 @@ impl Footplate {
 
     /// Says why the ask's answer did not go on its card, in the yard of
     /// the following `session`: on the open one's card at once, and on
-    /// one that is held when the window shows it. A yard followed no
-    /// longer has no card to say it on.
+    /// one that is held when the window shows it. A yard no longer
+    /// followed has no card to say it on.
     fn refused_in(&mut self, session: u64, at: (String, u64), why: String, cx: &mut Context<Self>) {
         if session == self.session {
             self.refused.insert(at, why);
@@ -4620,11 +4620,6 @@ impl Footplate {
         self.notice(format!("not sent to {whom}: {}", unsent.why), cx);
     }
 
-    /// Words for the ask `at` of `yard` that the yard did not take are
-    /// back with what was typed since: in the line while that yard is
-    /// still the open one, as it was opened then, and else with the ask
-    /// they were typed for, in its own yard. `what` did not happen, and
-    /// `err` is why.
     /// Words for the ask `at` of `yard` that the yard did not take are
     /// back with what was typed since: in the line while that yard is
     /// still the open one, as it was opened then, which is answered, and
