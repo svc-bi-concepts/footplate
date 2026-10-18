@@ -319,7 +319,13 @@ fn write_switcher_settings(socket: &Path) {
     let home = crate::settings::Yard::near("home", &socket.to_string_lossy());
     let droplet =
         crate::settings::Yard::far("droplet", "https://droplet.example.net", "droplet.token");
-    crate::settings::Settings::default()
+    let mut settings = crate::settings::Settings::default();
+    settings.look = match std::env::var("SHOT_LOOK").as_deref() {
+        Ok("light") => crate::theme::Look::Light,
+        Ok("dark") => crate::theme::Look::Dark,
+        _ => crate::theme::Look::Auto,
+    };
+    settings
         .with_yard(Some(crate::settings::HERE), home, Some(&file))
         .and_then(|set| set.with_yard(None, droplet, Some(&file)))
         .and_then(|set| {

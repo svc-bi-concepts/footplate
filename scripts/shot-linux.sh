@@ -216,9 +216,9 @@ docker exec -e "SHOT_LOOK=$look" "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user
     look_json=""
     if [ -n "$SHOT_LOOK" ]; then look_json=", \"look\": \"$SHOT_LOOK\""; fi
     if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\""$look_json"}" > "$scratch/config/footplate/settings.json"; fi
-    if [ -n "$SHOT_LOOK" ] && [ "'"$state"'" != far ]; then printf "%s\n" "{\"look\": \"$SHOT_LOOK\"}" > "$scratch/config/footplate/settings.json"; fi
+    if [ -n "$SHOT_LOOK" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != switcher ]; then printf "%s\n" "{\"look\": \"$SHOT_LOOK\"}" > "$scratch/config/footplate/settings.json"; fi
     chown -R shot:shot "$scratch"
-    su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
+    su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json SHOT_LOOK='$SHOT_LOOK' FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 
 # The window is waited for, not slept for: sway's tree names it by app_id.
 # Three seconds past that, the first paint has settled and grim shoots.
