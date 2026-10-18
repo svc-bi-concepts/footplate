@@ -186,7 +186,8 @@ working styles as a numbered scale), `hosted` (the first screen with
 the hosted way's fields open and filled), `signedout` (the away
 screen of a hosted yard that is signed out), `arrivals` (the
 arrivals board open on the arrivals row), `arrival` (one
-arrival's bead open from the board), `secret` (an open card of a
+arrival's bead open from the board), `flow` (yardr's line open on
+its flow), `secret` (an open card of a
 secret ask, posed with a value typed and hidden) and `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown). With no state the first
