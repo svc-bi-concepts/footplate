@@ -54,8 +54,9 @@ use crate::yard::Env;
 /// throwaway config, with a session the edge no longer knows; the away
 /// yard from settings the state writes itself, against a throwaway
 /// config, with a device the yard no longer knows; the
-/// switcher's four yards from settings the state writes itself, home live
-/// at the shot's socket, two more live at their listeners, and one away; the
+/// switcher's four yards from settings the state writes itself, with
+/// adventuretime open, this machine second, plantime live at its listener,
+/// and droplet away; the
 /// settings open over a running yard, each state on its section;
 /// the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
@@ -139,8 +140,9 @@ pub(super) struct ShotYard {
     /// the window opens the hosted yard through the edge, whose session
     /// is none the edge knows.
     edge: Option<(Yard, Router)>,
-    /// The switcher's other live yards, for `switcher` alone: office and
-    /// plantime at their listeners, held from the start beside home.
+    /// The switcher's other live yards, for `switcher` alone: adventuretime
+    /// and plantime at their listeners, held from the start beside this
+    /// machine.
     extra: Vec<std::sync::Arc<Yard>>,
 }
 
@@ -260,15 +262,18 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         shot.extra = vec![std::sync::Arc::new(far)];
     }
     if state == "switcher" {
-        // The switcher's other live yards, held from the start: office
+        // The switcher's other live yards, held from the start: adventuretime
         // with two mails and one decision, plantime with twelve mails, so
         // the counts stand one and two figures in their column.
-        let office = Yard::start_tcp();
-        switcher_office(&office);
+        let adventuretime = Yard::start_tcp();
+        switcher_adventuretime(&adventuretime);
         let plantime = Yard::start_tcp();
         switcher_plantime(&plantime);
-        write_switcher_settings(office.address(), plantime.address());
-        shot.extra = vec![std::sync::Arc::new(office), std::sync::Arc::new(plantime)];
+        write_switcher_settings(adventuretime.address(), plantime.address());
+        shot.extra = vec![
+            std::sync::Arc::new(adventuretime),
+            std::sync::Arc::new(plantime),
+        ];
     }
     if state == "reconnecting" {
         // The yard answers, the window reads it, and then its server is
@@ -395,14 +400,14 @@ fn write_away_settings(address: &str) {
         });
 }
 
-/// The settings the `switcher` shot opens: four yards, home live at
-/// the shot's socket and open, office and plantime live at their
-/// listeners, and droplet away. Droplet keeps no token, so it is never
-/// reached: the window asks nothing of the network for it. The shot
-/// script runs against a throwaway config, which keeps no settings;
-/// where a settings file already stands, the state is refused rather
-/// than overwrite it.
-fn write_switcher_settings(office_at: &str, plantime_at: &str) {
+/// The settings the `switcher` shot opens: four yards in the screenshot's
+/// order, adventuretime at its listener and open, this machine at the
+/// shot's socket, droplet away, then plantime at its listener. Droplet
+/// keeps no token, so it is never reached: the window asks nothing of the
+/// network for it. The shot script runs against a throwaway config, which
+/// keeps no settings; where a settings file already stands, the state is
+/// refused rather than overwrite it.
+fn write_switcher_settings(adventuretime_at: &str, plantime_at: &str) {
     let Some(file) = crate::settings::file() else {
         eprintln!("footplate: the switcher shot keeps no settings without a home");
         std::process::exit(1);
@@ -414,9 +419,13 @@ fn write_switcher_settings(office_at: &str, plantime_at: &str) {
         );
         std::process::exit(2);
     }
-    // Home by this run's socket, which the shot points at the fake yard.
-    let home = crate::settings::Yard::near("home", "");
-    let office = crate::settings::Yard::far("office", office_at, "yard-office.token");
+    let adventuretime = crate::settings::Yard::far(
+        "adventuretime.tail5c8d.ts.net",
+        adventuretime_at,
+        "yard-adventuretime.token",
+    );
+    // This machine's yard is the shot's socket.
+    let home = crate::settings::Yard::near(crate::settings::HERE, "");
     let plantime = crate::settings::Yard::far("plantime", plantime_at, "yard-plantime.token");
     let droplet =
         crate::settings::Yard::far("droplet", "https://droplet.example.net", "droplet.token");
@@ -428,12 +437,12 @@ fn write_switcher_settings(office_at: &str, plantime_at: &str) {
         },
         ..Default::default()
     }
-    .with_yard(Some(crate::settings::HERE), home, Some(&file))
-    .and_then(|set| set.with_yard(None, office, Some(&file)))
-    .and_then(|set| set.with_yard(None, plantime, Some(&file)))
+    .with_yard(Some(crate::settings::HERE), adventuretime, Some(&file))
+    .and_then(|set| set.with_yard(None, home, Some(&file)))
     .and_then(|set| set.with_yard(None, droplet, Some(&file)))
+    .and_then(|set| set.with_yard(None, plantime, Some(&file)))
     .and_then(|set| {
-        set.opening("home")
+        set.opening("adventuretime.tail5c8d.ts.net")
             .write(&file)
             .map_err(|error| error.to_string())
     })
@@ -443,7 +452,7 @@ fn write_switcher_settings(office_at: &str, plantime_at: &str) {
     });
     let dir = file.parent().unwrap_or_else(|| Path::new("."));
     for (token, at) in [
-        ("yard-office.token", office_at),
+        ("yard-adventuretime.token", adventuretime_at),
         ("yard-plantime.token", plantime_at),
     ] {
         let edge = crate::api::Address::parse(at).unwrap_or_else(|error| {
@@ -459,14 +468,14 @@ fn write_switcher_settings(office_at: &str, plantime_at: &str) {
     }
 }
 
-/// The office yard of the `switcher` shot: jo's, with two mails and one
-/// open decision, so its row carries 3 with "1 decision · 2 mail" in its
-/// tooltip.
-fn switcher_office(yard: &Yard) {
+/// The adventuretime yard of the `switcher` shot: jo's, with two mails
+/// and one open decision, so its row carries 3 with
+/// "1 decision · 2 mail" in its tooltip.
+fn switcher_adventuretime(yard: &Yard) {
     populate(yard, "switcher");
     yard.answer(
         "UserInbox",
-        r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "From the office.", "read": false},
+        r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "From adventuretime.", "read": false},
             {"seq": 13, "from": "assembly", "to": "jo", "text": "Assembled.", "read": false}], "unread": 2, "last": 13, "from": ["yardmaster", "assembly"]}}"#,
     );
     yard.answer(
@@ -479,7 +488,7 @@ fn switcher_office(yard: &Yard) {
 }
 
 /// The plantime yard of the `switcher` shot: jo's, with twelve mails, so
-/// its row carries 12 beside office's 3: one and two figures in the
+/// its row carries 12 beside adventuretime's 3: one and two figures in the
 /// counts' column.
 fn switcher_plantime(yard: &Yard) {
     populate(yard, "switcher");
@@ -2089,9 +2098,9 @@ mod tests {
 
     #[test]
     fn the_switcher_shot_s_held_yards_wait_two_and_one_and_twelve() {
-        let office = Yard::start();
-        switcher_office(&office);
-        let loaded = session::load(&office.client(), "shot").unwrap();
+        let adventuretime = Yard::start();
+        switcher_adventuretime(&adventuretime);
+        let loaded = session::load(&adventuretime.client(), "shot").unwrap();
         assert_eq!(loaded.me, "jo");
         assert_eq!(loaded.unread.len(), 2);
         assert_eq!(loaded.asks.open.len(), 1);

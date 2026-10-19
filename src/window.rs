@@ -27471,9 +27471,10 @@ yardr.dev
             "droplet",
             "plantime",
         ];
-        // At the usual size and the largest, and at the narrowest window
+        // At the usual size and the largest, at full and narrow widths
         // with each: the hint and every key stand inside the list, within
-        // a pixel for gpui's rounding.
+        // a pixel for gpui's rounding. Resize on every pass so the full
+        // width at the largest size is full too.
         for text in [settings::TEXT, settings::TEXT_MAX] {
             view.update(cx, |v, cx| {
                 let set = Settings {
@@ -27482,21 +27483,27 @@ yardr.dev
                 };
                 v.set(set, cx)
             });
-            for width in [None, Some(616.)] {
-                if let Some(width) = width {
-                    cx.simulate_resize(gpui::size(px(width), px(360.)));
-                }
+            for (width, height) in [(1280., 800.), (416., 360.)] {
+                cx.simulate_resize(gpui::size(px(width), px(height)));
                 // One frame, read whole: a redraw per bound would draw the
                 // window again for each.
                 drawn(cx, "switcher");
                 let list = bounds_now(cx, "switcher");
-                let hint = bounds_now(cx, "keys hint switch");
+                let hint = bounds_now(cx, "switch hint");
                 assert!(
                     list.left() <= hint.left() + px(1.)
                         && hint.right() <= list.right() + px(1.)
                         && list.top() <= hint.top() + px(1.)
                         && hint.bottom() <= list.bottom() + px(1.),
                     "at {text} px the hint leaves the list: {hint:?} {list:?}"
+                );
+                let keys_hint = bounds_now(cx, "keys hint switch");
+                assert!(
+                    list.left() <= keys_hint.left() + px(1.)
+                        && keys_hint.right() <= list.right() + px(1.)
+                        && list.top() <= keys_hint.top() + px(1.)
+                        && keys_hint.bottom() <= list.bottom() + px(1.),
+                    "at {text} px the keys hint leaves the list: {keys_hint:?} {list:?}"
                 );
                 for name in yards {
                     let key = bounds_now(cx, &format!("switch key {name}"));
