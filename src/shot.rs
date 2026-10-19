@@ -1176,17 +1176,21 @@ fn populate(yard: &Yard, state: &str) {
     }
     if state == "arrivals" || state == "departures" || state == "flow" {
         // The flows these states shoot answer over the shared ones:
-        // three tracks with a backlog to count, a held and a blocked
+        // five tracks with a backlog to count, a held and a blocked
         // bead under a fault lamp, a late and a worked bead with one
         // more in review's full group, a wait and a person's turn under
         // a turn lamp, a terminal stage with its buffer stop, an
         // Elsewhere bead, two beads with no line, and drafts quiet.
         // Each stage carries its terminal flag and its routed group's
         // seats, each claimed bead its worker and its stage's clock.
+        // The longest names this yard's own flows have stand among them:
+        // `contributor` and `approved` as stages of people, and the line
+        // `contributors.issue · issue`, so a cell too narrow for a real
+        // name shows in the picture.
         yard.answer(
             "Flows",
-            &json!({"result": {
-                "travelling": 12,
+            &with_the_longest_names(json!({"result": {
+                "travelling": 14,
                 "depots": [
                     {"name": "yardr", "kind": "git", "travelling": 9, "flows": [
                         {"name": "default", "type": "", "source": "store", "stages": [
@@ -1225,7 +1229,7 @@ fn populate(yard: &Yard, state: &str) {
                                 {"bead": "yd-r3", "title": "Third in review",
                                  "expected": "3h–4h", "remark": "", "tone": "none",
                                  "working": false}]},
-                            {"stage": "review-security", "group": "mckean", "human": true,
+                            {"stage": "review-security", "group": "muse-security", "human": false,
                              "lamp": "turn", "terminal": false, "limit": 1, "taken": 0,
                              "beads": [
                                 {"bead": "yd-alpha", "title": "Alpha moves first",
@@ -1239,7 +1243,7 @@ fn populate(yard: &Yard, state: &str) {
                              "lamp": "none", "terminal": true, "limit": 2, "taken": 0,
                              "beads": []},
                         ]},
-                        {"name": "design", "type": "", "source": "store", "stages": [
+                        {"name": "design.design", "type": "design", "source": "store", "stages": [
                             {"stage": "draft", "group": "mckean", "human": true,
                              "lamp": "none", "terminal": false, "limit": 1, "taken": 0,
                              "beads": [
@@ -1254,7 +1258,7 @@ fn populate(yard: &Yard, state: &str) {
                          "expected": "—", "remark": "", "tone": "none",
                          "working": false},
                     ]},
-                    {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
+                    {"name": "footplate", "kind": "git", "travelling": 2, "flows": [
                         {"name": "default", "type": "task", "source": "store", "stages": [
                             {"stage": "new", "group": "muse-builders", "human": false,
                              "lamp": "none", "terminal": false, "limit": 2, "taken": 1,
@@ -1275,10 +1279,68 @@ fn populate(yard: &Yard, state: &str) {
                      "expected": "—", "remark": "waits for yardmaster, jo",
                      "tone": "amber", "working": false},
                 ],
-            }})
+            }}))
             .to_string(),
         );
     }
+}
+
+/// The rich flows with this yard's longest names added: footplate's flow
+/// of pull requests, whose stages of people have the longest heads, and
+/// signalbox, whose flow has the longest line. They are added to the
+/// literal, not written in it: it is long enough as it stands for json!
+/// to reach its recursion limit.
+fn with_the_longest_names(mut flows: serde_json::Value) -> serde_json::Value {
+    let depots = flows["result"]["depots"].as_array_mut().unwrap();
+    depots[1]["flows"].as_array_mut().unwrap().push(json!(
+        {"name": "contributors.pr", "type": "pr", "source": "store", "stages": [
+            {"stage": "triage", "group": "mckean", "human": true,
+             "lamp": "none", "terminal": false, "limit": 1, "taken": 0, "beads": []},
+            {"stage": "review", "group": "muse-reviewers", "human": false,
+             "lamp": "none", "terminal": false, "limit": 2, "taken": 2, "beads": []},
+            {"stage": "contributor", "group": "mckean", "human": true,
+             "lamp": "turn", "terminal": false, "limit": 1, "taken": 0,
+             "beads": [
+                {"bead": "footplate-c1", "title": "A contributor's pull request",
+                 "expected": "1h–2h", "remark": "waits for jo",
+                 "tone": "amber", "working": false}]},
+            {"stage": "approved", "group": "mckean", "human": true,
+             "lamp": "none", "terminal": false, "limit": 1, "taken": 0, "beads": []},
+            {"stage": "decide", "group": "decisions", "human": true,
+             "lamp": "none", "terminal": false, "limit": 1, "taken": 0, "beads": []},
+            {"stage": "merged", "group": "", "human": false,
+             "lamp": "none", "terminal": true, "beads": []},
+            {"stage": "closed", "group": "", "human": false,
+             "lamp": "none", "terminal": true, "beads": []},
+        ]}
+    ));
+    depots.push(json!(
+        {"name": "signalbox", "kind": "git", "travelling": 1, "flows": [
+            {"name": "contributors.issue", "type": "issue", "source": "store", "stages": [
+                {"stage": "triage", "group": "mckean", "human": true,
+                 "lamp": "turn", "terminal": false, "limit": 1, "taken": 0,
+                 "beads": [
+                    {"bead": "signalbox-i1", "title": "An issue to triage",
+                     "expected": "—", "remark": "waits for yardmaster",
+                     "tone": "amber", "working": false}]},
+                {"stage": "backlog", "group": "mckean", "human": true,
+                 "lamp": "none", "terminal": false, "limit": 1, "taken": 0, "beads": []},
+                {"stage": "new", "group": "muse-builders", "human": false,
+                 "lamp": "none", "terminal": false, "limit": 2, "taken": 1, "beads": []},
+                {"stage": "review", "group": "muse-reviewers", "human": false,
+                 "lamp": "none", "terminal": false, "limit": 2, "taken": 2, "beads": []},
+                {"stage": "approved", "group": "shippers", "human": false,
+                 "lamp": "none", "terminal": false, "limit": 2, "taken": 0, "beads": []},
+                {"stage": "decide", "group": "decisions", "human": true,
+                 "lamp": "none", "terminal": false, "limit": 1, "taken": 0, "beads": []},
+                {"stage": "merged", "group": "", "human": false,
+                 "lamp": "none", "terminal": true, "beads": []},
+                {"stage": "closed", "group": "", "human": false,
+                 "lamp": "none", "terminal": true, "beads": []},
+            ]},
+        ], "elsewhere": []}
+    ));
+    flows
 }
 
 /// The command of the run ask: longer than the window is wide.
@@ -1645,12 +1707,13 @@ mod tests {
                     // The arrivals, departures and flow states shoot the
                     // richer one instead: yardr's two flows with a
                     // backlog, an Elsewhere bead and two beads with no
-                    // line, footplate's one, and drafts quiet.
+                    // line, footplate's two, drafts quiet, and signalbox
+                    // with the longest line name.
                     let rich = overrun || *state == "flow";
                     assert_eq!(
                         loaded.flows.travelling,
                         match rich {
-                            true => 12,
+                            true => 14,
                             false => 3,
                         },
                         "{state}"
@@ -1667,7 +1730,7 @@ mod tests {
                     assert_eq!(
                         loaded.flows.depots.len(),
                         match rich {
-                            true => 3,
+                            true => 4,
                             false => 2,
                         },
                         "{state}"
@@ -1684,7 +1747,7 @@ mod tests {
                                 ("new", false),
                                 ("decide", true),
                                 ("review", false),
-                                ("review-security", true),
+                                ("review-security", false),
                                 ("approved", false),
                             ],
                             "{state}"
@@ -1707,8 +1770,26 @@ mod tests {
                         );
                         assert_eq!(loaded.flows.depots[0].flows.len(), 2, "{state}");
                         assert_eq!(loaded.flows.depots[0].elsewhere.len(), 1, "{state}");
-                        assert_eq!(loaded.flows.depots[1].travelling, 1, "{state}");
+                        assert_eq!(loaded.flows.depots[1].travelling, 2, "{state}");
                         assert_eq!(loaded.flows.depots[2].travelling, 0, "{state}");
+                        // This yard's longest names: the stages of people
+                        // with the longest heads, and the longest line.
+                        let contributors = &loaded.flows.depots[1].flows[1];
+                        assert_eq!(contributors.name, "contributors.pr", "{state}");
+                        assert_eq!(
+                            contributors
+                                .stages
+                                .iter()
+                                .filter(|s| s.human)
+                                .map(|s| s.stage.as_str())
+                                .collect::<Vec<_>>(),
+                            ["triage", "contributor", "approved", "decide"],
+                            "{state}"
+                        );
+                        let signalbox = &loaded.flows.depots[3];
+                        assert_eq!(signalbox.name, "signalbox", "{state}");
+                        assert_eq!(signalbox.flows[0].name, "contributors.issue", "{state}");
+                        assert_eq!(signalbox.flows[0].flow_type, "issue", "{state}");
                         assert_eq!(
                             loaded
                                 .flows
