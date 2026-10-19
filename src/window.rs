@@ -13,8 +13,8 @@ use std::time::Duration;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat, KeyBinding, MouseButton,
-    ObjectFit, Pixels, Rems, Rgba, ScrollHandle, SharedString, Size, Stateful, Task, Window,
-    actions, div, img, prelude::*, px, relative, rems, rgba, white,
+    ObjectFit, Pixels, Rgba, ScrollHandle, SharedString, Size, Stateful, Task, Window, actions,
+    div, img, prelude::*, px, relative, rems, rgba, white,
 };
 
 use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
@@ -135,29 +135,19 @@ const RAIL_TILE: f32 = 52.;
 /// A rail label's size in pixels, fixed with its tile.
 const RAIL_LABEL: f32 = 10.;
 
-/// The panel's fixed cells in rems, drawn once: the name column, the
-/// backlog count, one stage's cell, and the wide cell of the beads with
-/// no line. Stages align by place because every cell is this wide. They
-/// are in rems because the words in them are: a cell in pixels cut its
-/// words at the larger text sizes. The first three are the longest name
-/// this yard's flows give them, as DejaVu Sans draws it (the widest sans
-/// of the desktops here, and the font the Linux shots draw in), plus the
-/// cell's padding, at the usual 16-pixel rem:
-/// - the name column, 168: the flow line `contributors.issue · issue`,
-///   150 pixels, and 8 of padding;
-/// - the backlog cell, 64: `backlog`, 47 pixels, between 8 each side;
-/// - a stage's cell, 152: the head `contributor · people`, 119 pixels,
-///   with a lamp's 12 and 8 each side.
-///
-/// The test of the longest names holds each of them at every text size.
-const PANEL_NAME: f32 = 10.5;
-const PANEL_BACKLOG: f32 = 4.;
-const PANEL_STAGE: f32 = 9.5;
-const PANEL_NO_LINE: f32 = 15.;
-
-/// What a track's card adds to its cells in rems: 8 pixels of padding
-/// and a 1-pixel border on each side.
-const PANEL_CHROME: f32 = 1.125;
+/// A stage cell's narrowest width in rems: a headcode with its lamp
+/// dot and the cell's padding, and the longest stage word whole.
+/// Measured as DejaVu Sans draws `● 7mcg` (the widest sans of the
+/// desktops here, and the font the Linux shots draw in), 47 pixels at
+/// the meta size, with the cell's 16 pixels of padding and the running
+/// dot's 10 (6 with its 4-pixel gap), rounded up to 96 pixels to hold
+/// the longest stage word `contributor` (67 pixels) with its lamp and
+/// padding without cutting, at the usual 16-pixel rem. In rems because
+/// the words in it are: a cell in pixels cut its words at the larger
+/// text sizes. Stage heads longer than the cell wrap whole onto a
+/// second line; headcodes longer than this truncate, as they did on the
+/// fixed grid.
+const PANEL_MIN: f32 = 6.;
 
 /// The switcher's list in rems, drawn once: its narrowest and its widest.
 /// They are in rems because the hint line in it is: a list in pixels cut
@@ -184,7 +174,7 @@ const LINE_COLUMN: f32 = 176.;
 /// The departures board's fixed columns in pixels, drawn once:
 /// the expected arrival in mono, the bead's title with its headcode,
 /// the platform, the line, and the remark. Past the pane's edge the
-/// board scrolls sideways, as the panel does.
+/// board scrolls sideways; the panel fits instead.
 const BOARD_EXPECTED: f32 = 80.;
 const BOARD_BEAD: f32 = 280.;
 const BOARD_PLATFORM: f32 = 120.;
@@ -582,11 +572,14 @@ fn panel_track_line(human: bool, lit: bool, palette: Palette) -> Div {
     }
 }
 
-/// How wide a track's card stands: the name, the backlog and the cells
-/// of the stages of the flow with the most of them, whichever line holds
-/// it, and never less than the wide cell of the beads with no line needs.
-fn panel_width(depots: &[FlowDepot]) -> Rems {
-    let stages = depots
+/// How many stage columns the panel's tracks share: the stages of
+/// the flow with the most of them, whichever line holds it, the backlog
+/// never a column. Every track's cells are this many to the card's
+/// width, so columns line up across tracks; a flow with fewer stages
+/// leaves the rest empty. At least one, so a yard with no stages still
+/// divides.
+fn panel_columns(depots: &[FlowDepot]) -> usize {
+    depots
         .iter()
         .flat_map(|depot| &depot.flows)
         .map(|flow| {
@@ -596,9 +589,8 @@ fn panel_width(depots: &[FlowDepot]) -> Rems {
                 .count()
         })
         .max()
-        .unwrap_or(0);
-    let grid = PANEL_BACKLOG + stages as f32 * PANEL_STAGE;
-    rems(PANEL_NAME + grid.max(PANEL_NO_LINE) + PANEL_CHROME)
+        .unwrap_or(0)
+        .max(1)
 }
 
 /// The kit's meta type, for the panel's small words: 12 pixels on a
@@ -618,15 +610,16 @@ fn lines_too_old(palette: Palette) -> Div {
         .child(model::LINES_TOO_OLD)
 }
 
-/// A track's card: a surface of its own under its cells, in the sunken
-/// ground with the border's hairline and the kit's 8-pixel radius, at
-/// least `width` wide and as wide as the pane where that is more, so
-/// the tracks stand as bands one under another.
-fn panel_card(width: Rems, palette: Palette) -> Div {
+/// A track's card: a surface of its own under its name and its cells,
+/// in the sunken ground with the border's hairline and the kit's
+/// 8-pixel radius, as wide as the pane, so the tracks stand as bands
+/// one under another and never past the pane's edge.
+fn panel_card(palette: Palette) -> Div {
     div()
-        .min_w(width)
+        .w_full()
+        .min_w_0()
         .flex()
-        .flex_row()
+        .flex_col()
         .px_2()
         .py_1()
         .rounded_lg()
@@ -13162,13 +13155,13 @@ impl Footplate {
             .child(cell("Remark", BOARD_REMARK))
     }
 
-    /// The arrivals panel: every travelling flow one straight track on
-    /// the fixed grid — the name cell, the backlog count, a cell per
-    /// stage in travel order — each track a card of its own, the
-    /// Elsewhere stubs, the beads with no line as their own track, and
-    /// the quiet tracks folded to one row. The geography never re-lays
-    /// itself out: past the pane's edge it scrolls, sideways over the
-    /// stages and down over the tracks.
+    /// The arrivals panel: every travelling flow one track — its name
+    /// above its stages, a cell per stage but the backlog's in travel
+    /// order — each track a card of its own, the Elsewhere stubs, the
+    /// beads with no line as their own track, and the quiet tracks
+    /// folded to one row. Every track fits the pane's width: the cells
+    /// share it, wrapping where they cannot, and the panel scrolls only
+    /// down over the tracks.
     fn panel(
         &self,
         model: &Model,
@@ -13176,15 +13169,15 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let mono = select::mono(cx);
-        // Every card is as wide as the widest flow's grid, the quiet
+        // Every track shares the widest flow's columns, the quiet
         // flows' too, so folding the quiet tracks moves none of them.
-        let width = panel_width(model.depots());
+        let columns = panel_columns(model.depots());
         let mut body = div()
             .id("panel")
             .debug_selector(|| "panel".to_string())
             .flex_1()
             .min_h_0()
-            .overflow_x_scroll()
+            .min_w_0()
             .overflow_y_scroll()
             .track_scroll(&self.decision)
             .px_3()
@@ -13200,11 +13193,11 @@ impl Footplate {
             .filter(|depot| depot.travelling > 0 || !depot.error.is_empty())
         {
             empty = false;
-            body = body.child(self.panel_depot(depot, width, mono.clone(), palette, cx));
+            body = body.child(self.panel_depot(depot, columns, mono.clone(), palette, cx));
         }
         if !model.unassigned().is_empty() {
             empty = false;
-            body = body.child(self.panel_no_line(model, width, mono.clone(), palette, cx));
+            body = body.child(self.panel_no_line(model, mono.clone(), palette, cx));
         }
         if model
             .depots()
@@ -13212,7 +13205,7 @@ impl Footplate {
             .any(|depot| depot.travelling == 0 && depot.error.is_empty())
         {
             empty = false;
-            body = body.child(self.panel_quiet(model, width, mono.clone(), palette, cx));
+            body = body.child(self.panel_quiet(model, columns, mono.clone(), palette, cx));
         }
         if empty {
             body = body.child(match model.flows_too_old() {
@@ -13230,41 +13223,39 @@ impl Footplate {
     fn panel_depot(
         &self,
         depot: &FlowDepot,
-        width: Rems,
+        columns: usize,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let mut rows = div().flex().flex_col().gap_1();
         if !depot.error.is_empty() {
-            rows = rows.child(self.panel_words(depot, depot.error.clone(), width, palette, cx));
+            rows = rows.child(self.panel_words(depot, depot.error.clone(), palette, cx));
         }
         for flow in &depot.flows {
-            rows = rows.child(self.panel_track(depot, flow, width, mono.clone(), palette, cx));
+            rows = rows.child(self.panel_track(depot, flow, columns, mono.clone(), palette, cx));
         }
         if depot.flows.is_empty() && depot.error.is_empty() && depot.elsewhere.is_empty() {
-            rows =
-                rows.child(self.panel_words(depot, "None in transit.".into(), width, palette, cx));
+            rows = rows.child(self.panel_words(depot, "None in transit.".into(), palette, cx));
         }
         if !depot.elsewhere.is_empty() {
-            rows = rows.child(self.panel_elsewhere(depot, width, mono, palette, cx));
+            rows = rows.child(self.panel_elsewhere(depot, mono, palette, cx));
         }
         rows
     }
 
-    /// One depot's row where its flows draw no track: the name cell
-    /// and faint words where its stages would stand — the error where
-    /// its flows could not be read, else that none is in transit.
+    /// One depot's row where its flows draw no track: its name above
+    /// faint words — the error where its flows could not be read, else
+    /// that none is in transit.
     fn panel_words(
         &self,
         depot: &FlowDepot,
         words: String,
-        width: Rems,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let name = depot.name.clone();
-        panel_card(width, palette)
+        panel_card(palette)
             .debug_selector({
                 let name = name.clone();
                 move || format!("panel words {name}")
@@ -13272,6 +13263,7 @@ impl Footplate {
             .child(self.panel_name(
                 name.clone(),
                 String::new(),
+                None,
                 Selected::Line(name.clone()),
                 format!("panel name {name}"),
                 palette,
@@ -13279,7 +13271,7 @@ impl Footplate {
             ))
             .child(
                 div()
-                    .flex_1()
+                    .w_full()
                     .min_w_0()
                     .py_2()
                     .px_2()
@@ -13289,14 +13281,14 @@ impl Footplate {
             )
     }
 
-    /// One track, a card of its own: the name cell, the backlog count,
-    /// and a cell per stage but the backlog's, left to right in travel
-    /// order.
+    /// One track, a card of its own: its name above a cell per stage
+    /// but the backlog's, left to right in travel order, wrapping where
+    /// the stages cannot fit the card's width.
     fn panel_track(
         &self,
         depot: &FlowDepot,
         flow: &Flow,
-        width: Rems,
+        columns: usize,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -13306,7 +13298,19 @@ impl Footplate {
             false => format!("{} · {}", flow.name, flow.flow_type),
         };
         let count = backlog_count(flow);
-        let mut track = panel_card(width, palette)
+        let mut stages = div().flex().flex_row().flex_wrap().w_full().min_w_0();
+        for stage in flow.stages.iter().filter(|stage| stage.stage != "backlog") {
+            stages = stages.child(self.panel_cell(
+                depot,
+                flow,
+                stage,
+                columns,
+                mono.clone(),
+                palette,
+                cx,
+            ));
+        }
+        panel_card(palette)
             .debug_selector({
                 let (depot, flow) = (depot.name.clone(), flow.name.clone());
                 move || format!("panel track {depot} {flow}")
@@ -13315,73 +13319,44 @@ impl Footplate {
             .child(self.panel_name(
                 depot.name.clone(),
                 second,
+                Some(count),
                 Selected::Line(depot.name.clone()),
                 format!("panel name {} {}", depot.name, flow.name),
                 palette,
                 cx,
             ))
-            .child(
-                div()
-                    .debug_selector({
-                        let (depot, flow) = (depot.name.clone(), flow.name.clone());
-                        move || format!("panel backlog {depot} {flow}")
-                    })
-                    .w(rems(PANEL_BACKLOG))
-                    .flex_none()
-                    .border_r_1()
-                    .border_color(palette.line)
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .py_2()
-                    .child(
-                        div()
-                            .text_size(rems(0.9375))
-                            .line_height(rems(1.25))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(match count {
-                                0 => palette.faint,
-                                _ => palette.text,
-                            })
-                            .child(count.to_string()),
-                    )
-                    .child(
-                        panel_meta()
-                            .debug_selector({
-                                let (depot, flow) = (depot.name.clone(), flow.name.clone());
-                                move || format!("panel backlog word {depot} {flow}")
-                            })
-                            .text_color(palette.faint)
-                            .child("backlog"),
-                    ),
-            );
-        for stage in flow.stages.iter().filter(|stage| stage.stage != "backlog") {
-            track = track.child(self.panel_cell(depot, flow, stage, mono.clone(), palette, cx));
-        }
-        track
+            .child(stages)
     }
 
-    /// One track's name cell: the depot's name with the flow's name
-    /// and type under it, opening the line. Fixed width, as every
-    /// cell is.
+    /// One track's name above its stages: the depot's name with the
+    /// flow's name and type and the backlog count on one line, opening
+    /// the line. The depot stands in the label type, the flow and the
+    /// count in the meta type; where one line cannot hold them they wrap
+    /// whole, never cut.
+    #[allow(clippy::too_many_arguments)]
     fn panel_name(
         &self,
         first: String,
         second: String,
+        backlog: Option<usize>,
         to: Selected,
         what: String,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        div()
+        let mut row = div()
             .id(SharedString::from(what.clone()))
             .debug_selector({
                 let what = what.clone();
                 move || what.clone()
             })
-            .w(rems(PANEL_NAME))
-            .flex_none()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_baseline()
+            .gap_2()
             .py_1p5()
             .pr_2()
             .rounded_md()
@@ -13394,18 +13369,33 @@ impl Footplate {
                         let what = what.clone();
                         move || format!("{what} depot")
                     })
-                    .truncate()
                     .line_height(rems(1.25))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(first),
-            )
-            .child(
+            );
+        if !second.is_empty() {
+            row = row.child(
                 panel_meta()
-                    .debug_selector(move || format!("{what} flow"))
-                    .truncate()
+                    .debug_selector({
+                        let what = what.clone();
+                        move || format!("{what} flow")
+                    })
                     .text_color(palette.faint)
                     .child(second),
-            )
+            );
+        }
+        if let Some(count) = backlog {
+            row = row.child(
+                panel_meta()
+                    .debug_selector(move || format!("{what} backlog"))
+                    .text_color(match count {
+                        0 => palette.faint,
+                        _ => palette.text,
+                    })
+                    .child(format!("{count} backlog")),
+            );
+        }
+        row
     }
 
     /// One stage's cell: its name with the lamp where one burns and
@@ -13413,12 +13403,16 @@ impl Footplate {
     /// it, and two headcodes, the second reading "+N" where a third bead
     /// stands on it. Lit only with a bead on it: an empty stage stands
     /// on its track's card, its name faint, and an occupied one steps up
-    /// to the raised surface.
+    /// to the raised surface. The cells of a track share its width, each
+    /// one of `columns` to the card and never narrower than a headcode;
+    /// a head longer than its cell wraps whole onto a second line.
+    #[allow(clippy::too_many_arguments)]
     fn panel_cell(
         &self,
         depot: &FlowDepot,
         flow: &Flow,
         stage: &FlowStage,
+        columns: usize,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -13445,8 +13439,9 @@ impl Footplate {
                     (depot.name.clone(), flow.name.clone(), stage.stage.clone());
                 move || format!("panel stage {depot} {flow} {stage}")
             })
-            .w(rems(PANEL_STAGE))
             .flex_none()
+            .flex_basis(relative(1. / columns as f32))
+            .min_w(rems(PANEL_MIN))
             .rounded_md()
             .when(lit, |el| el.bg(palette.ground))
             .child(
@@ -13467,7 +13462,6 @@ impl Footplate {
                             })
                             .flex_1()
                             .min_w_0()
-                            .truncate()
                             .text_color(match lit {
                                 true => palette.text,
                                 false => palette.faint,
@@ -13549,50 +13543,46 @@ impl Footplate {
     }
 
     /// The stub under a depot's last track: its Elsewhere beads'
-    /// headcodes on a card, only where beads stand there. It hangs
-    /// under the cells, past the name column.
+    /// headcodes on a card, only where beads stand there, under their
+    /// count and wrapping where they cannot fit one row.
     fn panel_elsewhere(
         &self,
         depot: &FlowDepot,
-        width: Rems,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut stub = panel_card(width, palette)
+        let mut codes = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .w_full()
+            .min_w_0();
+        for bead in &depot.elsewhere {
+            codes = codes.child(self.panel_headcode(bead, mono.clone(), palette, cx));
+        }
+        panel_card(palette)
             .debug_selector({
                 let depot = depot.name.clone();
                 move || format!("panel elsewhere {depot}")
             })
-            .items_center()
             .gap_2()
-            .py_1()
-            .child(
-                div()
-                    .w(rems(PANEL_NAME - 0.5))
-                    .flex_none()
-                    .into_any_element(),
-            )
             .child(
                 panel_meta()
-                    .flex_none()
                     .text_color(palette.faint)
                     .child(format!("Elsewhere · {}", depot.elsewhere.len())),
-            );
-        for bead in &depot.elsewhere {
-            stub = stub.child(self.panel_headcode(bead, mono.clone(), palette, cx));
-        }
-        stub
+            )
+            .child(codes)
     }
 
     /// The beads travelling with no line: their own track at the foot
-    /// of the active ones, one wide cell holding their headcodes,
-    /// because a bead with no depot travels no flow and has no stages
-    /// to stand between.
+    /// of the active ones, its name above their headcodes, because a
+    /// bead with no depot travels no flow and has no stages to stand
+    /// between.
     fn panel_no_line(
         &self,
         model: &Model,
-        width: Rems,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -13601,12 +13591,13 @@ impl Footplate {
         for bead in model.unassigned() {
             codes = codes.child(self.panel_headcode(bead, mono.clone(), palette, cx));
         }
-        panel_card(width, palette)
+        panel_card(palette)
             .debug_selector(|| "panel noline".to_string())
             .min_h(rems(4.))
             .child(self.panel_name(
                 "No line".into(),
                 "no depot".into(),
+                None,
                 Selected::NoLine,
                 "panel noline name".into(),
                 palette,
@@ -13614,15 +13605,14 @@ impl Footplate {
             ))
             .child(
                 div()
-                    .w(rems(PANEL_NO_LINE))
-                    .flex_none()
+                    .w_full()
+                    .min_w_0()
                     .rounded_md()
                     .bg(palette.ground)
                     .flex()
                     .flex_col()
                     .child(
                         panel_meta()
-                            .truncate()
                             .px_2()
                             .pt_1()
                             .text_color(palette.text)
@@ -13639,7 +13629,7 @@ impl Footplate {
     fn panel_quiet(
         &self,
         model: &Model,
-        width: Rems,
+        columns: usize,
         mono: Option<SharedString>,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -13675,7 +13665,8 @@ impl Footplate {
         );
         if open {
             for depot in quiet {
-                section = section.child(self.panel_depot(depot, width, mono.clone(), palette, cx));
+                section =
+                    section.child(self.panel_depot(depot, columns, mono.clone(), palette, cx));
             }
         }
         section
@@ -18308,6 +18299,54 @@ mod tests {
                  "expected": "2h–3h", "remark": "", "tone": "none",
                  "working": false},
             ],
+        }})
+        .to_string()
+    }
+
+    /// The flows view the wrapping test draws: a nine-stage release flow
+    /// that cannot fit the narrow pane on one row, and a one-stage flow
+    /// beside it.
+    fn flows_wrapping() -> String {
+        let stages: Vec<Value> = [
+            "build",
+            "sign",
+            "decide",
+            "verify",
+            "publish",
+            "published",
+            "live",
+            "done",
+            "closed",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(n, stage)| {
+            let beads = match n {
+                0 => vec![json!({"bead": "yd-ship", "title": "Ship it",
+                                 "expected": "1h–2h", "remark": "", "tone": "none",
+                                 "working": false})],
+                _ => vec![],
+            };
+            json!({"stage": stage, "group": "g", "human": false,
+                   "lamp": "none", "terminal": n == 8, "beads": beads})
+        })
+        .collect();
+        json!({"result": {
+            "travelling": 2,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "release", "type": "release", "source": "store",
+                     "stages": stages},
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "none", "beads": [
+                            {"bead": "yd-small", "title": "A small bead",
+                             "expected": "—", "remark": "", "tone": "none",
+                             "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+            ],
+            "unassigned": [],
         }})
         .to_string()
     }
@@ -24742,11 +24781,11 @@ yardr.dev
     }
 
     /// The arrivals row opens the panel: one track per travelling
-    /// flow on the fixed grid — the name, the backlog count, a cell
-    /// per stage in travel order — with the lamps lit only where beads
-    /// stand, two headcodes per cell and "+N" past that, the Elsewhere
-    /// stub, No line's own track, and the quiet tracks folded to one
-    /// row. The head carries the summary and the toggle, on the panel.
+    /// flow — its name above a cell per stage in travel order — with
+    /// the lamps lit only where beads stand, two headcodes per cell and
+    /// "+N" past that, the Elsewhere stub, No line's own track, and the
+    /// quiet tracks folded to one row. The head carries the summary and
+    /// the toggle, on the panel.
     #[gpui::test]
     fn the_arrivals_row_opens_the_panel_of_tracks(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -24765,56 +24804,55 @@ yardr.dev
             assert_eq!(model.waiting_on_you().len(), 2);
             assert_eq!(model.held_count(), 1);
         });
-        // One track per travelling flow, the fixed cells, the backlog's
-        // count and no stage cell for it.
-        for (depot, flow) in [
-            ("yardr", "default"),
-            ("yardr", "design"),
-            ("footplate", "default"),
+        // One track per travelling flow, its name above its stages with
+        // the backlog's count on the name's line, and no stage cell for
+        // the backlog.
+        for (depot, flow, first) in [
+            ("yardr", "default", "new"),
+            ("yardr", "design", "draft"),
+            ("footplate", "default", "new"),
         ] {
             let track = format!("panel track {depot} {flow}");
             let name = format!("panel name {depot} {flow}");
-            let backlog = format!("panel backlog {depot} {flow}");
+            let backlog = format!("panel name {depot} {flow} backlog");
             assert!(drawn(cx, &track), "{track}");
             assert!(drawn(cx, &name), "{name}");
             assert!(drawn(cx, &backlog), "{backlog}");
             let name = bounds_of(cx, &name);
-            let backlog = bounds_of(cx, &backlog);
+            let stage = bounds_of(cx, &format!("panel stage {depot} {flow} {first}"));
             assert!(
-                (name.size.width - px(PANEL_NAME * 16.)).abs() < px(1.),
-                "the name cell is no {} pixels: {name:?}",
-                PANEL_NAME * 16.
-            );
-            assert!(
-                (backlog.size.width - px(PANEL_BACKLOG * 16.)).abs() < px(1.),
-                "the backlog cell is no {} pixels: {backlog:?}",
-                PANEL_BACKLOG * 16.
+                name.bottom() <= stage.top() + px(1.),
+                "the name stands beside its stages, not above: {name:?} {stage:?}"
             );
         }
         assert!(!drawn(cx, "panel stage yardr default backlog"));
-        // The stages in travel order, one width each, aligned by place
-        // across the tracks.
+        // The stages in travel order, sharing the card's width equally
+        // and aligned by place across the tracks.
         for stage in ["new", "review", "approved"] {
             let cell = format!("panel stage yardr default {stage}");
             assert!(drawn(cx, &cell), "{cell}");
-            let cell = bounds_of(cx, &cell);
-            assert!(
-                (cell.size.width - px(PANEL_STAGE * 16.)).abs() < px(1.),
-                "the stage cell is no {} pixels: {cell:?}",
-                PANEL_STAGE * 16.
-            );
         }
-        let new = bounds_of(cx, "panel stage yardr default new").left();
-        let review = bounds_of(cx, "panel stage yardr default review").left();
-        let approved = bounds_of(cx, "panel stage yardr default approved").left();
+        let new = bounds_of(cx, "panel stage yardr default new");
+        let review = bounds_of(cx, "panel stage yardr default review");
+        let approved = bounds_of(cx, "panel stage yardr default approved");
         assert!(
-            new < review && review < approved,
+            new.left() < review.left() && review.left() < approved.left(),
             "the stages stand out of travel order: {new:?} {review:?} {approved:?}"
         );
-        let footplate = bounds_of(cx, "panel stage footplate default new").left();
+        for (what, cell) in [("review", &review), ("approved", &approved)] {
+            assert!(
+                (cell.size.width - new.size.width).abs() < px(1.),
+                "the {what} cell shares no width with the new cell: {cell:?} {new:?}"
+            );
+        }
+        let footplate = bounds_of(cx, "panel stage footplate default new");
         assert!(
-            (new - footplate).abs() < px(1.),
+            (new.left() - footplate.left()).abs() < px(1.),
             "the first stages stand out of column: {new:?} {footplate:?}"
+        );
+        assert!(
+            (new.size.width - footplate.size.width).abs() < px(1.),
+            "the tracks share no cell width: {new:?} {footplate:?}"
         );
         // The lamps: fault and turn burn where beads stand, and no lamp
         // where none stands, whatever the stage serves.
@@ -24997,11 +25035,10 @@ yardr.dev
         });
     }
 
-    /// At the narrowest window the panel holds: the head, three tracks
-    /// and the Elsewhere stub on first paint, No line cut at the foot
-    /// and Quiet below the fold, and sideways the name and the backlog
-    /// whole with the first stage cut at the edge and the second past
-    /// it, scrolling.
+    /// At the narrowest window the panel holds: the tracks stand in
+    /// order down the pane, each fitting the pane's width with its name
+    /// above its stages, and Quiet stands below the fold, reached by
+    /// scrolling down. Nothing runs past the pane's right edge.
     #[gpui::test]
     fn the_panel_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25015,9 +25052,8 @@ yardr.dev
         cx.simulate_resize(gpui::size(px(616.), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
-        // Down the pane: the head, three tracks and the stub stand
-        // whole on first paint, No line is cut at the foot, and Quiet
-        // stands below the fold, reached by scrolling.
+        // Down the pane: the head, the tracks, the stub, No line and
+        // Quiet stand in order, Quiet below the fold.
         let head = bounds_of(cx, "arrivals head");
         let first = bounds_of(cx, "panel track yardr default");
         let second = bounds_of(cx, "panel track yardr design");
@@ -25039,66 +25075,97 @@ yardr.dev
             );
         }
         assert!(
-            stub.bottom() <= px(360.),
-            "the stub stands below the fold: {stub:?}"
-        );
-        assert!(
-            third.bottom() <= px(360.),
-            "the third track stands below the fold: {third:?}"
-        );
-        assert!(
-            noline.top() < px(360.) && px(360.) < noline.bottom(),
-            "No line is not cut at the foot: {noline:?}"
-        );
-        assert!(
             px(360.) <= quiet.top(),
             "Quiet stands on first paint: {quiet:?}"
         );
-        // Sideways: the name and the backlog stand whole, the first
-        // stage is cut at the pane's edge, and the rest scrolls. The
-        // cards stand as wide as the grid, past the pane's edge.
-        let name = bounds_of(cx, "panel name yardr default");
-        let backlog = bounds_of(cx, "panel backlog yardr default");
-        let new = bounds_of(cx, "panel stage yardr default new");
-        let review = bounds_of(cx, "panel stage yardr default review");
+        // Sideways: every name, backlog count and stage cell stands
+        // inside the pane, and every card stops at its edge.
+        for (depot, flow, stages) in [
+            ("yardr", "default", &["new", "review", "approved"][..]),
+            ("yardr", "design", &["draft", "critique"][..]),
+            ("footplate", "default", &["new"][..]),
+        ] {
+            let card = bounds_of(cx, &format!("panel track {depot} {flow}"));
+            assert!(
+                card.right() <= px(616.),
+                "the {depot} {flow} card runs past the pane: {card:?}"
+            );
+            for part in [
+                format!("panel name {depot} {flow}"),
+                format!("panel name {depot} {flow} backlog"),
+            ] {
+                let at = bounds_of(cx, &part);
+                assert!(at.right() <= px(616.), "{part} runs past the pane: {at:?}");
+            }
+            for stage in stages {
+                let cell = bounds_of(cx, &format!("panel stage {depot} {flow} {stage}"));
+                assert!(
+                    cell.right() <= px(616.),
+                    "the {depot} {flow} {stage} cell runs past the pane: {cell:?}"
+                );
+            }
+        }
+    }
+
+    /// At the narrowest window no track's cells run past the pane's right
+    /// edge, and a flow too long to fit wraps: its later stages continue
+    /// on a row below, starting under the first stage's column.
+    #[gpui::test]
+    fn the_panel_fits_its_tracks_and_wraps_a_long_flow(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_wrapping());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        // The narrowest window the application opens (main.rs).
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        wait(cx, "the panel", |cx| drawn(cx, "panel track yardr release"));
+        // Every cell stands inside the pane, the long flow's and the
+        // short one's.
+        for stage in [
+            "build",
+            "sign",
+            "decide",
+            "verify",
+            "publish",
+            "published",
+            "live",
+            "done",
+            "closed",
+        ] {
+            let cell = bounds_of(cx, &format!("panel stage yardr release {stage}"));
+            assert!(
+                cell.right() <= px(616.),
+                "the {stage} cell runs past the pane: {cell:?}"
+            );
+        }
+        let small = bounds_of(cx, "panel stage yardr default new");
         assert!(
-            (name.size.width - px(PANEL_NAME * 16.)).abs() < px(1.),
-            "the name cell is no {} pixels: {name:?}",
-            PANEL_NAME * 16.
+            small.right() <= px(616.),
+            "the short track runs past the pane: {small:?}"
+        );
+        // The long flow wraps: its last stage stands below its first,
+        // starting under the first stage's column.
+        let first = bounds_of(cx, "panel stage yardr release build");
+        let last = bounds_of(cx, "panel stage yardr release closed");
+        assert!(
+            first.top() < last.top(),
+            "the long flow stands on one row: {first:?} {last:?}"
         );
         assert!(
-            (backlog.size.width - px(PANEL_BACKLOG * 16.)).abs() < px(1.),
-            "the backlog cell is no {} pixels: {backlog:?}",
-            PANEL_BACKLOG * 16.
-        );
-        assert!(
-            (new.size.width - px(PANEL_STAGE * 16.)).abs() < px(1.),
-            "the stage cell is no {} pixels: {new:?}",
-            PANEL_STAGE * 16.
-        );
-        assert!(
-            backlog.right() <= px(616.),
-            "the backlog is cut at the edge: {backlog:?}"
-        );
-        assert!(
-            new.left() < px(616.) && px(616.) < new.right(),
-            "the first stage is not cut at the edge: {new:?}"
-        );
-        assert!(
-            px(616.) <= review.left(),
-            "the second stage stands in the pane: {review:?}"
-        );
-        assert!(
-            px(616.) < first.right(),
-            "the card stops at the pane's edge: {first:?}"
+            (first.left() - last.left()).abs() < px(1.),
+            "the wrapped row starts off the first column: {first:?} {last:?}"
         );
     }
 
-    /// A card's width is the grid of the flow with the most stages: the
-    /// backlog is a cell of its own and each other stage one more, and
-    /// the wide cell of the beads with no line is a floor under it.
+    /// The tracks share the columns of the flow with the most stages:
+    /// each other stage one column, the backlog never one, and one where
+    /// no flow has a stage, so the cards still divide.
     #[test]
-    fn a_card_is_as_wide_as_the_flow_with_the_most_stages_needs() {
+    fn the_tracks_share_the_columns_of_the_flow_with_the_most_stages() {
         let depot = |stages: &[&str]| FlowDepot {
             flows: vec![Flow {
                 stages: stages
@@ -25112,24 +25179,20 @@ yardr.dev
             }],
             ..FlowDepot::default()
         };
-        let floor = rems(PANEL_NAME + PANEL_NO_LINE + PANEL_CHROME);
-        assert_eq!(panel_width(&[]), floor);
-        // One stage and a backlog stand under the floor.
-        assert_eq!(panel_width(&[depot(&["backlog", "a"])]), floor);
+        assert_eq!(panel_columns(&[]), 1);
+        // The backlog is never a column.
+        assert_eq!(panel_columns(&[depot(&["backlog"])]), 1);
+        assert_eq!(panel_columns(&[depot(&["backlog", "a"])]), 1);
         // The widest flow decides, whichever depot holds it.
         let wide = depot(&["backlog", "a", "b", "c", "d", "e"]);
-        assert_eq!(
-            panel_width(&[depot(&["a", "b"]), wide]),
-            rems(PANEL_NAME + PANEL_BACKLOG + 5. * PANEL_STAGE + PANEL_CHROME)
-        );
+        assert_eq!(panel_columns(&[depot(&["a", "b"]), wide]), 5);
     }
 
-    /// A card stands as wide as the widest flow's grid, so the tracks
-    /// stand one under another as bands, and as the pane where that is
-    /// more, so a wide window has no bare ground at the right of a
-    /// short flow.
+    /// Every card stands as wide as the pane, so the tracks stand one
+    /// under another as bands, at the narrowest window and the widest,
+    /// and never past the pane's edge.
     #[gpui::test]
-    fn the_panel_s_cards_stand_as_wide_as_the_grid_or_the_pane(cx: &mut TestAppContext) {
+    fn the_panel_s_cards_stand_as_wide_as_the_pane(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
@@ -25137,16 +25200,13 @@ yardr.dev
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         cx.run_until_parked();
-        // The widest flow here has three stages beside the backlog.
-        let grid = px((PANEL_NAME + PANEL_BACKLOG + 3. * PANEL_STAGE + PANEL_CHROME) * 16.);
-        for (width, past) in [(616., true), (1920., false)] {
+        for width in [616., 1920.] {
             cx.simulate_resize(gpui::size(px(width), px(900.)));
             view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
             wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
             let panel = bounds_of(cx, "panel");
             // The body's side padding, 12 pixels each side.
-            let inside = panel.size.width - px(24.);
-            let wanted = grid.max(inside);
+            let wanted = panel.size.width - px(24.);
             for track in [
                 "panel track yardr default",
                 "panel track yardr design",
@@ -25159,17 +25219,20 @@ yardr.dev
                     (card.size.width - wanted).abs() < px(1.),
                     "at {width} wide {track} is {card:?}, not {wanted:?}"
                 );
+                assert!(
+                    card.right() <= px(width),
+                    "at {width} wide {track} runs past the pane: {card:?}"
+                );
             }
-            assert_eq!(wanted > inside, past, "at {width} wide");
         }
     }
 
-    /// No stage head, backlog word or flow line of this yard's flows is
-    /// cut or wrapped, at any text size: each stands in a box as wide as
-    /// DejaVu Sans, the widest sans of the desktops here, draws it, with
-    /// the lamp beside every head and the buffer stop beside the
-    /// terminal ones. The cells are in rems, so they grow with the text
-    /// as the words do; in pixels they cut the words at the larger sizes.
+    /// No name on the panel is cut at any text size: each depot, flow
+    /// line and backlog count stands whole on its track's name row, and
+    /// each stage head stands whole on one line or wraps whole onto a
+    /// second, never truncated. The cells are in rems, so they grow with
+    /// the text as the words do; in pixels they cut the words at the
+    /// larger sizes.
     #[gpui::test]
     fn the_panel_holds_this_yard_s_longest_names_at_every_text_size(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25200,16 +25263,6 @@ yardr.dev
             // and a seventh more.
             let small = 0.75 * rem;
             let bold = 0.875 * rem * 8. / 7.;
-            let holds = |cx: &mut VisualTestContext, selector: String, words: String, size: f32| {
-                let at = bounds_now(cx, &selector);
-                let wide = dejavu_width(&words, size);
-                assert!(
-                    f32::from(at.size.width) >= wide,
-                    "at {text} px {words:?} is cut: {} wide in {at:?}",
-                    wide
-                );
-                at
-            };
             for (depot, flows) in &this_yard() {
                 for flow in flows {
                     let (name, flow_type) = (&flow.name, &flow.flow_type);
@@ -25217,40 +25270,57 @@ yardr.dev
                         true => name.to_string(),
                         false => format!("{name} · {flow_type}"),
                     };
-                    holds(cx, format!("panel name {depot} {name} flow"), line, small);
-                    holds(
-                        cx,
-                        format!("panel name {depot} {name} depot"),
-                        depot.to_string(),
-                        bold,
-                    );
-                    // The word hugs its text, so its cell is held to it,
-                    // and it stands on one line: a wrapped word would be
-                    // two lines high.
-                    holds(
-                        cx,
-                        format!("panel backlog {depot} {name}"),
-                        "backlog".to_string(),
-                        small,
-                    );
-                    let word = bounds_now(cx, &format!("panel backlog word {depot} {name}"));
+                    let backlogged = flow
+                        .stages
+                        .iter()
+                        .filter(|(stage, ..)| stage == "backlog")
+                        .count();
+                    let backlog = format!("{backlogged} backlog");
+                    // The name's words stand on one line each: a wrapped
+                    // word would be two lines high. They hug their text,
+                    // so the test platform's wide font sizes their boxes,
+                    // and holding those against DejaVu says nothing; the
+                    // row is held instead, as DejaVu draws it, against
+                    // the card it stands in.
+                    for part in ["depot", "flow", "backlog"] {
+                        let at = bounds_now(cx, &format!("panel name {depot} {name} {part}"));
+                        assert!(
+                            f32::from(at.size.height) < rem * 1.5,
+                            "at {text} px the {part} is wrapped in {depot} {name}: {at:?}"
+                        );
+                    }
+                    let card = bounds_now(cx, &format!("panel track {depot} {name}"));
+                    let available = f32::from(card.size.width) - 1.5 * rem - 2.;
+                    let wide = dejavu_width(depot, bold)
+                        + dejavu_width(&line, small)
+                        + dejavu_width(&backlog, small)
+                        + rem;
                     assert!(
-                        f32::from(word.size.height) < rem * 1.5,
-                        "at {text} px backlog is wrapped in {depot} {name}: {word:?}"
+                        wide <= available,
+                        "at {text} px the name overflows its card in {depot} {name}: {wide} wide in {card:?}"
                     );
                     for (stage, human, _) in
                         flow.stages.iter().filter(|(stage, ..)| stage != "backlog")
                     {
-                        let head = match human {
-                            true => format!("{stage} · people"),
-                            false => stage.to_string(),
-                        };
-                        holds(
-                            cx,
-                            format!("panel head {depot} {name} {stage}"),
-                            head,
-                            small,
+                        // A head stands on one line or wraps whole onto
+                        // a second, never more and never cut.
+                        let head = bounds_now(cx, &format!("panel head {depot} {name} {stage}"));
+                        assert!(
+                            f32::from(head.size.height) < rem * 2.5,
+                            "at {text} px the head wraps past two lines in {depot} {name} {stage}: {head:?}"
                         );
+                        // At the largest text this yard's longest heads
+                        // wrap: a truncated head would stand one line
+                        // high with its words past its box.
+                        if text == settings::TEXT_MAX
+                            && (matches!(stage.as_str(), "contributor" | "review-security")
+                                || (*human && stage == "approved"))
+                        {
+                            assert!(
+                                f32::from(head.size.height) > rem * 1.5,
+                                "at {text} px the longest head stands one line high, truncated, in {depot} {name} {stage}: {head:?}"
+                            );
+                        }
                     }
                 }
             }
