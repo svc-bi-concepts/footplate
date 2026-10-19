@@ -987,6 +987,17 @@ fn candidate_line(candidate: &api::SetupCandidate) -> String {
     )
 }
 
+/// A setup candidate the card took, named in words beside its account.
+/// Selection is also shown by the raised row; it needs no glyph.
+fn candidate_choice_line(candidate: &api::SetupCandidate, taken: &str) -> String {
+    let line = candidate_line(candidate);
+    if candidate.source == taken {
+        format!("taken: {line}")
+    } else {
+        line
+    }
+}
+
 /// The toggle beside a secret ask's field: `Show` draws what is typed as
 /// typed, for a look, `Hide` draws marks again. The value is unchanged
 /// either way: it goes in its call as ever.
@@ -13800,8 +13811,7 @@ impl Footplate {
         choice = choice.child(div().text_sm().text_color(palette.faint).child(SETUP_TAKE));
         for candidate in &setup.candidates {
             let is_taken = candidate.source == taken;
-            let marker = if is_taken { "●" } else { "○" };
-            let text = format!("{marker} {}", candidate_line(candidate));
+            let text = candidate_choice_line(candidate, taken);
             let source = candidate.source.clone();
             let bead_click = bead.to_string();
             choice = choice.child(
@@ -29880,6 +29890,23 @@ mod tests {
         "name: courier\nbase: https://courier.example.com/api\ncredential: COURIER_TOKEN\n";
     const SETUP_MINT_FILE: &str = "#!/bin/sh\n# mint COURIER_TOKEN from COURIER_ACCOUNT\nexec courier-mint \"$COURIER_ACCOUNT\"\n";
     const SETUP_MINT_SHA: &str = "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc";
+
+    #[test]
+    fn a_taken_setup_candidate_is_named_in_words() {
+        let candidate = api::SetupCandidate {
+            source: "courier-existing".into(),
+            file: "/home/jo/.yardr/sources/courier-existing.env".into(),
+            values: [("COURIER_ACCOUNT".into(), "jo@example.test".into())]
+                .into_iter()
+                .collect(),
+        };
+        let line = "courier-existing — COURIER_ACCOUNT=jo@example.test (in /home/jo/.yardr/sources/courier-existing.env)";
+        assert_eq!(candidate_choice_line(&candidate, ""), line);
+        assert_eq!(
+            candidate_choice_line(&candidate, "courier-existing"),
+            format!("taken: {line}")
+        );
+    }
 
     /// The shared account values a candidate file holds for `account`.
     fn setup_values(account: &[&str]) -> Value {

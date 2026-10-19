@@ -2862,6 +2862,18 @@ impl Model {
         option: u64,
         approved: &api::SetupApproved,
     ) -> Vec<Effect> {
+        // `You decide` is an option on the card, but the yard records the
+        // recommended preset it resolved to. Keep the dealt card on that
+        // preset when the approval arrives, before the queue is read again.
+        let option = self
+            .setup(bead, ask)
+            .and_then(|setup| {
+                setup
+                    .presets
+                    .iter()
+                    .position(|preset| preset.name == approved.preset)
+            })
+            .map_or(option, |preset| preset as u64 + 1);
         let ran = Some(Ran {
             argv: vec!["setup".to_string(), approved.pack.clone()],
             result: approved.result.clone(),
@@ -10827,6 +10839,15 @@ mod tests {
         m.declined("yd-crm", 41, "not now");
         assert_eq!(m.setup_approving("yd-crm", 41), None);
         assert_eq!(m.setup("yd-crm", 41), Some(&courier()));
+
+        // `You decide` is recorded by the yard as the recommended preset,
+        // so the decided card marks that preset rather than the alias.
+        let mut m = with_a_setup_ask();
+        m.choose("yd-crm", 41, 3);
+        m.setup_approved("yd-crm", 41, 3, &setup_approved_with(&[]));
+        let detail = m.decided_detail("yd-crm", 41, &chrono::Utc).unwrap();
+        assert_eq!(detail.picked, 1);
+        assert_eq!(detail.pick, "read");
     }
 
     /// An approved setup reads as ran once the server has carried it out,
