@@ -600,6 +600,17 @@ fn panel_meta() -> Div {
     div().text_xs().line_height(rems(1.))
 }
 
+/// A stage name in the panel: GPUI can break an overlong hyphenated
+/// name between its letters, so give it an invisible break after each
+/// hyphen. The hyphenated words then stay whole when the cell wraps.
+fn panel_stage_name(stage: &str, human: bool) -> String {
+    let name = stage.replace('-', "-\u{200b}");
+    match human {
+        true => format!("{name} · people"),
+        false => name,
+    }
+}
+
 /// What the Lines pane says of a yard from before the Lines view, in
 /// place of the arrivals or the flows it would draw: plain words in the
 /// faint colour, never a notice.
@@ -13423,10 +13434,7 @@ impl Footplate {
             format!("panel lamp {} {} {}", depot.name, flow.name, stage.stage),
             palette,
         );
-        let name = match stage.human {
-            true => format!("{} · people", stage.stage),
-            false => stage.stage.clone(),
-        };
+        let name = panel_stage_name(&stage.stage, stage.human);
         let stop = stage.terminal.then(|| {
             buffer_stop(
                 format!("panel stop {} {} {}", depot.name, flow.name, stage.stage),
@@ -25186,6 +25194,15 @@ yardr.dev
         // The widest flow decides, whichever depot holds it.
         let wide = depot(&["backlog", "a", "b", "c", "d", "e"]);
         assert_eq!(panel_columns(&[depot(&["a", "b"]), wide]), 5);
+    }
+
+    #[test]
+    fn panel_stage_names_break_hyphenated_words_at_the_hyphen() {
+        assert_eq!(
+            panel_stage_name("review-security", false),
+            "review-\u{200b}security"
+        );
+        assert_eq!(panel_stage_name("approved", true), "approved · people");
     }
 
     /// Every card stands as wide as the pane, so the tracks stand one
