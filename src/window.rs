@@ -13532,7 +13532,13 @@ impl Footplate {
     /// on its track's card, its name faint, and an occupied one steps up
     /// to the raised surface. The cells of a track share its width, each
     /// one of `columns` to the card and never narrower than a headcode;
-    /// a head longer than its cell wraps whole onto a second line.
+    /// a head longer than its cell wraps whole onto a second line. Every
+    /// head stands two lines high with its words on the rule, so a head
+    /// of one line and a head of two put the rule at one place: the
+    /// rules of a row are one straight track, and of every track alike,
+    /// with no row measured for its tallest head. A name that wants a
+    /// third line makes its own cell taller rather than run over the row
+    /// above.
     #[allow(clippy::too_many_arguments)]
     fn panel_cell(
         &self,
@@ -13566,35 +13572,53 @@ impl Footplate {
             .flex_none()
             .flex_basis(relative(1. / columns as f32))
             .min_w(rems(PANEL_MIN))
+            .pt_1()
             .rounded_md()
             .when(lit, |el| el.bg(palette.ground))
             .child(
+                // Two of `panel_meta`'s lines, 1 rem each, bottom-aligned.
+                // The cell holds the top padding, so it stays out of
+                // this height. A minimum, not a fixed height: a head of
+                // three lines would spill upward out of a fixed box.
                 div()
+                    .min_h(rems(2.))
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
+                    .flex_col()
+                    .justify_end()
                     .px_2()
-                    .pt_1()
-                    .children(lamp)
                     .child(
-                        panel_meta()
-                            .debug_selector({
-                                let (depot, flow, stage) =
-                                    (depot.name.clone(), flow.name.clone(), stage.stage.clone());
-                                move || format!("panel head {depot} {flow} {stage}")
-                            })
-                            .flex_1()
-                            .min_w_0()
-                            .text_color(match lit {
-                                true => palette.text,
-                                false => palette.faint,
-                            })
-                            .child(name),
-                    )
-                    .children(stop),
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .children(lamp)
+                            .child(
+                                panel_meta()
+                                    .debug_selector({
+                                        let (depot, flow, stage) = (
+                                            depot.name.clone(),
+                                            flow.name.clone(),
+                                            stage.stage.clone(),
+                                        );
+                                        move || format!("panel head {depot} {flow} {stage}")
+                                    })
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(match lit {
+                                        true => palette.text,
+                                        false => palette.faint,
+                                    })
+                                    .child(name),
+                            )
+                            .children(stop),
+                    ),
             )
-            .child(panel_track_line(stage.human, lit, palette));
+            .child(panel_track_line(stage.human, lit, palette).debug_selector({
+                let (depot, flow, stage) =
+                    (depot.name.clone(), flow.name.clone(), stage.stage.clone());
+                move || format!("panel rule {depot} {flow} {stage}")
+            }));
         let mut codes = div().flex().flex_col().px_2().pb_1p5();
         match stage.beads.as_slice() {
             [] => {}
@@ -18557,8 +18581,10 @@ mod tests {
     }
 
     /// The flows view the wrapping test draws: a nine-stage release flow
-    /// that cannot fit the narrow pane on one row, and a one-stage flow
-    /// beside it.
+    /// that cannot fit the narrow pane on one row, two of its stages
+    /// handled by people so that their heads wrap in the narrow cell
+    /// beside heads that stand on one line, and a one-stage flow beside
+    /// it.
     fn flows_wrapping() -> String {
         let stages: Vec<Value> = [
             "build",
@@ -18580,7 +18606,8 @@ mod tests {
                                  "working": false})],
                 _ => vec![],
             };
-            json!({"stage": stage, "group": "g", "human": false,
+            json!({"stage": stage, "group": "g",
+                   "human": matches!(*stage, "sign" | "decide"),
                    "lamp": "none", "terminal": n == 8, "beads": beads})
         })
         .collect();
@@ -25300,16 +25327,140 @@ yardr.dev
         });
     }
 
+    /// One cell of the panel a test holds level: where it stands, and the
+    /// bead whose headcode comes first in it, where a bead stands on it.
+    struct HeldCell {
+        depot: String,
+        flow: String,
+        stage: String,
+        bead: Option<String>,
+    }
+
+    fn held(depot: &str, flow: &str, stage: &str, bead: Option<&str>) -> HeldCell {
+        HeldCell {
+            depot: depot.to_string(),
+            flow: flow.to_string(),
+            stage: stage.to_string(),
+            bead: bead.map(str::to_string),
+        }
+    }
+
+    /// Holds the frame last drawn to a panel whose tracks stand level. In
+    /// each row of a track, the cells that share a top, the rules stand at
+    /// one height, as one straight track, and the first headcodes under
+    /// them start at one height; and every cell of every track stands its
+    /// rule the same depth under its own top, two lines of the head type
+    /// or more, so the rows line up across the tracks as the columns do.
+    /// A cell whose head wants a third line is left out, since it makes
+    /// its own cell taller and its own test holds that: the test platform
+    /// draws every character 0.6 em wide, wider than any font, and wraps
+    /// `contributor` in the narrowest cell where DejaVu does not. Gives
+    /// how many pairs of cells of one row stand a head of one line beside
+    /// a wrapped one: a test asks for some, since with none it held
+    /// nothing the fix is for.
+    fn rules_level(cx: &mut VisualTestContext, rem: f32, cells: &[HeldCell]) -> usize {
+        struct Stands {
+            at: String,
+            track: (String, String),
+            cell: Bounds<Pixels>,
+            head: Bounds<Pixels>,
+            rule: Bounds<Pixels>,
+            code: Option<Bounds<Pixels>>,
+        }
+        let stands: Vec<Stands> = cells
+            .iter()
+            .map(|held| {
+                let at = format!("{} {} {}", held.depot, held.flow, held.stage);
+                Stands {
+                    track: (held.depot.clone(), held.flow.clone()),
+                    cell: bounds_now(cx, &format!("panel stage {at}")),
+                    head: bounds_now(cx, &format!("panel head {at}")),
+                    rule: bounds_now(cx, &format!("panel rule {at}")),
+                    code: held
+                        .bead
+                        .as_ref()
+                        .map(|bead| bounds_now(cx, &format!("panel headcode {bead}"))),
+                    at,
+                }
+            })
+            .collect();
+        let level: Vec<&Stands> = stands
+            .iter()
+            .filter(|s| f32::from(s.head.size.height) < 2.5 * rem)
+            .collect();
+        let depth = |s: &Stands| f32::from(s.rule.top() - s.cell.top());
+        let first = depth(level[0]);
+        for s in &level {
+            assert!(
+                depth(s) >= 2. * rem,
+                "the rule of {} stands under less than two lines of head: {:?} {:?}",
+                s.at,
+                s.cell,
+                s.rule
+            );
+            assert!(
+                (depth(s) - first).abs() < 0.5,
+                "the rule of {} stands {} under its cell's top, where {} stands {first}",
+                s.at,
+                depth(s),
+                level[0].at
+            );
+        }
+        let mut mixed = 0;
+        for (n, a) in level.iter().enumerate() {
+            for b in &level[n + 1..] {
+                if a.track != b.track || (a.cell.top() - b.cell.top()).abs() >= px(1.) {
+                    continue;
+                }
+                assert!(
+                    (a.rule.top() - b.rule.top()).abs() < px(0.5),
+                    "the rules of {} and {} stand on two levels in one row: {:?} {:?}",
+                    a.at,
+                    b.at,
+                    a.rule,
+                    b.rule
+                );
+                if let (Some(one), Some(other)) = (a.code, b.code) {
+                    assert!(
+                        (one.top() - other.top()).abs() < px(0.5),
+                        "the headcodes of {} and {} start on two levels in one row: {one:?} {other:?}",
+                        a.at,
+                        b.at
+                    );
+                }
+                let wrapped = |s: &Stands| f32::from(s.head.size.height) > 1.5 * rem;
+                if wrapped(a) != wrapped(b) {
+                    mixed += 1;
+                }
+            }
+        }
+        mixed
+    }
+
     /// At the narrowest window the panel holds: the tracks stand in
     /// order down the pane, each fitting the pane's width with its name
     /// above its stages, and Quiet stands below the fold, reached by
-    /// scrolling down. Nothing runs past the pane's right edge.
+    /// scrolling down. Nothing runs past the pane's right edge, and the
+    /// rules of a row stand level where a stage of people wraps its head
+    /// beside one that does not.
     #[gpui::test]
     fn the_panel_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
-        yard.answer("Flows", &flows_panel());
+        // A stage of people between yardr's `new` and `review`, whose
+        // head `decide · people` wraps in the narrow cell where `new`
+        // stands on one line: the first row of the track mixes the two.
+        let mut flows: Value = serde_json::from_str(&flows_panel()).unwrap();
+        flows["result"]["depots"][0]["flows"][0]["stages"]
+            .as_array_mut()
+            .unwrap()
+            .insert(
+                2,
+                json!({"stage": "decide", "group": "decisions", "human": true,
+                       "lamp": "none", "beads": []}),
+            );
+        yard.answer("Flows", &flows.to_string());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         cx.run_until_parked();
@@ -25346,7 +25497,11 @@ yardr.dev
         // Sideways: every name, backlog count and stage cell stands
         // inside the pane, and every card stops at its edge.
         for (depot, flow, stages) in [
-            ("yardr", "default", &["new", "review", "approved"][..]),
+            (
+                "yardr",
+                "default",
+                &["new", "decide", "review", "approved"][..],
+            ),
             ("yardr", "design", &["draft", "critique"][..]),
             ("footplate", "default", &["new"][..]),
         ] {
@@ -25370,11 +25525,32 @@ yardr.dev
                 );
             }
         }
+        // Level: in every row the rules stand at one height, whether
+        // the heads wrapped (`decide · people`, `draft · people`) or not.
+        let rem = f32::from(settings_of(&view, cx).rem());
+        let mixed = rules_level(
+            cx,
+            rem,
+            &[
+                held("yardr", "default", "new", Some("footplate-p512")),
+                held("yardr", "default", "decide", None),
+                held("yardr", "default", "review", Some("yd-zulu")),
+                held("yardr", "default", "approved", None),
+                held("yardr", "design", "draft", Some("yd-qskt")),
+                held("yardr", "design", "critique", None),
+                held("footplate", "default", "new", Some("footplate-fc47")),
+            ],
+        );
+        assert!(
+            0 < mixed,
+            "no row stands a head of one line beside a wrapped one"
+        );
     }
 
     /// At the narrowest window no track's cells run past the pane's right
     /// edge, and a flow too long to fit wraps: its later stages continue
-    /// on a row below, starting under the first stage's column.
+    /// on a row below, starting under the first stage's column, with the
+    /// rules of every row on one level.
     #[gpui::test]
     fn the_panel_fits_its_tracks_and_wraps_a_long_flow(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25388,9 +25564,7 @@ yardr.dev
         cx.simulate_resize(gpui::size(px(616.), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel track yardr release"));
-        // Every cell stands inside the pane, the long flow's and the
-        // short one's.
-        for stage in [
+        let stages = [
             "build",
             "sign",
             "decide",
@@ -25400,7 +25574,10 @@ yardr.dev
             "live",
             "done",
             "closed",
-        ] {
+        ];
+        // Every cell stands inside the pane, the long flow's and the
+        // short one's.
+        for stage in stages {
             let cell = bounds_of(cx, &format!("panel stage yardr release {stage}"));
             assert!(
                 cell.right() <= px(616.),
@@ -25423,6 +25600,123 @@ yardr.dev
         assert!(
             (first.left() - last.left()).abs() < px(1.),
             "the wrapped row starts off the first column: {first:?} {last:?}"
+        );
+        // Every row of the wrapped track stands its rules on one level,
+        // the first two rows where a head of people wraps beside one that
+        // stands on a line.
+        let rem = f32::from(settings_of(&view, cx).rem());
+        let mut cells: Vec<HeldCell> = stages
+            .iter()
+            .map(|stage| {
+                let bead = (*stage == "build").then_some("yd-ship");
+                held("yardr", "release", stage, bead)
+            })
+            .collect();
+        cells.push(held("yardr", "default", "new", Some("yd-small")));
+        let mixed = rules_level(cx, rem, &cells);
+        assert!(
+            0 < mixed,
+            "no row stands a head of one line beside a wrapped one"
+        );
+    }
+
+    /// The rules stand level at the narrowest window, at a laptop's and
+    /// at a wide one: with this yard's own flows, whose stages of people
+    /// and hyphenated names wrap where `new` and `review` do not, every
+    /// row of every track stands its rules at one height, as one straight
+    /// track, and the headcodes under them start at one height too.
+    #[gpui::test]
+    fn the_panel_s_rules_stand_level_in_every_row_at_every_window_width(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_this_yard());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        let rem = f32::from(settings_of(&view, cx).rem());
+        // Every stage of every flow, with the bead `flows_this_yard`
+        // stands on it.
+        let mut cells = Vec::new();
+        for (depot, flows) in &this_yard() {
+            for flow in flows {
+                for (stage, ..) in flow.stages.iter().filter(|(stage, ..)| stage != "backlog") {
+                    let bead = format!("{depot}-{}-{stage}", flow.name);
+                    cells.push(held(depot, &flow.name, stage, Some(&bead)));
+                }
+            }
+        }
+        // The narrowest window the application opens (main.rs), a
+        // laptop's, and a wide one.
+        for (width, height) in [(616., 360.), (950., 700.), (1200., 800.)] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+            wait(cx, "the panel", |cx| {
+                drawn(cx, "panel track yardr yardr.train")
+            });
+            // One frame, read whole: a redraw per cell would draw this
+            // many-tracked window hundreds of times.
+            drawn(cx, "panel");
+            let mixed = rules_level(cx, rem, &cells);
+            assert!(
+                0 < mixed,
+                "at {width} wide no row stands a head of one line beside a wrapped one"
+            );
+        }
+    }
+
+    /// A head that wants three lines, which none of this yard's names
+    /// does at the narrowest cell, makes its own cell taller: its words
+    /// stand whole between its cell's top and its rule, never up over the
+    /// row above, and the headcode stands under the rule.
+    #[gpui::test]
+    fn a_head_of_three_lines_makes_its_cell_taller_and_runs_over_nothing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let on = |stage: &str, human: bool, bead: &str| {
+            json!({"stage": stage, "group": "g", "human": human, "lamp": "none",
+                   "beads": [{"bead": bead, "title": "A bead", "expected": "—",
+                              "remark": "", "tone": "none", "working": false}]})
+        };
+        yard.answer(
+            "Flows",
+            &json!({"result": {"travelling": 2, "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        on("new", false, "yd-short"),
+                        on("review-security", true, "yd-long"),
+                    ]},
+                ], "elsewhere": []},
+            ], "unassigned": []}})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        wait(cx, "the panel", |cx| drawn(cx, "panel track yardr default"));
+        let rem = f32::from(settings_of(&view, cx).rem());
+        let cell = bounds_of(cx, "panel stage yardr default review-security");
+        let head = bounds_now(cx, "panel head yardr default review-security");
+        let rule = bounds_now(cx, "panel rule yardr default review-security");
+        let code = bounds_now(cx, "panel headcode yd-long");
+        assert!(
+            2.5 * rem < f32::from(head.size.height),
+            "the head wraps to three lines: {head:?}"
+        );
+        assert!(
+            cell.top() <= head.top(),
+            "the head runs up over the row above: {cell:?} {head:?}"
+        );
+        assert!(
+            head.bottom() <= rule.top(),
+            "the head runs down past its rule: {head:?} {rule:?}"
+        );
+        assert!(
+            rule.bottom() <= code.top() && code.bottom() <= cell.bottom(),
+            "the headcode stands off its cell: {rule:?} {code:?} {cell:?}"
         );
     }
 
