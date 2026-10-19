@@ -189,7 +189,9 @@ line that esc opens it), `setup` (step 2 of setting up a yard here,
 posed: a canned doctor of two providers and their model offers, and the
 working styles as a numbered scale), `hosted` (the first screen with
 the hosted way's fields open and filled), `signedout` (the away
-screen of a hosted yard that is signed out), `arrivals` (the
+screen of a hosted yard that is signed out), `away` (the away
+screen of a yard at an address that no longer lets the device in,
+with a way's fields open), `arrivals` (the
 arrivals board open on the arrivals row, with a late bead, a bead
 waiting on you and quiet lines), `arrival` (one
 arrival's bead open from the board), `flow` (yardr's line open on

@@ -32,7 +32,9 @@
 # their model offers, and the working styles as a numbered scale),
 # `hosted` (the first screen with the hosted way's fields open and
 # filled), `signedout` (the away screen of a hosted yard that is
-# signed out), `arrivals` (the arrivals board open on the arrivals
+# signed out), `away` (the away screen of a yard at an address that
+# no longer lets the device in, with a way's fields open),
+# `arrivals` (the arrivals board open on the arrivals
 # row, with a late bead, a bead waiting on you and quiet lines),
 # `arrival` (one arrival's bead open from the board), `flow`
 # (yardr's line open on its flow), `secret` (an open card of a secret
@@ -64,7 +66,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered keys"
+states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered keys"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

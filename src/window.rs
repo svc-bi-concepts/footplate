@@ -500,6 +500,22 @@ fn flow_words(flows: usize) -> String {
     }
 }
 
+/// What a bead's details head says under its title: the id with the
+/// line, and the stage too where no route strip under it says where
+/// the bead stands.
+fn bead_sub(detail: &ArrivalDetail, route: Option<&Route>) -> String {
+    let mut parts = vec![detail.bead.as_str()];
+    if route.is_none() {
+        parts.push(detail.stage.as_str());
+    }
+    parts.push(detail.line.as_str());
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// What the folded Decided says was dealt with: the number with
 /// "decided".
 fn decided_words(decided: usize) -> String {
@@ -2325,11 +2341,15 @@ impl Footplate {
                 .update(cx, |line, cx| line.set_text("K7QM-2XPD", cx));
             this.pair(cx);
         }
-        // The answered shot is the first screen with a way's fields open
-        // when the yard answers: the fields stand, and the screen says
-        // the yard answers again. A debug build's alone, as above.
+        // The answered and away shots stand with a way's fields open:
+        // the first screen's when the yard answers under them, and the
+        // away screen's of a yard that no longer lets the device in. A
+        // debug build's alone, as above.
         #[cfg(debug_assertions)]
-        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("answered") {
+        if matches!(
+            std::env::var("FOOTPLATE_SHOT").as_deref(),
+            Ok("answered") | Ok("away")
+        ) {
             this.adding = Some(Adding::Near);
             this.yard_name
                 .update(cx, |line, cx| line.set_text("second home", cx));
@@ -10201,53 +10221,58 @@ impl Footplate {
                     ("way hosted", "open a hosted yard", Adding::Hosted),
                 ];
                 el.child(
-                    // Two divs, not one, as reading_column has it:
-                    // `w_full` with `max_w` keeps the height its text
-                    // has at full width once the max clamps it.
+                    // Three divs: the max stands on a block of its own, so
+                    // the column under it has its width before its texts
+                    // measure. A flex column with the max itself measures
+                    // them at full width and keeps one line's height once
+                    // the max clamps it, and the help spills over the row
+                    // under the ways.
                     div().w_full().child(
-                        div()
-                            .max_w(rems(32.5))
-                            .mx_auto()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                // The ways stand one to a line, not beside
-                                // each other: a wrapping row under the
-                                // column's width keeps the height of one line
-                                // and spills the rest over whatever stands
-                                // under it.
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_start()
-                                    .gap_2()
-                                    // The first way makes the yard that is
-                                    // not there: this run's, and no other. It
-                                    // stands filled, as the one to take.
-                                    .children(setup_here.then(|| {
-                                        card_button(
-                                            "way here".to_string(),
-                                            "set up a yard here".to_string(),
-                                            palette,
-                                            Some(cx.listener(|this, _, window, cx| {
-                                                this.set_up_here(window, cx)
-                                            })),
-                                        )
-                                    }))
-                                    .children(ways.map(|(id, text, adding)| {
-                                        small_button(text.to_string(), palette)
-                                            .id(id)
-                                            .debug_selector(move || id.to_string())
-                                            .when(self.adding == Some(adding.clone()), |el| {
-                                                el.bg(palette.open)
-                                            })
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.add_yard(adding.clone(), window, cx)
-                                            }))
-                                    })),
-                            )
-                            .children(self.yard_asked(palette, cx)),
+                        div().max_w(rems(32.5)).mx_auto().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    // The ways stand one to a line, not beside
+                                    // each other: a wrapping row under the
+                                    // column's width keeps the height of one line
+                                    // and spills the rest over whatever stands
+                                    // under it.
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .items_start()
+                                        .gap_2()
+                                        // The first way makes the yard that is
+                                        // not there: this run's, and no other. It
+                                        // stands filled, as the one to take.
+                                        .children(setup_here.then(|| {
+                                            card_button(
+                                                "way here".to_string(),
+                                                "set up a yard here".to_string(),
+                                                palette,
+                                                Some(cx.listener(|this, _, window, cx| {
+                                                    this.set_up_here(window, cx)
+                                                })),
+                                            )
+                                        }))
+                                        .children(ways.map(|(id, text, adding)| {
+                                            small_button(text.to_string(), palette)
+                                                .id(id)
+                                                .debug_selector(move || id.to_string())
+                                                .when(self.adding == Some(adding.clone()), |el| {
+                                                    el.bg(palette.open)
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.add_yard(adding.clone(), window, cx)
+                                                    },
+                                                ))
+                                        })),
+                                )
+                                .children(self.yard_asked(palette, cx)),
+                        ),
                     ),
                 )
             })
@@ -10944,7 +10969,7 @@ impl Footplate {
                 .children(
                     model
                         .route_for(&row.bead)
-                        .map(|route| self.route_strip(&route, &bead, palette)),
+                        .map(|route| self.route_strip(&route, &bead, palette, "arrival")),
                 )
                 .child(
                     div()
@@ -10985,8 +11010,16 @@ impl Footplate {
     /// bead read done, the bead's own reads current in the text colour,
     /// and the rest read ahead, a person's turn among them drawing no
     /// colour: the accent is kept for what waits on the person reading
-    /// now, and the strip is not that.
-    fn route_strip(&self, route: &Route, bead: &str, palette: Palette) -> impl IntoElement + use<> {
+    /// now, and the strip is not that. `what` names where the strip
+    /// stands (`arrival`, `bead`), for its selectors: the board's row
+    /// and the details pane can be on screen together.
+    fn route_strip(
+        &self,
+        route: &Route,
+        bead: &str,
+        palette: Palette,
+        what: &str,
+    ) -> impl IntoElement + use<> {
         let mut strip = div()
             .flex()
             .flex_row()
@@ -10994,8 +11027,8 @@ impl Footplate {
             .items_center()
             .gap_1()
             .debug_selector({
-                let bead = bead.to_string();
-                move || format!("arrival strip {bead}")
+                let (what, bead) = (what.to_string(), bead.to_string());
+                move || format!("{what} strip {bead}")
             });
         for (n, stage) in route.stages.iter().enumerate() {
             if n > 0 {
@@ -11015,8 +11048,9 @@ impl Footplate {
                     .child(
                         div()
                             .debug_selector({
-                                let (bead, stage) = (bead.to_string(), stage.name.clone());
-                                move || format!("arrival stop {bead} {stage}")
+                                let (what, bead, stage) =
+                                    (what.to_string(), bead.to_string(), stage.name.clone());
+                                move || format!("{what} stop {bead} {stage}")
                             })
                             .size(rems(0.5))
                             .rounded_full()
@@ -13130,6 +13164,12 @@ impl Footplate {
             Selected::NoLine => "no line".to_string(),
             _ => model::ARRIVALS.to_string(),
         };
+        // The bead's route, as the board's rows show it: the strip
+        // under the id line says the stage, so the line drops the word.
+        // With no route the bead stands in no served stage, and the line
+        // keeps it, as it did.
+        let route = model.route_for(&detail.bead);
+        let sub = bead_sub(&detail, route.as_ref());
         let head = div()
             .p_3()
             .border_b_1()
@@ -13188,17 +13228,12 @@ impl Footplate {
                         let bead = detail.bead.clone();
                         move || format!("bead sub {bead}")
                     })
-                    .child(
-                        [
-                            detail.bead.as_str(),
-                            detail.stage.as_str(),
-                            detail.line.as_str(),
-                        ]
-                        .into_iter()
-                        .filter(|part| !part.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                    ),
+                    .child(sub),
+            )
+            .children(
+                route
+                    .as_ref()
+                    .map(|route| self.route_strip(route, &detail.bead, palette, "bead")),
             )
             .children((!detail.expected.is_empty()).then(|| {
                 let remark = remark_color(&detail.remark, &detail.tone, model.me(), palette);
@@ -22174,6 +22209,53 @@ mod tests {
         });
     }
 
+    /// A bead's details carry its route as a strip under the id line:
+    /// one stop per stage of its served flow, with the bead's own among
+    /// them. A bead in no served stage carries no strip.
+    #[gpui::test]
+    fn a_bead_s_details_carry_its_route_as_a_strip(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        click_on(cx, "arrival yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        assert!(drawn(cx, "bead strip yd-zulu"));
+        assert!(drawn(cx, "bead stop yd-zulu new"));
+        assert!(drawn(cx, "bead stop yd-zulu review"));
+        let sub = bounds_of(cx, "bead sub yd-zulu");
+        let strip = bounds_of(cx, "bead strip yd-zulu");
+        assert!(
+            strip.top() >= sub.bottom() - px(1.),
+            "the strip stands on the id line's row: {sub:?} {strip:?}"
+        );
+
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_elsewhere());
+        yard.answer("Bead", &bead_shed());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row No line");
+        wait(cx, "No line", |cx| drawn(cx, "no line bead yd-shed"));
+        click_on(cx, "no line bead yd-shed");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Bead("yd-shed".into()))
+            );
+            assert_eq!(v.model.as_ref().unwrap().route_for("yd-shed"), None);
+        });
+        assert!(!drawn(cx, "bead strip yd-shed"));
+    }
+
     /// An arrival's asks line counts its open questions, among the
     /// person's decisions.
     #[test]
@@ -22191,6 +22273,45 @@ mod tests {
         assert_eq!(bead_words(2), "2 beads");
         assert_eq!(flow_words(1), "1 flow");
         assert_eq!(flow_words(2), "2 flows");
+    }
+
+    /// A bead's id line drops the stage where a route strip under it
+    /// says where the bead stands, and keeps it where no strip does.
+    #[test]
+    fn a_bead_s_id_line_drops_the_stage_its_strip_says() {
+        let detail = ArrivalDetail {
+            bead: "yd-zulu".to_string(),
+            title: "Zulu's late turn".to_string(),
+            stage: "draft".to_string(),
+            line: "yardr".to_string(),
+            expected: "5h–8h".to_string(),
+            remark: "late".to_string(),
+            tone: "amber".to_string(),
+            labels: Vec::new(),
+            body: String::new(),
+            notes: Vec::new(),
+            open_asks: 0,
+        };
+        let route = Route {
+            stages: vec![
+                model::RouteStage {
+                    name: "new".to_string(),
+                    human: false,
+                },
+                model::RouteStage {
+                    name: "review".to_string(),
+                    human: true,
+                },
+            ],
+            current: 0,
+        };
+        assert_eq!(bead_sub(&detail, Some(&route)), "yd-zulu · yardr");
+        assert_eq!(bead_sub(&detail, None), "yd-zulu · draft · yardr");
+        let unserved = ArrivalDetail {
+            line: String::new(),
+            ..detail.clone()
+        };
+        assert_eq!(bead_sub(&unserved, None), "yd-zulu · draft");
     }
 
     /// The timetable's list holds the arrivals row with the yard-wide
@@ -26219,6 +26340,85 @@ mod tests {
         });
         assert_ne!(yard::read_token(&token).unwrap(), crate::fake::TOKEN);
         assert_eq!(mode_of(&token), 0o600);
+    }
+
+    /// On the away screen of a yard at an address, with a way's fields
+    /// open, the pair-again row stands fully below the help text: with
+    /// the short help and the long, at the window's size and a narrow
+    /// one.
+    #[gpui::test]
+    fn the_away_screen_s_pair_again_stands_below_the_help(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::far("far", far.address(), "yard-far.token"),
+                Some(&file),
+            )
+            .unwrap()
+            .opening("far")
+            .write(&file)
+            .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-far.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the far yard's conversations", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        // The operator removes the device: the away screen offers to
+        // pair again.
+        far.add_device("yardr-dev-phone");
+        far.remove_device(crate::fake::TOKEN);
+        wait(cx, "that the device is not let in", |cx| {
+            view.read_with(cx, |v, _| v.away == Away::Out)
+        });
+        assert!(drawn(cx, "pair again"));
+        for way in ["way near", "way far"] {
+            click_on(cx, way);
+            assert!(drawn(cx, "yard help"), "{way}");
+            let help = bounds_of(cx, "yard help");
+            let again = bounds_of(cx, "pair again");
+            // The help wraps to its lines: one line's height here means
+            // the rest of its text spills over the pair-again row, past
+            // its bounds. One line stands near 22px; the short help
+            // wraps to three.
+            assert!(
+                help.size.height > px(30.),
+                "the help stands one line tall ({way}): {help:?}"
+            );
+            assert!(
+                again.top() >= help.bottom() - px(1.),
+                "pair again stands on the help's lines ({way}): {again:?} {help:?}"
+            );
+        }
+        // And at a narrow window, where the help wraps further.
+        cx.simulate_resize(gpui::size(px(616.), px(900.)));
+        for way in ["way near", "way far"] {
+            click_on(cx, way);
+            assert!(drawn(cx, "yard help"), "{way}");
+            let help = bounds_of(cx, "yard help");
+            let again = bounds_of(cx, "pair again");
+            assert!(
+                help.size.height > px(30.),
+                "the help stands one line tall ({way}, narrow): {help:?}"
+            );
+            assert!(
+                again.top() >= help.bottom() - px(1.),
+                "pair again stands on the help's lines ({way}, narrow): {again:?} {help:?}"
+            );
+        }
     }
 
     /// From no yard, the hosted road ends in the yard's conversations:

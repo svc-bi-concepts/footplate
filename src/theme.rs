@@ -136,9 +136,10 @@ pub struct Palette {
     pub hover: Rgba,
     /// What waits on the person reading (unread mail, open asks, a bead
     /// held by them), and the controls that say yes: the primary button,
-    /// the chosen segment, the checked box. Nothing else is this colour:
-    /// links are the link blue, late is the error red, and their own name
-    /// is dim.
+    /// the chosen segment, the checked box. Yard rust, the design
+    /// system's accent in either look; the letters on it are the dusk
+    /// ink, at text contrast. Nothing else is this colour: links are the
+    /// link blue, late is the error red, and their own name is dim.
     pub accent: Rgba,
     pub on_accent: Rgba,
     pub warn: Rgba,
@@ -179,13 +180,13 @@ impl Palette {
                 faint: rgb(0x8d939c),
                 open: rgb(0x2c3038),
                 hover: rgb(0x23262c),
-                accent: rgb(0xe8a33d),
-                on_accent: rgb(0x1e2024),
+                accent: rgb(0xd3602f),
+                on_accent: rgb(0x161718),
                 warn: rgb(0xf0764f),
                 link: rgb(0x7aa2f7),
                 peer: rgb(PEER_DARK),
                 ok: rgb(0x7fb069),
-                selection: rgba(0xe8a33d55),
+                selection: rgba(0xd3602f55),
                 code: rgba(0xffffff14),
             }
         } else {
@@ -198,13 +199,13 @@ impl Palette {
                 faint: rgb(0x6e727a),
                 open: rgb(0xe0dcd4),
                 hover: rgb(0xe8e5df),
-                accent: rgb(0xa8600a),
-                on_accent: rgb(0xffffff),
+                accent: rgb(0xd3602f),
+                on_accent: rgb(0x161718),
                 warn: rgb(0xb3401c),
                 link: rgb(0x1a56c8),
                 peer: rgb(PEER_LIGHT),
                 ok: rgb(0x3d8b4f),
-                selection: rgba(0xa8600a40),
+                selection: rgba(0xd3602f40),
                 code: rgba(0x0000000f),
             }
         }
@@ -332,6 +333,41 @@ mod tests {
             assert_ne!(palette.link, palette.warn);
             assert_ne!(palette.link, palette.text);
         }
+    }
+
+    #[test]
+    fn the_accent_is_yard_rust_with_readable_text_on_it_in_either_look() {
+        // --accent is --yard-500 in both looks, and the selection
+        // carries its tint.
+        for look in [Look::Dark, Look::Light] {
+            let palette = Palette::of(look, WindowAppearance::Dark);
+            assert_eq!(palette.accent, rgb(0xd3602f));
+            assert_eq!(
+                (
+                    palette.selection.r,
+                    palette.selection.g,
+                    palette.selection.b
+                ),
+                (palette.accent.r, palette.accent.g, palette.accent.b)
+            );
+            assert!(
+                contrast(palette.on_accent, palette.accent) >= 4.5,
+                "{:?} on {:?}",
+                palette.on_accent,
+                palette.accent
+            );
+            assert_ne!(palette.accent, palette.ok);
+            assert_ne!(palette.accent, palette.warn);
+        }
+        // The running dot stays green.
+        assert_eq!(
+            Palette::of(Look::Dark, WindowAppearance::Dark).ok,
+            rgb(0x7fb069)
+        );
+        assert_eq!(
+            Palette::of(Look::Light, WindowAppearance::Light).ok,
+            rgb(0x3d8b4f)
+        );
     }
 
     #[test]

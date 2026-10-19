@@ -35,7 +35,9 @@ use crate::yard::Env;
 /// esc opens it, step 2 of setting up a yard here, posed with a
 /// canned doctor of two providers and their model offers, the first
 /// screen with the hosted way's fields open and filled, and the away
-/// screen of a hosted yard that is signed out, the arrivals board open
+/// screen of a hosted yard that is signed out, the away screen of a
+/// yard at an address that no longer lets the device in, with a way's
+/// fields open, the arrivals board open
 /// on the arrivals row with a late bead, a bead waiting on you and
 /// quiet lines, one arrival's bead open from the board, one
 /// line's flow open on its row, an open card of a secret ask posed
@@ -47,7 +49,9 @@ use crate::yard::Env;
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
 /// signed-out yard from settings the state writes itself, against a
-/// throwaway config, with a session the edge no longer knows; the
+/// throwaway config, with a session the edge no longer knows; the away
+/// yard from settings the state writes itself, against a throwaway
+/// config, with a device the yard no longer knows; the
 /// switcher's four yards from settings the state writes itself, home live
 /// at the shot's socket, two more live at their listeners, and one away; the
 /// settings open over a running yard, each state on its section;
@@ -89,6 +93,7 @@ pub const STATES: &[&str] = &[
     "setup",
     "hosted",
     "signedout",
+    "away",
     "arrivals",
     "arrival",
     "flow",
@@ -207,7 +212,10 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
 /// the hosted shot is the first screen with the hosted way's fields open
 /// on it. The signedout shot opens the hosted yard south through an edge
 /// that no longer knows its session, so the window opens on the away
-/// screen of a yard that is signed out.
+/// screen of a yard that is signed out. The away shot opens the yard
+/// far at its address with a device the yard no longer knows, so the
+/// window opens on the away screen that offers to pair again, with a
+/// way's fields open.
 fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     if state == "stopped" || state == "refusal" || state == "setup" || state == "hosted" {
         let mut env = env;
@@ -234,6 +242,18 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         edge.revoke(crate::fake::SESSION);
         write_signedout_settings(edge.address());
         shot.edge = Some((hosted, edge));
+    }
+    if state == "away" {
+        // The window opens far at its address, as the pair-again test
+        // has it: the token stands in its file, and the yard knew the
+        // device until its operator removed it there. The yard is held
+        // beside the shot's, so its listener stands for the shot.
+        let far = Yard::start_tcp();
+        populate(&far, state);
+        far.add_device("footplate-shot-phone");
+        far.remove_device(crate::fake::TOKEN);
+        write_away_settings(far.address());
+        shot.extra = vec![std::sync::Arc::new(far)];
     }
     if state == "switcher" {
         // The switcher's other live yards, held from the start: office
@@ -322,6 +342,51 @@ fn write_signedout_settings(address: &str) {
     crate::yard::keep_session(&dir.join("yard-south.session"), crate::fake::SESSION, &edge)
         .unwrap_or_else(|error| {
             eprintln!("footplate: the signedout shot keeps no session: {error}");
+            std::process::exit(1);
+        });
+}
+
+/// The settings the `away` shot opens: the yard far at its address,
+/// open, with its device token in a file beside them, as the
+/// pair-again test keeps them. The shot script runs against a
+/// throwaway config, which keeps no settings; where a settings file
+/// already stands, the state is refused rather than overwrite it.
+fn write_away_settings(address: &str) {
+    let Some(file) = crate::settings::file() else {
+        eprintln!("footplate: the away shot keeps no settings without a home");
+        std::process::exit(1);
+    };
+    if file.exists() {
+        eprintln!(
+            "footplate: the away shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh does",
+            file.display()
+        );
+        std::process::exit(2);
+    }
+    crate::settings::Settings::default()
+        .with_yard(
+            None,
+            crate::settings::Yard::far("far", address, "yard-far.token"),
+            Some(&file),
+        )
+        .and_then(|set| {
+            set.opening("far")
+                .write(&file)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the away shot keeps no settings: {error}");
+            std::process::exit(1);
+        });
+    let edge = crate::api::Address::parse(address).unwrap_or_else(|error| {
+        eprintln!("footplate: the away shot's yard has no address: {error}");
+        std::process::exit(1);
+    });
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    crate::yard::token_place(&dir.join("yard-far.token"))
+        .and_then(|place| place.keep(crate::fake::TOKEN, &edge))
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the away shot keeps no token: {error}");
             std::process::exit(1);
         });
 }
@@ -583,6 +648,7 @@ fn populate(yard: &Yard, state: &str) {
         | "reconnecting"
         | "answered"
         | "signedout"
+        | "away"
         | "arrivals"
         | "arrival"
         | "flow"
@@ -1454,6 +1520,7 @@ mod tests {
                 | "reconnecting"
                 | "answered"
                 | "signedout"
+                | "away"
                 | "switcher" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
