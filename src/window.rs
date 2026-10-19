@@ -159,6 +159,24 @@ const PANEL_NO_LINE: f32 = 15.;
 /// and a 1-pixel border on each side.
 const PANEL_CHROME: f32 = 1.125;
 
+/// The switcher's list in rems, drawn once: its narrowest and its widest.
+/// They are in rems because the hint line in it is: a list in pixels cut
+/// its words at the larger text sizes. Sized for the footer's hint line
+/// `↑↓ move · ↵ open · esc close · + add a yard · ? all keys`, as DejaVu
+/// Sans draws it (the widest sans of the desktops here, and the font the
+/// Linux shots draw in), plus the footer's padding and the list's border,
+/// at the usual 16-pixel rem: the line, 340 pixels, between 12 of padding
+/// each side with a 1-pixel border. The widest, 480, holds it on one line
+/// at the usual size with every row's ctrl+N whole; the narrowest, 320,
+/// leaves room to shrink, wrapping at the `·` separators, at a larger text
+/// size or a narrow window. Where the window's width less the rail is
+/// narrower still, the list is capped at that.
+///
+/// The test beside the switcher's rows holds the hint and every key
+/// inside at the usual size and the largest.
+const SWITCHER_MIN: f32 = 20.;
+const SWITCHER_MAX: f32 = 30.;
+
 /// A line view's stage column in pixels, and no narrower: the panel's
 /// track straightened, one column per stage in travel order.
 const LINE_COLUMN: f32 = 176.;
@@ -1654,11 +1672,12 @@ fn small_button(text: String, palette: Palette) -> Div {
 /// "? all keys", which opens the cheatsheet of the open view's keys:
 /// the hint where keys are listed in prose, and where `?` is the
 /// line's text. It takes its size from where it stands. `id` names
-/// the place, one per hint.
+/// the place, one per hint, and the test finds it by that name: two
+/// hints can stand at once, as the switcher's does over a card's.
 fn keys_hint(id: &'static str, palette: Palette, cx: &mut Context<Footplate>) -> Stateful<Div> {
     div()
         .id(id)
-        .debug_selector(|| "keys hint".to_string())
+        .debug_selector(move || id.to_string())
         .text_color(palette.link)
         .cursor_pointer()
         .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)))
@@ -10082,7 +10101,13 @@ impl Footplate {
     /// beside it. A click opens a yard, as Enter does on the row the
     /// arrows are on; the footer's key opens the settings' yards. It
     /// stands over whatever the window shows.
-    fn switcher(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn switcher(
+        &self,
+        at: usize,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut list = div().flex().flex_col().flex_none().py_1();
         for (place, yard) in self.settings.yards.iter().enumerate() {
             let name = yard.name.clone();
@@ -10156,6 +10181,7 @@ impl Footplate {
                                     let name = name.clone();
                                     move || format!("switch sign in {name}")
                                 })
+                                .flex_none()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.switching = None;
@@ -10171,6 +10197,7 @@ impl Footplate {
                                     let name = name.clone();
                                     move || format!("switch again {name}")
                                 })
+                                .flex_none()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.switching = None;
@@ -10270,16 +10297,24 @@ impl Footplate {
                     .child(second),
             );
         }
+        // The footer's hint, one segment per `·`, so the line wraps
+        // between them where the list is narrower than it: at a larger
+        // text size or a narrow window. On one line it reads as ever.
         list = list.child(
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
+                .gap_1()
                 .px_3()
                 .py_1()
                 .text_xs()
                 .text_color(palette.faint)
-                .child("↑↓ move · ↵ open · esc close · ")
+                .debug_selector(|| "switch hint".to_string())
+                .child("↑↓ move ·")
+                .child("↵ open ·")
+                .child("esc close ·")
                 .child(
                     div()
                         .id("switch add")
@@ -10291,15 +10326,22 @@ impl Footplate {
                         }))
                         .child("+ add a yard"),
                 )
-                .child("· ")
+                .child("·")
                 .child(keys_hint("keys hint switch", palette, cx)),
         );
+        // The list between its narrowest and its widest, capped at the
+        // window's width less the rail and 8 pixels' margin each side, so
+        // it never runs past the window's edge. In rems, with the text.
+        let rem = f32::from(window.rem_size());
+        let avail = (f32::from(window.viewport_size().width) - (RAIL + 16.)).max(0.) / rem;
+        let max = avail.min(SWITCHER_MAX);
+        let min = SWITCHER_MIN.min(max);
         div()
             .absolute()
             .left(px(RAIL + 8.))
             .top(px(8.))
-            .min_w(px(280.))
-            .max_w(px(360.))
+            .min_w(rems(min))
+            .max_w(rems(max))
             .debug_selector(|| "switcher".to_string())
             .rounded_lg()
             .border_1()
@@ -16127,7 +16169,10 @@ impl Render for Footplate {
         // of the rail's head; the image open over the window, where one
         // is, over that: over whatever shows, the settings and the first
         // run with it.
-        let shown = shown.children(self.switching.map(|at| self.switcher(at, palette, cx)));
+        let shown = shown.children(
+            self.switching
+                .map(|at| self.switcher(at, palette, window, cx)),
+        );
         let shown = match &self.image_open {
             Some(open) => shown.child(self.image_layer(open, window, cx)),
             None => shown,
@@ -23763,7 +23808,7 @@ yardr.dev
         // first; then `?` opens the card's list, with its hint on
         // the card.
         cx.simulate_keystrokes("escape");
-        assert!(drawn(cx, "keys hint"));
+        assert!(drawn(cx, "keys hint card"));
         assert!(!view.read_with(cx, |v, _| v.show_keys));
         cx.simulate_keystrokes("?");
         wait(cx, "the cheatsheet", |cx| {
@@ -23784,7 +23829,7 @@ yardr.dev
             !view.read_with(cx, |v, _| v.show_keys)
         });
         // The hint opens it with a click.
-        click_on(cx, "keys hint");
+        click_on(cx, "keys hint card");
         wait(cx, "the cheatsheet", |cx| {
             view.read_with(cx, |v, _| v.show_keys)
         });
@@ -27360,6 +27405,111 @@ yardr.dev
             view.read_with(cx, |v, _| v.settings.section),
             Section::Yards
         );
+    }
+
+    /// The switcher's list holds its hint and every yard's number key: the
+    /// hint line and each row's ctrl+N stand inside the list, at the usual
+    /// text size and the largest, with four yards, one with a long Tailscale
+    /// name. Names and addresses may truncate, but never past the badge, the
+    /// count and the key.
+    #[gpui::test]
+    fn the_switcher_holds_its_hint_and_every_key_inside(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let long = Yard::start_tcp();
+        a_far_yard_of_jo(&long);
+        let droplet = Yard::start();
+        a_yard_of_jo(&droplet);
+        let plantime = Yard::start();
+        a_yard_of_jo(&plantime);
+        // Four yards, one with a long Tailscale name, as the screenshot's
+        // case: this machine's, adventuretime's, droplet's and plantime's.
+        let file = dir.path().join("footplate/settings.json");
+        let set = Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::far(
+                    "adventuretime.tail5c8d.ts.net",
+                    long.address(),
+                    "yard-adventuretime.token",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .with_yard(
+                None,
+                settings::Yard::near("droplet", droplet.socket().to_str().unwrap()),
+                None,
+            )
+            .unwrap()
+            .with_yard(
+                None,
+                settings::Yard::near("plantime", plantime.socket().to_str().unwrap()),
+                None,
+            )
+            .unwrap();
+        set.write(&file).unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-adventuretime.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        click_on(cx, "yard chip");
+        assert!(drawn(cx, "switcher"));
+        let yards = [
+            "this machine",
+            "adventuretime.tail5c8d.ts.net",
+            "droplet",
+            "plantime",
+        ];
+        // At the usual size and the largest, and at the narrowest window
+        // with each: the hint and every key stand inside the list, within
+        // a pixel for gpui's rounding.
+        for text in [settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            for width in [None, Some(616.)] {
+                if let Some(width) = width {
+                    cx.simulate_resize(gpui::size(px(width), px(360.)));
+                }
+                // One frame, read whole: a redraw per bound would draw the
+                // window again for each.
+                drawn(cx, "switcher");
+                let list = bounds_now(cx, "switcher");
+                let hint = bounds_now(cx, "keys hint switch");
+                assert!(
+                    list.left() <= hint.left() + px(1.)
+                        && hint.right() <= list.right() + px(1.)
+                        && list.top() <= hint.top() + px(1.)
+                        && hint.bottom() <= list.bottom() + px(1.),
+                    "at {text} px the hint leaves the list: {hint:?} {list:?}"
+                );
+                for name in yards {
+                    let key = bounds_now(cx, &format!("switch key {name}"));
+                    assert!(
+                        list.left() <= key.left() + px(1.)
+                            && key.right() <= list.right() + px(1.)
+                            && list.top() <= key.top() + px(1.)
+                            && key.bottom() <= list.bottom() + px(1.),
+                        "at {text} px {name}'s key leaves the list: {key:?} {list:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// What is written for one yard stays with it across a switch and is
