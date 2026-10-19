@@ -40,7 +40,13 @@ if [ -n "$live_list" ]; then
     fi
 fi
 live() {
-    grep -F -x -q "$1" "$live_list" 2>/dev/null
+    live_wanted=$1
+    while IFS= read -r live_name || [ -n "$live_name" ]; do
+        if [ "$live_name" = "$live_wanted" ]; then
+            return 0
+        fi
+    done < "$live_list"
+    return 1
 }
 
 for d in "$root"/*; do

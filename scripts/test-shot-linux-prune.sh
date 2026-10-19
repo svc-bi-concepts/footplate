@@ -77,13 +77,14 @@ live_own=$live/own-tree-111
 live_active=$live/.shot-active
 mkdir -p "$live_own/debug" "$live/gone-fresh-222/debug" \
     "$live/live-fresh-333/debug" "$live/live-stale-444/debug" \
-    "$live/gone-active-555/debug" "$live/live-active-666/debug"
+    "$live/gone-active-555/debug" "$live/live-active-666/debug" \
+    "$live/-live-fresh-777/debug"
 mkdir -p "$live_active"
-for t in own-tree-111 gone-fresh-222 live-fresh-333 live-stale-444 gone-active-555 live-active-666; do
+for t in own-tree-111 gone-fresh-222 live-fresh-333 live-stale-444 gone-active-555 live-active-666 -live-fresh-777; do
     echo binary > "$live/$t/debug/footplate"
 done
 find "$live/live-stale-444" "$live_own" -exec touch -t 200001010000 {} +
-printf '%s\n' own-tree-111 live-fresh-333 live-stale-444 live-active-666 > "$tmp/live-list"
+printf '%s\n' own-tree-111 live-fresh-333 live-stale-444 live-active-666 -live-fresh-777 > "$tmp/live-list"
 echo active > "$live_active/gone-active-555-123"
 echo active > "$live_active/live-active-666-123"
 echo orphan > "$live_active/vanished-tree-999-123"
@@ -94,6 +95,7 @@ out=$(sh "$helper" "$live" "$live_own" "$live_active/own-tree-111-456" shot-linu
 [ -d "$live_own" ] || fail "this shot's own tree was pruned"
 [ ! -e "$live/gone-fresh-222" ] || fail "a removed checkout's fresh tree survived"
 [ -d "$live/live-fresh-333" ] || fail "a live checkout's fresh tree was pruned"
+[ -d "$live/-live-fresh-777" ] || fail "a live checkout with a leading hyphen was pruned"
 [ ! -e "$live/live-stale-444" ] || fail "a live checkout's stale tree survived"
 [ -d "$live/gone-active-555" ] || fail "an active-marked tree with no live checkout was pruned"
 [ ! -e "$live_active/gone-active-555-123" ] || fail "a removed checkout's marker survived"
