@@ -609,7 +609,7 @@ fn keys_for(view: KeysView) -> Vec<(String, String)> {
             ),
             (
                 format!("{SECONDARY}+enter"),
-                "on a run ask's card, approves it".into(),
+                "on a run or setup ask's card, approves it".into(),
             ),
             (
                 "esc".into(),
