@@ -527,14 +527,14 @@ fn decided_words(decided: usize) -> String {
 
 /// The colour of a timetable remark with the yard's `tone`, for the
 /// person `me` reads as: late is the error red, a held bead and a wait
-/// that names them the waiting accent, any other red remark the error
-/// red, and the rest dim. A wait for someone else is not theirs to
-/// answer, so it never takes the accent.
+/// that names them use the waiting text rust, any other red remark the
+/// error red, and the rest dim. A wait for someone else is not theirs
+/// to answer, so it never takes the accent.
 fn remark_color(remark: &str, tone: &str, me: &str, palette: Palette) -> Rgba {
     if late_line(remark).is_some() {
         palette.warn
     } else if remark == "held" || waits_on_you(remark, me) {
-        palette.accent
+        palette.text_accent
     } else if tone == "red" {
         palette.warn
     } else {
@@ -9817,9 +9817,11 @@ impl Footplate {
                     let (number, words) = counts.switcher();
                     count
                         .tooltip(move |_, cx| cx.new(|_| RailTip(words.clone())).into())
-                        // What waits reads in the accent; a yard with
+                        // What waits reads in text rust; a yard with
                         // nothing waiting keeps its dim zero.
-                        .when(counts.waiting() > 0, |el| el.text_color(palette.accent))
+                        .when(counts.waiting() > 0, |el| {
+                            el.text_color(palette.text_accent)
+                        })
                         .child(number)
                 }
                 _ => count,
@@ -11193,14 +11195,14 @@ impl Footplate {
                         .child(row.unread.to_string()),
                 ),
                 // Unread mail waits on the person reading, so it
-                // reads in the accent; the yard's notices are FYI, and
+                // reads in text rust; the yard's notices are FYI, and
                 // keep their muted badge above.
                 false => el.child(
                     div()
                         .flex_none()
                         .debug_selector(|| format!("row unread {}", name))
                         .text_sm()
-                        .text_color(palette.accent)
+                        .text_color(palette.text_accent)
                         .child(unread_words(row.unread)),
                 ),
             })
@@ -12101,7 +12103,7 @@ impl Footplate {
                             let bead = bead.clone();
                             move || format!("open card {bead} {ask_seq}")
                         })
-                        .text_color(palette.accent)
+                        .text_color(palette.text_accent)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_reference(
                                 select::RefTarget::Ask {
@@ -12649,7 +12651,7 @@ impl Footplate {
             .debug_selector(|| "waits banner".to_string())
             .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(palette.accent)
+            .text_color(palette.text_accent)
             .cursor_pointer()
             .track_focus(&self.waits_focus)
             .on_mouse_down(
@@ -13883,7 +13885,7 @@ impl Footplate {
                 div()
                     .id(SharedString::from(format!("current {bead_id} {ask_seq}")))
                     .text_sm()
-                    .text_color(palette.accent)
+                    .text_color(palette.text_accent)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_ask(bead_click.clone(), ask_seq, cx)
@@ -14381,7 +14383,7 @@ impl Footplate {
                             .rounded_md()
                             .when(picked, |el| {
                                 el.font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(palette.accent)
+                                    .text_color(palette.text_accent)
                             })
                             .when(n == detail.chosen, |el| el.bg(palette.open))
                             .when(n != detail.chosen, |el| {
@@ -21926,10 +21928,13 @@ mod tests {
             remark_color("late by 40m", "amber", "jo", palette),
             palette.warn
         );
-        assert_eq!(remark_color("held", "red", "jo", palette), palette.accent);
+        assert_eq!(
+            remark_color("held", "red", "jo", palette),
+            palette.text_accent
+        );
         assert_eq!(
             remark_color("waits for jo", "amber", "jo", palette),
-            palette.accent
+            palette.text_accent
         );
         assert_eq!(
             remark_color("waits for jo", "amber", "ada", palette),
@@ -21937,7 +21942,7 @@ mod tests {
         );
         assert_eq!(
             remark_color("waits for jo, ada", "amber", "ada", palette),
-            palette.accent
+            palette.text_accent
         );
         assert_eq!(remark_color("", "none", "jo", palette), palette.faint);
     }

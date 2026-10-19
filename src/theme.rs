@@ -108,7 +108,7 @@ fn slot(name: &str) -> usize {
 }
 
 /// The dot a crew member's state draws beside their name: what runs is
-/// the running green, what waits the waiting amber, what failed the
+/// the running green, what waits yard rust, what failed the
 /// error red, and what rests or stopped the quiet grey. Never colour
 /// alone: the state stays in words on the row's second line.
 pub fn crew_dot(dot: Dot, palette: Palette) -> Rgba {
@@ -134,14 +134,15 @@ pub struct Palette {
     /// The open row, and a row under the pointer.
     pub open: Rgba,
     pub hover: Rgba,
-    /// What waits on the person reading (unread mail, open asks, a bead
-    /// held by them), and the controls that say yes: the primary button,
-    /// the chosen segment, the checked box. Yard rust, the design
-    /// system's accent in either look; the letters on it are the dusk
-    /// ink, at text contrast. Nothing else is this colour: links are the
-    /// link blue, late is the error red, and their own name is dim.
+    /// The yard-rust fill for what waits on the person reading (unread
+    /// mail, open asks, a bead held by them) and controls that say yes:
+    /// the primary button, chosen segment and checked box. Text on the
+    /// fill uses `on_accent`; waiting text uses `text_accent`.
     pub accent: Rgba,
     pub on_accent: Rgba,
+    /// Yardr Design's text-accent token: a lighter rust on dark grounds
+    /// and a darker one on light grounds, each at text contrast.
+    pub text_accent: Rgba,
     pub warn: Rgba,
     /// Links: in messages, ask and bead ids, and the small controls that
     /// open an address or reset one (Open, run, reveal, reset). Blue in
@@ -182,6 +183,7 @@ impl Palette {
                 hover: rgb(0x23262c),
                 accent: rgb(0xd3602f),
                 on_accent: rgb(0x161718),
+                text_accent: rgb(0xe2794a),
                 warn: rgb(0xf0764f),
                 link: rgb(0x7aa2f7),
                 peer: rgb(PEER_DARK),
@@ -201,6 +203,7 @@ impl Palette {
                 hover: rgb(0xe8e5df),
                 accent: rgb(0xd3602f),
                 on_accent: rgb(0x161718),
+                text_accent: rgb(0xb54e22),
                 warn: rgb(0xb3401c),
                 link: rgb(0x1a56c8),
                 peer: rgb(PEER_LIGHT),
@@ -368,6 +371,24 @@ mod tests {
             Palette::of(Look::Light, WindowAppearance::Light).ok,
             rgb(0x3d8b4f)
         );
+    }
+
+    #[test]
+    fn text_accent_uses_the_readable_yard_rust_step_in_either_look() {
+        let dark = Palette::of(Look::Dark, WindowAppearance::Dark);
+        let light = Palette::of(Look::Light, WindowAppearance::Light);
+        assert_eq!(dark.text_accent, rgb(0xe2794a));
+        assert_eq!(light.text_accent, rgb(0xb54e22));
+        for palette in [dark, light] {
+            for ground in [palette.side, palette.ground, palette.hover, palette.open] {
+                assert!(
+                    contrast(palette.text_accent, ground) >= 4.5,
+                    "{:?} on {ground:?}",
+                    palette.text_accent
+                );
+            }
+            assert_ne!(palette.text_accent, palette.accent);
+        }
     }
 
     #[test]
