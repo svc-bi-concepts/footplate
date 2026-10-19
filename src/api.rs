@@ -375,7 +375,7 @@ pub struct FlowBead {
     #[serde(default)]
     pub worker: String,
     /// When the bead entered its stage, as an RFC 3339 time. Absent
-    /// where no session claimed it, and where the stay has no clock.
+    /// where the stay has no clock, whether or not a session claimed it.
     #[serde(default)]
     pub entered_stage_at: String,
 }

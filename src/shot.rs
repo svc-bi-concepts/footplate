@@ -572,10 +572,10 @@ fn populate(yard: &Yard, state: &str) {
     yard.answer("AddNote", "{}");
     yard.answer("DeferAsk", "{}");
     yard.answer("DeclineAsk", "{}");
-    // The arrivals board every state loads: three rows, one with an
-    // amber remark, one with none, one with a red one and no expected
-    // arrival, beside the platforms in travel order. The window counts
-    // it in the arrivals row, and the arrivals states open it.
+    // The arrivals board every state loads: three rows in served order,
+    // one with an amber remark, one with none, and one with a red remark
+    // and no expected arrival. The window counts it in the arrivals row;
+    // the departures state draws the rows flat in this order.
     yard.answer(
         "Arrivals",
         &json!({"result": {"rows": [
