@@ -12498,10 +12498,16 @@ impl Footplate {
     }
 
     /// Whether the bar of reactions floats over the mail `seq`: the
-    /// pointer stands on it, and the yard takes reactions.
+    /// pointer stands on it, the yard takes reactions, and no overlay
+    /// stands over the mail. The bar paints after the whole window, so
+    /// without this it would float over the switcher, an image or the
+    /// cheatsheet too.
     fn reacting(&self, seq: u64) -> bool {
         self.react_hover.is_some_and(|(at, _)| at == seq)
             && self.model.as_ref().is_some_and(|m| !m.react_too_old())
+            && self.switching.is_none()
+            && self.image_open.is_none()
+            && !self.show_keys
     }
 
     /// The letter's head, with the bar of reactions at its right while the
@@ -12635,7 +12641,10 @@ impl Footplate {
     /// The reactions a tap puts on the mail, in a bar that floats over the
     /// top right of the letter while the pointer stands on it: it is
     /// absolute in the head or body that draws it, so it takes no room
-    /// and the letter keeps its place and its height. Its own ground and
+    /// and the letter keeps its place and its height. It paints after the
+    /// rest of the window, so no line of the letter or of the next one
+    /// paints over it: the kit paints in tree order, and the letter's
+    /// body stands after the head that draws the bar. Its own ground and
     /// hairline keep the text under it from showing through, the kit's
     /// popover shadow lifts it, and it blocks the mouse, so that a tap on
     /// it is no press on that text. The yard's fixed set, each in a square
@@ -12728,7 +12737,10 @@ impl Footplate {
                     .child(emoji.to_string()),
             );
         }
-        row.into_any_element()
+        // Deferred, so the bar paints after the letter and what stands
+        // under it: its layout stays where it is, absolute at the top
+        // right of the head or body.
+        gpui::deferred(row).into_any_element()
     }
 
     /// A mail among the yard row's notices. No separator names its day
@@ -18270,6 +18282,51 @@ mod tests {
             at_rest,
             "the bar moved its letter"
         );
+    }
+
+    /// The bar paints after the whole window, so no line of the letter
+    /// or of the next one paints over it. An overlay standing over the
+    /// mail hides it instead, and it is back when the overlay shuts, the
+    /// pointer unmoved. (Read at `reacting`: the window's debug bounds
+    /// keep every selector once it was drawn.)
+    #[gpui::test]
+    fn the_bar_hides_while_an_overlay_stands_over_the_mail(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        let reacting = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.reacting(12))
+        };
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(drawn(cx, "react row 12"));
+        assert!(reacting(&view, cx));
+
+        // The cheatsheet, the switcher and an image over the window: no
+        // bar while each stands, and back once it shuts.
+        view.update(cx, |v, cx| v.toggle_keys(cx));
+        assert!(drawn(cx, "keys"));
+        assert!(!reacting(&view, cx));
+        view.update(cx, |v, cx| v.toggle_keys(cx));
+        assert!(reacting(&view, cx));
+
+        view.update_in(cx, |v, window, cx| v.toggle_switcher(window, cx));
+        assert!(drawn(cx, "switcher"));
+        assert!(!reacting(&view, cx));
+        view.update_in(cx, |v, window, cx| v.toggle_switcher(window, cx));
+        assert!(reacting(&view, cx));
+
+        view.update_in(cx, |v, window, cx| {
+            v.open_image("0".repeat(64), 100, window, cx)
+        });
+        assert!(drawn(cx, "image overlay"));
+        assert!(!reacting(&view, cx));
+        view.update_in(cx, |v, window, cx| v.shut_image(window, cx));
+        assert!(reacting(&view, cx));
+
+        // The pointer never moved: the bar is over the letter again.
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
     }
 
     /// The bar's emoji stand in fixed squares: the pointer on one draws
