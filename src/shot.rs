@@ -116,6 +116,7 @@ pub const STATES: &[&str] = &[
     "keys",
     "reactions",
     "reactions-hover",
+    "reactions-zoom",
     "notice",
 ];
 
@@ -1056,7 +1057,7 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
-        "reactions" | "reactions-hover" => {
+        "reactions" | "reactions-hover" | "reactions-zoom" => {
             // The yardmaster's conversation with the parties' reactions
             // under three mails: jo's on the question, both parties' on
             // the answer, and jo's on a last one, with a mail between
@@ -1064,7 +1065,8 @@ fn populate(yard: &Yard, state: &str) {
             // is long enough to run under the bar. The hover state poses
             // the pointer on it, so its bar of reactions to tap floats
             // over the end of its first line with jo's own marked, and
-            // no mail moves.
+            // no mail moves; the zoom state poses it on one emoji of
+            // that bar.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -2024,7 +2026,7 @@ mod tests {
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
                     assert!(!crate::model::is_page(&letters[0].files[1]), "{state}");
                 }
-                "reactions" | "reactions-hover" => {
+                "reactions" | "reactions-hover" | "reactions-zoom" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     // Four mails, the first with one reaction and the
                     // second with both parties', the third with none and

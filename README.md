@@ -210,7 +210,8 @@ look-alike row), `decisions-filtered` (that history with `docs`
 in its filter), `keys` (the cheatsheet open over an open card),
 `reactions` (the conversation with the parties' reactions under
 three mails), `reactions-hover` (that conversation with the bar
-of reactions to tap floating over one mail) and `notice` (the
+of reactions to tap floating over one mail), `reactions-zoom`
+(that bar with the pointer on one emoji) and `notice` (the
 conversation with the notice a flows view that did not answer
 leaves under the mail).
 With no state the first

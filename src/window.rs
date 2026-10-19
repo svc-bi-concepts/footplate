@@ -489,6 +489,8 @@ fn day_break(day: String, palette: Palette) -> AnyElement {
             .child(div().h(px(1.)).flex_1().bg(palette.line))
             .into_any_element(),
     )
+    // What the rows' gap carried under a row with no body.
+    .mb_1()
     .into_any_element()
 }
 
@@ -1929,9 +1931,10 @@ struct Anchor {
 }
 
 /// A piece of a letter the pointer can stand on: its head, its body, or
-/// the bar of reactions floating over it. They are drawn apart, and each
-/// tells the window of the pointer on its own: see
-/// [`Footplate::hover_react`].
+/// the bar of reactions floating over it. The head and the body stand
+/// touching, with no strip between them that is neither, so the letter
+/// is one hover target; each still tells the window of the pointer on
+/// its own: see [`Footplate::hover_react`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Piece {
     Head,
@@ -2408,6 +2411,10 @@ pub struct Footplate {
     /// The mail the pointer stands on, by seq, and the piece of it, if
     /// any: its bar of reactions to tap floats over it.
     react_hover: Option<(u64, Piece)>,
+    /// The bar's emoji the pointer stands on, by mail and emoji, if any:
+    /// it draws larger in its square. A piece left clears only its own
+    /// mark, as a letter's does.
+    emoji_hover: Option<(u64, String)>,
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
@@ -2744,6 +2751,13 @@ impl Footplate {
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-hover") {
             this.react_hover = Some((15, Piece::Body));
         }
+        // The reactions-zoom shot poses it on one emoji of that bar, so
+        // the emoji draws larger in its square.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-zoom") {
+            this.react_hover = Some((15, Piece::Bar));
+            this.emoji_hover = Some((15, "❤️".to_string()));
+        }
         this
     }
 
@@ -2980,6 +2994,7 @@ impl Footplate {
             show_keys: false,
             rail_hover: None,
             react_hover: None,
+            emoji_hover: None,
             declining: None,
             secret,
             filter,
@@ -4076,8 +4091,9 @@ impl Footplate {
             // that is not drawn is told of no leave, so a pointer that
             // goes while the row is away would leave the mark standing,
             // and the bar would be over that letter when the row is open
-            // again.
+            // again. Its emoji's mark goes with it, for the same reason.
             self.react_hover = None;
+            self.emoji_hover = None;
             match &after_sel {
                 Some(Selected::Decision(_))
                 | Some(Selected::Decided(_, _))
@@ -12405,6 +12421,12 @@ impl Footplate {
                     false if this.react_hover == here => None,
                     false => return,
                 };
+                // The bar went with the letter: no emoji of it is stood
+                // on. Its buttons draw no leave of their own while they
+                // are not drawn.
+                if this.react_hover.is_none() {
+                    this.emoji_hover = None;
+                }
                 cx.notify();
             });
         })
@@ -12428,8 +12450,13 @@ impl Footplate {
             div()
                 .id(("head", seq))
                 .relative()
+                .w_full()
                 .flex()
                 .gap_2()
+                // The breathing room to the body stands inside the head,
+                // so the two touch and the pointer goes from one to the
+                // other with no strip between them that is neither.
+                .pb_1()
                 .debug_selector(|| format!("head {seq}")),
             cx,
         )
@@ -12462,7 +12489,10 @@ impl Footplate {
             .relative()
             .w_full()
             .flex()
-            .flex_col();
+            .flex_col()
+            // The breathing room to the row below stands inside the
+            // body, so a body touches the head or body under it.
+            .pb_1();
         Self::hover_react(seq, Piece::Body, body, cx)
             // A correction carries its label above its text, so it reads
             // as no new thought.
@@ -12535,9 +12565,12 @@ impl Footplate {
     /// and the letter keeps its place and its height. Its own ground and
     /// hairline keep the text under it from showing through, the kit's
     /// popover shadow lifts it, and it blocks the mouse, so that a tap on
-    /// it is no press on that text. The yard's fixed set, the user's own
-    /// current one on the open ground. A tap on that one takes it away,
-    /// and a tap on another puts it instead.
+    /// it is no press on that text. The yard's fixed set, each in a square
+    /// of the kit's 32-pixel control size, with 8 pixels around and
+    /// between them; the one the pointer stands on draws 1.2 times larger
+    /// in its square, so neither its neighbours nor the bar move. The
+    /// user's own current one stands on the open ground. A tap on that one
+    /// takes it away, and a tap on another puts it instead.
     fn react_row(
         &self,
         seq: u64,
@@ -12563,8 +12596,8 @@ impl Footplate {
                 .right_0()
                 .flex()
                 .flex_row()
-                .gap_1()
-                .px_1()
+                .gap_2()
+                .p_2()
                 .rounded_md()
                 .border_1()
                 .border_color(palette.line)
@@ -12582,15 +12615,44 @@ impl Footplate {
         );
         for emoji in model::REACTIONS {
             let tapped = format!("react {seq} {emoji}");
+            let zoomed = self
+                .emoji_hover
+                .as_ref()
+                .is_some_and(|(at, on)| *at == seq && on == emoji);
+            let entity = cx.entity();
+            let on = emoji.to_string();
             row = row.child(
-                quiet_button(emoji.to_string(), palette)
+                div()
                     .id(SharedString::from(tapped.clone()))
                     .debug_selector({
                         let tapped = tapped.clone();
                         move || tapped.clone()
                     })
-                    .when(mine == Some(emoji), |el| el.bg(palette.open))
-                    .on_click(cx.listener(move |this, _, _, cx| this.react(seq, emoji, cx))),
+                    .size(px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(rems(match zoomed {
+                        true => 1.2,
+                        false => 1.0,
+                    }))
+                    .when(zoomed, |el| el.bg(palette.hover))
+                    .when(!zoomed && mine == Some(emoji), |el| el.bg(palette.open))
+                    .on_hover(move |hovered, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            let here = Some((seq, on.clone()));
+                            this.emoji_hover = match hovered {
+                                true => here,
+                                false if this.emoji_hover == here => None,
+                                false => return,
+                            };
+                            cx.notify();
+                        });
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.react(seq, emoji, cx)))
+                    .child(emoji.to_string()),
             );
         }
         row.into_any_element()
@@ -12820,7 +12882,10 @@ impl Footplate {
             .flex()
             .flex_col()
             .items_center()
-            .gap_1();
+            // No gap of its own: the breathing room between rows stands
+            // inside the head and the body, so a letter's two touch and
+            // the pointer never stands between them.
+            .gap_0();
         let mail = if entries.is_empty() {
             mail.child(reading_column(
                 div()
@@ -12842,16 +12907,20 @@ impl Footplate {
                 Top::Start => "The conversation starts here.",
                 Top::Unread => "",
             };
-            mail.child(reading_column(
-                div()
-                    .debug_selector(|| "conversation top".to_string())
-                    .flex()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .child(top)
-                    .into_any_element(),
-            ))
+            mail.child(
+                reading_column(
+                    div()
+                        .debug_selector(|| "conversation top".to_string())
+                        .flex()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child(top)
+                        .into_any_element(),
+                )
+                // What the rows' gap carried under a row with no body.
+                .mb_1(),
+            )
             .children(self.mail_rows(entries, palette, cx))
         };
         // The jump control stands over the mail, at its bottom right,
@@ -17908,11 +17977,11 @@ mod tests {
         f32::from(a - b).abs() < 1.
     }
 
-    /// The bar of reactions floats over the top right of the letter: in the
-    /// head's line where the letter has a head, over the first line of its
-    /// body where it reads under another's. It takes no room: with the
-    /// pointer on a letter, every row and every mail stands where it stood
-    /// with the pointer elsewhere.
+    /// The bar of reactions floats over the top right of the letter: at
+    /// the top of the head's line where the letter has a head, over the
+    /// first line of its body where it reads under another's. It takes no
+    /// room: with the pointer on a letter, every row and every mail stands
+    /// where it stood with the pointer elsewhere.
     #[gpui::test]
     fn the_bar_of_reactions_floats_over_a_letter_and_moves_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -17947,8 +18016,9 @@ mod tests {
             );
         }
 
-        // A letter with a head has the bar in the head's line, at the
-        // column's right.
+        // A letter with a head has the bar at the top right of the
+        // head's line, at the column's right. It floats, so it may run
+        // over the text under it.
         hover_on(cx, "text 12");
         let bar = bounds_of(cx, "react row 12");
         let (head, text) = (bounds_now(cx, "head 12"), bounds_now(cx, "text 12"));
@@ -17962,11 +18032,7 @@ mod tests {
         );
         assert!(
             near(bar.top(), head.top()),
-            "the bar is in the head's line: {bar:?} in {head:?}"
-        );
-        assert!(
-            bar.bottom() <= text.top(),
-            "the bar is over none of the text: {bar:?} over {text:?}"
+            "the bar is at the top of the head's line: {bar:?} in {head:?}"
         );
 
         // One that reads under another's has it over the first line of its
@@ -18001,9 +18067,8 @@ mod tests {
         grouped_letters(&yard);
         let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
 
-        // A letter with a head has the bar in the head, a line above its
-        // text: the pointer goes up to it from the text, across the gap
-        // between the two rows.
+        // A letter with a head has the bar at the top of the head: the
+        // pointer goes up to it from the text.
         hover_on(cx, "text 12");
         assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
         hover_on(cx, "react 12 👍");
@@ -18036,6 +18101,96 @@ mod tests {
         // Off the letter, the bar goes.
         hover_on(cx, "conversation top");
         assert_eq!(pointer_on(&view, cx), None);
+    }
+
+    /// The letter is one hover target: the pointer goes from its head to
+    /// its text, through the space between them, and the bar never hides
+    /// on the way. The head and the body touch, so every step stands on
+    /// one of the two.
+    #[gpui::test]
+    fn the_letter_is_one_hover_target_from_its_head_to_its_text(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        hover_on(cx, "conversation top");
+        assert_eq!(pointer_on(&view, cx), None);
+        let at_rest = letters_stand(&view, cx);
+
+        // Down the middle of the column from the head's center to the
+        // text's: the head stands as wide as the column, so the line
+        // stays inside the letter the whole way.
+        let (head, text) = (bounds_of(cx, "head 12"), bounds_of(cx, "text 12"));
+        let x = text.center().x;
+        let (from, to) = (f32::from(head.center().y), f32::from(text.center().y));
+        for step in 0..=10 {
+            let y = px(from + (to - from) * (step as f32) / 10.);
+            cx.simulate_mouse_move(gpui::point(x, y), None, gpui::Modifiers::default());
+            assert_eq!(
+                pointer_on(&view, cx).map(|(at, _)| at),
+                Some(12),
+                "step {step} hid the bar"
+            );
+            assert!(drawn(cx, "react row 12"), "step {step} hid the bar");
+        }
+        assert_eq!(
+            letters_stand(&view, cx),
+            at_rest,
+            "the bar moved its letter"
+        );
+    }
+
+    /// The bar's emoji stand in fixed squares: the pointer on one draws
+    /// it larger, and no button's bounds nor the bar's move for it.
+    #[gpui::test]
+    fn hovering_an_emoji_moves_no_button_and_no_bar(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        let bar_rest = bounds_of(cx, "react row 12");
+        let buttons_rest: Vec<Bounds<Pixels>> = model::REACTIONS
+            .iter()
+            .map(|emoji| bounds_of(cx, &format!("react 12 {emoji}")))
+            .collect();
+        for (emoji, bounds) in model::REACTIONS.iter().zip(&buttons_rest) {
+            assert!(
+                near(bounds.size.width, px(32.)) && near(bounds.size.height, px(32.)),
+                "{emoji} is no 32-pixel square: {bounds:?}"
+            );
+        }
+
+        for emoji in model::REACTIONS {
+            hover_on(cx, &format!("react 12 {emoji}"));
+            assert_eq!(
+                pointer_on(&view, cx),
+                Some((12, Piece::Bar)),
+                "{emoji} lost the letter"
+            );
+            assert_eq!(
+                view.read_with(cx, |v, _| v.emoji_hover.clone()),
+                Some((12, emoji.to_string())),
+                "{emoji} drew no larger"
+            );
+            assert_eq!(
+                bounds_of(cx, "react row 12"),
+                bar_rest,
+                "{emoji} moved the bar"
+            );
+            for (other, stood) in model::REACTIONS.iter().zip(&buttons_rest) {
+                assert_eq!(
+                    bounds_of(cx, &format!("react 12 {other}")),
+                    *stood,
+                    "{emoji} moved {other}"
+                );
+            }
+        }
+
+        hover_on(cx, "text 12");
+        assert_eq!(view.read_with(cx, |v, _| v.emoji_hover.clone()), None);
+        assert_eq!(bounds_of(cx, "react row 12"), bar_rest);
     }
 
     /// A press on the bar is no press on the text under it: it starts no
@@ -18159,20 +18314,14 @@ mod tests {
         assert_eq!(pointer_on(&view, cx), Some((31, Piece::Body)));
         let bar = bounds_of(cx, "react row 31");
         assert_eq!(stand(cx), at_rest, "the bar moved a mail");
-        let (head, text) = (bounds_now(cx, "head 31"), bounds_now(cx, "text 31"));
+        let head = bounds_now(cx, "head 31");
         assert!(
             near(bar.right(), head.right()),
             "the bar is at the list's right: {bar:?} in {head:?}"
         );
         assert!(
             near(bar.top(), head.top()),
-            "the bar is in the head's line: {bar:?} in {head:?}"
-        );
-        // The head's line is no taller than the bar, within a pixel, for
-        // the rounding of the lines' heights.
-        assert!(
-            bar.bottom() <= text.top() + px(1.),
-            "the bar is over none of the text: {bar:?} over {text:?}"
+            "the bar is at the top of the head's line: {bar:?} in {head:?}"
         );
 
         // The pointer goes up onto the bar, and the bar stays.
