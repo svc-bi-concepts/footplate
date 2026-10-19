@@ -17586,6 +17586,30 @@ mod tests {
         yard.answer("Conversation", &json!({"result": mails}).to_string());
     }
 
+    fn reaction_mails(emoji: Option<&str>) -> Vec<serde_json::Value> {
+        vec![
+            json!({
+                "seq": 12,
+                "at": mailed(0),
+                "from": "yardmaster",
+                "to": "jo",
+                "text": "Shall I land it?",
+                "read": false,
+                "reactions": emoji
+                    .map(|emoji| vec![json!({"from": "jo", "emoji": emoji})])
+                    .unwrap_or_default(),
+            }),
+            json!({
+                "seq": 13,
+                "at": mailed(1),
+                "from": "jo",
+                "to": "yardmaster",
+                "text": "Land it.",
+                "read": true,
+            }),
+        ]
+    }
+
     /// The window on `yard`, the focus in the line, once it shows `texts`.
     fn opened<'a>(
         yard: &Yard,
@@ -17631,17 +17655,11 @@ mod tests {
         })
     }
 
-    fn reaction_event(seq: u64, actor: &str, target: u64, emoji: &str) -> String {
-        json!({"seq": seq, "kind": "reaction", "actor": actor, "at": "2026-10-08T09:31:00Z",
-            "data": {"seq": target, "emoji": emoji}})
-        .to_string()
-    }
-
     #[gpui::test]
     fn a_letter_s_reactions_show_and_a_tap_puts_replaces_and_clears(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        mails(&yard, &["Shall I land it?", "Land it."]);
+        yard.converse("yardmaster", reaction_mails(None));
         yard.answer("React", "{}");
         let (view, cx) = opened(&yard, &["Shall I land it?", "Land it."], cx);
         // Mail the yard sends no reactions on reads as it always has.
@@ -17655,37 +17673,38 @@ mod tests {
             assert!(drawn(cx, &format!("react 12 {emoji}")), "{emoji}");
         }
 
-        // A tap puts it, and the conversation is read again.
+        // A tap puts it, and the target mail is read again. The fake yard
+        // returns the current state so this also covers a missed stream event.
+        yard.converse("yardmaster", reaction_mails(Some("👍")));
         click_on(cx, "react 12 👍");
         wait(cx, "the reaction put", |_| {
             yard.asked("React") == [json!({"seq": 12, "emoji": "👍", "actor": "jo"})]
         });
         wait(cx, "the conversation read again", |_| {
             yard.asked("Conversation").last()
-                == Some(&json!({"a": "jo", "b": "yardmaster", "after": 13}))
+                == Some(&json!({"a": "jo", "b": "yardmaster", "after": 11}))
         });
-        yard.emit(&reaction_event(21, "jo", 12, "👍"));
         wait(cx, "the reaction under the letter", |cx| {
             reactions_of(&view, cx) == [(12, vec![("👍".into(), "jo".into())]), (13, vec![])]
         });
         assert!(drawn(cx, "reactions 12"));
 
         // A tap on another replaces it.
+        yard.converse("yardmaster", reaction_mails(Some("🎉")));
         click_on(cx, "react 12 🎉");
         wait(cx, "the reaction replaced", |_| {
             yard.asked("React").last() == Some(&json!({"seq": 12, "emoji": "🎉", "actor": "jo"}))
         });
-        yard.emit(&reaction_event(22, "jo", 12, "🎉"));
         wait(cx, "the replacement under the letter", |cx| {
             reactions_of(&view, cx) == [(12, vec![("🎉".into(), "jo".into())]), (13, vec![])]
         });
 
         // A tap on the user's own current one takes it away.
+        yard.converse("yardmaster", reaction_mails(None));
         click_on(cx, "react 12 🎉");
         wait(cx, "the reaction taken away", |_| {
             yard.asked("React").last() == Some(&json!({"seq": 12, "emoji": "", "actor": "jo"}))
         });
-        yard.emit(&reaction_event(23, "jo", 12, ""));
         wait(cx, "no reaction under the letter", |cx| {
             reactions_of(&view, cx) == [(12, vec![]), (13, vec![])]
         });

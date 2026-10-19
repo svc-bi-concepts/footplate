@@ -3696,7 +3696,15 @@ impl Model {
             .iter()
             .find(|(_, c)| c.iter().any(|l| l.seq == seq))
             .map(|(name, _)| name.clone());
-        name.map(|name| vec![self.read(&name)]).unwrap_or_default()
+        name.map(|name| {
+            // `after` is exclusive. Start just before the target so the
+            // reread returns the mail whose reactions may have changed.
+            vec![Effect::Read {
+                name,
+                after: seq.saturating_sub(1),
+            }]
+        })
+        .unwrap_or_default()
     }
 
     /// Whether the yard has no React call: one from before reactions,
@@ -3739,15 +3747,15 @@ impl Model {
     /// Puts `l` into the conversation with `name`, in order. A mail it has
     /// already (the stream and the yard both tell of each) only gains what
     /// `l` knows more: that it was read, its reactions, or where it stands.
-    fn add(&mut self, name: &str, l: Letter) {
+    fn add(&mut self, name: &str, l: Letter, reactions_are_current: bool) {
         let c = self.convo.entry(name.to_string()).or_default();
         match c.binary_search_by_key(&l.seq, |have| have.seq) {
             Ok(i) => {
                 c[i].read |= l.read;
-                // A re-read carries the reactions as they stand; the
-                // stream's mail tells of none, so an empty one leaves
-                // what is held.
-                if !l.reactions.is_empty() {
+                // Conversation reads carry the current state, including
+                // no reactions after a clear. A mail stream event has no
+                // reaction field, so it must leave what is already held.
+                if reactions_are_current {
                     c[i].reactions = l.reactions;
                 }
                 // Mail to another yard only goes on from queued, and the
@@ -3764,7 +3772,7 @@ impl Model {
     pub fn conversation(&mut self, name: &str, letters: Vec<Letter>) -> Vec<Effect> {
         self.loaded.insert(name.to_string());
         for l in letters {
-            self.add(name, l);
+            self.add(name, l, true);
         }
         self.see();
         self.ack()
@@ -4046,7 +4054,7 @@ impl Model {
             if e.actor == self.me {
                 l.to = format!("{to}@{peer}");
                 l.delivery = "queued".to_string();
-                self.add(&l.to.clone(), l);
+                self.add(&l.to.clone(), l, false);
             }
             return Vec::new();
         }
@@ -4061,7 +4069,7 @@ impl Model {
             l.read = e.seq <= self.cursor;
         }
         let read = l.read;
-        self.add(if mine { to } else { &e.actor }, l);
+        self.add(if mine { to } else { &e.actor }, l, false);
         if !for_me || read || self.unread.contains_key(&e.seq) {
             return Vec::new();
         }
@@ -6318,8 +6326,7 @@ mod tests {
         ));
         assert_eq!(m.entries()[0].reactions, [reacted_by("jo", "❤️")]);
 
-        // A re-read carries what the letter holds now; one that tells
-        // of none leaves what is held.
+        // A re-read carries what the letter holds now.
         m.conversation(
             "yardmaster",
             vec![Letter {
@@ -6332,14 +6339,31 @@ mod tests {
             "yardmaster",
             vec![letter(12, "yardmaster", "jo", "Shall I land it?")],
         );
-        assert_eq!(m.entries()[0].reactions, [reacted_by("yardmaster", "👀")]);
+        assert_eq!(m.entries()[0].reactions, []);
+    }
+
+    #[test]
+    fn a_mail_stream_event_without_reactions_keeps_the_current_reactions() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.conversation(
+            "yardmaster",
+            vec![Letter {
+                reactions: vec![reacted_by("jo", "👍")],
+                ..letter(12, "yardmaster", "jo", "Shall I land it?")
+            }],
+        );
+
+        // Mail stream events do not carry reactions and must not undo the
+        // conversation's current state.
+        m.event(&mail_to_jo(12, "yardmaster"));
+        assert_eq!(m.entries()[0].reactions, [reacted_by("jo", "👍")]);
     }
 
     #[test]
     fn after_a_react_the_conversation_that_holds_the_mail_is_read_again() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation("yardmaster", vec![letter(12, "yardmaster", "jo", "first")]);
-        assert_eq!(m.reacted(12), [read("yardmaster", 12)]);
+        assert_eq!(m.reacted(12), [read("yardmaster", 11)]);
         // A mail the window does not hold reads nothing.
         assert_eq!(m.reacted(99), []);
     }
