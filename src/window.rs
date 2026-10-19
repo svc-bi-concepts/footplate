@@ -649,13 +649,16 @@ fn lines_too_old(palette: Palette) -> Div {
 /// A track's card: a surface of its own under its name and its cells,
 /// in the sunken ground with the border's hairline and the kit's
 /// 8-pixel radius, as wide as the pane, so the tracks stand as bands
-/// one under another and never past the pane's edge.
+/// one under another and never past the pane's edge. The card never
+/// shrinks: squeezed below its content it would spill its headcodes
+/// over the next row, so the panel scrolls instead.
 fn panel_card(palette: Palette) -> Div {
     div()
         .w_full()
         .min_w_0()
         .flex()
         .flex_col()
+        .flex_none()
         .px_2()
         .py_1()
         .rounded_lg()
@@ -13519,7 +13522,9 @@ impl Footplate {
     /// One depot's rows on the panel: its error where its flows could
     /// not be read, one track per flow in the served order, and the
     /// Elsewhere stub where beads stand there. The rows of one depot
-    /// stand close, so the depots read apart.
+    /// stand close, so the depots read apart. The rows never shrink:
+    /// squeezed, their cards would spill over the next row, so the
+    /// panel scrolls instead.
     fn panel_depot(
         &self,
         depot: &FlowDepot,
@@ -13528,7 +13533,7 @@ impl Footplate {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut rows = div().flex().flex_col().gap_1();
+        let mut rows = div().flex().flex_col().flex_none().gap_1();
         if !depot.error.is_empty() {
             rows = rows.child(self.panel_words(depot, depot.error.clone(), palette, cx));
         }
@@ -13962,7 +13967,10 @@ impl Footplate {
             .collect();
         let names: Vec<&str> = quiet.iter().map(|depot| depot.name.as_str()).collect();
         let open = model.quiet_expanded();
-        let mut section = div().flex().flex_col().gap_3().child(
+        // Never shrunk: squeezed, the folded row or the unfolded
+        // tracks would spill over whatever the panel draws last, so
+        // the panel scrolls instead.
+        let mut section = div().flex().flex_col().flex_none().gap_3().child(
             div()
                 .id("panel quiet")
                 .debug_selector(|| "panel quiet".to_string())
@@ -19245,6 +19253,66 @@ mod tests {
                 {"bead": "yd-shed", "title": "Paint the shed",
                  "expected": "2h–3h", "remark": "", "tone": "none",
                  "working": false},
+            ],
+        }})
+        .to_string()
+    }
+
+    /// The flows view the squeeze test draws: five travelling depots,
+    /// so the tracks cannot fit the narrowest panel, yardr's with
+    /// three beads on one stage, two beads travelling with no line,
+    /// and two quiet depots folded to the Quiet row.
+    fn flows_squeezed() -> String {
+        let bead = |bead: &str, title: &str| {
+            json!({"bead": bead, "title": title, "expected": "1h–2h",
+                   "remark": "", "tone": "none", "working": false})
+        };
+        let stage = |stage: &str, beads: Vec<Value>| {
+            json!({"stage": stage, "group": "g", "human": false,
+                   "lamp": "none", "beads": beads})
+        };
+        let depot = |name: &str, id: &str| {
+            json!({"name": name, "kind": "git", "travelling": 1, "flows": [
+                {"name": "default", "type": "", "source": "store", "stages": [
+                    stage("new", vec![bead(id, "A travelling bead")]),
+                ]},
+            ], "elsewhere": []})
+        };
+        let quiet = |name: &str| {
+            json!({"name": name, "kind": "dir", "travelling": 0, "flows": [
+                {"name": "default", "type": "", "source": "store", "stages": [
+                    stage("new", vec![]),
+                ]},
+            ], "elsewhere": []})
+        };
+        json!({"result": {
+            "travelling": 11,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 5, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "backlog", "group": "mckean", "human": true,
+                         "lamp": "none",
+                         "beads": [bead("yd-b1", "First to shape")]},
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "fault", "beads": [
+                            bead("yd-first", "First on the stage"),
+                            bead("yd-second", "Second on the stage"),
+                            bead("yd-third", "Third on the stage")]},
+                        {"stage": "review", "group": "muse-reviewers",
+                         "human": false, "lamp": "none",
+                         "beads": [bead("yd-zulu", "Zulu's late turn")]},
+                    ]},
+                ], "elsewhere": []},
+                depot("footplate", "footplate-fc47"),
+                depot("alpha", "yd-alpha"),
+                depot("beta", "yd-beta"),
+                depot("gamma", "yd-gamma"),
+                quiet("drafts"),
+                quiet("reports"),
+            ],
+            "unassigned": [
+                bead("yd-drifter", "A bead with no line"),
+                bead("yd-stray", "Another bead with no line"),
             ],
         }})
         .to_string()
@@ -26426,6 +26494,68 @@ yardr.dev
             0 < mixed,
             "no row stands a head of one line beside a wrapped one"
         );
+    }
+
+    /// The No line card holds its headcodes: with beads travelling with
+    /// no line and quiet depots folded, each headcode stands inside the
+    /// card and the card ends above the Quiet row, at every text size;
+    /// a line's track with three beads on one stage holds its headcode
+    /// and its "+2" alike. The panel scrolls over its tracks instead of
+    /// squeezing them, so nothing draws over the row below.
+    #[gpui::test]
+    fn the_no_line_card_holds_its_headcodes_above_the_quiet_row(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_squeezed());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        // The narrowest window the application opens (main.rs): the
+        // five tracks, the No line card and the Quiet row cannot all
+        // fit its panel, so a column that shrinks its children
+        // squeezes them and the headcodes spill over the next row.
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        wait(cx, "the panel", |cx| drawn(cx, "panel noline"));
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            // One frame, read whole: a redraw per headcode would draw
+            // the window again for each.
+            drawn(cx, "panel");
+            let card = bounds_now(cx, "panel noline");
+            for bead in ["yd-drifter", "yd-stray"] {
+                let code = bounds_now(cx, &format!("panel headcode {bead}"));
+                assert!(
+                    card.top() <= code.top() && code.bottom() <= card.bottom(),
+                    "at {text} px the {bead} headcode stands off the No line card: {card:?} {code:?}"
+                );
+            }
+            let quiet = bounds_now(cx, "panel quiet");
+            assert!(
+                card.bottom() <= quiet.top(),
+                "at {text} px the No line card runs over the Quiet row: {card:?} {quiet:?}"
+            );
+            // A line's track with three beads on one stage: its
+            // headcode and its "+2" stand inside the track's card.
+            let track = bounds_now(cx, "panel track yardr default");
+            let code = bounds_now(cx, "panel headcode yd-first");
+            assert!(
+                track.top() <= code.top() && code.bottom() <= track.bottom(),
+                "at {text} px the headcode stands off its track: {track:?} {code:?}"
+            );
+            let more = bounds_now(cx, "panel more yardr default new");
+            assert!(
+                track.top() <= more.top() && more.bottom() <= track.bottom(),
+                "at {text} px the +2 stands off its track: {track:?} {more:?}"
+            );
+        }
     }
 
     /// The rules stand level at the narrowest window, at a laptop's and
