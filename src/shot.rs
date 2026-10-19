@@ -609,7 +609,7 @@ fn populate(yard: &Yard, state: &str) {
              "remark": "", "tone": "none"},
             {"bead": "footplate-p512", "title": "The sign-in's password label",
              "platform": "new", "line": "footplate", "expected": "—",
-             "remark": "held", "tone": "red"},
+             "remark": "held by jo", "tone": "red", "held_by": "jo"},
         ], "platforms": ["new", "review", "draft"]}})
             .to_string(),
         );
@@ -646,8 +646,9 @@ fn populate(yard: &Yard, state: &str) {
                              "beads": [
                                 {"bead": "footplate-p512",
                                  "title": "The sign-in's password label",
-                                 "expected": "—", "remark": "held",
-                                 "tone": "red", "working": false}]},
+                                 "expected": "—", "remark": "held by jo",
+                                 "tone": "red", "held_by": "jo",
+                                 "working": false}]},
                         ]},
                     ], "elsewhere": []},
                 ],
@@ -1222,7 +1223,7 @@ fn populate(yard: &Yard, state: &str) {
     if state == "arrivals" || state == "departures" {
         // The board these states shoot answers over the shared one: a
         // late bead with the overrun the yard will print, a bead that
-        // waits on jo, and a held one. The window draws the panel on
+        // waits on jo, and one jo holds. The window draws the panel on
         // the arrivals row, and the board with its banner under
         // Departures.
         yard.answer(
@@ -1236,18 +1237,19 @@ fn populate(yard: &Yard, state: &str) {
                  "remark": "waits for jo, yardmaster", "tone": "amber"},
                 {"bead": "footplate-p512", "title": "The sign-in's password label",
                  "platform": "new", "line": "yardr", "expected": "—",
-                 "remark": "held", "tone": "red"},
+                 "remark": "held by jo", "tone": "red", "held_by": "jo"},
             ], "platforms": ["new", "review", "review-security"]}})
             .to_string(),
         );
     }
     if state == "arrivals" || state == "departures" || state == "flow" {
         // The flows these states shoot answer over the shared ones:
-        // five tracks with a backlog to count, a held and a blocked
-        // bead under a fault lamp, a late and a worked bead with one
-        // more in review's full group, a wait and a person's turn under
-        // a turn lamp, a terminal stage with its buffer stop, an
-        // Elsewhere bead, two beads with no line, and drafts quiet.
+        // five tracks with a backlog to count, a bead jo holds, one
+        // yardmaster holds and a blocked bead under a fault lamp, a
+        // late and a worked bead with one more in review's full group,
+        // a wait and a person's turn under a turn lamp, a terminal
+        // stage with its buffer stop, an Elsewhere bead, two beads
+        // with no line, and drafts quiet.
         // Each stage carries its terminal flag and its routed group's
         // seats, each claimed bead its worker and its stage's clock.
         // The longest names this yard's own flows have stand among them:
@@ -1257,9 +1259,9 @@ fn populate(yard: &Yard, state: &str) {
         yard.answer(
             "Flows",
             &with_the_longest_names(json!({"result": {
-                "travelling": 14,
+                "travelling": 15,
                 "depots": [
-                    {"name": "yardr", "kind": "git", "travelling": 9, "flows": [
+                    {"name": "yardr", "kind": "git", "travelling": 10, "flows": [
                         {"name": "default", "type": "", "source": "store", "stages": [
                             {"stage": "backlog", "group": "mckean", "human": true,
                              "lamp": "none", "terminal": false, "limit": 1, "taken": 0,
@@ -1275,8 +1277,14 @@ fn populate(yard: &Yard, state: &str) {
                              "beads": [
                                 {"bead": "footplate-p512",
                                  "title": "The sign-in's password label",
-                                 "expected": "—", "remark": "held",
-                                 "tone": "red", "working": false},
+                                 "expected": "—", "remark": "held by jo",
+                                 "tone": "red", "held_by": "jo",
+                                 "working": false},
+                                {"bead": "yd-x2", "title": "Held by another",
+                                 "expected": "2h–3h",
+                                 "remark": "held by yardmaster",
+                                 "tone": "red", "held_by": "yardmaster",
+                                 "working": false},
                                 {"bead": "yd-x1", "title": "Blocked behind it",
                                  "expected": "1h–2h", "remark": "blocked by footplate-p512",
                                  "tone": "amber", "working": false}]},
@@ -1736,7 +1744,7 @@ mod tests {
                     // amber remark, none, and a red one. The arrivals and
                     // departures states shoot their own board over that
                     // one: a late bead with its overrun, a bead that
-                    // waits on jo, and a held one.
+                    // waits on jo, and one jo holds.
                     assert_eq!(loaded.arrivals.rows.len(), 3, "{state}");
                     assert_eq!(loaded.arrivals.rows[0].bead, "yd-zulu", "{state}");
                     let overrun = *state == "arrivals" || *state == "departures";
@@ -1763,9 +1771,10 @@ mod tests {
                         (
                             loaded.arrivals.rows[2].expected.as_str(),
                             loaded.arrivals.rows[2].remark.as_str(),
-                            loaded.arrivals.rows[2].tone.as_str()
+                            loaded.arrivals.rows[2].tone.as_str(),
+                            loaded.arrivals.rows[2].held_by.as_str()
                         ),
-                        ("—", "held", "red"),
+                        ("—", "held by jo", "red", "jo"),
                         "{state}"
                     );
                     // The flows view beside the board: three travelling,
@@ -1780,7 +1789,7 @@ mod tests {
                     assert_eq!(
                         loaded.flows.travelling,
                         match rich {
-                            true => 14,
+                            true => 15,
                             false => 3,
                         },
                         "{state}"
@@ -1789,7 +1798,7 @@ mod tests {
                     assert_eq!(
                         loaded.flows.depots[0].travelling,
                         match rich {
-                            true => 9,
+                            true => 10,
                             false => 2,
                         },
                         "{state}"
@@ -1821,7 +1830,23 @@ mod tests {
                         );
                         assert_eq!(stages[1].lamp, "fault", "{state}");
                         assert_eq!(stages[4].lamp, "turn", "{state}");
-                        assert_eq!(stages[1].beads.len(), 2, "{state}");
+                        assert_eq!(stages[1].beads.len(), 3, "{state}");
+                        // The fault stage holds a bead jo holds, one
+                        // yardmaster holds, and the blocked bead behind
+                        // them.
+                        assert_eq!(
+                            stages[1]
+                                .beads
+                                .iter()
+                                .map(|b| (b.remark.as_str(), b.held_by.as_str()))
+                                .collect::<Vec<_>>(),
+                            [
+                                ("held by jo", "jo"),
+                                ("held by yardmaster", "yardmaster"),
+                                ("blocked by footplate-p512", ""),
+                            ],
+                            "{state}"
+                        );
                         assert_eq!(stages[3].beads.len(), 3, "{state}");
                         assert!(!stages[1].terminal, "{state}");
                         assert!(stages[5].terminal, "{state}");

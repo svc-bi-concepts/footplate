@@ -253,6 +253,10 @@ pub struct Arrival {
     /// `red`, `amber` or `none`.
     #[serde(default)]
     pub tone: String,
+    /// Who holds the bead, as the yard names them. Empty where no hold
+    /// is on, and where the yard kept no holder: absent is unknown.
+    #[serde(default)]
+    pub held_by: String,
 }
 
 /// The flows view as the yard serves it: the depots as lines, each with
@@ -365,6 +369,10 @@ pub struct FlowBead {
     /// late mark, `none` with no remark.
     #[serde(default)]
     pub tone: String,
+    /// Who holds the bead, as the yard names them. Empty where no hold
+    /// is on, and where the yard kept no holder: absent is unknown.
+    #[serde(default)]
+    pub held_by: String,
     /// An agent's or a command's session claimed it; a manual group's
     /// claim is a person's turn and no work.
     #[serde(default)]
@@ -4540,7 +4548,7 @@ mod tests {
             r#"{"result": {"rows": [
                 {"bead": "footplate-p512", "title": "The sign-in's password label",
                  "platform": "new", "line": "footplate", "expected": "—",
-                 "remark": "held", "tone": "red"},
+                 "remark": "held by jo", "tone": "red", "held_by": "jo"},
                 {"bead": "yardr-bwm2", "title": "Hosted v0 trial",
                  "platform": "review", "line": "yardr", "expected": "20m–35m",
                  "remark": "", "tone": "none"},
@@ -4563,19 +4571,22 @@ mod tests {
                 rows[0].line.as_str(),
                 rows[0].expected.as_str(),
                 rows[0].remark.as_str(),
-                rows[0].tone.as_str()
+                rows[0].tone.as_str(),
+                rows[0].held_by.as_str()
             ),
             (
                 "The sign-in's password label",
                 "new",
                 "footplate",
                 "—",
-                "held",
-                "red"
+                "held by jo",
+                "red",
+                "jo"
             )
         );
         assert_eq!(rows[1].remark.as_str(), "");
         assert_eq!(rows[1].tone.as_str(), "none");
+        assert!(rows[1].held_by.is_empty());
         assert_eq!(rows[2].line.as_str(), "");
         assert_eq!(rows[2].remark.as_str(), "waits for decisions");
         assert_eq!(rows[2].tone.as_str(), "amber");
@@ -4672,6 +4683,7 @@ mod tests {
         assert!(!stages[0].beads[0].working);
         assert!(stages[0].beads[0].worker.is_empty());
         assert!(stages[0].beads[0].entered_stage_at.is_empty());
+        assert!(stages[0].beads[0].held_by.is_empty());
         assert_eq!(stages[1].lamp.as_str(), "none");
         assert_eq!((stages[1].limit, stages[1].taken), (Some(1), Some(1)));
         assert!(stages[1].beads.is_empty());
@@ -4691,6 +4703,10 @@ mod tests {
         let drafts = &board.depots[1];
         assert!(drafts.flows.is_empty());
         assert_eq!(drafts.elsewhere.len(), 1);
+        // A hold from before the yard kept the holder reads `held`
+        // with no holder: absent is unknown.
+        assert_eq!(drafts.elsewhere[0].remark.as_str(), "held");
+        assert!(drafts.elsewhere[0].held_by.is_empty());
         assert!(!drafts.error.is_empty());
         assert_eq!(board.unassigned.len(), 1);
         assert_eq!(board.unassigned[0].bead.as_str(), "yd-shed");

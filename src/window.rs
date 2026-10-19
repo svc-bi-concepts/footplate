@@ -24,8 +24,8 @@ use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, AskPreview, DecidedDetail, DecidedEntry, DecidedFold,
     DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode, Model, News,
-    Outcome, Route, Row, Selected, Target, Top, backlog_count, short_bead, stage_age, waits_on_you,
-    you_first,
+    Outcome, Route, Row, Selected, Target, Top, backlog_count, held_by_you, is_held, short_bead,
+    stage_age, waits_on_you, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -746,7 +746,7 @@ fn waits_for_seat(bead: &FlowBead, stage: &FlowStage) -> bool {
         return false;
     }
     if bead.tone == "red"
-        || bead.remark == "held"
+        || is_held(&bead.remark)
         || bead.remark.starts_with("blocked by ")
         || bead.remark.starts_with("waits for ")
     {
@@ -818,14 +818,16 @@ fn decided_words(decided: usize) -> String {
     }
 }
 
-/// The colour of a timetable remark with the yard's `tone`, for the
-/// person `me` reads as: a held or stalled bead reads the error red, a
-/// wait that names them the waiting text rust, and the rest dim — a
-/// blocked bead, a late mark and a wait for someone else. Lateness is
-/// words, never red; a wait for someone else is not theirs to answer,
-/// so it never takes the accent.
-fn remark_color(remark: &str, tone: &str, me: &str, palette: Palette) -> Rgba {
-    if remark == "held" || tone == "red" {
+/// The colour of a timetable remark with the yard's `tone` and
+/// holder, for the person `me` reads as: a stalled bead reads the
+/// error red, and a held bead only where they hold it; a wait that
+/// names them reads the waiting text rust, and the rest dim — a hold
+/// by anyone else or no one known, a blocked bead, a late mark and a
+/// wait for someone else. Lateness is words, never red; a hold or a
+/// wait for someone else is not theirs to answer, so it never takes
+/// the accent.
+fn remark_color(remark: &str, tone: &str, held_by: &str, me: &str, palette: Palette) -> Rgba {
+    if tone == "red" && (!is_held(remark) || held_by_you(held_by, me)) {
         palette.warn
     } else if waits_on_you(remark, me) {
         palette.text_accent
@@ -855,15 +857,24 @@ fn lamp_dot(lamp: &str, selector: String, palette: Palette) -> Option<Div> {
 
 /// A headcode's colour on the panel, for the person `me` reads as: a
 /// bead being worked reads in the text colour (with the running dot
-/// beside it), a held or stalled bead in the error red, and a wait on
-/// the reader in the waiting rust. Working stands first, whatever the
-/// stage's lamp says; a blocked or late bead stands plain in the text
-/// colour, its reason in words one zoom in. A wait for someone else is
-/// not theirs to answer, so it never takes the accent.
-fn headcode_color(working: bool, remark: &str, tone: &str, me: &str, palette: Palette) -> Rgba {
+/// beside it), a stalled bead in the error red, a held bead in red
+/// only where they hold it, and a wait on the reader in the waiting
+/// rust. Working stands first, whatever the stage's lamp says; a hold
+/// by anyone else or no one known stands plain in the text colour as
+/// a blocked or late bead does, its reason in words one zoom in. A
+/// hold or a wait for someone else is not theirs to answer, so it
+/// never takes the accent.
+fn headcode_color(
+    working: bool,
+    remark: &str,
+    tone: &str,
+    held_by: &str,
+    me: &str,
+    palette: Palette,
+) -> Rgba {
     if working {
         palette.text
-    } else if tone == "red" {
+    } else if tone == "red" && (!is_held(remark) || held_by_you(held_by, me)) {
         palette.warn
     } else if waits_on_you(remark, me) {
         palette.text_accent
@@ -11359,7 +11370,7 @@ impl Footplate {
         let bead = row.bead.clone();
         let sel = Selected::Bead(row.bead.clone());
         let remark = you_first(&row.remark, model.me());
-        let color = remark_color(&row.remark, &row.tone, model.me(), palette);
+        let color = remark_color(&row.remark, &row.tone, &row.held_by, model.me(), palette);
         let mut expected = grown(BOARD_EXPECTED)
             .debug_selector({
                 let bead = bead.clone();
@@ -13875,7 +13886,14 @@ impl Footplate {
         let sel = Selected::Bead(bead.bead.clone());
         let name = bead.bead.clone();
         let me = self.model.as_ref().map(Model::me).unwrap_or_default();
-        let color = headcode_color(bead.working, &bead.remark, &bead.tone, me, palette);
+        let color = headcode_color(
+            bead.working,
+            &bead.remark,
+            &bead.tone,
+            &bead.held_by,
+            me,
+            palette,
+        );
         let mut text = panel_meta()
             .flex_1()
             .min_w_0()
@@ -14468,7 +14486,7 @@ impl Footplate {
         let bead = row.bead.clone();
         let sel = Selected::Bead(row.bead.clone());
         let me = self.model.as_ref().map(Model::me).unwrap_or_default();
-        let color = remark_color(&row.remark, &row.tone, me, palette);
+        let color = remark_color(&row.remark, &row.tone, &row.held_by, me, palette);
         let mut meta = Vec::new();
         if !row.worker.is_empty() {
             meta.push(format!("worked by {}", row.worker));
@@ -14629,7 +14647,7 @@ impl Footplate {
             .hover(|style| style.border_color(palette.line))
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
         let me = self.model.as_ref().map(Model::me).unwrap_or_default();
-        let remark = remark_color(&row.remark, &row.tone, me, palette);
+        let remark = remark_color(&row.remark, &row.tone, &row.held_by, me, palette);
         let mut time = div()
             .flex_none()
             .debug_selector({
@@ -14860,7 +14878,13 @@ impl Footplate {
                     .map(|route| self.route_strip(route, &detail.bead, palette, "bead")),
             )
             .children((!detail.expected.is_empty()).then(|| {
-                let remark = remark_color(&detail.remark, &detail.tone, model.me(), palette);
+                let remark = remark_color(
+                    &detail.remark,
+                    &detail.tone,
+                    &detail.held_by,
+                    model.me(),
+                    palette,
+                );
                 div()
                     .flex()
                     .items_center()
@@ -19662,6 +19686,32 @@ mod tests {
                      "working": true, "worker": "herdr yardr-pinned-new",
                      "entered_stage_at": "2026-10-10T09:00:00Z"},
                 ]},
+            ],
+            "unassigned": [],
+        }})
+        .to_string()
+    }
+
+    /// The flows view with two held beads on one stage: one the
+    /// reader holds, one another holds, each remarked as the yard
+    /// words it with its holder beside it.
+    fn flows_held() -> String {
+        json!({"result": {
+            "travelling": 2,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "fault", "terminal": false, "limit": 3, "taken": 2,
+                         "beads": [
+                            {"bead": "yd-mine", "title": "Held by the reader",
+                             "expected": "1h–2h", "remark": "held by jo",
+                             "tone": "red", "held_by": "jo", "working": false},
+                            {"bead": "yd-theirs", "title": "Held by another",
+                             "expected": "2h–3h", "remark": "held by ada",
+                             "tone": "red", "held_by": "ada", "working": false}]},
+                    ]},
+                ], "elsewhere": []},
             ],
             "unassigned": [],
         }})
@@ -24903,38 +24953,54 @@ yardr.dev
     }
 
     /// A remark reads waiting only where it waits on the reader: a
-    /// held or stalled bead reads red, a wait naming them reads waiting,
-    /// and late, blocked, a wait for anyone else and nothing read dim.
+    /// stalled bead reads red, a held bead only where they hold it, a
+    /// wait naming them reads waiting, and a hold by anyone else or
+    /// no one known, late, blocked, a wait for anyone else and
+    /// nothing read dim.
     #[test]
     fn remarks_read_waiting_only_where_they_wait_on_the_reader() {
         let palette = Palette::of(Look::Dark, WindowAppearance::Dark);
-        assert_eq!(remark_color("held", "red", "jo", palette), palette.warn);
         assert_eq!(
-            remark_color("stalled · session failed", "red", "jo", palette),
+            remark_color("held by jo", "red", "jo", "jo", palette),
             palette.warn
         );
         assert_eq!(
-            remark_color("waits for jo", "amber", "jo", palette),
+            remark_color("stalled · session failed", "red", "", "jo", palette),
+            palette.warn
+        );
+        assert_eq!(
+            remark_color("held by ada", "red", "ada", "jo", palette),
+            palette.faint
+        );
+        assert_eq!(
+            remark_color("held", "red", "", "jo", palette),
+            palette.faint
+        );
+        assert_eq!(
+            remark_color("waits for jo", "amber", "", "jo", palette),
             palette.text_accent
         );
         assert_eq!(
-            remark_color("waits for jo, ada", "amber", "ada", palette),
+            remark_color("waits for jo, ada", "amber", "", "ada", palette),
             palette.text_accent
         );
-        assert_eq!(remark_color("late", "amber", "jo", palette), palette.faint);
         assert_eq!(
-            remark_color("late by 40m", "amber", "jo", palette),
+            remark_color("late", "amber", "", "jo", palette),
             palette.faint
         );
         assert_eq!(
-            remark_color("blocked by yd-x", "amber", "jo", palette),
+            remark_color("late by 40m", "amber", "", "jo", palette),
             palette.faint
         );
         assert_eq!(
-            remark_color("waits for jo", "amber", "ada", palette),
+            remark_color("blocked by yd-x", "amber", "", "jo", palette),
             palette.faint
         );
-        assert_eq!(remark_color("", "none", "jo", palette), palette.faint);
+        assert_eq!(
+            remark_color("waits for jo", "amber", "", "ada", palette),
+            palette.faint
+        );
+        assert_eq!(remark_color("", "none", "", "jo", palette), palette.faint);
     }
 
     /// A stage column's head says whose group works there: its name,
@@ -24995,6 +25061,10 @@ yardr.dev
         assert!(!waits_for_seat(&bead("", "none", true), &full));
         assert!(!waits_for_seat(&bead("held", "red", false), &full));
         assert!(!waits_for_seat(
+            &bead("held by yardmaster", "red", false),
+            &full
+        ));
+        assert!(!waits_for_seat(
             &bead("blocked by yd-x", "amber", false),
             &full
         ));
@@ -25032,47 +25102,56 @@ yardr.dev
         assert_eq!(stage_lamp(&stage("turn", 0)), "none");
     }
 
-    /// A headcode reads its marker: working in the text colour, held
-    /// or stalled in red, a wait on the reader in rust, and blocked,
-    /// late or plain in the text colour. Working stands first,
-    /// whatever else the bead carries.
+    /// A headcode reads its marker: working in the text colour,
+    /// stalled in red, a held bead in red only where the reader holds
+    /// it, a wait on the reader in rust, and a hold by anyone else or
+    /// no one known, blocked, late or plain in the text colour.
+    /// Working stands first, whatever else the bead carries.
     #[test]
     fn headcodes_mark_working_held_and_waiting() {
         let palette = Palette::of(Look::Dark, WindowAppearance::Dark);
         assert_eq!(
-            headcode_color(true, "held", "red", "jo", palette),
+            headcode_color(true, "held by jo", "red", "jo", "jo", palette),
             palette.text
         );
         assert_eq!(
-            headcode_color(true, "waits for jo", "amber", "jo", palette),
+            headcode_color(true, "waits for jo", "amber", "", "jo", palette),
             palette.text
         );
         assert_eq!(
-            headcode_color(false, "held", "red", "jo", palette),
+            headcode_color(false, "held by jo", "red", "jo", "jo", palette),
             palette.warn
         );
         assert_eq!(
-            headcode_color(false, "stalled · session failed", "red", "jo", palette),
+            headcode_color(false, "stalled · session failed", "red", "", "jo", palette),
             palette.warn
         );
         assert_eq!(
-            headcode_color(false, "waits for jo", "amber", "jo", palette),
+            headcode_color(false, "held by ada", "red", "ada", "jo", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(false, "held", "red", "", "jo", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(false, "waits for jo", "amber", "", "jo", palette),
             palette.text_accent
         );
         assert_eq!(
-            headcode_color(false, "waits for jo", "amber", "ada", palette),
+            headcode_color(false, "waits for jo", "amber", "", "ada", palette),
             palette.text
         );
         assert_eq!(
-            headcode_color(false, "blocked by yd-x", "amber", "jo", palette),
+            headcode_color(false, "blocked by yd-x", "amber", "", "jo", palette),
             palette.text
         );
         assert_eq!(
-            headcode_color(false, "late by 40m", "amber", "jo", palette),
+            headcode_color(false, "late by 40m", "amber", "", "jo", palette),
             palette.text
         );
         assert_eq!(
-            headcode_color(false, "", "none", "jo", palette),
+            headcode_color(false, "", "none", "", "jo", palette),
             palette.text
         );
     }
@@ -25452,6 +25531,7 @@ yardr.dev
             expected: "5h–8h".to_string(),
             remark: "late".to_string(),
             tone: "amber".to_string(),
+            held_by: String::new(),
             labels: Vec::new(),
             body: String::new(),
             notes: Vec::new(),
@@ -25696,6 +25776,66 @@ yardr.dev
             view.read_with(cx, |v, _| {
                 v.model.as_ref().unwrap().selected() == Some(&Selected::Line("yardr".into()))
             })
+        });
+    }
+
+    /// A line's held beads read red only where the reader holds
+    /// them: one bead held by jo and one by ada, and only the first
+    /// draws warn. A test reads no colours from the frame, so it reads
+    /// the rows the window draws and the colours it draws them in.
+    #[gpui::test]
+    fn a_line_s_held_beads_read_red_only_where_the_reader_holds_them(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_held());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row yardr");
+        wait(cx, "the flow", |cx| drawn(cx, "flow head yardr"));
+        assert!(drawn(cx, "card remark yd-mine"));
+        assert!(drawn(cx, "card remark yd-theirs"));
+        let palette = palette(cx);
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.me(), "jo");
+            let beads = &model.depot("yardr").unwrap().flows[0].stages[0].beads;
+            assert_eq!(beads.len(), 2);
+            assert_eq!(
+                (beads[0].remark.as_str(), beads[0].held_by.as_str()),
+                ("held by jo", "jo")
+            );
+            assert_eq!(
+                (beads[1].remark.as_str(), beads[1].held_by.as_str()),
+                ("held by ada", "ada")
+            );
+            assert_eq!(you_first(&beads[0].remark, model.me()), "held by you");
+            assert_eq!(you_first(&beads[1].remark, model.me()), "held by ada");
+            for (bead, remark, headcode) in [
+                (0, palette.warn, palette.warn),
+                (1, palette.faint, palette.text),
+            ] {
+                let bead = &beads[bead];
+                assert_eq!(
+                    remark_color(&bead.remark, &bead.tone, &bead.held_by, model.me(), palette),
+                    remark,
+                    "{}",
+                    bead.bead,
+                );
+                assert_eq!(
+                    headcode_color(
+                        bead.working,
+                        &bead.remark,
+                        &bead.tone,
+                        &bead.held_by,
+                        model.me(),
+                        palette
+                    ),
+                    headcode,
+                    "{}",
+                    bead.bead,
+                );
+            }
         });
     }
 

@@ -167,6 +167,18 @@ pub fn waits_on_you(remark: &str, me: &str) -> bool {
     waits_names(remark).is_some_and(|names| !me.is_empty() && names.contains(&me))
 }
 
+/// Whether the remark is a hold: `held` where the holder is unknown,
+/// `held by <name>` where the yard knows them. A stall is no hold.
+pub fn is_held(remark: &str) -> bool {
+    remark == "held" || remark.starts_with("held by ")
+}
+
+/// Whether the served holder is the reader: `held_by` names `me`.
+/// Nobody where `me` is empty, and an unknown holder is nobody's.
+pub fn held_by_you(held_by: &str, me: &str) -> bool {
+    !me.is_empty() && held_by == me
+}
+
 /// Whether the remark names `me` alone: `waits for jo` where `me` is `jo`.
 /// A wait for several names no one alone, even where `me` is among them;
 /// the yard prints every member of the stage's group, so alone means the
@@ -178,10 +190,17 @@ fn waits_on_you_alone(remark: &str, me: &str) -> bool {
     }
 }
 
-/// The remark with `you` first among whom it waits for, where it waits
-/// for `me`: `waits for mckean, yardmaster` reads `waits for you,
-/// yardmaster`. Any other remark stands as the yard printed it.
+/// The remark with `you` where it names the reader: `waits for
+/// mckean, yardmaster` reads `waits for you, yardmaster`, and `held by
+/// mckean` reads `held by you`. Any other remark stands as the yard
+/// printed it.
 pub fn you_first(remark: &str, me: &str) -> String {
+    if let Some(holder) = remark.strip_prefix("held by ") {
+        if !me.is_empty() && holder.trim() == me {
+            return "held by you".to_string();
+        }
+        return remark.to_string();
+    }
     let Some(names) = waits_names(remark) else {
         return remark.to_string();
     };
@@ -601,6 +620,9 @@ pub struct ArrivalDetail {
     pub expected: String,
     pub remark: String,
     pub tone: String,
+    /// Who holds the bead, from the row it came from. Empty where no
+    /// hold is on, and where the holder is unknown.
+    pub held_by: String,
     pub labels: Vec<String>,
     pub body: String,
     /// The notes oldest first, so the newest stands last.
@@ -2030,40 +2052,50 @@ impl Model {
     }
 
     /// One travelling bead whole, as the details pane shows it: what the
-    /// Bead call returned, with the line, expected arrival and remark of
-    /// the row it came from. The board's row where the yard serves the
-    /// bead still, else the flows view's; `no line` for a bead with none.
-    /// None until the bead is read.
+    /// Bead call returned, with the line, expected arrival, remark and
+    /// holder of the row it came from. The board's row where the yard
+    /// serves the bead still, else the flows view's; `no line` for a
+    /// bead with none. None until the bead is read.
     pub fn arrival_detail(&self, bead: &str) -> Option<ArrivalDetail> {
         let b = self.beads.get(bead)?;
         let row = self.arrivals.iter().find(|r| r.bead == bead);
         let flowed = self.flow_bead(bead);
-        let (line, expected, remark, tone) = match (row, flowed) {
+        let (line, expected, remark, tone, held_by) = match (row, flowed) {
             (Some(r), _) if !r.line.is_empty() => (
                 r.line.clone(),
                 r.expected.clone(),
                 r.remark.clone(),
                 r.tone.clone(),
+                r.held_by.clone(),
             ),
             (Some(r), _) => (
                 "no line".to_string(),
                 r.expected.clone(),
                 r.remark.clone(),
                 r.tone.clone(),
+                r.held_by.clone(),
             ),
             (None, Some((found, Some(depot)))) => (
                 depot.to_string(),
                 found.expected.clone(),
                 found.remark.clone(),
                 found.tone.clone(),
+                found.held_by.clone(),
             ),
             (None, Some((found, None))) => (
                 "no line".to_string(),
                 found.expected.clone(),
                 found.remark.clone(),
                 found.tone.clone(),
+                found.held_by.clone(),
             ),
-            (None, None) => (String::new(), String::new(), String::new(), String::new()),
+            (None, None) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
         let mut notes: Vec<&BeadNote> = b.notes.iter().collect();
         // The notes newest last. The yard serves them oldest first; the
@@ -2078,6 +2110,7 @@ impl Model {
             expected,
             remark,
             tone,
+            held_by,
             labels: b.labels.iter().map(|l| plain(l)).collect(),
             body: plain(&b.body),
             notes: notes
@@ -7436,6 +7469,7 @@ mod tests {
             expected: expected.into(),
             remark: remark.into(),
             tone: tone.into(),
+            held_by: String::new(),
         }
     }
 
@@ -7805,10 +7839,12 @@ mod tests {
         assert_eq!(m.route_for("yd-unknown"), None);
     }
 
-    /// A waits remark names you first where it names you; any other
-    /// remark, and a wait for nobody you are, stands as printed.
+    /// A remark names you where it names you: a wait with you
+    /// first among its names, a hold by you as `held by you`. Any
+    /// other remark, and a wait or hold for nobody you are, stands as
+    /// printed.
     #[test]
-    fn a_waits_remark_names_you_first_where_it_names_you() {
+    fn a_remark_names_you_where_it_names_you() {
         assert_eq!(
             you_first("waits for yardmaster, jo", "jo"),
             "waits for you, yardmaster"
@@ -7818,20 +7854,42 @@ mod tests {
             you_first("waits for yardmaster", "jo"),
             "waits for yardmaster"
         );
+        assert_eq!(you_first("held by jo", "jo"), "held by you");
+        assert_eq!(you_first("held by yardmaster", "jo"), "held by yardmaster");
         assert_eq!(you_first("held", "jo"), "held");
         assert_eq!(you_first("", "jo"), "");
         assert_eq!(you_first("waits for jo", ""), "waits for jo");
+        assert_eq!(you_first("held by jo", ""), "held by jo");
     }
 
-    /// A wait names you where you are among its names, and only then.
+    /// A wait names you where you are among its names, and only then:
+    /// a hold is no wait, whoever holds it.
     #[test]
     fn a_wait_names_you_where_you_are_among_its_names() {
         assert!(waits_on_you("waits for yardmaster, jo", "jo"));
         assert!(waits_on_you("waits for jo", "jo"));
         assert!(!waits_on_you("waits for yardmaster", "jo"));
         assert!(!waits_on_you("held", "jo"));
+        assert!(!waits_on_you("held by jo", "jo"));
         assert!(!waits_on_you("", "jo"));
         assert!(!waits_on_you("waits for jo", ""));
+    }
+
+    /// A hold is `held` or `held by <name>`; a stall is no hold. The
+    /// served holder is the reader where it names them, and an
+    /// unknown holder is nobody's.
+    #[test]
+    fn a_hold_is_held_or_held_by_a_name() {
+        assert!(is_held("held"));
+        assert!(is_held("held by jo"));
+        assert!(!is_held("stalled · session failed"));
+        assert!(!is_held("blocked by yd-x"));
+        assert!(!is_held(""));
+        assert!(held_by_you("jo", "jo"));
+        assert!(!held_by_you("yardmaster", "jo"));
+        assert!(!held_by_you("", "jo"));
+        assert!(!held_by_you("jo", ""));
+        assert!(!held_by_you("", ""));
     }
 
     /// The quiet lines fold under Quiet: folded they are not in the
@@ -8262,6 +8320,36 @@ mod tests {
         assert_eq!(detail.expected, "");
         assert_eq!(detail.remark, "");
         assert_eq!(detail.body, "The turn the yard waits on.");
+        assert_eq!(detail.held_by, "");
+    }
+
+    /// An arrival's bead carries who holds it from the row it came
+    /// from: the board's row where the yard serves the bead still,
+    /// else the flows view's, and none where neither serves it.
+    #[test]
+    fn an_arrival_s_bead_carries_who_holds_it_from_its_row() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        let mut held = arrival("yd-held", "new", "yardr", "—", "held by jo", "red");
+        held.held_by = "jo".into();
+        m.arrivals(board(vec![held]));
+        m.bead_loaded(Bead {
+            id: "yd-held".into(),
+            ..Bead::default()
+        });
+        assert_eq!(m.arrival_detail("yd-held").unwrap().held_by, "jo");
+        // The flows view's row where the board serves the bead no
+        // longer, and none where neither serves it.
+        let mut flows = flow_view();
+        flows.depots[0].flows[0].stages[1].beads[0].held_by = "ada".into();
+        m.flows(flows);
+        m.bead_loaded(Bead {
+            id: "yd-alpha".into(),
+            ..Bead::default()
+        });
+        assert_eq!(m.arrival_detail("yd-alpha").unwrap().held_by, "ada");
+        m.arrivals(Arrivals::default());
+        m.flows(Flows::default());
+        assert_eq!(m.arrival_detail("yd-held").unwrap().held_by, "");
     }
 
     /// The open arrival's bead stays open and read while the queue is
