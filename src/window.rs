@@ -402,9 +402,9 @@ fn post_note(
     Ok(())
 }
 
-/// The conversation's reading width: the mail stands full width up to 720
-/// pixels, centred in the pane, as the review's sketch has it.
-const READING_WIDTH: f32 = 720.;
+/// The conversation's reading width: the mail and the composer stand
+/// full width up to 880 pixels, centred in the pane.
+const READING_WIDTH: f32 = 880.;
 
 /// A row of the reading column: full width, its content centred in
 /// the reading width.
@@ -12314,47 +12314,59 @@ impl Footplate {
                 )
             })
             .child(
-                div()
-                    .m_3()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(palette.line)
-                    .bg(palette.side)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    // A press anywhere in the frame is for the line. The
-                    // window itself takes the focus of a press no one
-                    // claimed, so this one is claimed.
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        window.focus(&focus);
-                        window.prevent_default();
-                    })
-                    .children(attached)
-                    // Why a marked attachment cannot go, by the line it
-                    // keeps from being sent.
-                    .children(reasons.into_iter().map(|why| {
+                // The composer stands in the reading column with the mail
+                // above it: centred, no wider than the mail, its edges
+                // lining up with the column's on a wide window. Two divs,
+                // not one, as reading_column has it; the side margins stand
+                // on the outer one so the frame meets the column's edges,
+                // and where the pane is narrower than the reading width the
+                // frame keeps today's margins.
+                div().mx_3().child(
+                    div().max_w(px(READING_WIDTH)).mx_auto().child(
                         div()
-                            .text_sm()
-                            .text_color(palette.warn)
-                            .child(format!("! {why}"))
-                    }))
-                    .child(self.line.clone())
-                    // The draft stays as typed while the yard is
-                    // reconnecting, with the reason beside the line.
-                    .when(self.reconnecting(), |el| el.child(send_held(palette)))
-                    // The cheatsheet's hint, where `?` is the line's
-                    // text: the keys open it with a click instead.
-                    .child(
-                        div()
+                            .debug_selector(|| "composer".to_string())
+                            .my_3()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(palette.line)
+                            .bg(palette.side)
                             .flex()
-                            .flex_row()
-                            .justify_end()
-                            .text_xs()
-                            .child(keys_hint("keys hint line", palette, cx)),
+                            .flex_col()
+                            .gap_2()
+                            // A press anywhere in the frame is for the line. The
+                            // window itself takes the focus of a press no one
+                            // claimed, so this one is claimed.
+                            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                window.focus(&focus);
+                                window.prevent_default();
+                            })
+                            .children(attached)
+                            // Why a marked attachment cannot go, by the line it
+                            // keeps from being sent.
+                            .children(reasons.into_iter().map(|why| {
+                                div()
+                                    .text_sm()
+                                    .text_color(palette.warn)
+                                    .child(format!("! {why}"))
+                            }))
+                            .child(self.line.clone())
+                            // The draft stays as typed while the yard is
+                            // reconnecting, with the reason beside the line.
+                            .when(self.reconnecting(), |el| el.child(send_held(palette)))
+                            // The cheatsheet's hint, where `?` is the line's
+                            // text: the keys open it with a click instead.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_end()
+                                    .text_xs()
+                                    .child(keys_hint("keys hint line", palette, cx)),
+                            ),
                     ),
+                ),
             )
     }
 
@@ -22540,7 +22552,8 @@ mod tests {
 
     /// The conversation reads as a column: each mail's name stands over
     /// its sender's group alone, a separator breaks over each day, and at
-    /// 1920 pixels the mail stands 720 wide, centred in the pane.
+    /// 1920 pixels the mail stands 880 wide, centred in the pane, with the
+    /// composer under it in the same column.
     #[gpui::test]
     fn the_conversation_reads_as_a_grouped_column_with_day_separators(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -22585,28 +22598,51 @@ mod tests {
             }
         }
         // At 1920 pixels the mail stands in the reading column: capped at
-        // 720, off both edges of the pane.
+        // 880, off both edges of the pane.
         cx.simulate_resize(gpui::size(px(1920.), px(1080.)));
         let rows = bounds_of(cx, "rows");
         for seq in [12, 13, 14] {
             let text = bounds_of(cx, &format!("text {seq}"));
             assert!(
-                text.size.width <= px(720.),
+                text.size.width <= px(880.),
                 "mail {seq} runs past the column: {text:?}"
             );
             assert!(
-                text.size.width >= px(690.),
+                text.size.width >= px(850.),
                 "mail {seq} stands off the column's width: {text:?}"
             );
             assert!(
-                text.origin.x >= rows.right() + px(300.),
+                text.origin.x >= rows.right() + px(220.),
                 "mail {seq} stands off the column's left: {text:?} in {rows:?}"
             );
             assert!(
-                text.right() <= px(1920.) - px(300.),
+                text.right() <= px(1920.) - px(220.),
                 "mail {seq} stands off the column's right: {text:?}"
             );
         }
+        // The composer stands in the same column: capped at 880 and
+        // centred in the pane as the mail is, so its edges meet the
+        // column's. (The mail's text keeps a gutter on its left, so its
+        // own middle is no measure.)
+        let frame = bounds_of(cx, "composer");
+        assert!(
+            frame.size.width <= px(880.),
+            "the composer runs past the column: {frame:?}"
+        );
+        assert!(
+            frame.size.width >= px(850.),
+            "the composer stands off the column's width: {frame:?}"
+        );
+        let middle = frame.origin.x + frame.size.width / 2.;
+        let pane = (rows.right() + px(1920.)) / 2.;
+        assert!(
+            middle >= pane - px(1.),
+            "the composer stands off the column's middle: {frame:?} in {rows:?}"
+        );
+        assert!(
+            middle <= pane + px(1.),
+            "the composer stands off the column's middle: {frame:?} in {rows:?}"
+        );
     }
 
     /// A conversation of `n` mails from alternating senders, most of
