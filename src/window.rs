@@ -26501,7 +26501,9 @@ yardr.dev
     /// card and the card ends above the Quiet row, at every text size;
     /// a line's track with three beads on one stage holds its headcode
     /// and its "+2" alike. The panel scrolls over its tracks instead of
-    /// squeezing them, so nothing draws over the row below.
+    /// squeezing them, so nothing draws over the row below. With the
+    /// quiet depots unfolded the Quiet row still stands below the card,
+    /// with the quiet tracks under it.
     #[gpui::test]
     fn the_no_line_card_holds_its_headcodes_above_the_quiet_row(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -26518,16 +26520,10 @@ yardr.dev
         cx.simulate_resize(gpui::size(px(616.), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel noline"));
-        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
-            view.update(cx, |v, cx| {
-                let set = Settings {
-                    text,
-                    ..v.settings.clone()
-                };
-                v.set(set, cx)
-            });
-            // One frame, read whole: a redraw per headcode would draw
-            // the window again for each.
+        // One frame, read whole: a redraw per headcode would draw the
+        // window again for each. The card holds its headcodes and ends
+        // above the Quiet row, folded or unfolded alike.
+        let held = |cx: &mut VisualTestContext, text: u8| {
             drawn(cx, "panel");
             let card = bounds_now(cx, "panel noline");
             for bead in ["yd-drifter", "yd-stray"] {
@@ -26555,6 +26551,44 @@ yardr.dev
                 track.top() <= more.top() && more.bottom() <= track.bottom(),
                 "at {text} px the +2 stands off its track: {track:?} {more:?}"
             );
+            quiet
+        };
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            held(cx, text);
+        }
+        // Unfolded, as mckean's shot has it: the Quiet row still
+        // stands below the card, with the quiet tracks under it. The
+        // fold is toggled through the model: the row stands scrolled
+        // out of this narrow window, where no click reaches it.
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| {
+                m.toggle_quiet();
+                Vec::new()
+            })
+        });
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            let quiet = held(cx, text);
+            for track in ["panel track drafts default", "panel track reports default"] {
+                let card = bounds_now(cx, track);
+                assert!(
+                    quiet.bottom() <= card.top(),
+                    "at {text} px unfolded {track} stands over the Quiet row: {quiet:?} {card:?}"
+                );
+            }
         }
     }
 
