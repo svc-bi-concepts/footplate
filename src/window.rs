@@ -12813,7 +12813,10 @@ impl Footplate {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.conversation)
-            .p_4()
+            // Keep the mail's side edges on the composer's 12px margin;
+            // the vertical breathing room stays 16px.
+            .px_3()
+            .py_4()
             .flex()
             .flex_col()
             .items_center()
@@ -25457,13 +25460,18 @@ yardr.dev
             "640 is no narrow window: the pane is {pane:?}"
         );
         let (notice, frame) = (bounds_of(cx, "notice"), bounds_of(cx, "composer"));
+        let head = bounds_of(cx, "head 12");
         assert!(
-            near(notice.left(), frame.left()),
-            "the notice does not start where the frame does: {notice:?}, {frame:?}"
+            near(notice.left(), frame.left()) && near(notice.left(), head.left()),
+            "the notice does not start where the frame and the letters do: {notice:?}, {frame:?}, {head:?}"
         );
         assert!(
             near(notice.right(), frame.right()),
             "the notice does not end where the frame does: {notice:?}, {frame:?}"
+        );
+        assert!(
+            near(notice.right(), head.right()),
+            "the notice does not end where the letters do: {notice:?}, {head:?}"
         );
         assert!(
             notice.size.height > line * 1.5,
