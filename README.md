@@ -211,9 +211,10 @@ in its filter), `keys` (the cheatsheet open over an open card),
 `reactions` (the conversation with the parties' reactions under
 three mails), `reactions-hover` (that conversation with the bar
 of reactions to tap floating over one mail), `reactions-zoom`
-(that bar with the pointer on one emoji) and `notice` (the
+(that bar with the pointer on one emoji), `notice` (the
 conversation with the notice a flows view that did not answer
-leaves under the mail).
+leaves under the mail) and `drawer` (the conversation with the
+bead its chip names open in the drawer beside it).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
@@ -1043,7 +1044,8 @@ its card under "Decided".
 | `x`, on an open card | puts the ask aside |
 | `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them. A secret ask is declined at once, with none |
 | `e`, on a card | expands it to the bead whole, or folds it again |
-| `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone |
+| `esc`, on a card | leaves a decline asked for words, shuts the bead drawer where one is open, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone |
+| a click on a bead's chip in a mail | opens the bead in the drawer beside what is open, which stays as it was; the drawer's Open shows the bead whole, and `esc` shuts the drawer |
 | `?`, on a card, the yard row, Lines or the switcher; a click on "? all keys" | opens the cheatsheet of the open view's keys; `esc` closes it |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
 | `cmd+[` · `cmd+]` (`ctrl` on Linux) | the modes back, forth |

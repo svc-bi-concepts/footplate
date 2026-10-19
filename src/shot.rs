@@ -48,9 +48,10 @@ use crate::yard::Env;
 /// of them away, the yardmaster's conversation naming an ask and two
 /// bead ids, the cheatsheet open over an open card, and the
 /// yardmaster's conversation with the parties' reactions under three
-/// mails, with the bar of reactions to tap floating over one of them, and
-/// the yardmaster's conversation with the notice a flows view that did not
-/// answer leaves under the mail.
+/// mails, with the bar of reactions to tap floating over one of them, the
+/// yardmaster's conversation with the notice a flows view that did not
+/// answer leaves under the mail, and the yardmaster's conversation with
+/// the bead its chip names open in the drawer beside it.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -118,6 +119,7 @@ pub const STATES: &[&str] = &[
     "reactions-hover",
     "reactions-zoom",
     "notice",
+    "drawer",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -1016,6 +1018,35 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        }
+        "drawer" => {
+            // The yardmaster's conversation naming the bead the drawer
+            // shows beside it: yd-zulu travels on the board every state
+            // serves, and is read whole for the drawer, as a click on
+            // its chip reads it.
+            yard.answer(
+                "UserInbox",
+                &json!({"result": {"mail": [
+                    {"seq": 12, "from": "yardmaster", "to": "jo",
+                     "text": "The turn (yd-zulu) is still waiting.",
+                     "read": false},
+                ], "unread": 1, "last": 12, "from": ["yardmaster"]}})
+                .to_string(),
+            );
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": "2026-10-14T08:00:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "The turn (yd-zulu) is still waiting.",
+                     "read": false},
+                    {"seq": 13, "at": "2026-10-14T08:02:00Z", "from": "jo", "to": "yardmaster",
+                     "text": "Then it waits on the grant, as ever.",
+                     "read": false},
+                ]})
+                .to_string(),
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            yard.answer("Bead", &bead_zulu());
         }
         "refs" => {
             // The yardmaster's conversation naming an ask and two bead
@@ -2079,6 +2110,16 @@ mod tests {
                         loaded.flows_notice
                     );
                     assert_eq!(loaded.arrivals_notice, None, "{state}");
+                }
+                "drawer" => {
+                    // The two mails, the first naming the bead the
+                    // drawer shows, which is read whole for it.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 2, "{state}");
+                    assert!(letters[0].text.contains("yd-zulu"), "{state}");
+                    let bead = yard.client().bead("yd-zulu").unwrap();
+                    assert_eq!(bead.title, "Zulu's late turn", "{state}");
                 }
                 "refs" => {
                     // The run ask the first mail names, and the two bead

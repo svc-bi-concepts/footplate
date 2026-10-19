@@ -3735,6 +3735,18 @@ impl Model {
         }
     }
 
+    /// Reads the bead whole when it was not read before: what the
+    /// drawer opens with, without selecting it, as opening the row does.
+    pub fn read_bead(&mut self, bead: &str) -> Vec<Effect> {
+        if self.beads.contains_key(bead) {
+            Vec::new()
+        } else {
+            vec![Effect::Bead {
+                bead: bead.to_string(),
+            }]
+        }
+    }
+
     /// Mail was sent to `to`. It also comes from the stream; reading it
     /// shows it when the stream is lost at this moment, and costs what is
     /// new.
@@ -5803,6 +5815,25 @@ mod tests {
         // A name that is no row changes nothing.
         assert_eq!(m.select(Selected::Conversation("nobody".into())), []);
         assert_eq!(m.selected_conversation(), Some("assembly"));
+    }
+
+    #[test]
+    fn reading_a_bead_reads_it_whole_once_and_selects_nothing() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(
+            m.read_bead("yd-zulu"),
+            [Effect::Bead {
+                bead: "yd-zulu".into()
+            }]
+        );
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
+        m.bead_loaded(Bead {
+            id: "yd-zulu".into(),
+            ..Bead::default()
+        });
+        // It was read: nothing is asked again.
+        assert_eq!(m.read_bead("yd-zulu"), []);
+        assert_eq!(m.selected_conversation(), Some("yardmaster"));
     }
 
     #[test]

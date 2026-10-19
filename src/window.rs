@@ -204,6 +204,22 @@ fn grown(usual: f32) -> Div {
     div().w(rems(usual / 16.)).min_w(px(usual))
 }
 
+/// The bead drawer's width in pixels at the usual text size, drawn
+/// through [`grown`]: fixed, and growing with the text above it, as a
+/// line view's columns do.
+const DRAWER_WIDTH: f32 = 320.;
+
+/// Whether the window `window` pixels wide holds the bead drawer beside
+/// the reading pane: the pane keeps at least the drawer's own width. The
+/// rail is [`RAIL`] pixels, the list 270 at the usual text size and never
+/// over 48 hundredths of the window, as [`Footplate::column`] draws them,
+/// and the drawer its grown width; `rem` is the window's rem in pixels.
+fn drawer_fits(window: Pixels, rem: f32) -> bool {
+    let drawer = DRAWER_WIDTH.max(DRAWER_WIDTH / 16. * rem);
+    let list = (270. * rem / 16.).min(0.48 * f32::from(window));
+    f32::from(window) - RAIL - list - drawer >= drawer
+}
+
 /// How many backlog titles a line view's backlog column lists before
 /// "+N more".
 const BACKLOG_TITLES: usize = 6;
@@ -934,8 +950,9 @@ impl KeysView {
 
 /// Every key the open `view` answers to, each with what it does: the
 /// view's own keys first, then the window's, which answer everywhere.
-/// Named as the footers and the README name them.
-fn keys_for(view: KeysView) -> Vec<(String, String)> {
+/// Named as the footers and the README name them. With the bead drawer
+/// open, the views it stands beside name esc shutting it.
+fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = match view {
         KeysView::Switcher => vec![
             ("↑↓".into(), "move in the list".into()),
@@ -1025,6 +1042,24 @@ fn keys_for(view: KeysView) -> Vec<(String, String)> {
             ("esc".into(), "leaves the way's fields".into()),
         ],
     };
+    // With the bead drawer open, esc shuts it: the views whose reading
+    // pane it stands beside name that key. A card's esc row says it with
+    // the decline, ahead of the card's own leavings; the switcher's esc
+    // leaves the list, the settings shut the drawer as they open, and
+    // the away screen stands in place of the reading pane it shuts from.
+    if drawer {
+        match view {
+            KeysView::Conversation | KeysView::Yard | KeysView::Timetable => {
+                rows.insert(0, ("esc".into(), "shuts the bead drawer".into()));
+            }
+            KeysView::Card => {
+                if let Some(esc) = rows.iter_mut().find(|(key, _)| key == "esc") {
+                    esc.1 = "leaves the decline and shuts the bead drawer, then the words, the pick, then the words".into();
+                }
+            }
+            KeysView::Switcher | KeysView::Settings | KeysView::Away => {}
+        }
+    }
     // The window's keys, which answer in every view.
     rows.extend([
         (
@@ -2397,6 +2432,11 @@ pub struct Footplate {
     back_position: Option<(String, gpui::Point<gpui::Pixels>)>,
     /// The open card's own scroll: mail and notices arriving never move it.
     decision: ScrollHandle,
+    /// The bead the drawer at the window's right shows, if one is open
+    /// there: a bead link's bead, beside what was being read.
+    drawer: Option<String>,
+    /// The drawer's own scroll: the reading pane's never moves it.
+    drawer_scroll: ScrollHandle,
     /// The left list's own scroll: the window never moves it, but the
     /// arrivals shots stand at its end, where the arrivals row is.
     rows: ScrollHandle,
@@ -3023,6 +3063,8 @@ impl Footplate {
             older_at: None,
             back_position: None,
             decision: ScrollHandle::new(),
+            drawer: None,
+            drawer_scroll: ScrollHandle::new(),
             rows: ScrollHandle::new(),
             selection,
             images: HashMap::new(),
@@ -3516,9 +3558,11 @@ impl Footplate {
         // The pointer's mark on a letter is of the yard that is left: a
         // seq alone names a letter, so the yard shown next would have its
         // own mail of that number under the bar. Its emoji's mark goes
-        // with it, as where the open row changes.
+        // with it, as where the open row changes. The bead drawer shuts
+        // with them: its bead is a bead of the yard that is left.
         self.react_hover = None;
         self.emoji_hover = None;
+        self.drawer = None;
         let words = std::mem::take(&mut self.ask_words);
         if !words.is_empty() {
             self.kept_words.insert(self.yard.clone(), words);
@@ -3966,6 +4010,16 @@ impl Footplate {
                             back: None,
                         });
                     }
+                    // The drawer shot opens the bead beside the
+                    // yardmaster's conversation, as a click on its chip
+                    // does: the bead is read whole, and the drawer shows
+                    // it once the call answers. A debug build's alone,
+                    // as above.
+                    #[cfg(debug_assertions)]
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("drawer") {
+                        self.drawer = Some("yd-zulu".into());
+                        effects.extend(model.read_bead("yd-zulu"));
+                    }
                     // The decisions shots stand with the history open; the
                     // filtered one with `docs` typed in its filter, as a
                     // `/` and the word would. A debug build's alone.
@@ -4142,6 +4196,11 @@ impl Footplate {
         if before_sel != after_sel {
             // Another row is open than the one the yard was left on.
             self.returning = None;
+            // A bead open full width shuts the drawer: one bead view
+            // shows.
+            if matches!(&after_sel, Some(Selected::Bead(_))) {
+                self.drawer = None;
+            }
             // The pointer's mark on a letter goes with the row. A letter
             // that is not drawn is told of no leave, so a pointer that
             // goes while the row is away would leave the mark standing,
@@ -6562,9 +6621,25 @@ impl Footplate {
                 self.select(Selected::Decided(bead, ask), window, cx);
             }
             select::RefTarget::Bead { bead } => {
-                self.select(Selected::Bead(bead), window, cx);
+                self.open_bead(bead, window, cx);
             }
         }
+    }
+
+    /// Opens the bead a mail names: in the drawer beside the reading
+    /// pane, which stays as it was, or full width where the window holds
+    /// no drawer beside it.
+    fn open_bead(&mut self, bead: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !drawer_fits(window.viewport_size().width, f32::from(self.settings.rem())) {
+            return self.select(Selected::Bead(bead), window, cx);
+        }
+        // Another bead than the one the drawer shows starts at its top;
+        // the same one stays where it stood.
+        if self.drawer.as_ref() != Some(&bead) {
+            self.drawer_scroll.scroll_to_item(0);
+        }
+        self.drawer = Some(bead.clone());
+        self.change(cx, |m| m.read_bead(&bead));
     }
 
     /// Copies what is selected of the messages. The line copies its own
@@ -6894,6 +6969,14 @@ impl Footplate {
             window.focus(&self.focus.clone());
             return;
         }
+        // Esc shuts the bead drawer: the focus is in it or the reading
+        // pane from here on, past the overlays, the away fields, the
+        // decline and the filter above, and ahead of the card's own
+        // leavings below.
+        if self.drawer.take().is_some() {
+            cx.notify();
+            return;
+        }
         let Some((bead, ask)) = self.card() else {
             return;
         };
@@ -6994,9 +7077,11 @@ impl Footplate {
         // a pointer that leaves one is told of no leave. The mark goes with
         // the sheet, or the bar would wait over that letter when the
         // conversation shows again. Its emoji's mark goes with it, as where
-        // the open row changes.
+        // the open row changes. The bead drawer shuts with them: the sheet
+        // stands in place of the reading pane it stands beside.
         self.react_hover = None;
         self.emoji_hover = None;
+        self.drawer = None;
         // A card under the settings is not in view, and neither is its
         // field: nothing typed of a secret waits there.
         self.forget_secret(cx);
@@ -10160,7 +10245,7 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut list = div().flex().flex_col().gap_1();
-        for (key, does) in keys_for(view) {
+        for (key, does) in keys_for(view, self.drawer.is_some()) {
             list = list.child(
                 div()
                     .flex()
@@ -12847,9 +12932,9 @@ impl Footplate {
                 self.talk_flow(model, line, palette, cx).into_any_element()
             }
             Some(Selected::NoLine) => self.talk_no_line(model, palette, cx).into_any_element(),
-            Some(Selected::Bead(bead)) => {
-                self.talk_bead(model, bead, palette, cx).into_any_element()
-            }
+            Some(Selected::Bead(bead)) => self
+                .talk_bead(model, bead, &self.decision, palette, cx)
+                .into_any_element(),
             Some(Selected::Decision(bead)) => self
                 .talk_decision(model, bead, palette, cx)
                 .into_any_element(),
@@ -14801,11 +14886,14 @@ impl Footplate {
     /// the body, then the notes newest last. Its asks are the Decisions
     /// rows' job: one line counts them and links nothing. A quiet back
     /// link naming where it came from leads there, and Open takes the
-    /// bead's page to the browser where the web view answers.
+    /// bead's page to the browser where the web view answers. Full width
+    /// in the reading pane and in the drawer beside it alike; `scroll`
+    /// is whose scroll it moves.
     fn talk_bead(
         &self,
         model: &Model,
         bead: &str,
+        scroll: &ScrollHandle,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -14944,7 +15032,7 @@ impl Footplate {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .track_scroll(&self.decision)
+            .track_scroll(scroll)
             .p_4()
             .flex()
             .flex_col()
@@ -14976,6 +15064,94 @@ impl Footplate {
                         .child(format!("! {}", model.notice)),
                 )
             })
+    }
+
+    /// The bead drawer at the window's right: one bead beside what is
+    /// open, as [`Footplate::talk_bead`] draws it, with its own head
+    /// above — the bead's id, Open for the bead full width, and its × —
+    /// and the cheatsheet's hint below. None where no bead is open in
+    /// it. The reading pane narrows to make room; nothing overlaps it.
+    fn talk_drawer(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let bead = self.drawer.clone()?;
+        let full = bead.clone();
+        Some(
+            grown(DRAWER_WIDTH)
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(palette.side)
+                .border_l_1()
+                .border_color(palette.line)
+                .id("drawer")
+                .debug_selector(|| "drawer".to_string())
+                .child(
+                    div()
+                        .flex_none()
+                        .p_3()
+                        .border_b_1()
+                        .border_color(palette.line)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(bead.clone()),
+                        )
+                        .child(
+                            small_button("Open".to_string(), palette)
+                                .id("drawer open")
+                                .debug_selector(|| "drawer open".to_string())
+                                .text_color(palette.text_accent)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.select(Selected::Bead(full.clone()), window, cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("drawer close")
+                                .debug_selector(|| "drawer close".to_string())
+                                .text_xl()
+                                .text_color(palette.faint)
+                                .cursor_pointer()
+                                .child("×")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.drawer = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                // The bead fills what the head and the hint leave: its pane
+                // is full height, so it stands in a wrapper that flexes.
+                .child(div().flex_1().min_h_0().child(self.talk_bead(
+                    model,
+                    &bead,
+                    &self.drawer_scroll,
+                    palette,
+                    cx,
+                )))
+                .child(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .text_xs()
+                        .child(keys_hint("keys hint drawer", palette, cx)),
+                ),
+        )
     }
 
     /// One arrival's bead whole: its body, and its notes newest last,
@@ -16563,7 +16739,8 @@ impl Render for Footplate {
                 .children(self.first_run.clone()),
             (Some(_), Some(model)) if self.reconnecting() => root
                 .child(self.list(model, palette, cx))
-                .child(self.talk(model, palette, cx)),
+                .child(self.talk(model, palette, cx))
+                .children(self.talk_drawer(model, palette, cx)),
             (Some(why), _) => match &self.first_run {
                 Some(first_run) => root.child(first_run.clone()),
                 None => root.child(self.away(why, palette, cx)),
@@ -16591,7 +16768,8 @@ impl Render for Footplate {
                 .children(self.first_run.clone()),
             (None, Some(model)) => root
                 .child(self.list(model, palette, cx))
-                .child(self.talk(model, palette, cx)),
+                .child(self.talk(model, palette, cx))
+                .children(self.talk_drawer(model, palette, cx)),
             (None, None) => root,
         };
         // The switcher's list stands over whatever shows, to the right
@@ -19007,7 +19185,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_click_on_a_bead_chip_opens_the_bead(cx: &mut TestAppContext) {
+    fn a_click_on_a_bead_chip_opens_the_bead_in_the_drawer(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_three());
@@ -19015,11 +19193,415 @@ mod tests {
         let mail = "over in bead-a now";
         mails(&yard, &[mail]);
         let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        // The chip opens the bead beside the conversation, which stays
+        // open on its row, in its mode, with its scroll.
+        let (rows, conversation) =
+            view.read_with(cx, |v, _| (v.rows.offset(), v.conversation.offset()));
+        click(cx, 12, mail, 8, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Chat);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.rows.offset(), rows);
+            assert_eq!(v.conversation.offset(), conversation);
+        });
+        wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+        assert!(drawn(cx, "drawer"));
+        assert!(drawn(cx, "drawer open"));
+        assert!(drawn(cx, "drawer close"));
+        assert!(drawn(cx, "bead title bead-a"));
+    }
+
+    /// The bead the drawer shows, if one is open there.
+    fn drawer_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
+        view.read_with(cx, |v, _| v.drawer.clone())
+    }
+
+    /// A yard whose mail can name two beads, with both served whole:
+    /// yd-zulu from the board and bead-a from the open asks.
+    fn a_yard_of_two_beads(yard: &Yard) {
+        a_yard_of_jo(yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
+        yard.answer("UserAsks", &asks_three());
+        yard.answer_for("Bead", "bead", "yd-zulu", &bead_zulu());
+        yard.answer_for("Bead", "bead", "bead-a", &bead_three());
+    }
+
+    /// A click on another bead's chip while the drawer is open shows that
+    /// bead in it: one bead at a time, no stack. The conversation stays
+    /// open throughout.
+    #[gpui::test]
+    fn a_second_bead_chip_replaces_the_drawer_s_bead(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_two_beads(&yard);
+        let mail = "over in bead-a after yd-zulu";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        click(cx, 12, mail, 10, 1.);
+        wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        assert!(drawn(cx, "bead title bead-a"));
+        click(cx, 12, mail, 24, 1.);
+        wait(cx, "yd-zulu read whole", |cx| {
+            has_bead(&view, cx, "yd-zulu")
+        });
+        assert_eq!(drawer_of(&view, cx), Some("yd-zulu".to_string()));
+        assert!(drawn(cx, "bead title yd-zulu"));
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+    }
+
+    /// The drawer's Open shows its bead full width, as a chip did, and
+    /// shuts the drawer.
+    #[gpui::test]
+    fn the_drawer_s_open_shows_the_bead_full_width_and_shuts_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_two_beads(&yard);
+        let mail = "over in bead-a after yd-zulu";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        click(cx, 12, mail, 24, 1.);
+        wait(cx, "yd-zulu read whole", |cx| {
+            has_bead(&view, cx, "yd-zulu")
+        });
+        assert_eq!(drawer_of(&view, cx), Some("yd-zulu".to_string()));
+        click_on(cx, "drawer open");
+        wait(cx, "the bead full width", |cx| {
+            open_row(&view, cx) == Some(Selected::Bead("yd-zulu".into()))
+        });
+        assert_eq!(drawer_of(&view, cx), None);
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Timetable);
+        assert!(drawn(cx, "bead back"));
+    }
+
+    /// Esc shuts the drawer with the focus in the line or in the window's
+    /// keys, on a conversation or a card, and so does its ×. What was
+    /// open stays open.
+    #[gpui::test]
+    fn esc_and_the_drawer_s_close_button_shut_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_two_beads(&yard);
+        let mail = "over in bead-a after yd-zulu";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        // Esc with the focus in the line shuts it; the conversation stays.
+        click(cx, 12, mail, 10, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(drawer_of(&view, cx), None);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+
+        // Esc with the window's keys shuts it too.
+        click(cx, 12, mail, 10, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        view.update_in(cx, |v, window, _| window.focus(&v.focus.clone()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(drawer_of(&view, cx), None);
+
+        // The × shuts it; the conversation stays.
+        click(cx, 12, mail, 10, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        click_on(cx, "drawer close");
+        cx.run_until_parked();
+        assert_eq!(drawer_of(&view, cx), None);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+
+        // On a card the drawer stands beside, esc shuts it and the card
+        // stays open.
+        click(cx, 12, mail, 10, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-a".into()), window, cx)
+        });
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(drawer_of(&view, cx), None);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Decision("bead-a".into()))
+        );
+    }
+
+    /// The cheatsheet lists esc shutting the drawer where one is open, and
+    /// the drawer carries the cheatsheet's hint, as the other views do.
+    /// Esc shuts the cheatsheet above it first, and the drawer stands.
+    #[gpui::test]
+    fn the_cheatsheet_lists_the_drawer_s_key(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_two_beads(&yard);
+        let mail = "over in bead-a after yd-zulu";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        // With no drawer the conversation names no esc.
+        click_on(cx, "keys hint line");
+        wait(cx, "the cheatsheet", |cx| {
+            view.read_with(cx, |v, _| v.show_keys)
+        });
+        assert!(!drawn(cx, "keys row esc"));
+        cx.simulate_keystrokes("escape");
+        wait(cx, "the cheatsheet shut", |cx| {
+            !view.read_with(cx, |v, _| v.show_keys)
+        });
+
+        // With one the drawer's hint opens the cheatsheet, which names
+        // esc shutting it.
+        click(cx, 12, mail, 10, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        assert!(drawn(cx, "keys hint drawer"));
+        click_on(cx, "keys hint drawer");
+        wait(cx, "the cheatsheet", |cx| {
+            drawn(cx, "keys") && view.read_with(cx, |v, _| v.show_keys)
+        });
+        assert!(drawn(cx, "keys row esc"));
+        cx.simulate_keystrokes("escape");
+        wait(cx, "the cheatsheet shut", |cx| {
+            !view.read_with(cx, |v, _| v.show_keys)
+        });
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+
+        // The rows it lists: esc shuts the drawer in the views whose
+        // reading pane it stands beside, with the card's own leavings
+        // after it, and nowhere else.
+        let does = |view: KeysView, drawer: bool| {
+            keys_for(view, drawer)
+                .into_iter()
+                .filter(|(key, _)| key == "esc")
+                .map(|(_, does)| does)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(does(KeysView::Conversation, false), Vec::<String>::new());
+        assert_eq!(
+            does(KeysView::Conversation, true),
+            ["shuts the bead drawer"]
+        );
+        assert_eq!(does(KeysView::Yard, true), ["shuts the bead drawer"]);
+        assert_eq!(does(KeysView::Timetable, true), ["shuts the bead drawer"]);
+        assert_eq!(
+            does(KeysView::Card, true),
+            [
+                "leaves the decline and shuts the bead drawer, then the words, the pick, then the words"
+            ]
+        );
+        for view in [KeysView::Switcher, KeysView::Settings, KeysView::Away] {
+            assert_eq!(does(view, false), does(view, true), "{view:?}");
+        }
+    }
+
+    /// Where the window holds no drawer beside the reading pane, a bead's
+    /// chip opens the bead full width, as it did.
+    #[gpui::test]
+    fn a_bead_chip_opens_full_width_where_no_drawer_fits(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        let mail = "over in bead-a now";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        assert!(drawn(cx, "text 12"));
 
         click(cx, 12, mail, 8, 1.);
+        assert_eq!(drawer_of(&view, cx), None);
         assert_eq!(open_row(&view, cx), Some(Selected::Bead("bead-a".into())));
         assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Timetable);
         wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+        assert!(drawn(cx, "bead back"));
+    }
+
+    /// The drawer holds the window's right at its grown width, and the
+    /// reading pane narrows to make room: the mail stands wholly left of
+    /// it. Its width grows with the text and never under 320.
+    #[gpui::test]
+    fn the_drawer_narrows_the_reading_pane_and_holds_its_width(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_two_beads(&yard);
+        let mail = "over in bead-a after yd-zulu";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        let window = cx.update(|window, _| window.viewport_size());
+        let wide = bounds_of(cx, "composer");
+
+        click(cx, 12, mail, 24, 1.);
+        wait(cx, "yd-zulu read whole", |cx| {
+            has_bead(&view, cx, "yd-zulu")
+        });
+        assert_eq!(drawer_of(&view, cx), Some("yd-zulu".to_string()));
+        // A redraw per bound would draw this window for each: one frame,
+        // read whole.
+        assert!(drawn(cx, "drawer"));
+        let (drawer, composer, text) = (
+            bounds_now(cx, "drawer"),
+            bounds_now(cx, "composer"),
+            bounds_now(cx, "text 12"),
+        );
+        assert!(
+            (f32::from(drawer.size.width) - DRAWER_WIDTH).abs() < 1.,
+            "the drawer is no 320 pixels: {drawer:?}"
+        );
+        assert!(
+            (drawer.right() - window.width).abs() < px(1.),
+            "the drawer stands off the window's right: {drawer:?} in {window:?}"
+        );
+        assert!(
+            composer.size.width < wide.size.width,
+            "the pane did not narrow: {composer:?} was {wide:?}"
+        );
+        assert!(
+            text.right() <= drawer.left() + px(1.),
+            "the mail runs under the drawer: {text:?} over {drawer:?}"
+        );
+
+        // Larger text grows it, and smaller never narrows it under 320.
+        for (text_size, width) in [(20u8, 320. / 16. * (16. * 20. / 14.)), (11u8, 320.)] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text: text_size,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            assert!(drawn(cx, "drawer"));
+            let drawer = bounds_now(cx, "drawer");
+            assert!(
+                (f32::from(drawer.size.width) - width).abs() < 1.,
+                "at {text_size} px the drawer is no {width}: {drawer:?}"
+            );
+        }
+    }
+
+    /// The drawer shuts on a yard switch and on the settings, as the bar
+    /// of reactions does.
+    #[gpui::test]
+    fn the_drawer_shuts_on_a_yard_switch_and_on_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        near.answer("Arrivals", &arrivals_board());
+        near.answer("Flows", &flows_board());
+        near.answer_for("Bead", "bead", "yd-zulu", &bead_zulu());
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &Told::new(), true, cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        let open = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.update_in(cx, |v, window, cx| {
+                v.open_reference(
+                    select::RefTarget::Bead {
+                        bead: "yd-zulu".into(),
+                    },
+                    window,
+                    cx,
+                )
+            });
+        };
+
+        open(&view, cx);
+        wait(cx, "yd-zulu read whole", |cx| {
+            has_bead(&view, cx, "yd-zulu")
+        });
+        assert_eq!(drawer_of(&view, cx), Some("yd-zulu".to_string()));
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+        assert_eq!(drawer_of(&view, cx), None);
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+
+        open(&view, cx);
+        assert_eq!(drawer_of(&view, cx), Some("yd-zulu".to_string()));
+        view.update_in(cx, |v, window, cx| v.switch_to("second home", window, cx));
+        wait(cx, "the second home's conversation", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(drawer_of(&view, cx), None);
+    }
+
+    /// The drawer scrolls on its own handle: moving it moves neither the
+    /// reading pane's card nor the card it.
+    #[gpui::test]
+    fn the_drawer_scrolls_on_its_own_handle(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_of_notes(60));
+        let mail = "over in bead-a now";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+        let offsets = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                (v.drawer_scroll.offset().y, v.decision.offset().y)
+            })
+        };
+
+        click(cx, 12, mail, 8, 1.);
+        wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        assert_eq!(offsets(&view, cx), (px(0.), px(0.)));
+        // Down over the drawer's asks line moves the drawer past its
+        // top, and the reading pane's scroll stands.
+        scroll_on(cx, "bead asks bead-a", gpui::point(px(0.), px(-600.)));
+        let (drawer, decision) = offsets(&view, cx);
+        assert!(drawer < px(0.), "the drawer did not scroll: {drawer:?}");
+        assert_eq!(decision, px(0.));
+
+        // The card the drawer stands beside moves on its own: expanded
+        // over sixty notes it scrolls, and the drawer stands.
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Decision("bead-a".into()), window, cx)
+        });
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        click_on(cx, "expand bead-a 3");
+        wait(cx, "the card expanded", |cx| {
+            expanded_of(&view, cx, "bead-a", 3)
+        });
+        scroll_on(cx, "expand bead-a 3", gpui::point(px(0.), px(-600.)));
+        let (stood, moved) = offsets(&view, cx);
+        assert!(moved < px(0.), "the card did not scroll: {moved:?}");
+        assert_eq!(stood, drawer);
+    }
+
+    /// The drawer fits where the reading pane keeps at least its own
+    /// width: from 974 pixels up at the usual size, and never where the
+    /// text grows both past the window.
+    #[test]
+    fn the_drawer_fits_where_the_pane_keeps_its_width() {
+        assert!(drawer_fits(px(1280.), 16.));
+        assert!(drawer_fits(px(974.), 16.));
+        assert!(!drawer_fits(px(973.), 16.));
+        assert!(!drawer_fits(px(616.), 16.));
+        assert!(!drawer_fits(px(1280.), 16. * 20. / 14.));
+        assert!(drawer_fits(px(974.), 16. * 11. / 14.));
     }
 
     #[gpui::test]
@@ -25262,7 +25844,7 @@ yardr.dev
     #[test]
     fn the_cheatsheet_names_every_key_of_the_open_view() {
         let rows = |view: KeysView| {
-            keys_for(view)
+            keys_for(view, false)
                 .into_iter()
                 .map(|(key, _)| key)
                 .collect::<Vec<_>>()
