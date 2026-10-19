@@ -18,13 +18,14 @@ use gpui::{
 };
 
 use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
-use crate::api::{Flow, FlowBead, FlowStage};
+use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, ArrivalGroup, AskPreview, DecidedDetail, DecidedEntry,
     DecidedFold, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode,
-    Model, News, Outcome, Route, Row, Selected, Target, Top, late_line, waits_on_you, you_first,
+    Model, News, Outcome, Route, Row, Selected, Target, Top, backlog_count, late_line, short_bead,
+    waits_on_you, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -133,6 +134,14 @@ const RAIL_TILE: f32 = 52.;
 
 /// A rail label's size in pixels, fixed with its tile.
 const RAIL_LABEL: f32 = 10.;
+
+/// The panel's fixed cells in pixels, drawn once: the name column, the
+/// backlog count, one stage's cell, and the wide cell of the beads with
+/// no line. Stages align by place because every cell is this wide.
+const PANEL_NAME: f32 = 120.;
+const PANEL_BACKLOG: f32 = 52.;
+const PANEL_STAGE: f32 = 92.;
+const PANEL_NO_LINE: f32 = 240.;
 
 /// The key that is cmd on macOS and ctrl elsewhere, as the hints name it.
 const SECONDARY: &str = if cfg!(target_os = "macos") {
@@ -484,6 +493,38 @@ fn quiet_head(open: bool, quiet: usize) -> String {
     format!("{} Quiet · {}", if open { "▾" } else { "▸" }, quiet)
 }
 
+/// What the panel's folded Quiet says: folded or open, naming the
+/// quiet lines, with nothing in transit under them.
+fn panel_quiet_head(open: bool, names: &[&str]) -> String {
+    format!(
+        "{} Quiet · {} · nothing in transit",
+        if open { "▾" } else { "▸" },
+        names.join(", ")
+    )
+}
+
+/// The track through a stage's cell: a 1-pixel line in the border
+/// colour, stopping short of each stage boundary for the insulated
+/// joint, dashed where people handle the stage.
+fn panel_track_line(human: bool, palette: Palette) -> Div {
+    match human {
+        false => div().h_px().bg(palette.line).mx(px(2.)).my_1(),
+        true => {
+            let mut dashes = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .mx(px(2.))
+                .my_1();
+            for _ in 0..9 {
+                dashes = dashes.child(div().h_px().w(px(6.)).flex_none().bg(palette.line));
+            }
+            dashes
+        }
+    }
+}
+
 /// What a stage's head says stands on it: the number with "bead".
 fn bead_words(beads: usize) -> String {
     match beads {
@@ -497,6 +538,20 @@ fn flow_words(flows: usize) -> String {
     match flows {
         1 => "1 flow".to_string(),
         flows => format!("{flows} flows"),
+    }
+}
+
+/// What the bead's quiet back link names: where it was opened from —
+/// the panel or the departures board, the line, or No line.
+fn bead_back_name(back: &Selected, departures: bool) -> String {
+    match back {
+        Selected::Arrivals => match departures {
+            true => "departures".to_string(),
+            false => "panel".to_string(),
+        },
+        Selected::Line(line) => line.clone(),
+        Selected::NoLine => "no line".to_string(),
+        _ => model::ARRIVALS.to_string(),
     }
 }
 
@@ -539,6 +594,44 @@ fn remark_color(remark: &str, tone: &str, me: &str, palette: Palette) -> Rgba {
         palette.warn
     } else {
         palette.faint
+    }
+}
+
+/// A stage's wait light as a dot: red for fault, rust for turn, and no
+/// dot where neither burns. The line view draws it as served; the panel
+/// draws it only where a bead stands on the stage.
+fn lamp_dot(lamp: &str, selector: String, palette: Palette) -> Option<Div> {
+    let color = match lamp {
+        "fault" => palette.warn,
+        "turn" => palette.accent,
+        _ => return None,
+    };
+    Some(
+        div()
+            .debug_selector(move || selector.clone())
+            .size(rems(0.5))
+            .rounded_full()
+            .bg(color)
+            .flex_none(),
+    )
+}
+
+/// A headcode's colour on the panel, for the person `me` reads as: a
+/// bead being worked reads in the text colour (with the running dot
+/// beside it), a held or stalled bead in the error red, and a wait on
+/// the reader in the waiting rust. Working stands first, whatever the
+/// stage's lamp says; a blocked or late bead stands plain in the text
+/// colour, its reason in words one zoom in. A wait for someone else is
+/// not theirs to answer, so it never takes the accent.
+fn headcode_color(working: bool, remark: &str, tone: &str, me: &str, palette: Palette) -> Rgba {
+    if working {
+        palette.text
+    } else if tone == "red" {
+        palette.warn
+    } else if waits_on_you(remark, me) {
+        palette.text_accent
+    } else {
+        palette.text
     }
 }
 
@@ -1643,6 +1736,9 @@ struct Place {
     texts: HashSet<(String, u64)>,
     decided_expanded: bool,
     quiet_expanded: bool,
+    /// Which arrivals view stood: the departures board where true, the
+    /// panel where false, as the head's toggle sets it.
+    departures: bool,
     /// The history's chip and the folded rows standing open, as the
     /// folded history itself is kept.
     decided_chip: Option<Outcome>,
@@ -3202,6 +3298,7 @@ impl Footplate {
             kept.row(mode),
             kept.decided_expanded,
             kept.quiet_expanded,
+            kept.departures,
         );
         model.expand(&kept.expanded);
         model.show_texts(&kept.texts);
@@ -3469,6 +3566,7 @@ impl Footplate {
                         kept.row(mode).or(shot),
                         kept.decided_expanded,
                         kept.quiet_expanded,
+                        kept.departures,
                     ),
                 };
                 let notices: Vec<String> = [arrivals_notice, flows_notice]
@@ -3994,6 +4092,7 @@ impl Footplate {
         kept.texts = model.map(|m| m.texts().clone()).unwrap_or_default();
         kept.decided_expanded = model.is_some_and(Model::decided_expanded);
         kept.quiet_expanded = model.is_some_and(Model::quiet_expanded);
+        kept.departures = model.is_some_and(Model::departures);
         kept.decided_chip = model.and_then(|m| m.decided_chip());
         kept.decided_folds = model.map(|m| m.decided_folds().clone()).unwrap_or_default();
         kept
@@ -10027,6 +10126,15 @@ impl Footplate {
         });
     }
 
+    /// The arrivals head's toggle sets which view stands: the
+    /// departures board where true, the panel where false.
+    fn set_departures(&mut self, departures: bool, cx: &mut Context<Self>) {
+        self.change(cx, |m| {
+            m.set_departures(departures);
+            Vec::new()
+        });
+    }
+
     /// The away screen's first line where the yard was reached before and
     /// is not now: which yard, and why in a word or two.
     fn away_why(&self) -> Option<String> {
@@ -12560,6 +12668,9 @@ impl Footplate {
     /// each row opening the bead's details. The head carries the
     /// complete travelling total, and where the board's rows are capped
     /// a quiet last line says how many of them show.
+    /// The arrivals pane: the panel of tracks, or the departures
+    /// board under the head's toggle. The head carries the travelling
+    /// words, the panel's summary where it stands, and the toggle.
     fn talk_arrivals(
         &self,
         model: &Model,
@@ -12567,7 +12678,37 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
-        let head = div()
+        let head = self.arrivals_head(model, palette, cx);
+        let body = match model.departures() {
+            true => self.departures_board(model, palette, cx).into_any_element(),
+            false => self.panel(model, palette, cx).into_any_element(),
+        };
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(body)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// The arrivals pane's head: the title with the Panel/Departures
+    /// toggle at its right, then the travelling words and the panel's
+    /// summary where it stands. The words stand full-width under the
+    /// title's row, so the summary holds one line down to the floor.
+    fn arrivals_head(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
             .p_3()
             .border_b_1()
             .border_color(palette.line)
@@ -12575,18 +12716,159 @@ impl Footplate {
             .flex_col()
             .child(
                 div()
-                    .id("arrivals head")
-                    .debug_selector(|| "arrivals head".to_string())
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .tooltip(|_, cx| cx.new(|_| RailTip(Self::ARRIVALS_TIP.to_string())).into())
-                    .child("arrivals"),
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("arrivals head")
+                            .debug_selector(|| "arrivals head".to_string())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .tooltip(|_, cx| {
+                                cx.new(|_| RailTip(Self::ARRIVALS_TIP.to_string())).into()
+                            })
+                            .child("arrivals"),
+                    )
+                    .child(self.arrivals_toggle(model, palette, cx)),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(palette.faint)
                     .child(format!("{} · all lines", model.arrivals_row().line)),
+            )
+            .children(self.panel_summary(model, palette, cx))
+    }
+
+    /// The head's Panel/Departures toggle: two quiet words, the open
+    /// view in the text colour and the other faint, each opening its
+    /// view.
+    fn arrivals_toggle(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let departures = model.departures();
+        let mut toggle = div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .flex_none()
+            .pt(px(2.));
+        toggle = toggle.child(self.toggle_word("Panel", false, !departures, palette, cx));
+        toggle = toggle.child(self.toggle_word("Departures", true, departures, palette, cx));
+        toggle
+    }
+
+    /// One word of the arrivals toggle: in the text colour where its
+    /// view stands, faint otherwise, opening its view on a click.
+    fn toggle_word(
+        &self,
+        word: &'static str,
+        departures: bool,
+        open: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let what = format!("arrivals {}", word.to_lowercase());
+        div()
+            .id(SharedString::from(what.clone()))
+            .debug_selector(move || what.clone())
+            .text_sm()
+            .text_color(match open {
+                true => palette.text,
+                false => palette.faint,
+            })
+            .when(open, |el| el.font_weight(FontWeight::SEMIBOLD))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.set_departures(departures, cx)))
+            .child(word)
+    }
+
+    /// The panel's summary words: how many beads are being worked, wait
+    /// on the reader, and are held, each where any are, in quiet words.
+    /// The waiting words open the decisions mode, as the board's banner
+    /// count does. None where nothing is worked, waited or held, and
+    /// never on the departures board, whose banner counts the waits.
+    fn panel_summary(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        if model.departures() {
+            return None;
+        }
+        let working = model.working_count();
+        let waiting = model.waiting_on_you().len();
+        let held = model.held_count();
+        if working == 0 && waiting == 0 && held == 0 {
+            return None;
+        }
+        let mut parts: Vec<AnyElement> = Vec::new();
+        if working > 0 {
+            parts.push(
+                div()
+                    .text_color(palette.text)
+                    .child(format!("{working} working"))
+                    .into_any_element(),
             );
+        }
+        if waiting > 0 {
+            parts.push(
+                div()
+                    .id("panel waits")
+                    .debug_selector(|| "panel waits".to_string())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette.text_accent)
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.set_mode(Mode::Decisions, window, cx)
+                        }),
+                    )
+                    .child(format!("{waiting} waiting on you"))
+                    .into_any_element(),
+            );
+        }
+        if held > 0 {
+            parts.push(
+                div()
+                    .text_color(palette.faint)
+                    .child(format!("{held} held"))
+                    .into_any_element(),
+            );
+        }
+        let mut line = div()
+            .debug_selector(|| "panel summary".to_string())
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .text_xs();
+        for (n, part) in parts.into_iter().enumerate() {
+            if n > 0 {
+                line = line.child(div().text_color(palette.faint).child("·"));
+            }
+            line = line.child(part);
+        }
+        Some(line)
+    }
+
+    /// The departures board under the toggle: the served rows under
+    /// their platform, with the waits banner and the cap's honest line,
+    /// as the arrivals pane drew them before the panel.
+    fn departures_board(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let mono = select::mono(cx);
         let mut list = div()
             .id("arrivals")
@@ -12622,19 +12904,482 @@ impl Footplate {
                     .child(format!("{shown} of {travelling} shown")),
             );
         }
-        pane.children(self.reconnect_strip(palette))
-            .child(head)
-            .child(list)
-            .when(!model.notice.is_empty(), |el| {
-                el.child(
-                    div()
-                        .px_4()
-                        .py_1()
-                        .text_sm()
-                        .text_color(palette.warn)
-                        .child(format!("! {}", model.notice)),
-                )
+        list
+    }
+
+    /// The arrivals panel: every travelling flow one straight track on
+    /// the fixed grid — the name cell, the backlog count, a cell per
+    /// stage in travel order — the Elsewhere stubs, the beads with no
+    /// line as their own track, and the quiet tracks folded to one row.
+    /// The geography never re-lays itself out: past the pane's edge it
+    /// scrolls, sideways over the stages and down over the tracks.
+    fn panel(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mono = select::mono(cx);
+        let mut body = div()
+            .id("panel")
+            .debug_selector(|| "panel".to_string())
+            .flex_1()
+            .min_h_0()
+            .overflow_x_scroll()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col();
+        let mut empty = true;
+        for depot in model.depots().iter().filter(|depot| depot.travelling > 0) {
+            empty = false;
+            body = body.child(self.panel_depot(depot, mono.clone(), palette, cx));
+        }
+        if !model.unassigned().is_empty() {
+            empty = false;
+            body = body.child(self.panel_no_line(model, mono.clone(), palette, cx));
+        }
+        if model.depots().iter().any(|depot| depot.travelling == 0) {
+            empty = false;
+            body = body.child(self.panel_quiet(model, mono.clone(), palette, cx));
+        }
+        if empty {
+            body = body.child(div().text_color(palette.faint).child("None in transit."));
+        }
+        body
+    }
+
+    /// One depot's rows on the panel: its error where its flows could
+    /// not be read, one track per flow in the served order, and the
+    /// Elsewhere stub where beads stand there.
+    fn panel_depot(
+        &self,
+        depot: &FlowDepot,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut rows = div().flex().flex_col();
+        if !depot.error.is_empty() {
+            rows = rows.child(self.panel_words(depot, depot.error.clone(), palette, cx));
+        }
+        for flow in &depot.flows {
+            rows = rows.child(self.panel_track(depot, flow, mono.clone(), palette, cx));
+        }
+        if depot.flows.is_empty() && depot.error.is_empty() && depot.elsewhere.is_empty() {
+            rows = rows.child(self.panel_words(depot, "None in transit.".into(), palette, cx));
+        }
+        if !depot.elsewhere.is_empty() {
+            rows = rows.child(self.panel_elsewhere(depot, mono, palette, cx));
+        }
+        rows
+    }
+
+    /// One depot's row where its flows draw no track: the name cell
+    /// and faint words where its stages would stand — the error where
+    /// its flows could not be read, else that none is in transit.
+    fn panel_words(
+        &self,
+        depot: &FlowDepot,
+        words: String,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let name = depot.name.clone();
+        div()
+            .debug_selector({
+                let name = name.clone();
+                move || format!("panel words {name}")
             })
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(palette.line)
+            .child(self.panel_name(
+                name.clone(),
+                String::new(),
+                Selected::Line(name.clone()),
+                format!("panel name {name}"),
+                palette,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .py_2()
+                    .px_2()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(words),
+            )
+    }
+
+    /// One track: the name cell, the backlog count, and a cell per
+    /// stage but the backlog's, left to right in travel order.
+    fn panel_track(
+        &self,
+        depot: &FlowDepot,
+        flow: &Flow,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let second = match flow.flow_type.is_empty() {
+            true => flow.name.clone(),
+            false => format!("{} · {}", flow.name, flow.flow_type),
+        };
+        let mut track = div()
+            .debug_selector({
+                let (depot, flow) = (depot.name.clone(), flow.name.clone());
+                move || format!("panel track {depot} {flow}")
+            })
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(palette.line)
+            .min_h(px(64.))
+            .child(self.panel_name(
+                depot.name.clone(),
+                second,
+                Selected::Line(depot.name.clone()),
+                format!("panel name {} {}", depot.name, flow.name),
+                palette,
+                cx,
+            ))
+            .child(
+                div()
+                    .debug_selector({
+                        let (depot, flow) = (depot.name.clone(), flow.name.clone());
+                        move || format!("panel backlog {depot} {flow}")
+                    })
+                    .w(px(PANEL_BACKLOG))
+                    .flex_none()
+                    .bg(palette.side)
+                    .border_l_1()
+                    .border_color(palette.line)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .py_2()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(backlog_count(flow).to_string()),
+                    )
+                    .child(div().text_xs().text_color(palette.faint).child("backlog")),
+            );
+        for stage in flow.stages.iter().filter(|stage| stage.stage != "backlog") {
+            track = track.child(self.panel_cell(depot, flow, stage, mono.clone(), palette, cx));
+        }
+        track
+    }
+
+    /// One track's name cell: the depot's name with the flow's name
+    /// and type under it, opening the line. Fixed width, as every
+    /// cell is.
+    fn panel_name(
+        &self,
+        first: String,
+        second: String,
+        to: Selected,
+        what: String,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .id(SharedString::from(what.clone()))
+            .debug_selector(move || what.clone())
+            .w(px(PANEL_NAME))
+            .flex_none()
+            .py_2()
+            .pr_2()
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.hover))
+            .on_click(cx.listener(move |this, _, window, cx| this.select(to.clone(), window, cx)))
+            .child(
+                div()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(first),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .child(second),
+            )
+    }
+
+    /// One stage's cell: its name with the lamp where one burns, the
+    /// track through it, and two headcodes, the second reading "+N"
+    /// where a third bead stands on it. Lit only with a bead on it:
+    /// an empty stage stands on the sunken surface, its name faint.
+    fn panel_cell(
+        &self,
+        depot: &FlowDepot,
+        flow: &Flow,
+        stage: &FlowStage,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let lit = !stage.beads.is_empty();
+        let lamp = match lit {
+            true => lamp_dot(
+                &stage.lamp,
+                format!("panel lamp {} {} {}", depot.name, flow.name, stage.stage),
+                palette,
+            ),
+            false => None,
+        };
+        let name = match stage.human {
+            true => format!("{} · people", stage.stage),
+            false => stage.stage.clone(),
+        };
+        let mut cell = div()
+            .debug_selector({
+                let (depot, flow, stage) =
+                    (depot.name.clone(), flow.name.clone(), stage.stage.clone());
+                move || format!("panel stage {depot} {flow} {stage}")
+            })
+            .w(px(PANEL_STAGE))
+            .flex_none()
+            .border_l_1()
+            .border_color(palette.line)
+            .when(!lit, |el| el.bg(palette.side))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .pt_1p5()
+                    .children(lamp)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(match lit {
+                                true => palette.text,
+                                false => palette.faint,
+                            })
+                            .child(name),
+                    ),
+            )
+            .child(panel_track_line(stage.human, palette));
+        let mut codes = div().flex().flex_col().px_2().pb_1p5();
+        match stage.beads.as_slice() {
+            [] => {}
+            [one] => {
+                codes = codes.child(self.panel_headcode(one, mono, palette, cx));
+            }
+            [one, two] => {
+                codes = codes.child(self.panel_headcode(one, mono.clone(), palette, cx));
+                codes = codes.child(self.panel_headcode(two, mono, palette, cx));
+            }
+            [one, ..] => {
+                codes = codes.child(self.panel_headcode(one, mono, palette, cx));
+                codes = codes.child(
+                    div()
+                        .debug_selector({
+                            let (depot, flow, stage) =
+                                (depot.name.clone(), flow.name.clone(), stage.stage.clone());
+                            move || format!("panel more {depot} {flow} {stage}")
+                        })
+                        .text_xs()
+                        .text_color(palette.faint)
+                        .child(format!("+{}", stage.beads.len() - 1)),
+                );
+            }
+        }
+        cell = cell.child(codes);
+        cell
+    }
+
+    /// One bead's headcode on the panel: the short handle in its
+    /// marker drawing, in mono, opening the bead. A bead being worked
+    /// carries the running dot at its left.
+    fn panel_headcode(
+        &self,
+        bead: &FlowBead,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let sel = Selected::Bead(bead.bead.clone());
+        let name = bead.bead.clone();
+        let me = self.model.as_ref().map(Model::me).unwrap_or_default();
+        let color = headcode_color(bead.working, &bead.remark, &bead.tone, me, palette);
+        let mut text = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_xs()
+            .text_color(color)
+            .when(bead.working, |el| el.font_weight(FontWeight::SEMIBOLD))
+            .child(short_bead(&bead.bead));
+        if let Some(mono) = mono {
+            text = text.font_family(mono);
+        }
+        div()
+            .id(SharedString::from(format!("panel headcode {name}")))
+            .debug_selector({
+                let name = name.clone();
+                move || format!("panel headcode {name}")
+            })
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .children(
+                bead.working
+                    .then(|| div().size(px(6.)).rounded_full().bg(palette.ok).flex_none()),
+            )
+            .child(text)
+    }
+
+    /// The stub under a depot's last track: its Elsewhere beads'
+    /// headcodes in the sunken surface, only where beads stand there.
+    fn panel_elsewhere(
+        &self,
+        depot: &FlowDepot,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut stub = div()
+            .debug_selector({
+                let depot = depot.name.clone();
+                move || format!("panel elsewhere {depot}")
+            })
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .bg(palette.side)
+            .border_b_1()
+            .border_color(palette.line)
+            .py_1p5()
+            .px_2()
+            .pl(px(PANEL_NAME + 8.))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .child(format!("Elsewhere · {}", depot.elsewhere.len())),
+            );
+        for bead in &depot.elsewhere {
+            stub = stub.child(self.panel_headcode(bead, mono.clone(), palette, cx));
+        }
+        stub
+    }
+
+    /// The beads travelling with no line: their own track at the foot
+    /// of the active ones, one wide cell holding their headcodes,
+    /// because a bead with no depot travels no flow and has no stages
+    /// to stand between.
+    fn panel_no_line(
+        &self,
+        model: &Model,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut codes = div().flex().flex_col().px_2().pb_1p5();
+        for bead in model.unassigned() {
+            codes = codes.child(self.panel_headcode(bead, mono.clone(), palette, cx));
+        }
+        div()
+            .debug_selector(|| "panel noline".to_string())
+            .flex()
+            .flex_row()
+            .border_b_1()
+            .border_color(palette.line)
+            .min_h(px(64.))
+            .child(self.panel_name(
+                "No line".into(),
+                "no depot".into(),
+                Selected::NoLine,
+                "panel noline name".into(),
+                palette,
+                cx,
+            ))
+            .child(
+                div()
+                    .w(px(PANEL_NO_LINE))
+                    .flex_none()
+                    .border_l_1()
+                    .border_color(palette.line)
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .px_2()
+                            .pt_1p5()
+                            .text_xs()
+                            .text_color(palette.faint)
+                            .child("travelling"),
+                    )
+                    .child(panel_track_line(false, palette))
+                    .child(codes),
+            )
+    }
+
+    /// The quiet tracks folded to one row at the panel's foot: the
+    /// folded names, unfolding to their tracks with the list's Quiet
+    /// fold.
+    fn panel_quiet(
+        &self,
+        model: &Model,
+        mono: Option<SharedString>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let quiet: Vec<&FlowDepot> = model
+            .depots()
+            .iter()
+            .filter(|depot| depot.travelling == 0)
+            .collect();
+        let names: Vec<&str> = quiet.iter().map(|depot| depot.name.as_str()).collect();
+        let open = model.quiet_expanded();
+        let mut section = div().flex().flex_col().child(
+            div()
+                .id("panel quiet")
+                .debug_selector(|| "panel quiet".to_string())
+                .py_2()
+                .flex()
+                .flex_row()
+                .items_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(palette.hover))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_quiet(cx)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(palette.faint)
+                        .child(panel_quiet_head(open, &names)),
+                ),
+        );
+        if open {
+            for depot in quiet {
+                section = section.child(self.panel_depot(depot, mono.clone(), palette, cx));
+            }
+        }
+        section
     }
 
     /// The beads that wait on the person reading, above the table:
@@ -12881,27 +13626,17 @@ impl Footplate {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let lamp = match stage.lamp.as_str() {
-            "fault" => Some(palette.warn),
-            "turn" => Some(palette.accent),
-            _ => None,
-        };
+        let lamp = lamp_dot(
+            &stage.lamp,
+            format!("lamp {} {}", flow.name, stage.stage),
+            palette,
+        );
         let mut section = div().flex().flex_col().child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .children(lamp.map(|color| {
-                    div()
-                        .debug_selector({
-                            let (flow, stage) = (flow.name.clone(), stage.stage.clone());
-                            move || format!("lamp {flow} {stage}")
-                        })
-                        .size(rems(0.5))
-                        .rounded_full()
-                        .bg(color)
-                        .flex_none()
-                }))
+                .children(lamp)
                 .child(
                     div()
                         .debug_selector({
@@ -13157,15 +13892,9 @@ impl Footplate {
                 .bead_url(&detail.bead),
             _ => None,
         };
-        // The quiet back link names where the bead was opened from:
-        // the board, the line, or No line.
+        // The quiet back link names where the bead was opened from.
         let back = model.bead_back();
-        let back_name = match &back {
-            Selected::Arrivals => model::ARRIVALS.to_string(),
-            Selected::Line(line) => line.clone(),
-            Selected::NoLine => "no line".to_string(),
-            _ => model::ARRIVALS.to_string(),
-        };
+        let back_name = bead_back_name(&back, model.departures());
         // The bead's route, as the board's rows show it: the strip
         // under the id line says the stage, so the line drops the word.
         // With no route the bead stands in no served stage, and the line
@@ -16983,6 +17712,88 @@ mod tests {
                  "flows": [], "elsewhere": []},
             ],
             "unassigned": [],
+        }})
+        .to_string()
+    }
+
+    /// The flows view the panel test draws: yardr's two flows with a
+    /// backlog to count, a fault stage holding three beads, a turn
+    /// stage with a bead that waits on jo and one being worked, an
+    /// empty stage, a human stage, and an Elsewhere bead; footplate's
+    /// typed flow with one quiet bead; drafts quiet with an empty
+    /// flow; and one bead with no line.
+    fn flows_panel() -> String {
+        json!({"result": {
+            "travelling": 9,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 7, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "backlog", "group": "mckean", "human": true,
+                         "lamp": "none", "beads": [
+                            {"bead": "yd-b1", "title": "First to shape",
+                             "expected": "—", "remark": "", "tone": "none",
+                             "working": false},
+                            {"bead": "yd-b2", "title": "Second to shape",
+                             "expected": "—", "remark": "", "tone": "none",
+                             "working": false}]},
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "fault", "beads": [
+                            {"bead": "footplate-p512",
+                             "title": "The sign-in's password label",
+                             "expected": "—", "remark": "held", "tone": "red",
+                             "working": false},
+                            {"bead": "yd-blocked", "title": "Blocked behind it",
+                             "expected": "1h–2h", "remark": "blocked by footplate-p512",
+                             "tone": "amber", "working": false},
+                            {"bead": "yd-extra", "title": "Third on the stage",
+                             "expected": "2h–3h", "remark": "", "tone": "none",
+                             "working": false}]},
+                        {"stage": "review", "group": "muse-reviewers", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yd-zulu", "title": "Zulu's late turn",
+                             "expected": "5h–8h", "remark": "waits for jo",
+                             "tone": "amber", "working": false},
+                            {"bead": "yd-work", "title": "Worked while it waits",
+                             "expected": "1h–2h", "remark": "waits for jo",
+                             "tone": "amber", "working": true}]},
+                        {"stage": "approved", "group": "shippers", "human": false,
+                         "lamp": "none", "beads": []},
+                    ]},
+                    {"name": "design", "type": "", "source": "store", "stages": [
+                        {"stage": "draft", "group": "mckean", "human": true,
+                         "lamp": "none", "beads": [
+                            {"bead": "yd-qskt", "title": "The panel's design",
+                             "expected": "3h–5h", "remark": "late by 40m",
+                             "tone": "amber", "working": false}]},
+                        {"stage": "critique", "group": "mckean", "human": true,
+                         "lamp": "turn", "beads": []},
+                    ]},
+                ], "elsewhere": [
+                    {"bead": "yardr-pinned", "title": "A pinned flow's bead",
+                     "expected": "—", "remark": "", "tone": "none",
+                     "working": false},
+                ]},
+                {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
+                    {"name": "default", "type": "task", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "none", "beads": [
+                            {"bead": "footplate-fc47", "title": "A quiet bead",
+                             "expected": "1h–2h", "remark": "", "tone": "none",
+                             "working": false}]},
+                    ]},
+                ], "elsewhere": []},
+                {"name": "drafts", "kind": "dir", "travelling": 0, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "", "human": false,
+                         "lamp": "none", "beads": []},
+                    ]},
+                ], "elsewhere": []},
+            ],
+            "unassigned": [
+                {"bead": "yd-shed", "title": "Paint the shed",
+                 "expected": "2h–3h", "remark": "", "tone": "none",
+                 "working": false},
+            ],
         }})
         .to_string()
     }
@@ -21645,9 +22456,10 @@ mod tests {
     }
 
     /// The timetable's list holds the arrivals row, counting what is in
-    /// transit. A click on it opens the board: the served rows grouped by
-    /// platform, the platforms in the served travel order, each with its
-    /// rows in the served order and remarked as served.
+    /// transit. A click on it opens the panel; Departures keeps the board:
+    /// the served rows grouped by platform, the platforms in the served
+    /// travel order, each with its rows in the served order and remarked
+    /// as served.
     #[gpui::test]
     fn the_arrivals_row_opens_the_board_grouped_by_platform(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -21672,6 +22484,7 @@ mod tests {
         // review's one row before draft's two, though draft appears
         // first in the served rows.
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         view.read_with(cx, |v, _| {
             assert_eq!(
@@ -21751,6 +22564,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         assert!(drawn(cx, "arrival group draft"));
         assert!(drawn(cx, "arrival group review"));
@@ -21785,6 +22599,7 @@ mod tests {
         let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&_view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
             assert!(drawn(cx, &format!("arrival strip {bead}")), "{bead}");
@@ -21805,6 +22620,7 @@ mod tests {
         let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&_view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         assert!(drawn(cx, "arrival strip yd-zulu"));
         assert!(!drawn(cx, "arrival strip yd-alpha"));
@@ -21823,6 +22639,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         view.read_with(cx, |v, _| {
             assert_eq!(
@@ -21885,6 +22702,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         view.read_with(cx, |v, _| {
             assert_eq!(v.model.as_ref().unwrap().waiting_on_you().len(), 55);
@@ -21945,6 +22763,73 @@ mod tests {
             palette.text_accent
         );
         assert_eq!(remark_color("", "none", "jo", palette), palette.faint);
+    }
+
+    /// A headcode reads its marker: working in the text colour, held
+    /// or stalled in red, a wait on the reader in rust, and blocked,
+    /// late or plain in the text colour. Working stands first,
+    /// whatever else the bead carries.
+    #[test]
+    fn headcodes_mark_working_held_and_waiting() {
+        let palette = Palette::of(Look::Dark, WindowAppearance::Dark);
+        assert_eq!(
+            headcode_color(true, "held", "red", "jo", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(true, "waits for jo", "amber", "jo", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(false, "held", "red", "jo", palette),
+            palette.warn
+        );
+        assert_eq!(
+            headcode_color(false, "stalled · session failed", "red", "jo", palette),
+            palette.warn
+        );
+        assert_eq!(
+            headcode_color(false, "waits for jo", "amber", "jo", palette),
+            palette.text_accent
+        );
+        assert_eq!(
+            headcode_color(false, "waits for jo", "amber", "ada", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(false, "blocked by yd-x", "amber", "jo", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(false, "late by 40m", "amber", "jo", palette),
+            palette.text
+        );
+        assert_eq!(
+            headcode_color(false, "", "none", "jo", palette),
+            palette.text
+        );
+    }
+
+    /// The panel's Quiet names its lines, folded or open, with nothing
+    /// in transit under them. The bead's back link names where it came
+    /// from: the panel or departures, the line, or No line.
+    #[test]
+    fn the_panel_s_quiet_and_the_bead_s_back_link_name_where() {
+        assert_eq!(
+            panel_quiet_head(false, &["drafts"]),
+            "▸ Quiet · drafts · nothing in transit"
+        );
+        assert_eq!(
+            panel_quiet_head(true, &["drafts", "signalbox"]),
+            "▾ Quiet · drafts, signalbox · nothing in transit"
+        );
+        assert_eq!(bead_back_name(&Selected::Arrivals, false), "panel");
+        assert_eq!(bead_back_name(&Selected::Arrivals, true), "departures");
+        assert_eq!(
+            bead_back_name(&Selected::Line("yardr".into()), false),
+            "yardr"
+        );
+        assert_eq!(bead_back_name(&Selected::NoLine, false), "no line");
     }
 
     /// The cheatsheet names every key of the open view: the view's own
@@ -22072,6 +22957,7 @@ mod tests {
         let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&_view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         assert!(drawn(cx, "arrival late yd-zulu"));
         assert!(!drawn(cx, "arrival remark yd-zulu"));
@@ -22135,6 +23021,7 @@ mod tests {
             view.read_with(cx, |v, _| !v.model.as_ref().unwrap().quiet_expanded())
         });
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         cx.simulate_click(stood, gpui::Modifiers::default());
         cx.run_until_parked();
@@ -22151,7 +23038,7 @@ mod tests {
     /// platform and line, the expected arrival and remark of its row,
     /// the labels, the body, then the notes newest last with their
     /// author and time. Its asks are one line that links nothing, and a
-    /// quiet arrivals link leads back to the board.
+    /// quiet departures link leads back to the board.
     #[gpui::test]
     fn a_board_row_s_click_opens_the_bead_s_details(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -22162,6 +23049,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         // The bead from the Bead call, through a row's click.
         click_on(cx, "arrival yd-zulu");
@@ -22227,6 +23115,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         click_on(cx, "arrival yd-zulu");
         wait(cx, "the bead", |cx| drawn(cx, "bead back"));
@@ -22567,6 +23456,7 @@ mod tests {
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrivals capped"));
         view.read_with(cx, |v, _| {
             let model = v.model.as_ref().unwrap();
@@ -22592,6 +23482,7 @@ mod tests {
         });
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         click_on(cx, "arrival yd-zulu");
         wait(cx, "the bead", |cx| drawn(cx, "bead back"));
@@ -22625,6 +23516,7 @@ mod tests {
         });
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
+        to_departures(cx);
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         click_on(cx, "arrival yd-zulu");
         wait(cx, "the bead", |cx| drawn(cx, "bead back"));
@@ -22847,9 +23739,318 @@ mod tests {
         rows_tile(&view, cx);
     }
 
+    /// The arrivals row opens the panel: one track per travelling
+    /// flow on the fixed grid — the name, the backlog count, a cell
+    /// per stage in travel order — with the lamps lit only where beads
+    /// stand, two headcodes per cell and "+N" past that, the Elsewhere
+    /// stub, No line's own track, and the quiet tracks folded to one
+    /// row. The head carries the summary and the toggle, on the panel.
+    #[gpui::test]
+    fn the_arrivals_row_opens_the_panel_of_tracks(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_panel());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the panel", |cx| drawn(cx, "panel track yardr default"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.selected(), Some(&Selected::Arrivals));
+            assert!(!model.departures());
+            assert_eq!(model.working_count(), 1);
+            assert_eq!(model.waiting_on_you().len(), 2);
+            assert_eq!(model.held_count(), 1);
+        });
+        // One track per travelling flow, the fixed cells, the backlog's
+        // count and no stage cell for it.
+        for (depot, flow) in [
+            ("yardr", "default"),
+            ("yardr", "design"),
+            ("footplate", "default"),
+        ] {
+            let track = format!("panel track {depot} {flow}");
+            let name = format!("panel name {depot} {flow}");
+            let backlog = format!("panel backlog {depot} {flow}");
+            assert!(drawn(cx, &track), "{track}");
+            assert!(drawn(cx, &name), "{name}");
+            assert!(drawn(cx, &backlog), "{backlog}");
+            let name = bounds_of(cx, &name);
+            let backlog = bounds_of(cx, &backlog);
+            assert!(
+                (name.size.width - px(120.)).abs() < px(1.),
+                "the name cell is no 120 pixels: {name:?}"
+            );
+            assert!(
+                (backlog.size.width - px(52.)).abs() < px(1.),
+                "the backlog cell is no 52 pixels: {backlog:?}"
+            );
+        }
+        assert!(!drawn(cx, "panel stage yardr default backlog"));
+        // The stages in travel order, 92 pixels each, aligned by place
+        // across the tracks.
+        for stage in ["new", "review", "approved"] {
+            let cell = format!("panel stage yardr default {stage}");
+            assert!(drawn(cx, &cell), "{cell}");
+            let cell = bounds_of(cx, &cell);
+            assert!(
+                (cell.size.width - px(92.)).abs() < px(1.),
+                "the stage cell is no 92 pixels: {cell:?}"
+            );
+        }
+        let new = bounds_of(cx, "panel stage yardr default new").left();
+        let review = bounds_of(cx, "panel stage yardr default review").left();
+        let approved = bounds_of(cx, "panel stage yardr default approved").left();
+        assert!(
+            new < review && review < approved,
+            "the stages stand out of travel order: {new:?} {review:?} {approved:?}"
+        );
+        let footplate = bounds_of(cx, "panel stage footplate default new").left();
+        assert!(
+            (new - footplate).abs() < px(1.),
+            "the first stages stand out of column: {new:?} {footplate:?}"
+        );
+        // The lamps: fault and turn burn where beads stand, and no lamp
+        // where none stands, whatever the stage serves.
+        assert!(drawn(cx, "panel lamp yardr default new"));
+        assert!(drawn(cx, "panel lamp yardr default review"));
+        assert!(!drawn(cx, "panel lamp yardr default approved"));
+        assert!(!drawn(cx, "panel lamp yardr design critique"));
+        assert!(!drawn(cx, "panel lamp footplate default new"));
+        // One headcode and "+N" past two beads; two where two
+        // stand; every other bead on its stage.
+        assert!(drawn(cx, "panel headcode footplate-p512"));
+        assert!(!drawn(cx, "panel headcode yd-blocked"));
+        assert!(!drawn(cx, "panel headcode yd-extra"));
+        assert!(drawn(cx, "panel more yardr default new"));
+        for bead in ["yd-zulu", "yd-work", "yd-qskt", "footplate-fc47"] {
+            assert!(drawn(cx, &format!("panel headcode {bead}")), "{bead}");
+        }
+        // Elsewhere hangs under its depot's last track; No line has
+        // its own track; the quiet tracks fold to one row.
+        assert!(drawn(cx, "panel elsewhere yardr"));
+        assert!(drawn(cx, "panel headcode yardr-pinned"));
+        let design = bounds_of(cx, "panel track yardr design").top();
+        let stub = bounds_of(cx, "panel elsewhere yardr").top();
+        let footplate = bounds_of(cx, "panel track footplate default").top();
+        assert!(
+            design < stub && stub < footplate,
+            "Elsewhere hangs off its depot's last track: {design:?} {stub:?} {footplate:?}"
+        );
+        assert!(drawn(cx, "panel noline"));
+        assert!(drawn(cx, "panel headcode yd-shed"));
+        assert!(drawn(cx, "panel quiet"));
+        assert!(!drawn(cx, "panel track drafts default"));
+        // The head: the summary and the toggle, on the panel, with no
+        // board beneath them.
+        assert!(drawn(cx, "arrivals head"));
+        assert!(drawn(cx, "panel summary"));
+        assert!(drawn(cx, "panel waits"));
+        assert!(drawn(cx, "arrivals panel"));
+        assert!(drawn(cx, "arrivals departures"));
+        assert!(!drawn(cx, "waits banner"));
+        assert!(!drawn(cx, "arrival yd-zulu"));
+        // Departures keeps the board under the toggle, and Panel steps
+        // back to the panel.
+        to_departures(cx);
+        wait(cx, "the departures", |cx| drawn(cx, "arrival yd-zulu"));
+        assert!(drawn(cx, "waits banner"));
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().departures());
+        });
+        click_on(cx, "arrivals panel");
+        wait(cx, "the panel again", |cx| {
+            drawn(cx, "panel track yardr default")
+        });
+    }
+
+    /// A headcode's click opens the bead's details, and the quiet back
+    /// link names the panel and returns to it.
+    #[gpui::test]
+    fn a_headcode_s_click_opens_the_bead_and_back_returns_to_the_panel(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_panel());
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the panel", |cx| drawn(cx, "panel headcode yd-zulu"));
+        click_on(cx, "panel headcode yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.selected(), Some(&Selected::Bead("yd-zulu".into())));
+            assert_eq!(model.bead_back(), Selected::Arrivals);
+            assert_eq!(
+                bead_back_name(&model.bead_back(), model.departures()),
+                "panel"
+            );
+        });
+        click_on(cx, "bead back");
+        wait(cx, "the panel again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some(&Selected::Arrivals)
+            }) && drawn(cx, "panel track yardr default")
+        });
+        assert!(!drawn(cx, "arrival yd-zulu"));
+    }
+
+    /// The panel's quiet tracks fold and unfold with the list's Quiet:
+    /// one row naming the quiet lines, unfolding to their tracks from
+    /// either side.
+    #[gpui::test]
+    fn the_panel_s_quiet_tracks_fold_with_the_list_s_quiet(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_panel());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
+        assert!(drawn(cx, "quiet"));
+        assert!(!drawn(cx, "row drafts"));
+        assert!(!drawn(cx, "panel track drafts default"));
+        // Unfold from the panel: the tracks stand, and the list's fold
+        // opens too.
+        click_on(cx, "panel quiet");
+        wait(cx, "the quiet tracks", |cx| {
+            drawn(cx, "panel track drafts default")
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().quiet_expanded());
+        });
+        assert!(drawn(cx, "row drafts"));
+
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_panel());
+        let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&_view, cx);
+        // Unfold from the list: the panel draws the tracks unfolded.
+        click_on(cx, "quiet");
+        wait(cx, "the quiet lines", |cx| drawn(cx, "row drafts"));
+        click_on(cx, "row arrivals");
+        wait(cx, "the unfolded panel", |cx| {
+            drawn(cx, "panel track drafts default")
+        });
+    }
+
+    /// The panel's waiting words open the decisions mode, counting
+    /// what waits as the board's banner does.
+    #[gpui::test]
+    fn the_panel_s_waiting_words_open_decisions(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_panel());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the panel", |cx| drawn(cx, "panel waits"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.model.as_ref().unwrap().waiting_on_you().len(), 2);
+        });
+        click_on(cx, "panel waits");
+        wait(cx, "the decisions mode", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
+        });
+    }
+
+    /// At the narrowest window the panel holds: the head, three tracks
+    /// and the Elsewhere stub on first paint, No line cut at the foot
+    /// and Quiet below the fold, and sideways the name, the backlog
+    /// and the first stage whole with the second stage cut at the
+    /// edge.
+    #[gpui::test]
+    fn the_panel_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_panel());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        // The narrowest window the application opens (main.rs).
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
+        // Down the pane: the head, three tracks and the stub stand
+        // whole on first paint, No line is cut at the foot, and Quiet
+        // stands below the fold, reached by scrolling.
+        let head = bounds_of(cx, "arrivals head");
+        let first = bounds_of(cx, "panel track yardr default");
+        let second = bounds_of(cx, "panel track yardr design");
+        let third = bounds_of(cx, "panel track footplate default");
+        let stub = bounds_of(cx, "panel elsewhere yardr");
+        let noline = bounds_of(cx, "panel noline");
+        let quiet = bounds_of(cx, "panel quiet");
+        for (what, top, bottom) in [
+            ("the head", &head, &first),
+            ("the first track", &first, &second),
+            ("the second track", &second, &stub),
+            ("the stub", &stub, &third),
+            ("the third track", &third, &noline),
+            ("No line", &noline, &quiet),
+        ] {
+            assert!(
+                top.top() <= bottom.top(),
+                "{what} stands out of order: {top:?} {bottom:?}"
+            );
+        }
+        assert!(
+            stub.bottom() <= px(360.),
+            "the stub stands below the fold: {stub:?}"
+        );
+        assert!(
+            third.bottom() <= px(360.),
+            "the third track stands below the fold: {third:?}"
+        );
+        assert!(
+            noline.top() < px(360.) && px(360.) < noline.bottom(),
+            "No line is not cut at the foot: {noline:?}"
+        );
+        assert!(
+            px(360.) <= quiet.top(),
+            "Quiet stands on first paint: {quiet:?}"
+        );
+        // Sideways: the name, the backlog and the first stage stand
+        // whole, the second stage is cut at the pane's edge, and the
+        // rest scrolls.
+        let name = bounds_of(cx, "panel name yardr default");
+        let backlog = bounds_of(cx, "panel backlog yardr default");
+        let new = bounds_of(cx, "panel stage yardr default new");
+        let review = bounds_of(cx, "panel stage yardr default review");
+        assert!(
+            (name.size.width - px(120.)).abs() < px(1.),
+            "the name cell is no 120 pixels: {name:?}"
+        );
+        assert!(
+            (backlog.size.width - px(52.)).abs() < px(1.),
+            "the backlog cell is no 52 pixels: {backlog:?}"
+        );
+        assert!(
+            (new.size.width - px(92.)).abs() < px(1.),
+            "the stage cell is no 92 pixels: {new:?}"
+        );
+        assert!(
+            new.right() <= px(616.),
+            "the first stage is cut at the edge: {new:?}"
+        );
+        assert!(
+            px(616.) < review.right(),
+            "the second stage stands whole: {review:?}"
+        );
+    }
+
     /// At the narrowest window the arrivals panes hold: the list's row
-    /// inside the column, the board's groups and two-line rows inside
-    /// the pane, and the bead's head and asks line inside it too.
+    /// inside the column, the departures board's groups and two-line
+    /// rows inside the pane, and the bead's head and asks line inside
+    /// it too.
     #[gpui::test]
     fn the_arrivals_panes_hold_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -22876,7 +24077,10 @@ mod tests {
         // window. The row stands below the fold at this height, so the
         // board is opened as a click opens it, and the click itself is
         // the wider window's test.
-        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Arrivals, window, cx);
+            v.set_departures(true, cx);
+        });
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
         let right = px(616.);
         for group in ["draft", "review"] {
@@ -24308,6 +25512,12 @@ mod tests {
             Mode::Timetable => cx.simulate_keystrokes("secondary-["),
             Mode::Decisions => (),
         }
+    }
+
+    /// Steps the arrivals pane to the departures board, from the panel.
+    fn to_departures(cx: &mut VisualTestContext) {
+        click_on(cx, "arrivals departures");
+        cx.run_until_parked();
     }
 
     /// Steps the rail to the timetable, from any mode.

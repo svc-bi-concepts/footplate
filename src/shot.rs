@@ -37,9 +37,9 @@ use crate::yard::Env;
 /// screen with the hosted way's fields open and filled, and the away
 /// screen of a hosted yard that is signed out, the away screen of a
 /// yard at an address that no longer lets the device in, with a way's
-/// fields open, the arrivals board open
-/// on the arrivals row with a late bead, a bead waiting on you and
-/// quiet lines, one arrival's bead open from the board, one
+/// fields open, the arrivals panel open
+/// on the arrivals row with its lamps, headcodes and quiet lines, one
+/// arrival's bead open from the panel, one
 /// line's flow open on its row, an open card of a secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
@@ -1147,9 +1147,13 @@ fn populate(yard: &Yard, state: &str) {
     if state == "arrivals" {
         // The board this state shoots answers over the shared one: a
         // late bead with the overrun the yard will print, a bead that
-        // waits on jo, and a held one, on yardr's five-stage route, with
-        // footplate and drafts quiet. The window banners the wait, draws
-        // each row's strip, and folds the quiet lines.
+        // waits on jo, and a held one. Its flows draw the panel: three
+        // tracks with a backlog to count, a held and a blocked bead
+        // under a fault lamp, a late bead with two more behind "+N",
+        // a wait and a worked bead under a turn lamp, an Elsewhere
+        // bead, two beads with no line, and drafts quiet. The window
+        // draws the panel on the arrivals row, and the board with its
+        // banner under Departures.
         yard.answer(
             "Arrivals",
             &json!({"result": {"rows": [
@@ -1168,42 +1172,85 @@ fn populate(yard: &Yard, state: &str) {
         yard.answer(
             "Flows",
             &json!({"result": {
-                "travelling": 3,
+                "travelling": 12,
                 "depots": [
-                    {"name": "yardr", "kind": "git", "travelling": 3, "flows": [
+                    {"name": "yardr", "kind": "git", "travelling": 9, "flows": [
                         {"name": "default", "type": "", "source": "store", "stages": [
+                            {"stage": "backlog", "group": "mckean", "human": true,
+                             "lamp": "none", "beads": [
+                                {"bead": "yd-b1", "title": "First to shape",
+                                 "expected": "—", "remark": "", "tone": "none",
+                                 "working": false},
+                                {"bead": "yd-b2", "title": "Second to shape",
+                                 "expected": "—", "remark": "", "tone": "none",
+                                 "working": false}]},
                             {"stage": "new", "group": "muse-builders", "human": false,
                              "lamp": "fault", "beads": [
                                 {"bead": "footplate-p512",
                                  "title": "The sign-in's password label",
                                  "expected": "—", "remark": "held",
-                                 "tone": "red", "working": false}]},
+                                 "tone": "red", "working": false},
+                                {"bead": "yd-x1", "title": "Blocked behind it",
+                                 "expected": "1h–2h", "remark": "blocked by footplate-p512",
+                                 "tone": "amber", "working": false}]},
                             {"stage": "decide", "group": "decisions", "human": true,
                              "lamp": "none", "beads": []},
                             {"stage": "review", "group": "muse-reviewers", "human": false,
                              "lamp": "none", "beads": [
                                 {"bead": "yd-zulu", "title": "Zulu's late turn",
                                  "expected": "5h–8h", "remark": "late by 40m",
-                                 "tone": "amber", "working": false}]},
+                                 "tone": "amber", "working": false},
+                                {"bead": "yd-r2", "title": "Second in review",
+                                 "expected": "2h–3h", "remark": "", "tone": "none",
+                                 "working": false},
+                                {"bead": "yd-r3", "title": "Third in review",
+                                 "expected": "3h–4h", "remark": "", "tone": "none",
+                                 "working": false}]},
                             {"stage": "review-security", "group": "mckean", "human": true,
                              "lamp": "turn", "beads": [
                                 {"bead": "yd-alpha", "title": "Alpha moves first",
                                  "expected": "20m–35m", "remark": "waits for jo, yardmaster",
-                                 "tone": "amber", "working": false}]},
+                                 "tone": "amber", "working": false},
+                                {"bead": "yd-w1", "title": "Worked while it waits",
+                                 "expected": "1h–2h", "remark": "",
+                                 "tone": "none", "working": true}]},
                             {"stage": "approved", "group": "shippers", "human": false,
                              "lamp": "none", "beads": []},
                         ]},
-                    ], "elsewhere": []},
-                    {"name": "footplate", "kind": "git", "travelling": 0, "flows": [
-                        {"name": "default", "type": "", "source": "store", "stages": [
-                            {"stage": "new", "group": "muse-builders", "human": false,
+                        {"name": "design", "type": "", "source": "store", "stages": [
+                            {"stage": "draft", "group": "mckean", "human": true,
+                             "lamp": "none", "beads": [
+                                {"bead": "yd-d1", "title": "Drafts the follow-up",
+                                 "expected": "3h–5h", "remark": "",
+                                 "tone": "none", "working": false}]},
+                            {"stage": "critique", "group": "mckean", "human": true,
                              "lamp": "none", "beads": []},
+                        ]},
+                    ], "elsewhere": [
+                        {"bead": "yardr-p9", "title": "A pinned flow's bead",
+                         "expected": "—", "remark": "", "tone": "none",
+                         "working": false},
+                    ]},
+                    {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
+                        {"name": "default", "type": "task", "source": "store", "stages": [
+                            {"stage": "new", "group": "muse-builders", "human": false,
+                             "lamp": "none", "beads": [
+                                {"bead": "footplate-f1", "title": "A quiet bead",
+                                 "expected": "1h–2h", "remark": "",
+                                 "tone": "none", "working": false}]},
                         ]},
                     ], "elsewhere": []},
                     {"name": "drafts", "kind": "dir", "travelling": 0,
                      "flows": [], "elsewhere": []},
                 ],
-                "unassigned": [],
+                "unassigned": [
+                    {"bead": "yd-s1", "title": "Travels light",
+                     "expected": "2h–3h", "remark": "", "tone": "none",
+                     "working": false},
+                    {"bead": "yd-s2", "title": "Waits with no line",
+                     "expected": "—", "remark": "waits for yardmaster, jo",
+                     "tone": "amber", "working": false},
+                ],
             }})
             .to_string(),
         );
@@ -1537,8 +1584,7 @@ mod tests {
                     // platforms in travel order. The arrivals state
                     // shoots its own board over that one: a late bead
                     // with its overrun, a bead that waits on jo, and a
-                    // held one, on yardr's five-stage route, with two
-                    // quiet lines.
+                    // held one, which Departures keeps under the toggle.
                     assert_eq!(loaded.arrivals.rows.len(), 3, "{state}");
                     assert_eq!(loaded.arrivals.rows[0].bead, "yd-zulu", "{state}");
                     let overrun = *state == "arrivals";
@@ -1581,15 +1627,23 @@ mod tests {
                     // The flows view beside the board: three travelling,
                     // yardr's two on a turn and a quiet stage, footplate's
                     // one on a fault stage, and nothing without a line.
-                    // The arrivals state shoots yardr's three on its
-                    // five-stage route instead, with footplate and drafts
-                    // quiet.
-                    assert_eq!(loaded.flows.travelling, 3, "{state}");
+                    // The arrivals state shoots the panel's instead:
+                    // yardr's two flows with a backlog, an Elsewhere
+                    // bead and two beads with no line, footplate's one,
+                    // and drafts quiet.
+                    assert_eq!(
+                        loaded.flows.travelling,
+                        match overrun {
+                            true => 12,
+                            false => 3,
+                        },
+                        "{state}"
+                    );
                     assert_eq!(loaded.flows.depots[0].name, "yardr", "{state}");
                     assert_eq!(
                         loaded.flows.depots[0].travelling,
                         match overrun {
-                            true => 3,
+                            true => 9,
                             false => 2,
                         },
                         "{state}"
@@ -1610,6 +1664,7 @@ mod tests {
                                 .map(|s| (s.stage.as_str(), s.human))
                                 .collect::<Vec<_>>(),
                             [
+                                ("backlog", true),
                                 ("new", false),
                                 ("decide", true),
                                 ("review", false),
@@ -1618,20 +1673,35 @@ mod tests {
                             ],
                             "{state}"
                         );
-                        assert_eq!(stages[0].lamp, "fault", "{state}");
-                        assert_eq!(stages[3].lamp, "turn", "{state}");
-                        assert_eq!(loaded.flows.depots[1].travelling, 0, "{state}");
+                        assert_eq!(stages[1].lamp, "fault", "{state}");
+                        assert_eq!(stages[4].lamp, "turn", "{state}");
+                        assert_eq!(stages[1].beads.len(), 2, "{state}");
+                        assert_eq!(stages[3].beads.len(), 3, "{state}");
+                        assert_eq!(loaded.flows.depots[0].flows.len(), 2, "{state}");
+                        assert_eq!(loaded.flows.depots[0].elsewhere.len(), 1, "{state}");
+                        assert_eq!(loaded.flows.depots[1].travelling, 1, "{state}");
                         assert_eq!(loaded.flows.depots[2].travelling, 0, "{state}");
+                        assert_eq!(
+                            loaded
+                                .flows
+                                .unassigned
+                                .iter()
+                                .map(|b| b.bead.as_str())
+                                .collect::<Vec<_>>(),
+                            ["yd-s1", "yd-s2"],
+                            "{state}"
+                        );
+                    } else {
+                        assert!(loaded.flows.unassigned.is_empty(), "{state}");
                     }
                     assert_eq!(
                         loaded.flows.depots[0].flows[0].stages[0].lamp,
                         match overrun {
-                            true => "fault",
+                            true => "none",
                             false => "turn",
                         },
                         "{state}"
                     );
-                    assert!(loaded.flows.unassigned.is_empty(), "{state}");
                     // One arrival's bead, which the arrival state opens:
                     // the body, two labels, two notes, and three asks, two
                     // of them open.

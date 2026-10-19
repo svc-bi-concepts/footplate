@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
-    DecidedAsk, Event, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer, Ran,
-    Run, Secret, Setup, User,
+    DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer,
+    Ran, Run, Secret, Setup, User,
 };
 use crate::markdown;
 use crate::select;
@@ -318,7 +318,8 @@ pub enum Selected {
     /// A conversation, by crew name, user name or `<name>@<peer>`.
     Conversation(String),
     Yard,
-    /// The arrivals board: the served rows under their platform.
+    /// The arrivals pane: the panel of tracks, or the departures
+    /// board under the head's toggle.
     Arrivals,
     /// One line's flows, by depot name, in the served order.
     Line(String),
@@ -911,6 +912,9 @@ pub struct Model {
     decided_folds: HashSet<(String, u64)>,
     /// Whether the timetable's quiet lines stand unfolded.
     quiet_expanded: bool,
+    /// Whether the arrivals pane shows the departures board instead of
+    /// the panel: the head's toggle, the panel where false.
+    departures: bool,
     /// One bead whole, by id, as the cards show it: read when a decision
     /// row opens, and again on every event whose bead is one shown.
     beads: HashMap<String, Bead>,
@@ -955,7 +959,7 @@ impl Model {
     /// the yard was lost, if any: it stays open when its row is still
     /// there. Else the mode's own default is.
     pub fn new(state: State, mode: Mode, selected: Option<Selected>) -> (Model, Vec<Effect>) {
-        Self::new_returning(state, mode, selected, false, false)
+        Self::new_returning(state, mode, selected, false, false, false)
     }
 
     /// The model of a state read when returning to a yard. The folded
@@ -968,8 +972,9 @@ impl Model {
         selected: Option<Selected>,
         decided_expanded: bool,
         quiet_expanded: bool,
+        departures: bool,
     ) -> (Model, Vec<Effect>) {
-        let mut m = Self::of(state, decided_expanded, quiet_expanded);
+        let mut m = Self::of(state, decided_expanded, quiet_expanded, departures);
         m.mode = mode;
         m.selected = m.row_in(mode, selected);
         m.opened();
@@ -982,12 +987,12 @@ impl Model {
     pub fn new_aside(state: State) -> Model {
         Model {
             aside: true,
-            ..Self::of(state, false, false)
+            ..Self::of(state, false, false, false)
         }
     }
 
     /// What a state just read has, with no row open yet.
-    fn of(state: State, decided_expanded: bool, quiet_expanded: bool) -> Model {
+    fn of(state: State, decided_expanded: bool, quiet_expanded: bool, departures: bool) -> Model {
         let mut m = Model {
             me: state.me,
             parties: parties(&state.peers),
@@ -1003,6 +1008,7 @@ impl Model {
             decided: state.asks.decided,
             decided_expanded,
             quiet_expanded,
+            departures,
             events_seen: state.head,
             ..Model::default()
         };
@@ -1070,11 +1076,13 @@ impl Model {
         selected: Option<Selected>,
         decided_expanded: bool,
         quiet_expanded: bool,
+        departures: bool,
     ) -> Vec<Effect> {
         self.aside = false;
         self.mode = mode;
         self.decided_expanded |= decided_expanded;
         self.quiet_expanded |= quiet_expanded;
+        self.departures |= departures;
         self.selected = self.row_in(mode, selected);
         self.opened();
         self.open()
@@ -1628,6 +1636,18 @@ impl Model {
         self.quiet_expanded = !self.quiet_expanded;
     }
 
+    /// Whether the arrivals pane shows the departures board: the head's
+    /// toggle, the panel where false.
+    pub fn departures(&self) -> bool {
+        self.departures
+    }
+
+    /// The head's toggle sets which arrivals view stands: the departures
+    /// board where true, the panel where false.
+    pub fn set_departures(&mut self, departures: bool) {
+        self.departures = departures;
+    }
+
     /// The arrivals board as read: the rows as served, ordered and
     /// remarked.
     pub fn arrival_rows(&self) -> &[Arrival] {
@@ -1728,33 +1748,7 @@ impl Model {
                 &row.remark,
             );
         }
-        for depot in &self.flows.depots {
-            for flow in &depot.flows {
-                for stage in &flow.stages {
-                    for bead in &stage.beads {
-                        include(
-                            &mut waiting,
-                            &mut seen,
-                            &self.me,
-                            &bead.bead,
-                            &bead.title,
-                            &bead.remark,
-                        );
-                    }
-                }
-            }
-            for bead in &depot.elsewhere {
-                include(
-                    &mut waiting,
-                    &mut seen,
-                    &self.me,
-                    &bead.bead,
-                    &bead.title,
-                    &bead.remark,
-                );
-            }
-        }
-        for bead in &self.flows.unassigned {
+        for bead in self.flow_beads() {
             include(
                 &mut waiting,
                 &mut seen,
@@ -1765,6 +1759,36 @@ impl Model {
             );
         }
         waiting
+    }
+
+    /// Every bead of the Flows view: each stage's in travel order, each
+    /// depot's Elsewhere after its flows, and those with no line last,
+    /// all in the served order.
+    fn flow_beads(&self) -> impl Iterator<Item = &FlowBead> {
+        self.flows
+            .depots
+            .iter()
+            .flat_map(|depot| {
+                depot
+                    .flows
+                    .iter()
+                    .flat_map(|flow| flow.stages.iter())
+                    .flat_map(|stage| stage.beads.iter())
+                    .chain(depot.elsewhere.iter())
+            })
+            .chain(self.flows.unassigned.iter())
+    }
+
+    /// How many of the Flows beads are being worked: the panel's
+    /// summary, beside what waits on the reader.
+    pub fn working_count(&self) -> usize {
+        self.flow_beads().filter(|bead| bead.working).count()
+    }
+
+    /// How many of the Flows beads are held or stalled: the red tone,
+    /// the panel's summary beside what is worked and what waits.
+    pub fn held_count(&self) -> usize {
+        self.flow_beads().filter(|bead| bead.tone == "red").count()
     }
 
     /// One line on what the platform `stage` is: whose turn a bead
@@ -1804,6 +1828,12 @@ impl Model {
     /// One line's flows as served, when the yard serves the line.
     pub fn depot(&self, name: &str) -> Option<&FlowDepot> {
         self.flows.depots.iter().find(|d| d.name == name)
+    }
+
+    /// The lines of the Flows view in the served order, travelling or
+    /// not, as the panel draws their tracks.
+    pub fn depots(&self) -> &[FlowDepot] {
+        &self.flows.depots
     }
 
     /// The beads travelling with no line, newest change first, as served.
@@ -4384,8 +4414,19 @@ fn display_topic(topic: &str) -> String {
 }
 
 /// A bead's id small, at a row's end: past its last `-`.
-fn short_bead(bead: &str) -> String {
+pub fn short_bead(bead: &str) -> String {
     bead.rsplit('-').next().unwrap_or(bead).to_string()
+}
+
+/// How many of the flow's beads stand on its `backlog` stage: the
+/// panel's backlog cell counts them, and draws no stage cell for
+/// them, so the queue reads as a count and never as chips.
+pub fn backlog_count(flow: &Flow) -> usize {
+    flow.stages
+        .iter()
+        .filter(|stage| stage.stage == "backlog")
+        .map(|stage| stage.beads.len())
+        .sum()
 }
 
 /// Whether the bead is another yard's question: `<id>@<peer>`, as the
@@ -5342,6 +5383,7 @@ mod tests {
                 Mode::Chat,
                 Some(Selected::Conversation("assembly".into())),
                 false,
+                false,
                 false
             ),
             [page("assembly", 0)]
@@ -5360,7 +5402,11 @@ mod tests {
             [Effect::Ack { through: 21 }]
         );
         // With no row kept it opens as a yard opened for the first time.
-        assert!(!fresh.back_to(Mode::Chat, None, false, false).is_empty());
+        assert!(
+            !fresh
+                .back_to(Mode::Chat, None, false, false, false)
+                .is_empty()
+        );
         assert_eq!(
             fresh.selected(),
             Some(&Selected::Conversation("yardmaster".into()))
@@ -5380,6 +5426,7 @@ mod tests {
             Mode::Decisions,
             Some(Selected::Decided("gone".into(), 1)),
             true,
+            false,
             false,
         );
         // No open decision to fall back to: the mode opens on nothing,
@@ -7467,6 +7514,7 @@ mod tests {
             Some(Selected::Line("footplate".into())),
             false,
             true,
+            false,
         );
         assert_eq!(model.selected(), Some(&Selected::Line("footplate".into())));
         let (model, _) = Model::new_returning(
@@ -7475,8 +7523,88 @@ mod tests {
             Some(Selected::Line("footplate".into())),
             false,
             false,
+            false,
         );
         assert_eq!(model.selected(), Some(&Selected::Arrivals));
+    }
+
+    /// The arrivals pane opens the panel: departures stands only where
+    /// the head's toggle sets it, and a yard come back to keeps which
+    /// stood, as Quiet's fold is kept.
+    #[test]
+    fn the_arrivals_pane_opens_the_panel_until_departures_is_set() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        assert!(!m.departures());
+        m.set_departures(true);
+        assert!(m.departures());
+        m.set_departures(false);
+        assert!(!m.departures());
+        let (model, _) = Model::new_returning(
+            yard(&[]),
+            Mode::Timetable,
+            Some(Selected::Arrivals),
+            false,
+            false,
+            true,
+        );
+        assert!(model.departures());
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.back_to(Mode::Timetable, None, false, false, true);
+        assert!(m.departures());
+    }
+
+    /// The panel's summary counts the Flows beads: how many are being
+    /// worked, how many wait on the reader, and how many are held or
+    /// stalled, from the stages, Elsewhere and No line alike. A flow's
+    /// backlog count is its `backlog` stages' beads, wherever among
+    /// them they stand.
+    #[test]
+    fn the_panel_counts_what_is_worked_held_and_waiting() {
+        use crate::api::{Flow, FlowStage};
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        let mut flows = flow_view();
+        flows.depots[0].flows[0].stages[0].beads[0].working = true;
+        flows.depots[0].elsewhere[0].remark = "waits for jo".into();
+        flows.depots[0].elsewhere[0].tone = "amber".into();
+        flows.unassigned[0].tone = "red".into();
+        m.flows(flows);
+        assert_eq!(m.working_count(), 1);
+        assert_eq!(m.held_count(), 2);
+        assert_eq!(
+            m.waiting_on_you()
+                .iter()
+                .map(|(bead, _)| *bead)
+                .collect::<Vec<_>>(),
+            ["yardr-pinned"]
+        );
+        let flow = Flow {
+            name: "default".into(),
+            flow_type: "".into(),
+            source: "store".into(),
+            stages: vec![
+                FlowStage {
+                    stage: "backlog".into(),
+                    beads: vec![
+                        flowed("yd-a", "A waits shaping", "—", "", "none"),
+                        flowed("yd-b", "B waits shaping", "—", "", "none"),
+                    ],
+                    ..FlowStage::default()
+                },
+                FlowStage {
+                    stage: "new".into(),
+                    beads: vec![flowed("yd-c", "C moves", "1h–2h", "", "none")],
+                    ..FlowStage::default()
+                },
+            ],
+        };
+        assert_eq!(backlog_count(&flow), 2);
+        assert_eq!(
+            backlog_count(&Flow {
+                stages: vec![],
+                ..Flow::default()
+            }),
+            0
+        );
     }
 
     /// The banner keeps visible arrivals in their served order, then
