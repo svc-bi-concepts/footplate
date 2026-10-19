@@ -196,7 +196,8 @@ arrivals panel open on the arrivals row, with its lamps, headcodes
 and quiet lines), `departures` (the departures board open under the
 toggle, with its banner), `arrival` (one
 arrival's bead open from the panel), `flow` (yardr's line open on
-its flow), `secret` (an open card of a
+its flow), `old-lines` (the Lines pane against a yard too old to
+serve it, saying so in plain words), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of

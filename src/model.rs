@@ -77,6 +77,12 @@ pub struct State {
     /// Why the flows view is empty, in the window's words; `None` where
     /// it was read.
     pub flows_notice: Option<String>,
+    /// The yard has no Arrivals call: one from before the Lines view.
+    /// The Lines pane says so, and no notice is raised.
+    pub arrivals_too_old: bool,
+    /// The yard has no Flows call: as above, for the flows half of the
+    /// Lines view.
+    pub flows_too_old: bool,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -832,6 +838,13 @@ pub struct Model {
     /// The flows view as read: the lines with their flows, stages, beads
     /// and lamps, the unassigned rows, and the travelling totals.
     flows: Flows,
+    /// The yard has no Arrivals call: one from before the Lines view.
+    /// The Lines pane says so, and no notice is raised. A board read
+    /// again clears it, as one read at the start never sets it.
+    arrivals_too_old: bool,
+    /// The yard has no Flows call: as above, for the flows half of the
+    /// Lines view.
+    flows_too_old: bool,
     /// The timetable row a travelling bead was opened from: the board, a
     /// line or No line. The list's open row and the details' back link
     /// while the bead is open.
@@ -976,6 +989,8 @@ impl Model {
             crew: state.crew,
             arrivals: state.arrivals.rows,
             flows: state.flows,
+            arrivals_too_old: state.arrivals_too_old,
+            flows_too_old: state.flows_too_old,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -1629,9 +1644,27 @@ impl Model {
         &self.arrivals
     }
 
-    /// The arrivals board as read again.
+    /// The arrivals board as read again. The yard has the call, so it
+    /// is not too old for it.
     pub fn arrivals(&mut self, board: Arrivals) {
         self.arrivals = board.rows;
+        self.arrivals_too_old = false;
+    }
+
+    /// Whether the yard has no Arrivals call: one from before the Lines
+    /// view, which the Lines pane says.
+    pub fn arrivals_too_old(&self) -> bool {
+        self.arrivals_too_old
+    }
+
+    /// The arrivals board could not be read again. A yard without the
+    /// call is no error: the Lines pane says the yard is too old, and no
+    /// notice is raised. Anything else is said as a notice, as ever.
+    pub fn arrivals_failed(&mut self, err: &api::Error) {
+        match lines_too_old(err) {
+            true => self.arrivals_too_old = true,
+            false => self.notice = format!("the arrivals could not be read: {err}"),
+        }
     }
 
     /// One bead's route, as the details' strip shows it: the stages in
@@ -1744,10 +1777,28 @@ impl Model {
     }
 
     /// The flows view as read again. A line or No line that is gone
-    /// falls back to the board; a travelling bead is never gone.
+    /// falls back to the board; a travelling bead is never gone. The yard
+    /// has the call, so it is not too old for it.
     pub fn flows(&mut self, board: Flows) -> Vec<Effect> {
         self.flows = board;
+        self.flows_too_old = false;
         self.reselect()
+    }
+
+    /// Whether the yard has no Flows call: one from before the Lines
+    /// view, which the Lines pane says.
+    pub fn flows_too_old(&self) -> bool {
+        self.flows_too_old
+    }
+
+    /// The flows view could not be read again. A yard without the call
+    /// is no error: the Lines pane says the yard is too old, and no
+    /// notice is raised. Anything else is said as a notice, as ever.
+    pub fn flows_failed(&mut self, err: &api::Error) {
+        match lines_too_old(err) {
+            true => self.flows_too_old = true,
+            false => self.notice = format!("the flows could not be read: {err}"),
+        }
     }
 
     /// One line's flows as served, when the yard serves the line.
@@ -4763,6 +4814,21 @@ pub fn approves_elsewhere(err: &api::Error) -> bool {
 pub fn note_files_too_old(err: &api::Error) -> bool {
     matches!(err, api::Error::Refused { message, .. } if message.starts_with("argument \"files\""))
 }
+
+/// Whether the yard has no such Lines call: one from before Arrivals
+/// and Flows, which says it has no such method. That is no error: the
+/// Lines pane says the yard is too old, in plain words, and no notice
+/// is raised. Its words are read here, as above, and when they change
+/// this is shown as any refusal.
+pub fn lines_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
+/// What the Lines pane says of a yard from before the Lines view, in
+/// place of the arrivals or the flows it would draw: plain words, never
+/// the wire's method names, and never in red.
+pub const LINES_TOO_OLD: &str =
+    "this yard's yardr is older than the Lines view (it needs yardr from 16 Oct 2026 or later)";
 
 /// What the yard answered to a setup approval, in one line: the pack with
 /// the preset picked and who the grants are for, with the names given or
@@ -8467,6 +8533,68 @@ mod tests {
         assert!(!note_files_too_old(&api::Error::Protocol(
             "AddNote: status 200, and no JSON object".into()
         )));
+    }
+
+    /// A yard from before the Lines view has no Arrivals or Flows call:
+    /// its answer is no error, so no notice is raised, and the Lines
+    /// pane says the yard is too old instead. Anything else those calls
+    /// fail with is said as a notice, as ever. A board or a view read
+    /// again clears its half: the yard has the call.
+    #[test]
+    fn an_old_yard_s_lines_are_said_in_the_lines_pane_not_as_a_notice() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        assert!(lines_too_old(&refused("no such method Arrivals")));
+        assert!(lines_too_old(&refused("no such method Flows")));
+        assert!(!lines_too_old(&refused("the board is closed")));
+        assert!(!lines_too_old(&api::Error::Protocol(
+            "Arrivals: status 200, and no JSON object".into()
+        )));
+        // Plain words, and never the wire's method names.
+        assert!(LINES_TOO_OLD.contains("older than the Lines view"));
+        assert!(!LINES_TOO_OLD.contains("no such method"));
+        assert!(!LINES_TOO_OLD.contains("Arrivals"));
+        assert!(!LINES_TOO_OLD.contains("Flows"));
+
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.arrivals_failed(&refused("no such method Arrivals"));
+        assert!(m.arrivals_too_old());
+        assert!(!m.flows_too_old());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+        m.flows_failed(&refused("no such method Flows"));
+        assert!(m.flows_too_old());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+
+        // A board read again clears its half alone.
+        m.arrivals(Arrivals::default());
+        assert!(!m.arrivals_too_old());
+        assert!(m.flows_too_old());
+        let _ = m.flows(Flows::default());
+        assert!(!m.flows_too_old());
+
+        // Any other failure is a notice, as ever, and not the Lines pane's.
+        for err in [
+            refused("the board is closed"),
+            api::Error::Protocol("Arrivals: status 200, and no JSON object".into()),
+            api::Error::Down(std::io::Error::other("the yard went away")),
+        ] {
+            m.arrivals_failed(&err);
+            assert!(!m.arrivals_too_old());
+            assert_eq!(m.notice, format!("the arrivals could not be read: {err}"));
+            m.notice.clear();
+        }
+        for err in [
+            refused("the view is closed"),
+            api::Error::Protocol("Flows: status 200, and no JSON object".into()),
+            api::Error::Down(std::io::Error::other("the yard went away")),
+        ] {
+            m.flows_failed(&err);
+            assert!(!m.flows_too_old());
+            assert_eq!(m.notice, format!("the flows could not be read: {err}"));
+            m.notice.clear();
+        }
     }
 
     #[test]

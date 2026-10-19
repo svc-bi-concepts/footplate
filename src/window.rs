@@ -590,6 +590,16 @@ fn panel_meta() -> Div {
     div().text_xs().line_height(rems(1.))
 }
 
+/// What the Lines pane says of a yard from before the Lines view, in
+/// place of the arrivals or the flows it would draw: plain words in the
+/// faint colour, never a notice.
+fn lines_too_old(palette: Palette) -> Div {
+    div()
+        .debug_selector(|| "lines too old".to_string())
+        .text_color(palette.faint)
+        .child(model::LINES_TOO_OLD)
+}
+
 /// A track's card: a surface of its own under its cells, in the sunken
 /// ground with the border's hairline and the kit's 8-pixel radius, at
 /// least `width` wide and as wide as the pane where that is more, so
@@ -2543,7 +2553,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("run") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
             return Some(Selected::Decision("bead-s".into()));
         }
-        Ok("arrivals") | Ok("departures") => return Some(Selected::Arrivals),
+        Ok("arrivals") | Ok("departures") | Ok("old-lines") => return Some(Selected::Arrivals),
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
         Ok("flow") => return Some(Selected::Line("yardr".into())),
         _ => {}
@@ -5345,11 +5355,10 @@ impl Footplate {
                             m.arrivals(board);
                             Vec::new()
                         }),
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the arrivals could not be read: {err}"),
-                            cx,
-                        ),
+                        Err(err) => this.change_in(session, cx, |m| {
+                            m.arrivals_failed(&err);
+                            Vec::new()
+                        }),
                     },
                 ),
                 Effect::Flows => self.ask_in(
@@ -5358,11 +5367,10 @@ impl Footplate {
                     |client, _| client.flows(),
                     move |this, flows, cx| match flows {
                         Ok(board) => this.change_in(session, cx, |m| m.flows(board)),
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the flows could not be read: {err}"),
-                            cx,
-                        ),
+                        Err(err) => this.change_in(session, cx, |m| {
+                            m.flows_failed(&err);
+                            Vec::new()
+                        }),
                     },
                 ),
                 Effect::Timetable { from, until } => self.ask_in(
@@ -13062,7 +13070,10 @@ impl Footplate {
         }
         let rows = model.arrival_rows();
         if rows.is_empty() {
-            list = list.child(div().text_color(palette.faint).child("None in transit."));
+            list = list.child(match model.arrivals_too_old() {
+                true => lines_too_old(palette),
+                false => div().text_color(palette.faint).child("None in transit."),
+            });
         } else {
             list = list.child(self.departures_head(palette));
             for row in rows {
@@ -13165,7 +13176,10 @@ impl Footplate {
             body = body.child(self.panel_quiet(model, width, mono.clone(), palette, cx));
         }
         if empty {
-            body = body.child(div().text_color(palette.faint).child("None in transit."));
+            body = body.child(match model.flows_too_old() {
+                true => lines_too_old(palette),
+                false => div().text_color(palette.faint).child("None in transit."),
+            });
         }
         body
     }
@@ -23224,6 +23238,90 @@ yardr.dev
         });
         // Three travel and three show: no capped line stands.
         assert!(!drawn(cx, "arrivals capped"));
+    }
+
+    /// A yard from before the Lines view serves no Arrivals or Flows:
+    /// no notice is raised in any mode, and the Lines pane says the yard
+    /// is too old instead, on the panel and under Departures alike, and
+    /// nowhere else.
+    #[gpui::test]
+    fn an_old_yard_says_so_in_the_lines_pane_and_nowhere_else(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let old = |method: &str| {
+            format!(r#"{{"error": {{"code": "error", "message": "no such method {method}"}}}}"#)
+        };
+        yard.answer("Arrivals", &old("Arrivals"));
+        yard.answer("Flows", &old("Flows"));
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.arrivals_too_old());
+            assert!(model.flows_too_old());
+        });
+        assert_eq!(notice(&view, cx), "");
+        assert!(!drawn(cx, "lines too old"));
+        // The panel says the yard is too old, and so does the board
+        // under the toggle, with still no notice anywhere.
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        cx.run_until_parked();
+        assert!(drawn(cx, "lines too old"));
+        assert_eq!(notice(&view, cx), "");
+        to_departures(cx);
+        assert!(drawn(cx, "lines too old"));
+        assert_eq!(notice(&view, cx), "");
+        // Back in chat and in decisions: no notice, and the words stand
+        // in the Lines pane alone. (What was drawn stays drawn to the
+        // tests, so the words gone from the pane are not said here.)
+        to_chat(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "");
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// A Lines call read again past an old yard says the yard is too
+    /// old, with no notice; any other failure of the re-read is a
+    /// notice, as ever.
+    #[gpui::test]
+    fn a_lines_call_read_again_says_an_old_yard_and_notices_the_rest(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The board read again past an answer the yard has no call for:
+        // too old, with no notice, and the flows half reads on.
+        yard.answer_once_status(
+            "Arrivals",
+            200,
+            r#"{"error": {"code": "error", "message": "no such method Arrivals"}}"#,
+        );
+        yard.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 1}}"#);
+        wait(cx, "the yard too old for arrivals", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.arrivals_too_old())
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "");
+        view.read_with(cx, |v, _| {
+            assert!(!v.model.as_ref().unwrap().flows_too_old());
+        });
+        // A re-read the yard serves unreadably is a notice, as ever.
+        yard.answer_once_status("Flows", 200, r#"{"result": {"travelling": [7]}}"#);
+        yard.emit(r#"{"seq": 22, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 2}}"#);
+        wait(cx, "why the flows could not be read", |cx| {
+            !notice(&view, cx).is_empty()
+        });
+        assert!(
+            notice(&view, cx).starts_with("the flows could not be read: "),
+            "{}",
+            notice(&view, cx)
+        );
+        view.read_with(cx, |v, _| {
+            assert!(!v.model.as_ref().unwrap().flows_too_old());
+        });
     }
 
     /// Against a yard that serves no platforms list the board still

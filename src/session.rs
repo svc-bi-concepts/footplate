@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::{self, Arrivals, Client, Event, Flows};
-use crate::model::State;
+use crate::model::{self, State};
 
 /// How long until the yard is tried again.
 pub const RETRY: Duration = Duration::from_secs(3);
@@ -245,19 +245,25 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     let asks = client.user_asks(&user.name)?;
     // One call's failure must not hold the whole yard away: an
     // unreadable board reads as empty, with why for the window to say,
-    // and an unreadable flows view with it.
-    let (arrivals, arrivals_notice) = match client.arrivals() {
-        Ok(board) => (board, None),
+    // and an unreadable flows view with it. A yard from before the
+    // calls has no Lines to serve: that reads as empty too, with the
+    // Lines pane saying so instead of a notice.
+    let (arrivals, arrivals_notice, arrivals_too_old) = match client.arrivals() {
+        Ok(board) => (board, None, false),
+        Err(err) if model::lines_too_old(&err) => (Arrivals::default(), None, true),
         Err(err) => (
             Arrivals::default(),
             Some(format!("the arrivals could not be read: {err}")),
+            false,
         ),
     };
-    let (flows, flows_notice) = match client.flows() {
-        Ok(board) => (board, None),
+    let (flows, flows_notice, flows_too_old) = match client.flows() {
+        Ok(board) => (board, None, false),
+        Err(err) if model::lines_too_old(&err) => (Flows::default(), None, true),
         Err(err) => (
             Flows::default(),
             Some(format!("the flows could not be read: {err}")),
+            false,
         ),
     };
     Ok(State {
@@ -273,8 +279,10 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         asks,
         arrivals,
         arrivals_notice,
+        arrivals_too_old,
         flows,
         flows_notice,
+        flows_too_old,
         yard,
     })
 }
@@ -549,6 +557,49 @@ mod tests {
         );
         let state = load(&yard.client(), "jo").unwrap();
         assert_eq!(state.flows_notice, None);
+    }
+
+    /// A yard from before the Lines view has no Arrivals or Flows call:
+    /// both read as empty, with neither raising a notice, and the Lines
+    /// pane says the yard is too old instead. Either half alone reads
+    /// the same, and a half that reads is not too old.
+    #[test]
+    fn load_reads_on_past_a_yard_too_old_for_lines() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let old = |method: &str| {
+            format!(r#"{{"error": {{"code": "error", "message": "no such method {method}"}}}}"#)
+        };
+        // Neither call: empty, with no notice, and both halves too old.
+        yard.answer("Arrivals", &old("Arrivals"));
+        yard.answer("Flows", &old("Flows"));
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.arrivals.rows.is_empty());
+        assert_eq!(state.arrivals_notice, None);
+        assert!(state.arrivals_too_old);
+        assert_eq!(state.flows, Flows::default());
+        assert_eq!(state.flows_notice, None);
+        assert!(state.flows_too_old);
+        // Either half alone: its half too old, the other as it reads.
+        yard.answer("Arrivals", r#"{"result": []}"#);
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.arrivals_notice, None);
+        assert!(!state.arrivals_too_old);
+        assert_eq!(state.flows_notice, None);
+        assert!(state.flows_too_old);
+        yard.answer("Arrivals", &old("Arrivals"));
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.arrivals_too_old);
+        assert!(!state.flows_too_old);
+        // Both halves read: neither too old.
+        yard.answer("Arrivals", r#"{"result": []}"#);
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(!state.arrivals_too_old);
+        assert!(!state.flows_too_old);
     }
 
     /// A yard at an address: the window is for the user its token is of,

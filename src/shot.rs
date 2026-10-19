@@ -41,7 +41,8 @@ use crate::yard::Env;
 /// on the arrivals row with its lamps, headcodes and quiet lines, the
 /// departures board open under the toggle, one
 /// arrival's bead open from the panel, one
-/// line's flow open on its row, an open card of a secret ask posed
+/// line's flow open on its row, the Lines pane against a yard too old
+/// to serve it, saying so in plain words, an open card of a secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, the yardmaster's conversation naming an ask and two
@@ -99,6 +100,7 @@ pub const STATES: &[&str] = &[
     "departures",
     "arrival",
     "flow",
+    "old-lines",
     "secret",
     "secret-shown",
     "secret-refused",
@@ -572,13 +574,16 @@ fn populate(yard: &Yard, state: &str) {
     yard.answer("AddNote", "{}");
     yard.answer("DeferAsk", "{}");
     yard.answer("DeclineAsk", "{}");
-    // The arrivals board every state loads: three rows in served order,
-    // one with an amber remark, one with none, and one with a red remark
-    // and no expected arrival. The window counts it in the arrivals row;
-    // the departures state draws the rows flat in this order.
-    yard.answer(
-        "Arrivals",
-        &json!({"result": {"rows": [
+    // The arrivals board every state but old-lines loads: three rows
+    // in served order, one with an amber remark, one with none, and one
+    // with a red remark and no expected arrival. The window counts it
+    // in the arrivals row; the departures state draws the rows flat in
+    // this order. Old-lines serves neither call, so the yard answers
+    // no such method to both, as a yardr from before the Lines view.
+    if state != "old-lines" {
+        yard.answer(
+            "Arrivals",
+            &json!({"result": {"rows": [
             {"bead": "yd-zulu", "title": "Zulu's late turn",
              "platform": "draft", "line": "yardr", "expected": "5h–8h",
              "remark": "late", "tone": "amber"},
@@ -589,50 +594,51 @@ fn populate(yard: &Yard, state: &str) {
              "platform": "new", "line": "footplate", "expected": "—",
              "remark": "held", "tone": "red"},
         ], "platforms": ["new", "review", "draft"]}})
-        .to_string(),
-    );
-    // The flows view every state loads: the three arrivals travelling,
-    // yardr's two on its default flow's turn and quiet stages,
-    // footplate's one on a fault stage, each stage with its terminal
-    // flag and its routed group's seats. The window counts the totals
-    // in the timetable's rows.
-    yard.answer(
-        "Flows",
-        &json!({"result": {
-            "travelling": 3,
-            "depots": [
-                {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
-                    {"name": "default", "type": "", "source": "store", "stages": [
-                        {"stage": "new", "group": "muse-builders", "human": false,
-                         "lamp": "turn", "terminal": false, "limit": 3, "taken": 2,
-                         "beads": [
-                            {"bead": "yd-zulu", "title": "Zulu's late turn",
-                             "expected": "5h–8h", "remark": "late",
-                             "tone": "amber", "working": false}]},
-                        {"stage": "review", "group": "mckean", "human": true,
-                         "lamp": "none", "terminal": false, "limit": 1, "taken": 0,
-                         "beads": [
-                            {"bead": "yd-alpha", "title": "Alpha moves first",
-                             "expected": "20m–35m", "remark": "",
-                             "tone": "none", "working": false}]},
-                    ]},
-                ], "elsewhere": []},
-                {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
-                    {"name": "default", "type": "", "source": "store", "stages": [
-                        {"stage": "new", "group": "muse-builders", "human": false,
-                         "lamp": "fault", "terminal": false, "limit": 2, "taken": 1,
-                         "beads": [
-                            {"bead": "footplate-p512",
-                             "title": "The sign-in's password label",
-                             "expected": "—", "remark": "held",
-                             "tone": "red", "working": false}]},
-                    ]},
-                ], "elsewhere": []},
-            ],
-            "unassigned": [],
-        }})
-        .to_string(),
-    );
+            .to_string(),
+        );
+        // The flows view every state but old-lines loads: the three arrivals
+        // travelling, yardr's two on its default flow's turn and quiet stages,
+        // footplate's one on a fault stage, each stage with its terminal
+        // flag and its routed group's seats. The window counts the totals
+        // in the timetable's rows.
+        yard.answer(
+            "Flows",
+            &json!({"result": {
+                "travelling": 3,
+                "depots": [
+                    {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
+                        {"name": "default", "type": "", "source": "store", "stages": [
+                            {"stage": "new", "group": "muse-builders", "human": false,
+                             "lamp": "turn", "terminal": false, "limit": 3, "taken": 2,
+                             "beads": [
+                                {"bead": "yd-zulu", "title": "Zulu's late turn",
+                                 "expected": "5h–8h", "remark": "late",
+                                 "tone": "amber", "working": false}]},
+                            {"stage": "review", "group": "mckean", "human": true,
+                             "lamp": "none", "terminal": false, "limit": 1, "taken": 0,
+                             "beads": [
+                                {"bead": "yd-alpha", "title": "Alpha moves first",
+                                 "expected": "20m–35m", "remark": "",
+                                 "tone": "none", "working": false}]},
+                        ]},
+                    ], "elsewhere": []},
+                    {"name": "footplate", "kind": "git", "travelling": 1, "flows": [
+                        {"name": "default", "type": "", "source": "store", "stages": [
+                            {"stage": "new", "group": "muse-builders", "human": false,
+                             "lamp": "fault", "terminal": false, "limit": 2, "taken": 1,
+                             "beads": [
+                                {"bead": "footplate-p512",
+                                 "title": "The sign-in's password label",
+                                 "expected": "—", "remark": "held",
+                                 "tone": "red", "working": false}]},
+                        ]},
+                    ], "elsewhere": []},
+                ],
+                "unassigned": [],
+            }})
+            .to_string(),
+        );
+    }
     match state {
         // The yard at an address is opened from the settings, not from
         // this yard, and the settings open over a running one, each
@@ -660,6 +666,7 @@ fn populate(yard: &Yard, state: &str) {
         | "departures"
         | "arrival"
         | "flow"
+        | "old-lines"
         | "switcher" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
@@ -2027,6 +2034,21 @@ mod tests {
                         }
                         entry => panic!("the run folds: {entry:?}"),
                     }
+                }
+                "old-lines" => {
+                    // The yard serves neither Lines call, as one from
+                    // before the Lines view: both halves read as empty,
+                    // with no notice, and too old instead.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 6, "{state}");
+                    assert!(loaded.arrivals.rows.is_empty(), "{state}");
+                    assert_eq!(loaded.arrivals_notice, None, "{state}");
+                    assert!(loaded.arrivals_too_old, "{state}");
+                    assert_eq!(loaded.flows.travelling, 0, "{state}");
+                    assert!(loaded.flows.depots.is_empty(), "{state}");
+                    assert_eq!(loaded.flows_notice, None, "{state}");
+                    assert!(loaded.flows_too_old, "{state}");
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }
