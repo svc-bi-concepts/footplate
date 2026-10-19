@@ -597,6 +597,7 @@ fn keys_for(view: KeysView) -> Vec<(String, String)> {
                 "enter".into(),
                 "sends the pick with the line's words".into(),
             ),
+            ("shift+enter".into(), "breaks the line".into()),
             ("i".into(), "types the words in".into()),
             ("x".into(), "puts the ask aside".into()),
             ("d".into(), "declines with words".into()),
@@ -619,6 +620,10 @@ fn keys_for(view: KeysView) -> Vec<(String, String)> {
                 "the next, the previous row".into(),
             ),
             ("pageup · pagedown".into(), "scroll by a page".into()),
+            (
+                format!("{SECONDARY}+home · {SECONDARY}+end"),
+                "the oldest loaded, the newest".into(),
+            ),
             ("?".into(), "this list".into()),
         ],
         KeysView::Yard => vec![
@@ -629,6 +634,10 @@ fn keys_for(view: KeysView) -> Vec<(String, String)> {
                 "the next, the previous row".into(),
             ),
             ("pageup · pagedown".into(), "scroll by a page".into()),
+            (
+                format!("{SECONDARY}+home · {SECONDARY}+end"),
+                "the first notice, the newest".into(),
+            ),
             ("?".into(), "this list".into()),
         ],
         KeysView::Timetable => vec![
@@ -21962,6 +21971,11 @@ mod tests {
         assert!(rows(KeysView::Switcher).contains(&"?".to_string()));
         assert!(rows(KeysView::Switcher).contains(&"+".to_string()));
         assert!(rows(KeysView::Yard).contains(&"shift+x".to_string()));
+        assert!(rows(KeysView::Conversation).contains(&"shift+enter".to_string()));
+        assert!(rows(KeysView::Card).contains(&"shift+enter".to_string()));
+        let oldest_newest = format!("{SECONDARY}+home · {SECONDARY}+end");
+        assert!(rows(KeysView::Card).contains(&oldest_newest));
+        assert!(rows(KeysView::Yard).contains(&oldest_newest));
         assert!(!rows(KeysView::Conversation).contains(&"?".to_string()));
         assert!(!rows(KeysView::Settings).contains(&"?".to_string()));
     }
