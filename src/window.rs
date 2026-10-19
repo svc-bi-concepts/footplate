@@ -18782,8 +18782,9 @@ mod tests {
         .to_string()
     }
 
-    /// The board with a bead that waits on jo: one row remarked
-    /// `waits for yardmaster, jo`, one plain, at the one platform.
+    /// The board with a wait for several naming jo: one row remarked
+    /// `waits for yardmaster, jo`, one plain, at the one platform. It
+    /// waits on jo only with an open ask on that bead.
     fn arrivals_waits() -> String {
         json!({"result": {
             "rows": [
@@ -24102,13 +24103,15 @@ yardr.dev
 
     /// The board banners how many beads wait on the person reading:
     /// the head alone above the table, no row per bead, and a click
-    /// opens the decisions mode, as Enter does with the focus on it.
+    /// opens the decisions mode, as Enter does with the focus on it. The
+    /// wait for several counts with an open ask on that bead.
     #[gpui::test]
     fn the_board_banners_how_many_wait_on_you(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_waits());
         yard.answer("Flows", &flows_board());
+        yard.answer("UserAsks", &asks_about("yd-zulu", "yardmaster", "Land it?"));
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
@@ -24152,14 +24155,36 @@ yardr.dev
         });
     }
 
+    /// A wait for several without an open ask banners nothing: the row
+    /// stands as the yard printed it, and counts toward no "waiting on
+    /// you".
+    #[gpui::test]
+    fn a_wait_for_several_without_an_open_ask_banners_nothing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_waits());
+        yard.answer("Flows", &flows_board());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        to_departures(cx);
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().waiting_on_you().is_empty());
+        });
+        assert!(!drawn(cx, "waits banner"));
+    }
+
     /// The banner holds fifty-five waits on its one line: the head
     /// alone above the table, no row per bead, and a click opens the
-    /// decisions mode.
+    /// decisions mode. The arrivals row's wait for several counts with
+    /// its open ask; the fifty-four flows rows name jo alone.
     #[gpui::test]
     fn the_banner_holds_fifty_five_waits_on_one_line(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_waits());
+        yard.answer("UserAsks", &asks_about("yd-zulu", "yardmaster", "Land it?"));
         let mut flows: Value = serde_json::from_str(&flows_board()).unwrap();
         let beads = flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"]
             .as_array_mut()

@@ -160,9 +160,22 @@ fn line_transit_words(transit: usize) -> String {
 }
 
 /// Whether the remark is a wait that names `me`: `waits for` with `me`
-/// among the comma-separated names. Nobody where `me` is empty.
+/// among the comma-separated names. Nobody where `me` is empty. The rows
+/// draw with this; what counts toward "waiting on you" is alone or asked
+/// ([`Model::waiting_on_you`]), not this.
 pub fn waits_on_you(remark: &str, me: &str) -> bool {
     waits_names(remark).is_some_and(|names| !me.is_empty() && names.contains(&me))
+}
+
+/// Whether the remark names `me` alone: `waits for jo` where `me` is `jo`.
+/// A wait for several names no one alone, even where `me` is among them;
+/// the yard prints every member of the stage's group, so alone means the
+/// group has only them. Nobody where `me` is empty.
+fn waits_on_you_alone(remark: &str, me: &str) -> bool {
+    match waits_names(remark) {
+        Some(names) => !me.is_empty() && names.len() == 1 && names[0] == me,
+        None => false,
+    }
 }
 
 /// The remark with `you` first among whom it waits for, where it waits
@@ -1715,21 +1728,26 @@ impl Model {
 
     /// The beads that wait on the person reading, in the board's order
     /// first and then the complete Flows order. Arrivals is capped, so
-    /// the flows also supply waits beyond the rows the table can show.
+    /// the flows also supply waits beyond the rows the table can show. A
+    /// bead waits on them where its remark names them alone, or where
+    /// they have an open ask on it; a wait naming several people counts
+    /// only with an open ask on that bead.
     pub fn waiting_on_you(&self) -> Vec<(&str, &str)> {
         fn include<'a>(
             waiting: &mut Vec<(&'a str, &'a str)>,
             seen: &mut HashSet<&'a str>,
             me: &str,
+            asked: &HashSet<&str>,
             bead: &'a str,
             title: &'a str,
             remark: &str,
         ) {
-            if waits_on_you(remark, me) && seen.insert(bead) {
+            if (waits_on_you_alone(remark, me) || asked.contains(bead)) && seen.insert(bead) {
                 waiting.push((bead, title));
             }
         }
 
+        let asked: HashSet<&str> = self.open.iter().map(|ask| ask.bead.as_str()).collect();
         let mut waiting = Vec::new();
         let mut seen = HashSet::new();
         for row in &self.arrivals {
@@ -1737,6 +1755,7 @@ impl Model {
                 &mut waiting,
                 &mut seen,
                 &self.me,
+                &asked,
                 &row.bead,
                 &row.title,
                 &row.remark,
@@ -1747,6 +1766,7 @@ impl Model {
                 &mut waiting,
                 &mut seen,
                 &self.me,
+                &asked,
                 &bead.bead,
                 &bead.title,
                 &bead.remark,
@@ -7804,7 +7824,8 @@ mod tests {
 
     /// The banner keeps visible arrivals in their served order, then
     /// includes waits beyond the arrivals cap from stages, Elsewhere
-    /// and No line, once per bead.
+    /// and No line, once per bead. A wait for several counts only with
+    /// an open ask on that bead, so `yd-f` stands out until asked.
     #[test]
     fn the_banner_s_beads_are_the_board_s_rows_that_wait_on_you() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
@@ -7872,8 +7893,92 @@ mod tests {
                 .iter()
                 .map(|(bead, _)| *bead)
                 .collect::<Vec<_>>(),
+            ["yd-a", "yd-e", "yd-u"]
+        );
+        // With an open ask on it, the wait for several counts too.
+        m.asks(crate::api::Asks {
+            open: vec![open_ask(
+                "yd-f",
+                "Both wait",
+                "",
+                3,
+                "Which first?",
+                "yardmaster",
+                "2026-10-10T10:00:00Z",
+            )],
+            decided: Vec::new(),
+        });
+        assert_eq!(
+            m.waiting_on_you()
+                .iter()
+                .map(|(bead, _)| *bead)
+                .collect::<Vec<_>>(),
             ["yd-a", "yd-f", "yd-e", "yd-u"]
         );
+    }
+
+    /// A bead waits on the reader where its remark names them alone, or
+    /// where they have an open ask on it: a wait for several without an
+    /// ask counts nothing, with one it counts, as does an ask on a bead
+    /// whose remark waits on no one.
+    #[test]
+    fn a_bead_waits_on_you_alone_or_asked() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        m.arrivals(board(vec![
+            arrival("yd-alone", "new", "yardr", "1h–2h", "waits for jo", "amber"),
+            arrival(
+                "yd-multi",
+                "new",
+                "yardr",
+                "1h–2h",
+                "waits for yardmaster, jo",
+                "amber",
+            ),
+            arrival(
+                "yd-other",
+                "new",
+                "yardr",
+                "1h–2h",
+                "waits for yardmaster",
+                "amber",
+            ),
+            arrival("yd-plain", "new", "yardr", "1h–2h", "", "none"),
+        ]));
+        let waiting = m
+            .waiting_on_you()
+            .iter()
+            .map(|(bead, _)| (*bead).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(waiting, ["yd-alone"]);
+        m.asks(crate::api::Asks {
+            open: vec![
+                open_ask(
+                    "yd-multi",
+                    "Both wait",
+                    "",
+                    3,
+                    "Which first?",
+                    "yardmaster",
+                    "2026-10-10T10:00:00Z",
+                ),
+                open_ask(
+                    "yd-plain",
+                    "Plain moves",
+                    "",
+                    4,
+                    "Go now?",
+                    "yardmaster",
+                    "2026-10-10T11:00:00Z",
+                ),
+            ],
+            decided: Vec::new(),
+        });
+        let waiting = m
+            .waiting_on_you()
+            .iter()
+            .map(|(bead, _)| (*bead).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(waiting, ["yd-alone", "yd-multi", "yd-plain"]);
     }
 
     /// A bead the board no longer serves — beyond its cap — is detailed
