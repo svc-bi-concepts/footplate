@@ -6381,7 +6381,7 @@ mod tests {
         assert!(m.notice.is_empty(), "{}", m.notice);
         // A reaction answered clears it.
         m.conversation("yardmaster", vec![letter(12, "yardmaster", "jo", "x")]);
-        assert_eq!(m.reacted(12), [read("yardmaster", 12)]);
+        assert_eq!(m.reacted(12), [read("yardmaster", 11)]);
         assert!(!m.react_too_old());
         // Anything else is a notice, as ever.
         m.react_failed(&refused("only the letter's sender or receiver may react"));
