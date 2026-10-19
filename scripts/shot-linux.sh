@@ -180,11 +180,12 @@ trap 'exit 1' HUP INT TERM
 # Beyond the build's own packages, which the provisioning brings itself,
 # the shot wants the compositor's (sway, grim, seatd), Vulkan's (the
 # loader, the software driver, vulkaninfo to say which driver answers) and
-# a font, so the window's words are drawn as words and not as boxes.
+# fonts, so the window's words are drawn as words and not as boxes: one
+# for text, and one for emoji, which mail and reactions carry.
 platform=""
 cargo_home=/cargo
 extra_bins="sway grim seatd vulkaninfo dbus-run-session"
-extra_pkgs="sway grim seatd mesa-vulkan-drivers libvulkan1 vulkan-tools dbus fonts-dejavu-core"
+extra_pkgs="sway grim seatd mesa-vulkan-drivers libvulkan1 vulkan-tools dbus fonts-dejavu-core fonts-noto-color-emoji"
 linux_provision "$name"
 echo "shot-linux.sh: container $name, volumes $cargo_vol $target_vol" >&2
 
