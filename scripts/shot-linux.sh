@@ -137,16 +137,10 @@ esac
 # name them. Empty is the usual 14, as ever.
 text=${SHOT_TEXT:-}
 case "$text" in
-    "") ;;
-    *[!0-9]*)
+    ""|11|12|13|14|15|16|17|18|19|20) ;;
+    *)
         echo "shot-linux.sh: SHOT_TEXT must be 11 to 20" >&2
         exit 2
-        ;;
-    *)
-        if [ "$text" -lt 11 ] || [ "$text" -gt 20 ]; then
-            echo "shot-linux.sh: SHOT_TEXT must be 11 to 20" >&2
-            exit 2
-        fi
         ;;
 esac
 if ! command -v docker >/dev/null 2>&1; then
