@@ -10808,7 +10808,9 @@ mod tests {
         m.take_account("yd-crm", 41, "courier-existing");
         m.choose("yd-crm", 41, 2);
         assert_eq!(m.setup_approving("yd-crm", 41), Some(&courier()));
-        let effects = m.setup_approved("yd-crm", 41, 2, &setup_approved_with(&[]));
+        let mut approved = setup_approved_with(&[]);
+        approved.preset = "everything".into();
+        let effects = m.setup_approved("yd-crm", 41, 2, &approved);
         assert!(effects.contains(&Effect::Asks));
         assert!(effects.contains(&Effect::Bead {
             bead: "yd-crm".into()
@@ -10818,11 +10820,11 @@ mod tests {
         let detail = m.decided_detail("yd-crm", 41, &chrono::Utc).unwrap();
         assert_eq!(
             detail.state_line,
-            "approved, being carried out: setup of pack courier, preset read to crew yardmaster"
+            "approved, being carried out: setup of pack courier, preset everything to crew yardmaster"
         );
         assert_eq!(detail.setup, Some(courier()));
         assert_eq!(detail.picked, 2);
-        assert_eq!(detail.pick, "read");
+        assert_eq!(detail.pick, "everything");
         // The pick and the taken account went with the approval.
         assert_eq!(m.account_choice("yd-crm", 41), "");
         assert_eq!(m.setup_approving("yd-crm", 41), None);
