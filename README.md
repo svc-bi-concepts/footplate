@@ -193,7 +193,8 @@ screen of a hosted yard that is signed out), `away` (the away
 screen of a yard at an address that no longer lets the device in,
 with a way's fields open), `arrivals` (the
 arrivals panel open on the arrivals row, with its lamps, headcodes
-and quiet lines), `arrival` (one
+and quiet lines), `departures` (the departures board open under the
+toggle, with its banner), `arrival` (one
 arrival's bead open from the panel), `flow` (yardr's line open on
 its flow), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`

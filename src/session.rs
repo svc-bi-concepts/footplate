@@ -507,7 +507,6 @@ mod tests {
         yard.answer("Arrivals", r#"{"result": [7]}"#);
         let state = load(&yard.client(), "jo").unwrap();
         assert!(state.arrivals.rows.is_empty());
-        assert!(state.arrivals.platforms.is_empty());
         assert!(
             state
                 .arrivals_notice

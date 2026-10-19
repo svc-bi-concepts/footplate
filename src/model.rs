@@ -66,7 +66,7 @@ pub struct State {
     /// The person's open asks with what they dealt with.
     pub asks: Asks,
     /// The arrivals board as read: the rows as served, ordered and
-    /// remarked, beside the platforms in the order the beads travel.
+    /// remarked.
     pub arrivals: Arrivals,
     /// Why the arrivals board is empty, in the window's words; `None`
     /// where the board was read.
@@ -150,17 +150,6 @@ fn line_transit_words(transit: usize) -> String {
     match transit {
         0 => "nothing in transit".to_string(),
         transit => format!("{transit} in transit"),
-    }
-}
-
-/// The remark where it is a late mark: `late`, or `late by <overrun>`
-/// where the yard prints the overrun. None for any other remark. The
-/// board draws the late mark under the ETA, in red, apart from the
-/// rest, which stay in the row.
-pub fn late_line(remark: &str) -> Option<&str> {
-    match remark == "late" || remark.starts_with("late by ") {
-        true => Some(remark),
-        false => None,
     }
 }
 
@@ -555,15 +544,7 @@ pub struct DecidedGroup {
     pub rows: Vec<DecidedEntry>,
 }
 
-/// One platform's arrivals, with the served rows that stand at it, in
-/// the served order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ArrivalGroup {
-    pub platform: String,
-    pub rows: Vec<Arrival>,
-}
-
-/// One bead's route, as the board's strip shows it: its flow's stages
+/// One bead's route, as its details' strip shows it: its flow's stages
 /// in travel order, each with whether a bead there waits on a person,
 /// and which one the bead stands at.
 #[derive(Debug, Clone, PartialEq)]
@@ -848,11 +829,6 @@ pub struct Model {
     /// The arrivals board as read: the rows as served, ordered and
     /// remarked.
     arrivals: Vec<Arrival>,
-    /// The platforms in the order the beads travel, as served beside
-    /// the rows: the board groups under them. Empty from a yard that
-    /// serves no list, and then the board groups in first-appearance
-    /// order.
-    arrival_platforms: Vec<String>,
     /// The flows view as read: the lines with their flows, stages, beads
     /// and lamps, the unassigned rows, and the travelling totals.
     flows: Flows,
@@ -999,7 +975,6 @@ impl Model {
             trust: trusted(&state.peers),
             crew: state.crew,
             arrivals: state.arrivals.rows,
-            arrival_platforms: state.arrivals.platforms,
             flows: state.flows,
             cursor: state.cursor,
             asked: state.cursor,
@@ -1657,38 +1632,9 @@ impl Model {
     /// The arrivals board as read again.
     pub fn arrivals(&mut self, board: Arrivals) {
         self.arrivals = board.rows;
-        self.arrival_platforms = board.platforms;
     }
 
-    /// The served rows under their platform, the platforms in the served
-    /// travel order, each with its rows in the served order. A row whose
-    /// platform the served list does not name stands under its own group
-    /// at the end, in first-appearance order, so the board still draws
-    /// against a yard that serves no list. footplate invents no stage
-    /// order of its own: the groups stand as served.
-    pub fn arrival_groups(&self) -> Vec<ArrivalGroup> {
-        let mut groups: Vec<ArrivalGroup> = Vec::new();
-        for row in self.arrival_rows() {
-            match groups.iter_mut().find(|g| g.platform == row.platform) {
-                Some(g) => g.rows.push(row.clone()),
-                None => groups.push(ArrivalGroup {
-                    platform: row.platform.clone(),
-                    rows: vec![row.clone()],
-                }),
-            }
-        }
-        // In the served order; what it does not name stands last. The
-        // sort is stable, so those keep first-appearance order.
-        groups.sort_by_key(|g| {
-            self.arrival_platforms
-                .iter()
-                .position(|p| p == &g.platform)
-                .unwrap_or(usize::MAX)
-        });
-        groups
-    }
-
-    /// One bead's route, as the board's strip shows it: the stages in
+    /// One bead's route, as the details' strip shows it: the stages in
     /// travel order of the served flow the bead stands in, with which
     /// one it stands at. None where the bead stands in no stage of a
     /// served flow: Elsewhere, No line, or a flow the yard reads no
@@ -1789,27 +1735,6 @@ impl Model {
     /// the panel's summary beside what is worked and what waits.
     pub fn held_count(&self) -> usize {
         self.flow_beads().filter(|bead| bead.tone == "red").count()
-    }
-
-    /// One line on what the platform `stage` is: whose turn a bead
-    /// there is, from the first served flow that names the stage. None
-    /// where no served flow names it: the board says nothing it cannot
-    /// know.
-    pub fn platform_tip(&self, stage: &str) -> Option<String> {
-        for depot in &self.flows.depots {
-            for flow in &depot.flows {
-                if let Some(found) = flow.stages.iter().find(|s| s.stage == stage) {
-                    if found.human {
-                        return Some(format!("{stage}: waiting on a person"));
-                    }
-                    if found.group.is_empty() {
-                        return Some(format!("{stage}: no route matches"));
-                    }
-                    return Some(format!("{stage}: routed to the {} group", found.group));
-                }
-            }
-        }
-        None
     }
 
     /// The yard-wide travelling total the Flows call serves: the open
@@ -4974,6 +4899,30 @@ fn design_doc(bead: &str, body: &str, notes: &[crate::api::BeadNote]) -> String 
     String::new()
 }
 
+/// How long a bead has stood at its stage, from its served entry to
+/// now: `41 min at new`. A stay under a minute reads a minute; longer
+/// ones read hours, then days. Nothing for a time that cannot be read.
+pub fn stage_age<Tz: TimeZone>(entered: &str, stage: &str, now: &DateTime<Tz>) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let Ok(entered) = DateTime::parse_from_rfc3339(entered) else {
+        return None;
+    };
+    let minutes = ((now.timestamp() - entered.timestamp()) / 60).max(1);
+    let span = if minutes < 60 {
+        format!("{minutes} min")
+    } else if minutes < 24 * 60 {
+        format!("{} h", minutes / 60)
+    } else {
+        match minutes / (24 * 60) {
+            1 => "1 day".to_string(),
+            days => format!("{days} days"),
+        }
+    };
+    Some(format!("{span} at {stage}"))
+}
+
 /// How long an ask waits, from its `since` to now: `now`, `5m`, `2h`, `3d`.
 /// Nothing for a time that cannot be read.
 pub fn waits<Tz: TimeZone>(since: &str, now: &DateTime<Tz>) -> String
@@ -6358,10 +6307,9 @@ mod tests {
         let mut state = yard(&[]);
         state.asks.open = open;
         state.asks.decided = decided;
-        state.arrivals = board(
-            vec![arrival("yd-zulu", "new", "yardr", "5h–8h", "late", "amber")],
-            &["new"],
-        );
+        state.arrivals = board(vec![arrival(
+            "yd-zulu", "new", "yardr", "5h–8h", "late", "amber",
+        )]);
         let (mut m, _) = Model::new(state, Mode::Chat, None);
         m.select(Selected::Conversation("yardmaster".into()));
         let letters: Vec<Letter> = texts
@@ -7005,98 +6953,35 @@ mod tests {
         }
     }
 
-    fn board(rows: Vec<Arrival>, platforms: &[&str]) -> Arrivals {
-        Arrivals {
-            rows,
-            platforms: platforms.iter().map(|p| p.to_string()).collect(),
-        }
+    fn board(rows: Vec<Arrival>) -> Arrivals {
+        Arrivals { rows }
     }
 
     #[test]
     fn the_board_is_the_board_as_read_now_over_a_yard_lost() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert!(m.arrival_rows().is_empty());
-        m.arrivals(board(
-            vec![arrival("yd-links", "new", "yardr", "2h–3h", "", "none")],
-            &[],
-        ));
+        m.arrivals(board(vec![arrival(
+            "yd-links", "new", "yardr", "2h–3h", "", "none",
+        )]));
         assert_eq!(m.arrival_rows().len(), 1);
         // Read again after the yard was lost: the board is as read now.
         let (again, _) = m.resumed(yard(&[]), Mode::Chat);
         assert!(again.arrival_rows().is_empty());
     }
 
-    /// The board groups the served rows by platform, the platforms in
-    /// the served travel order, each with its rows in the served order.
-    /// A group of one is still a group, and nothing is remarked here:
-    /// the rows are as served.
+    /// The board's rows stand flat in the served arrival order,
+    /// remarked as served, with no grouping of their own.
     #[test]
-    fn the_board_groups_the_served_rows_by_platform_in_the_served_order() {
+    fn the_board_s_rows_stand_flat_in_the_served_arrival_order() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         let rows = vec![
             arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
             arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
             arrival("yd-fourth", "review", "yardr", "1h–2h", "held", "red"),
         ];
-        // The served list names draft first, though review appears first
-        // in the served rows: the groups stand as served.
-        m.arrivals(board(rows.clone(), &["draft", "review"]));
-        let groups = m.arrival_groups();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].platform, "draft");
-        assert_eq!(groups[1].platform, "review");
-        // Each with its rows in the served order, remarked as served.
-        assert_eq!(groups[0].rows, vec![rows[1].clone()]);
-        assert_eq!(groups[1].rows, vec![rows[0].clone(), rows[2].clone()]);
+        m.arrivals(board(rows.clone()));
         assert_eq!(m.arrival_rows(), rows.as_slice());
-    }
-
-    /// Without a served platforms list the board groups as it always
-    /// has: the platforms in the order they first appear in the served
-    /// order, each with its rows in the served order.
-    #[test]
-    fn without_a_platforms_list_the_board_groups_in_first_appearance_order() {
-        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
-        let rows = vec![
-            arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
-            arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
-            arrival("yd-fourth", "review", "yardr", "1h–2h", "held", "red"),
-        ];
-        m.arrivals(board(rows.clone(), &[]));
-        let groups = m.arrival_groups();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].platform, "review");
-        assert_eq!(groups[1].platform, "draft");
-        assert_eq!(groups[0].rows, vec![rows[0].clone(), rows[2].clone()]);
-        assert_eq!(groups[1].rows, vec![rows[1].clone()]);
-    }
-
-    /// A row whose platform the served list does not name stands under
-    /// its own group at the end, in first-appearance order with the
-    /// other unnamed ones.
-    #[test]
-    fn a_platform_the_list_does_not_name_stands_last_in_appearance_order() {
-        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
-        let rows = vec![
-            arrival("yd-first", "shape", "yardr", "20m–35m", "", "none"),
-            arrival("yd-second", "review", "yardr", "20m–35m", "", "none"),
-            arrival("yd-third", "draft", "yardr", "5h–8h", "late", "amber"),
-            arrival("yd-fourth", "build", "yardr", "1h–2h", "held", "red"),
-            arrival("yd-fifth", "review", "yardr", "1h–2h", "", "none"),
-        ];
-        m.arrivals(board(rows.clone(), &["draft", "review"]));
-        let groups = m.arrival_groups();
-        assert_eq!(groups.len(), 4);
-        assert_eq!(groups[0].platform, "draft");
-        assert_eq!(groups[1].platform, "review");
-        // Shape and build are not on the list: their own groups at the
-        // end, in the order they first appear.
-        assert_eq!(groups[2].platform, "shape");
-        assert_eq!(groups[3].platform, "build");
-        assert_eq!(groups[0].rows, vec![rows[2].clone()]);
-        assert_eq!(groups[1].rows, vec![rows[1].clone(), rows[4].clone()]);
-        assert_eq!(groups[2].rows, vec![rows[0].clone()]);
-        assert_eq!(groups[3].rows, vec![rows[3].clone()]);
     }
 
     /// The arrivals row stands at the timetable's head with the
@@ -7117,10 +7002,9 @@ mod tests {
             travelling: 16,
             ..Flows::default()
         });
-        m.arrivals(board(
-            vec![arrival("yd-a", "new", "yardr", "2h–3h", "", "none")],
-            &[],
-        ));
+        m.arrivals(board(vec![arrival(
+            "yd-a", "new", "yardr", "2h–3h", "", "none",
+        )]));
         assert_eq!(m.travelling(), 16);
         assert_eq!(m.arrivals_row().line, "16 in transit");
         m.flows(Flows {
@@ -7158,6 +7042,7 @@ mod tests {
             remark: remark.into(),
             tone: tone.into(),
             working: false,
+            ..FlowBead::default()
         }
     }
 
@@ -7191,6 +7076,7 @@ mod tests {
                                     "late",
                                     "amber",
                                 )],
+                                ..FlowStage::default()
                             },
                             FlowStage {
                                 stage: "review".into(),
@@ -7204,6 +7090,7 @@ mod tests {
                                     "held",
                                     "red",
                                 )],
+                                ..FlowStage::default()
                             },
                         ],
                     }],
@@ -7230,6 +7117,7 @@ mod tests {
                             human: false,
                             lamp: "none".into(),
                             beads: vec![],
+                            ..FlowStage::default()
                         }],
                     }],
                     elsewhere: vec![],
@@ -7460,17 +7348,6 @@ mod tests {
         assert!(!waits_on_you("waits for jo", ""));
     }
 
-    /// A late mark is `late`, with its overrun where the yard prints
-    /// one. Nothing else remarks late.
-    #[test]
-    fn a_late_mark_is_late_with_its_overrun_where_the_yard_prints_it() {
-        assert_eq!(late_line("late"), Some("late"));
-        assert_eq!(late_line("late by 40m"), Some("late by 40m"));
-        assert_eq!(late_line("held"), None);
-        assert_eq!(late_line("waits for jo"), None);
-        assert_eq!(late_line(""), None);
-    }
-
     /// The quiet lines fold under Quiet: folded they are not in the
     /// order and open nothing; unfolded they stand after No line. The
     /// active lines always stand, with their counts.
@@ -7650,62 +7527,34 @@ mod tests {
             "amber",
         ));
         m.flows(flows);
-        m.arrivals(board(
-            vec![
-                arrival("yd-a", "new", "yardr", "1h–2h", "waits for jo", "amber"),
-                arrival(
-                    "yd-b",
-                    "new",
-                    "yardr",
-                    "1h–2h",
-                    "waits for yardmaster",
-                    "amber",
-                ),
-                arrival("yd-c", "new", "yardr", "—", "held", "red"),
-                arrival("yd-d", "new", "yardr", "1h–2h", "late", "amber"),
-                arrival("yd-e", "new", "yardr", "1h–2h", "", "none"),
-                arrival(
-                    "yd-f",
-                    "new",
-                    "yardr",
-                    "1h–2h",
-                    "waits for yardmaster, jo",
-                    "amber",
-                ),
-            ],
-            &["new"],
-        ));
+        m.arrivals(board(vec![
+            arrival("yd-a", "new", "yardr", "1h–2h", "waits for jo", "amber"),
+            arrival(
+                "yd-b",
+                "new",
+                "yardr",
+                "1h–2h",
+                "waits for yardmaster",
+                "amber",
+            ),
+            arrival("yd-c", "new", "yardr", "—", "held", "red"),
+            arrival("yd-d", "new", "yardr", "1h–2h", "late", "amber"),
+            arrival("yd-e", "new", "yardr", "1h–2h", "", "none"),
+            arrival(
+                "yd-f",
+                "new",
+                "yardr",
+                "1h–2h",
+                "waits for yardmaster, jo",
+                "amber",
+            ),
+        ]));
         assert_eq!(
             m.waiting_on_you()
                 .iter()
                 .map(|(bead, _)| *bead)
                 .collect::<Vec<_>>(),
             ["yd-a", "yd-f", "yd-e", "yd-u"]
-        );
-    }
-
-    /// A platform's line says whose turn a bead there is: waiting on
-    /// a person at a manual stage, the group routed there, or that no
-    /// route matches. A stage no served flow names says nothing.
-    #[test]
-    fn a_platform_s_line_says_whose_turn_a_bead_there_is() {
-        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
-        m.flows(flow_view());
-        assert_eq!(
-            m.platform_tip("review").as_deref(),
-            Some("review: waiting on a person")
-        );
-        assert_eq!(
-            m.platform_tip("new").as_deref(),
-            Some("new: routed to the muse-builders group")
-        );
-        assert_eq!(m.platform_tip("siding"), None);
-        let mut view = flow_view();
-        view.depots[0].flows[0].stages[0].group = String::new();
-        m.flows(view);
-        assert_eq!(
-            m.platform_tip("new").as_deref(),
-            Some("new: no route matches")
         );
     }
 
@@ -7732,10 +7581,9 @@ mod tests {
         assert_eq!(detail.line, "no line");
         assert_eq!(detail.expected, "2h–3h");
         // On the board with no depot: `no line` too.
-        m.arrivals(board(
-            vec![arrival("yd-stray", "new", "", "1h–2h", "", "none")],
-            &[],
-        ));
+        m.arrivals(board(vec![arrival(
+            "yd-stray", "new", "", "1h–2h", "", "none",
+        )]));
         m.bead_loaded(Bead {
             id: "yd-stray".into(),
             ..Bead::default()
@@ -7803,12 +7651,9 @@ mod tests {
     #[test]
     fn an_arrival_s_bead_is_what_the_bead_call_returned_with_its_row() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
-        m.arrivals(board(
-            vec![arrival(
-                "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
-            )],
-            &[],
-        ));
+        m.arrivals(board(vec![arrival(
+            "yd-zulu", "draft", "yardr", "5h–8h", "late", "amber",
+        )]));
         // Nothing until the bead is read.
         assert_eq!(m.arrival_detail("yd-zulu"), None);
         m.bead_loaded(arrival_bead());
@@ -7854,10 +7699,9 @@ mod tests {
     #[test]
     fn the_open_arrival_s_bead_stays_open_over_a_queue_read_again() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
-        m.arrivals(board(
-            vec![arrival("yd-zulu", "draft", "yardr", "5h–8h", "", "none")],
-            &[],
-        ));
+        m.arrivals(board(vec![arrival(
+            "yd-zulu", "draft", "yardr", "5h–8h", "", "none",
+        )]));
         m.bead_loaded(arrival_bead());
         m.select(Selected::Bead("yd-zulu".into()));
         m.asks(Asks::default());
@@ -8974,6 +8818,36 @@ mod tests {
         assert_eq!(waits("2026-10-07T12:00:00Z", &now), "3d");
         assert_eq!(waits("", &now), "");
         assert_eq!(waits("yesterday", &now), "");
+    }
+
+    /// A bead's stage age reads from its served entry: minutes, then
+    /// hours, then days, at its stage. A stay under a minute reads a
+    /// minute, and a time that cannot be read reads nothing.
+    #[test]
+    fn a_bead_s_stage_age_reads_from_its_served_entry() {
+        let now = noon();
+        assert_eq!(
+            stage_age("2026-10-10T11:19:00Z", "new", &now).as_deref(),
+            Some("41 min at new")
+        );
+        assert_eq!(
+            stage_age("2026-10-10T11:59:30Z", "new", &now).as_deref(),
+            Some("1 min at new")
+        );
+        assert_eq!(
+            stage_age("2026-10-10T10:00:00Z", "review", &now).as_deref(),
+            Some("2 h at review")
+        );
+        assert_eq!(
+            stage_age("2026-10-09T12:00:00Z", "review", &now).as_deref(),
+            Some("1 day at review")
+        );
+        assert_eq!(
+            stage_age("2026-10-07T12:00:00Z", "new", &now).as_deref(),
+            Some("3 days at new")
+        );
+        assert_eq!(stage_age("", "new", &now), None);
+        assert_eq!(stage_age("yesterday", "new", &now), None);
     }
 
     #[test]

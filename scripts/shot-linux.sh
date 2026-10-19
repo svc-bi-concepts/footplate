@@ -36,7 +36,8 @@
 # no longer lets the device in, with a way's fields open),
 # `arrivals` (the arrivals panel open on the arrivals
 # row, with its lamps, headcodes and quiet lines),
-# `arrival` (one arrival's bead open from the panel), `flow`
+# `departures` (the departures board open under the toggle, with its
+# banner), `arrival` (one arrival's bead open from the panel), `flow`
 # (yardr's line open on its flow), `secret` (an open card of a secret
 # ask, posed with a value typed and hidden), `secret-shown` (that
 # card where the yard marks the value no secret: typed and shown),
@@ -66,7 +67,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered keys"
+states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered keys"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

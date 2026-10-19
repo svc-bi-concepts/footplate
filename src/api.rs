@@ -221,16 +221,13 @@ pub struct CrewMember {
     pub status: String,
 }
 
-/// The arrivals board as the yard serves it: the rows in arrival order
-/// beside the platforms in the order the beads travel, covering every
-/// platform a served row stands on. footplate groups the rows under the
-/// platforms in that order.
+/// The arrivals board as the yard serves it: the rows in arrival order.
+/// footplate draws them flat in that order; the platforms list the yard
+/// serves beside them is not read.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Arrivals {
     #[serde(default, deserialize_with = "or_default")]
     pub rows: Vec<Arrival>,
-    #[serde(default, deserialize_with = "or_default")]
-    pub platforms: Vec<String>,
 }
 
 /// One row of the arrivals board: a bead still travelling, its title,
@@ -318,7 +315,8 @@ pub struct Flow {
 }
 
 /// One stage of a flow and the open beads in it, with the stage's wait
-/// light.
+/// light, whether entering it closes the bead, and its routed group's
+/// seats.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct FlowStage {
     pub stage: String,
@@ -333,6 +331,19 @@ pub struct FlowStage {
     /// `turn` where only a person's turn does, `none` otherwise.
     #[serde(default)]
     pub lamp: String,
+    /// The stage closes the bead entering it.
+    #[serde(default)]
+    pub terminal: bool,
+    /// The routed group's seat limit, `0` pausing the group. Absent
+    /// where no route matches, so a reader can tell unrouted from
+    /// paused.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// How many of the routed group's seats live sessions hold across
+    /// the whole yard, the same number on every stage routed to the
+    /// group. Absent where no route matches.
+    #[serde(default)]
+    pub taken: Option<usize>,
     #[serde(default, deserialize_with = "or_default")]
     pub beads: Vec<FlowBead>,
 }
@@ -350,14 +361,23 @@ pub struct FlowBead {
     pub expected: String,
     #[serde(default)]
     pub remark: String,
-    /// `red` for a hold and a stall, `amber` for a wait and a late mark,
-    /// `none` with no remark.
+    /// `red` for a hold and a stall, `amber` for a block, a wait and a
+    /// late mark, `none` with no remark.
     #[serde(default)]
     pub tone: String,
     /// An agent's or a command's session claimed it; a manual group's
     /// claim is a person's turn and no work.
     #[serde(default)]
     pub working: bool,
+    /// Who works it, as `yardr session list` shows the claiming
+    /// session. Absent where no session claimed it, and on a manual
+    /// group's claim.
+    #[serde(default)]
+    pub worker: String,
+    /// When the bead entered its stage, as an RFC 3339 time. Absent
+    /// where no session claimed it, and where the stay has no clock.
+    #[serde(default)]
+    pub entered_stage_at: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -2274,10 +2294,9 @@ impl Client {
     }
 
     /// The arrivals board: the open beads still travelling, up to 15
-    /// rows in arrival order, each with its expected arrival and remark,
-    /// beside the platforms in the order the beads travel. A yard not
-    /// yet upgraded serves the rows as a bare list, which reads with no
-    /// platforms; no answer at all reads as an empty board.
+    /// rows in arrival order, each with its expected arrival and remark.
+    /// A yard not yet upgraded serves the rows as a bare list, which
+    /// reads the same; no answer at all reads as an empty board.
     pub fn arrivals(&self) -> Result<Arrivals> {
         let result = self.call("Arrivals", json!({}))?.unwrap_or(Value::Null);
         match result {
@@ -2285,10 +2304,7 @@ impl Client {
             Value::Array(rows) => {
                 let rows: Vec<Arrival> = serde_json::from_value(Value::Array(rows))
                     .map_err(|err| Error::Protocol(format!("Arrivals: {err}")))?;
-                Ok(Arrivals {
-                    rows,
-                    platforms: Vec::new(),
-                })
+                Ok(Arrivals { rows })
             }
             board => serde_json::from_value(board)
                 .map_err(|err| Error::Protocol(format!("Arrivals: {err}"))),
@@ -2297,9 +2313,11 @@ impl Client {
 
     /// The flows view: the depots as lines, each with its travelling
     /// total, its flows, each flow its stages in travel order with the
-    /// open beads on each and its lamp, and its Elsewhere rows; the beads
-    /// travelling with no line; and the yard-wide travelling total. No
-    /// answer at all reads as an empty view.
+    /// open beads on each, its lamp, its terminal flag and its group's
+    /// seats, each bead with who works it and when it entered its stage,
+    /// and its Elsewhere rows; the beads travelling with no line; and the
+    /// yard-wide travelling total. No answer at all reads as an empty
+    /// view.
     pub fn flows(&self) -> Result<Flows> {
         let result = self.call("Flows", json!({}))?.unwrap_or(Value::Null);
         match result {
@@ -4486,7 +4504,7 @@ mod tests {
     }
 
     #[test]
-    fn arrivals_come_with_their_rows_and_the_platforms_in_travel_order() {
+    fn arrivals_come_with_their_rows_in_arrival_order() {
         let yard = Yard::start();
         yard.answer(
             "Arrivals",
@@ -4509,7 +4527,6 @@ mod tests {
             rows.iter().map(|row| row.bead.as_str()).collect::<Vec<_>>(),
             ["footplate-p512", "yardr-bwm2", "yd-links"]
         );
-        assert_eq!(board.platforms, ["new", "review", "build"]);
         assert_eq!(
             (
                 rows[0].title.as_str(),
@@ -4536,7 +4553,7 @@ mod tests {
     }
 
     #[test]
-    fn arrivals_from_a_yard_with_no_list_are_rows_with_no_platforms() {
+    fn arrivals_from_a_yard_with_no_object_are_its_bare_rows() {
         let yard = Yard::start();
         // A yard not yet upgraded serves the bare list of rows.
         yard.answer(
@@ -4550,19 +4567,6 @@ mod tests {
         let board = yard.client().arrivals().unwrap();
         assert_eq!(board.rows.len(), 1);
         assert_eq!(board.rows[0].bead.as_str(), "yd-links");
-        assert!(board.platforms.is_empty());
-        // And an object with no platforms reads the same.
-        yard.answer(
-            "Arrivals",
-            r#"{"result": {"rows": [
-                {"bead": "yd-links", "title": "Move the links",
-                 "platform": "new", "line": "", "expected": "2h–3h",
-                 "remark": "", "tone": "none"}
-            ]}}"#,
-        );
-        let board = yard.client().arrivals().unwrap();
-        assert_eq!(board.rows.len(), 1);
-        assert!(board.platforms.is_empty());
         // No answer at all is an empty board.
         yard.answer("Arrivals", r#"{"result": null}"#);
         assert_eq!(yard.client().arrivals().unwrap(), Arrivals::default());
@@ -4577,18 +4581,24 @@ mod tests {
                 {"name": "yardr", "kind": "git", "travelling": 2, "flows": [
                     {"name": "default", "type": "", "source": "store", "stages": [
                         {"stage": "new", "group": "muse-builders", "human": false,
-                         "lamp": "turn", "beads": [
+                         "lamp": "turn", "terminal": false, "limit": 3, "taken": 2,
+                         "beads": [
                             {"bead": "yardr-bwm2", "title": "Hosted v0 trial",
                              "expected": "20m–35m", "remark": "waits for mckean",
                              "tone": "amber", "working": false}]},
                         {"stage": "review", "group": "mckean", "human": true,
-                         "lamp": "none", "beads": []}
+                         "lamp": "none", "terminal": false, "limit": 1, "taken": 1,
+                         "beads": []},
+                        {"stage": "merged", "group": "", "human": false,
+                         "lamp": "none", "terminal": true, "beads": []}
                     ]},
                     {"name": "design", "type": "design", "source": "repo@0f415ee",
                      "stages": []}
                 ], "elsewhere": [
                     {"bead": "yardr-pinned", "title": "A pinned flow's bead",
-                     "expected": "—", "remark": "", "tone": "none", "working": true}
+                     "expected": "—", "remark": "", "tone": "none", "working": true,
+                     "worker": "herdr yardr-pinned-new",
+                     "entered_stage_at": "2026-10-08T09:30:00Z"}
                 ]},
                 {"name": "drafts", "kind": "dir", "travelling": 1, "flows": [],
                  "elsewhere": [
@@ -4614,7 +4624,7 @@ mod tests {
         assert_eq!(depot.flows[0].source.as_str(), "store");
         assert_eq!(depot.flows[1].flow_type.as_str(), "design");
         let stages = &depot.flows[0].stages;
-        assert_eq!(stages.len(), 2);
+        assert_eq!(stages.len(), 3);
         assert_eq!(
             (
                 stages[0].stage.as_str(),
@@ -4624,16 +4634,30 @@ mod tests {
             ),
             ("new", "muse-builders", false, "turn")
         );
+        assert!(!stages[0].terminal);
+        assert_eq!((stages[0].limit, stages[0].taken), (Some(3), Some(2)));
         assert_eq!(stages[0].beads.len(), 1);
         assert_eq!(stages[0].beads[0].bead.as_str(), "yardr-bwm2");
         assert_eq!(stages[0].beads[0].remark.as_str(), "waits for mckean");
         assert_eq!(stages[0].beads[0].tone.as_str(), "amber");
         assert!(!stages[0].beads[0].working);
+        assert!(stages[0].beads[0].worker.is_empty());
+        assert!(stages[0].beads[0].entered_stage_at.is_empty());
         assert_eq!(stages[1].lamp.as_str(), "none");
+        assert_eq!((stages[1].limit, stages[1].taken), (Some(1), Some(1)));
         assert!(stages[1].beads.is_empty());
+        // The terminal stage closes its beads; with no route it serves
+        // no seats, absent rather than zero.
+        assert!(stages[2].terminal);
+        assert_eq!((stages[2].limit, stages[2].taken), (None, None));
         assert_eq!(depot.elsewhere.len(), 1);
         assert_eq!(depot.elsewhere[0].bead.as_str(), "yardr-pinned");
         assert!(depot.elsewhere[0].working);
+        assert_eq!(depot.elsewhere[0].worker.as_str(), "herdr yardr-pinned-new");
+        assert_eq!(
+            depot.elsewhere[0].entered_stage_at.as_str(),
+            "2026-10-08T09:30:00Z"
+        );
         assert!(depot.error.is_empty());
         let drafts = &board.depots[1];
         assert!(drafts.flows.is_empty());
