@@ -9686,7 +9686,7 @@ impl Footplate {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(key),
                     )
-                    .child(div().flex_1().child(does)),
+                    .child(div().flex_1().min_w_0().child(does)),
             );
         }
         div()
