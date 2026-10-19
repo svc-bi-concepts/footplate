@@ -12659,15 +12659,9 @@ impl Footplate {
             )
     }
 
-    /// What the board's head says `arrivals` is, in one line.
-    const ARRIVALS_TIP: &str = "arrivals: the beads still travelling, in arrival order";
+    /// What the arrivals pane's tooltip says, in one line.
+    const ARRIVALS_TIP: &str = "arrivals: the panel of beads still travelling";
 
-    /// The arrivals board: the rows that wait on the person reading as
-    /// a banner above the table, then the served rows under their
-    /// platform, each group headed by the platform name and its count,
-    /// each row opening the bead's details. The head carries the
-    /// complete travelling total, and where the board's rows are capped
-    /// a quiet last line says how many of them show.
     /// The arrivals pane: the panel of tracks, or the departures
     /// board under the head's toggle. The head carries the travelling
     /// words, the panel's summary where it stands, and the toggle.
@@ -12932,7 +12926,11 @@ impl Footplate {
             .flex()
             .flex_col();
         let mut empty = true;
-        for depot in model.depots().iter().filter(|depot| depot.travelling > 0) {
+        for depot in model
+            .depots()
+            .iter()
+            .filter(|depot| depot.travelling > 0 || !depot.error.is_empty())
+        {
             empty = false;
             body = body.child(self.panel_depot(depot, mono.clone(), palette, cx));
         }
@@ -12940,7 +12938,11 @@ impl Footplate {
             empty = false;
             body = body.child(self.panel_no_line(model, mono.clone(), palette, cx));
         }
-        if model.depots().iter().any(|depot| depot.travelling == 0) {
+        if model
+            .depots()
+            .iter()
+            .any(|depot| depot.travelling == 0 && depot.error.is_empty())
+        {
             empty = false;
             body = body.child(self.panel_quiet(model, mono.clone(), palette, cx));
         }
@@ -13349,7 +13351,7 @@ impl Footplate {
         let quiet: Vec<&FlowDepot> = model
             .depots()
             .iter()
-            .filter(|depot| depot.travelling == 0)
+            .filter(|depot| depot.travelling == 0 && depot.error.is_empty())
             .collect();
         let names: Vec<&str> = quiet.iter().map(|depot| depot.name.as_str()).collect();
         let open = model.quiet_expanded();
@@ -23863,6 +23865,32 @@ mod tests {
         wait(cx, "the panel again", |cx| {
             drawn(cx, "panel track yardr default")
         });
+    }
+
+    /// An unreadable quiet depot stays visible on the panel so its
+    /// error is not folded away as a quiet line.
+    #[gpui::test]
+    fn the_panel_keeps_an_unreadable_quiet_depot_visible(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let mut flows: Value = serde_json::from_str(&flows_panel()).unwrap();
+        let drafts = flows["result"]["depots"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|depot| depot["name"] == "drafts")
+            .unwrap();
+        drafts["flows"] = json!([]);
+        drafts["error"] = json!("cannot read the flow");
+        yard.answer("Flows", &flows.to_string());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the unreadable line", |cx| {
+            drawn(cx, "panel words drafts")
+        });
+        assert!(!drawn(cx, "panel quiet"));
     }
 
     /// A headcode's click opens the bead's details, and the quiet back
