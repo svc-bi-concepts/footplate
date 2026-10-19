@@ -202,8 +202,9 @@ yards, one of them away), `refs` (the conversation with the
 yardmaster, naming an ask and two bead ids: the ask's chip with its
 preview under the mail), `decisions` (the decisions list with one
 open ask and the 156-item history open: day groups and a folded
-look-alike row) and `decisions-filtered` (that history with `docs`
-in its filter). With no state the first
+look-alike row), `decisions-filtered` (that history with `docs`
+in its filter) and `keys` (the cheatsheet open over an open card).
+With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
 binary reads it from `FOOTPLATE_SHOT`, and a release build does not read
@@ -1032,7 +1033,9 @@ its card under "Decided".
 | `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them. A secret ask is declined at once, with none |
 | `e`, on a card | expands it to the bead whole, or folds it again |
 | `esc`, on a card | leaves a decline asked for words, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone |
+| `?`, on a card, the yard row, Lines or the switcher; a click on "? all keys" | opens the cheatsheet of the open view's keys; `esc` closes it |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
+| `cmd+[` · `cmd+]` (`ctrl` on Linux) | the modes back, forth |
 | `cmd+y` (`ctrl+y` on Linux), a click on the line under your name | lists the yards under the head: the arrows move, Enter opens the yard they are on, `esc` leaves |
 | `cmd+1`–`cmd+9` (`ctrl` on Linux) | opens the yard at that place in the list, from anywhere |
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |

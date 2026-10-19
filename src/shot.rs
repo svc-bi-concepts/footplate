@@ -41,8 +41,8 @@ use crate::yard::Env;
 /// line's flow open on its row, an open card of a secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
-/// of them away, and the yardmaster's conversation naming an ask and two
-/// bead ids.
+/// of them away, the yardmaster's conversation naming an ask and two
+/// bead ids, and the cheatsheet open over an open card.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -99,6 +99,7 @@ pub const STATES: &[&str] = &[
     "refs",
     "decisions",
     "decisions-filtered",
+    "keys",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -693,7 +694,7 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"title": "Paint the barn", "stage": "new", "type": "task", "originator": "jo"}}"#);
         }
-        "plain" | "lines" => {
+        "plain" | "lines" | "keys" => {
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
@@ -1623,7 +1624,7 @@ mod tests {
                     assert_eq!(added.kind.as_str(), "created", "{state}");
                     assert_eq!(added.text("originator"), "jo", "{state}");
                 }
-                "plain" | "lines" => {
+                "plain" | "lines" | "keys" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
                     let bead = yard.client().bead("bead-a").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");

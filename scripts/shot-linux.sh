@@ -43,8 +43,9 @@
 # `refs` (the conversation naming an ask and two bead ids, the ask's
 # chip with its preview under the mail), `decisions` (the decisions
 # list with one open ask and the 156-item history open: day groups
-# and a folded look-alike row) and `decisions-filtered` (that history
-# with `docs` in its filter).
+# and a folded look-alike row), `decisions-filtered` (that history
+# with `docs` in its filter) and `keys` (the cheatsheet open over an
+# open card).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the
@@ -63,7 +64,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered"
+states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout arrivals arrival flow secret secret-shown secret-refused switcher refs decisions decisions-filtered keys"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

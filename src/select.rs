@@ -806,9 +806,10 @@ fn face(kind: &Kind, base: &TextStyle, mono: Option<&SharedString>, rem: Pixels)
 
 /// The runs `shown` is drawn in, in the face `face` of its kind:
 /// bold, italic and inline code as its marks say, with a quiet ground
-/// under the code; a link as one; a reference as a chip, in the code's
-/// face on its ground but in the accent, with no underline; and
-/// `selected` of it on the selection's ground. `selected` stands in
+/// under the code; a link as one, in the link blue; a reference as a
+/// chip, in the code's face on its ground but in the link blue, with
+/// no underline; and `selected` of it on the selection's ground.
+/// `selected` stands in
 /// the text as it was written, as the selection keeps it; every other
 /// range stands in what gpui lays out, the long links shortened. A
 /// selection may begin or end inside a link or a mark: the runs do not
@@ -858,10 +859,10 @@ fn runs(
             }
         }
         if links.iter().any(|link| within(link, start)) {
-            run.color = palette.accent.into();
+            run.color = palette.link.into();
             run.underline = Some(UnderlineStyle {
                 thickness: px(1.),
-                color: Some(palette.accent.into()),
+                color: Some(palette.link.into()),
                 wavy: false,
             });
         }
@@ -869,7 +870,7 @@ fn runs(
             if let Some(mono) = mono {
                 run.font.family = mono.clone();
             }
-            run.color = palette.accent.into();
+            run.color = palette.link.into();
             run.background_color = Some(palette.code.into());
         }
         if selected.as_ref().is_some_and(|s| within(s, start)) {
@@ -1285,8 +1286,9 @@ impl Element for Text {
             let label = if just_copied { "copied" } else { "copy" };
             window.paint_quad(fill(*chip, palette.side).corner_radii(rem * 0.25));
             let mut run = base.to_run(label.len());
+            // Said, not waiting: the text colour, never the accent.
             let color = if just_copied {
-                palette.accent
+                palette.text
             } else {
                 palette.faint
             };
@@ -1521,10 +1523,10 @@ mod tests {
         // What gpui made of the link and the selection, when the text was
         // handed to it with the two as highlights.
         let link = gpui::HighlightStyle {
-            color: Some(palette.accent.into()),
+            color: Some(palette.link.into()),
             underline: Some(UnderlineStyle {
                 thickness: px(1.),
-                color: Some(palette.accent.into()),
+                color: Some(palette.link.into()),
                 wavy: false,
             }),
             ..Default::default()
@@ -1697,7 +1699,7 @@ mod tests {
         assert_eq!(words, ["see ", "https://example.org/a", " now"]);
         let link = &all[1].1;
         assert_eq!(link.font.weight, FontWeight::BOLD);
-        assert_eq!(link.color, palette.accent.into());
+        assert_eq!(link.color, palette.link.into());
         assert!(link.underline.is_some());
 
         // An item under another stands in twice as far, and the words of
@@ -2060,7 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_is_a_chip_in_the_accent_on_the_code_s_ground() {
+    fn a_reference_is_a_chip_in_the_link_blue_on_the_code_s_ground() {
         let (palette, mono) = (dark(), mono_face());
         let text = "its card (ask 6926).";
         let span = [Range { start: 10, end: 18 }];
@@ -2068,20 +2070,20 @@ mod tests {
         assert_eq!(all.len(), 3);
         let chip = &all[1];
         assert_eq!(chip.0, "ask 6926");
-        assert_eq!(chip.1.color, palette.accent.into());
+        assert_eq!(chip.1.color, palette.link.into());
         assert_eq!(chip.1.background_color, Some(palette.code.into()));
         assert_eq!(chip.1.font.family, mono);
         assert!(chip.1.underline.is_none());
-        // A selection over it keeps the accent on its own ground.
+        // A selection over it keeps the link blue on its own ground.
         let all = drawn_refs(text, Some(12..14), &span);
         let words: Vec<&str> = all.iter().map(|(words, _)| words.as_str()).collect();
         assert_eq!(words, ["its card (", "as", "k ", "6926", ")."]);
-        assert_eq!(all[2].1.color, palette.accent.into());
+        assert_eq!(all[2].1.color, palette.link.into());
         assert_eq!(all[2].1.background_color, Some(palette.selection.into()));
         // And a bold reference keeps its weight.
         let all = drawn_refs("its card (**ask 6926**).", None, &span);
         assert_eq!(all[1].0, "ask 6926");
         assert_eq!(all[1].1.font.weight, FontWeight::BOLD);
-        assert_eq!(all[1].1.color, palette.accent.into());
+        assert_eq!(all[1].1.color, palette.link.into());
     }
 }

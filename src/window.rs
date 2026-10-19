@@ -24,7 +24,7 @@ use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, ArrivalGroup, AskPreview, DecidedDetail, DecidedEntry,
     DecidedFold, DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode,
-    Model, News, Outcome, Route, Row, Selected, Target, Top, late_line, you_first,
+    Model, News, Outcome, Route, Row, Selected, Target, Top, late_line, waits_on_you, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -89,7 +89,8 @@ actions!(
         JumpOldest,
         PageUp,
         PageDown,
-        AwayDetails
+        AwayDetails,
+        ShowKeys
     ]
 );
 
@@ -508,6 +509,23 @@ fn decided_words(decided: usize) -> String {
     }
 }
 
+/// The colour of a timetable remark with the yard's `tone`, for the
+/// person `me` reads as: late is the error red, a held bead and a wait
+/// that names them the waiting accent, any other red remark the error
+/// red, and the rest dim. A wait for someone else is not theirs to
+/// answer, so it never takes the accent.
+fn remark_color(remark: &str, tone: &str, me: &str, palette: Palette) -> Rgba {
+    if late_line(remark).is_some() {
+        palette.warn
+    } else if remark == "held" || waits_on_you(remark, me) {
+        palette.accent
+    } else if tone == "red" {
+        palette.warn
+    } else {
+        palette.faint
+    }
+}
+
 /// What the Crew head says is unread in it: the number with "unread",
 /// or that none is. "Waiting" beside Crew would read as crew that
 /// waits, where it is mail that is not read.
@@ -516,6 +534,144 @@ fn unread_words(unread: usize) -> String {
         0 => "none unread".to_string(),
         unread => format!("{unread} unread"),
     }
+}
+
+/// The open view, as the cheatsheet names its keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeysView {
+    Switcher,
+    Settings,
+    Conversation,
+    Card,
+    Yard,
+    Timetable,
+    Away,
+}
+
+impl KeysView {
+    /// The view in the cheatsheet's title.
+    fn name(self) -> &'static str {
+        match self {
+            KeysView::Switcher => "the switcher",
+            KeysView::Settings => "the settings",
+            KeysView::Conversation => "this conversation",
+            KeysView::Card => "this card",
+            KeysView::Yard => "the yard row",
+            KeysView::Timetable => "Lines",
+            KeysView::Away => "this screen",
+        }
+    }
+}
+
+/// Every key the open `view` answers to, each with what it does: the
+/// view's own keys first, then the window's, which answer everywhere.
+/// Named as the footers and the README name them.
+fn keys_for(view: KeysView) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = match view {
+        KeysView::Switcher => vec![
+            ("↑↓".into(), "move in the list".into()),
+            ("enter".into(), "opens the yard they are on".into()),
+            ("esc".into(), "leaves the list".into()),
+            ("+".into(), "adds a yard".into()),
+            ("?".into(), "this list".into()),
+        ],
+        KeysView::Settings => vec![("esc".into(), "back to what was open".into())],
+        KeysView::Conversation => vec![
+            ("enter".into(), "sends the draft as one mail".into()),
+            ("shift+enter".into(), "breaks the line".into()),
+            (
+                "tab · shift+tab".into(),
+                "the next, the previous row".into(),
+            ),
+            ("pageup · pagedown".into(), "scroll by a page".into()),
+            (
+                format!("{SECONDARY}+home · {SECONDARY}+end"),
+                "the oldest loaded, the newest".into(),
+            ),
+            (format!("{SECONDARY}+c"), "copies what is selected".into()),
+        ],
+        KeysView::Card => vec![
+            ("1–9".into(), "choose an option".into()),
+            ("↑↓".into(), "choose, even while words are typed".into()),
+            (
+                "enter".into(),
+                "sends the pick with the line's words".into(),
+            ),
+            ("i".into(), "types the words in".into()),
+            ("x".into(), "puts the ask aside".into()),
+            ("d".into(), "declines with words".into()),
+            ("a".into(), "asks about this".into()),
+            ("e".into(), "expands to the bead whole, or folds it".into()),
+            (
+                "/".into(),
+                "in decisions, the history with its filter typed in".into(),
+            ),
+            (
+                format!("{SECONDARY}+enter"),
+                "on a run ask's card, approves it".into(),
+            ),
+            (
+                "esc".into(),
+                "leaves the decline, the words, the pick, then the words".into(),
+            ),
+            (
+                "tab · shift+tab".into(),
+                "the next, the previous row".into(),
+            ),
+            ("pageup · pagedown".into(), "scroll by a page".into()),
+            ("?".into(), "this list".into()),
+        ],
+        KeysView::Yard => vec![
+            ("x".into(), "marks one notice read".into()),
+            ("shift+x".into(), "marks every notice read".into()),
+            (
+                "tab · shift+tab".into(),
+                "the next, the previous row".into(),
+            ),
+            ("pageup · pagedown".into(), "scroll by a page".into()),
+            ("?".into(), "this list".into()),
+        ],
+        KeysView::Timetable => vec![
+            (
+                "tab · shift+tab".into(),
+                "the next, the previous row".into(),
+            ),
+            ("pageup · pagedown".into(), "scroll by a page".into()),
+            ("?".into(), "this list".into()),
+        ],
+        KeysView::Away => vec![
+            (
+                "enter".into(),
+                "opens the details, where no fields stand open".into(),
+            ),
+            ("esc".into(), "leaves the way's fields".into()),
+        ],
+    };
+    // The window's keys, which answer in every view.
+    rows.extend([
+        (
+            format!("{SECONDARY}+[ · {SECONDARY}+]"),
+            "the modes back, forth".into(),
+        ),
+        (format!("{SECONDARY}+y"), "lists the yards".into()),
+        (
+            format!("{SECONDARY}+1–9"),
+            "opens the yard at that place".into(),
+        ),
+        (
+            format!("{SECONDARY}+,"),
+            "the settings, and what was open again".into(),
+        ),
+        (
+            format!("{SECONDARY}+= · {SECONDARY}+- · {SECONDARY}+0"),
+            "the text larger, smaller, the usual size".into(),
+        ),
+        (
+            format!("{SECONDARY}+shift+l"),
+            "the next of auto, light, dark".into(),
+        ),
+    ]);
+    rows
 }
 
 /// What an arrival's asks line says: how many questions the bead has
@@ -621,10 +777,9 @@ fn decision_head(yard: &str, bead: &str, topic: &str) -> String {
     format!("{yard} · bead {bead} · {topic}")
 }
 
-/// What Decline's tooltip says: declining is not a pick and not "you
-/// decide"; the asker must find another way.
-const DECLINE_IS_NO_PICK: &str =
-    "Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way.";
+/// What Decline's tooltip says: saying no to every option, so the
+/// asker finds another way.
+const DECLINE_IS_NO_PICK: &str = "Say no to all options. The asker finds another way.";
 
 /// What the settings say over the list of yards: what a pairing gives that
 /// a link between two yards does not.
@@ -1191,6 +1346,20 @@ fn small_button(text: String, palette: Palette) -> Div {
         .child(text)
 }
 
+/// "? all keys", which opens the cheatsheet of the open view's keys:
+/// the hint where keys are listed in prose, and where `?` is the
+/// line's text. It takes its size from where it stands. `id` names
+/// the place, one per hint.
+fn keys_hint(id: &'static str, palette: Palette, cx: &mut Context<Footplate>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(|| "keys hint".to_string())
+        .text_color(palette.link)
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)))
+        .child("? all keys")
+}
+
 /// One segment of a segmented control: the choice `label`, filled with
 /// the accent where it is chosen, quiet text otherwise. The caller joins
 /// the segments with [`segmented`] and puts the clicks on them.
@@ -1355,6 +1524,11 @@ pub fn bind_keys(cx: &mut App) {
         // The history's filter, from anywhere its keys are the window's:
         // with the focus in a line the key is the line's text.
         KeyBinding::new("/", FocusFilter, Some(NO_LINE_CONTEXT)),
+        // The cheatsheet of the open view's keys, from anywhere its
+        // keys are the window's: with the focus in a line a `?` is
+        // the line's text, and the "? all keys" hints open it with a
+        // click instead.
+        KeyBinding::new("?", ShowKeys, Some(NO_LINE_CONTEXT)),
     ]);
     cx.bind_keys([
         KeyBinding::new("up", ChoiceUp, Some(SWITCH_CONTEXT)),
@@ -1365,6 +1539,7 @@ pub fn bind_keys(cx: &mut App) {
         // some platforms report instead, as with Larger.
         KeyBinding::new("+", AddYard, Some(SWITCH_CONTEXT)),
         KeyBinding::new("=", AddYard, Some(SWITCH_CONTEXT)),
+        KeyBinding::new("?", ShowKeys, Some(SWITCH_CONTEXT)),
     ]);
     // The away screen's details open on Enter from anywhere, as on a
     // click. The binding has no context, as the switcher's keys do, so it
@@ -1883,6 +2058,8 @@ pub struct Footplate {
     /// The switcher's list is shown as a popover at the rail's head: the
     /// row of it the keys are on.
     switching: Option<usize>,
+    /// The cheatsheet of the open view's keys stands over the window.
+    show_keys: bool,
     /// The rail's mode icon the pointer stands on, if any: its glyph
     /// brightens, as quiet text does.
     rail_hover: Option<Mode>,
@@ -2056,7 +2233,9 @@ fn shot_selected() -> Option<Selected> {
     #[cfg(debug_assertions)]
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
-        Ok("plain") | Ok("page") | Ok("lines") => return Some(Selected::Decision("bead-a".into())),
+        Ok("plain") | Ok("page") | Ok("lines") | Ok("keys") => {
+            return Some(Selected::Decision("bead-a".into()));
+        }
         Ok("decisions") | Ok("decisions-filtered") => {
             return Some(Selected::Decision("bead-a".into()));
         }
@@ -2190,6 +2369,12 @@ impl Footplate {
                 .position(|yard| yard.name == this.yard)
                 .unwrap_or(0);
             this.switching = Some(open);
+        }
+        // The keys shot opens with the cheatsheet standing over the
+        // card, as `?` leaves it. A debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("keys") {
+            this.show_keys = true;
         }
         this
     }
@@ -2424,6 +2609,7 @@ impl Footplate {
             returning: None,
             late: None,
             switching: None,
+            show_keys: false,
             rail_hover: None,
             declining: None,
             secret,
@@ -6178,6 +6364,11 @@ impl Footplate {
     /// asked for words, the words for the card's keys, the pick, then
     /// the words.
     fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_keys {
+            self.show_keys = false;
+            cx.notify();
+            return;
+        }
         if self.image_open.is_some() {
             return self.shut_image(window, cx);
         }
@@ -6581,6 +6772,44 @@ impl Footplate {
         let open = yards.iter().position(|yard| yard.name == self.yard);
         self.switching = Some(open.unwrap_or(0));
         window.focus(&self.focus.clone());
+    }
+
+    /// Shows the cheatsheet of the open view's keys, or shuts it again.
+    /// The window keeps the focus it had: the keys still answer under
+    /// the sheet, and esc shuts it first.
+    fn toggle_keys(&mut self, cx: &mut Context<Self>) {
+        self.show_keys = !self.show_keys;
+        cx.notify();
+    }
+
+    /// The open view, as the cheatsheet names its keys: the switcher
+    /// and the settings over whatever they stand on, the away screen
+    /// and the first run as one screen, else the open row, else the
+    /// mode.
+    fn keys_view(&self) -> KeysView {
+        if self.switching.is_some() {
+            return KeysView::Switcher;
+        }
+        if self.settings_open {
+            return KeysView::Settings;
+        }
+        if self.image_open.is_some() || self.first_run.is_some() || self.switch_question.is_some() {
+            return KeysView::Away;
+        }
+        if self.down.is_some() && !self.reconnecting() {
+            return KeysView::Away;
+        }
+        match self.model.as_ref().and_then(|m| m.selected().cloned()) {
+            Some(Selected::Conversation(_)) => KeysView::Conversation,
+            Some(Selected::Decision(_)) | Some(Selected::Decided(_, _)) => KeysView::Card,
+            Some(Selected::Yard) => KeysView::Yard,
+            Some(_) => KeysView::Timetable,
+            None => match self.mode() {
+                Mode::Decisions => KeysView::Card,
+                Mode::Timetable => KeysView::Timetable,
+                Mode::Chat => KeysView::Conversation,
+            },
+        }
     }
 
     /// From the switcher's list, by its key or its footer's button: the
@@ -8038,21 +8267,22 @@ impl Footplate {
         let notify = self.settings.notifications;
         let mut notifications = setting(
             "notifications".to_string(),
-            "the system tells of what arrives while the window is behind another or shows another row"
-                .to_string(),
+            "Notify me about things I can't see right now.".to_string(),
         )
-        .child(div().flex().child(segmented(
-            [("off", false), ("on", true)]
-                .map(|(name, on)| {
-                    segment(name.to_string(), on == notify.on, palette)
-                        .id(SharedString::from(format!("notify {name}")))
-                        .debug_selector(move || format!("notify {name}"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.notify_on(on, cx)))
-                })
-                .into_iter()
-                .collect(),
-            palette,
-        )));
+        .child(
+            div().flex().child(segmented(
+                [("off", false), ("on", true)]
+                    .map(|(name, on)| {
+                        segment(name.to_string(), on == notify.on, palette)
+                            .id(SharedString::from(format!("notify {name}")))
+                            .debug_selector(move || format!("notify {name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.notify_on(on, cx)))
+                    })
+                    .into_iter()
+                    .collect(),
+                palette,
+            )),
+        );
         if notify.on {
             notifications = notifications.child(
                 div().flex().flex_col().gap_2().children(
@@ -8109,7 +8339,7 @@ impl Footplate {
         let picked = self.settings.tray;
         let mark = setting(
             "tray mark".to_string(),
-            "auto is the menu bar's on a mac, black in the tray".to_string(),
+            "Auto matches the menu bar (Mac) or uses black (Linux tray).".to_string(),
         )
         .child(
             div().flex().child(segmented(
@@ -8210,7 +8440,7 @@ impl Footplate {
                                     .id("settings reveal")
                                     .debug_selector(|| "settings reveal".to_string())
                                     .text_sm()
-                                    .text_color(palette.accent)
+                                    .text_color(palette.link)
                                     .cursor_pointer()
                                     .on_click(move |_, _, cx| (open)(&url, cx))
                                     .child("reveal"),
@@ -8220,9 +8450,15 @@ impl Footplate {
             .child(
                 div()
                     .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap_1()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child(format!("{SECONDARY}+, or esc goes back")),
+                    .child(format!("{SECONDARY}+, or esc goes back"))
+                    .child("·")
+                    .child(keys_hint("keys hint settings", palette, cx)),
             );
         // The sheet stands centred in the window, over whatever stood
         // open: its own sections, not the timetable's rows beside them.
@@ -8836,8 +9072,8 @@ impl Footplate {
             );
         };
         let help = match entry.usual_view(&self.env.socket) {
-            Some(_) => "a note's pages open in the browser through it; empty is the usual address",
-            None => "a note's pages open in the browser through it; empty is no web view",
+            Some(_) => "Where a note's pages open. Default: the usual address.",
+            None => "Where a note's pages open. Empty means no web view.",
         };
         let focus = self.view.focus_handle(cx);
         let overridden = !entry.web_view.trim().is_empty();
@@ -8900,7 +9136,7 @@ impl Footplate {
                                 .id("view reset")
                                 .debug_selector(|| "view reset".to_string())
                                 .text_sm()
-                                .text_color(palette.accent)
+                                .text_color(palette.link)
                                 .cursor_pointer()
                                 .child("reset")
                                 .on_click(cx.listener(|this, _, _, cx| this.usual_view(cx))),
@@ -8952,8 +9188,7 @@ impl Footplate {
         };
         let mut section = setting(
             format!("run base of {}", entry.name),
-            "a note's pages run in the browser through it; empty is the web view's host on the sandbox port"
-                .to_string(),
+            "Where a note's live pages run. Default: the web view's host.".to_string(),
         )
         .child(
             div()
@@ -9005,7 +9240,7 @@ impl Footplate {
                             .id("run reset")
                             .debug_selector(|| "run reset".to_string())
                             .text_sm()
-                            .text_color(palette.accent)
+                            .text_color(palette.link)
                             .cursor_pointer()
                             .child("reset")
                             .on_click(cx.listener(|this, _, _, cx| this.usual_run(cx))),
@@ -9424,6 +9659,92 @@ impl Footplate {
             )
     }
 
+    /// The cheatsheet of the open view's keys, over the window: every
+    /// key the view answers to, each with what it does. A click
+    /// outside it shuts it, as esc and `?` again do.
+    fn keys_layer(
+        &self,
+        view: KeysView,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut list = div().flex().flex_col().gap_1();
+        for (key, does) in keys_for(view) {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .debug_selector({
+                        let key = key.clone();
+                        move || format!("keys row {key}")
+                    })
+                    .child(
+                        div()
+                            .w(rems(13.))
+                            .flex_none()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(key),
+                    )
+                    .child(div().flex_1().child(does)),
+            );
+        }
+        div()
+            .id("keys overlay")
+            .debug_selector(|| "keys".to_string())
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)))
+            .child(
+                div()
+                    .id("keys card")
+                    .debug_selector(|| "keys card".to_string())
+                    .max_w(rems(38.))
+                    .max_h(relative(0.85))
+                    .overflow_y_scroll()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("keys · {}", view.name())),
+                    )
+                    .child(list)
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child("esc closes"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("keys close")
+                    .debug_selector(|| "keys close".to_string())
+                    .absolute()
+                    .top(rems(0.75))
+                    .right(rems(1.))
+                    .text_xl()
+                    .text_color(palette.faint)
+                    .cursor_pointer()
+                    .child("×")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx))),
+            )
+    }
+
     /// The switcher's list as a popover to the right of the rail's head:
     /// a row for each yard of the settings, on two lines. The first has
     /// the yard's dot in its colour, its name, its kind, its waiting
@@ -9458,10 +9779,16 @@ impl Footplate {
                 .flex_none()
                 .text_right()
                 .text_color(palette.faint);
-            let count = match (why, counts.map(|counts| counts.switcher())) {
-                (None, Some((number, words))) => count
-                    .tooltip(move |_, cx| cx.new(|_| RailTip(words.clone())).into())
-                    .child(number),
+            let count = match (why, counts) {
+                (None, Some(counts)) => {
+                    let (number, words) = counts.switcher();
+                    count
+                        .tooltip(move |_, cx| cx.new(|_| RailTip(words.clone())).into())
+                        // What waits reads in the accent; a yard with
+                        // nothing waiting keeps its dim zero.
+                        .when(counts.waiting() > 0, |el| el.text_color(palette.accent))
+                        .child(number)
+                }
                 _ => count,
             };
             let mut second = div()
@@ -9633,7 +9960,9 @@ impl Footplate {
                             this.add_yard_from_switcher(window, cx)
                         }))
                         .child("+ add a yard"),
-                ),
+                )
+                .child("· ")
+                .child(keys_hint("keys hint switch", palette, cx)),
         );
         div()
             .absolute()
@@ -10017,8 +10346,11 @@ impl Footplate {
         );
         for (n, m) in Mode::ALL.into_iter().enumerate() {
             let open = live && m == mode;
+            // The open tile reads in the text colour on the open
+            // ground: the accent is kept for what waits on the person
+            // reading, and the open mode is not that.
             let color = match (open, live && self.rail_hover == Some(m), live) {
-                (true, _, _) => palette.accent,
+                (true, _, _) => palette.text,
                 (_, _, false) => palette.faint,
                 (_, true, _) => palette.text,
                 _ => palette.faint,
@@ -10084,9 +10416,13 @@ impl Footplate {
                                 .text_color(color)
                                 .child(m.label()),
                         )
-                        // The badge stands at the tile's top right, in
-                        // the accent, as the jump button's count is.
+                        // The badge stands at the tile's top right. Mail
+                        // and decisions wait on the person reading, so
+                        // theirs read in the accent, as the jump button's
+                        // count does; changed beads ask nothing of them,
+                        // so Lines' badge stays muted, as the yard row's.
                         .children(badge.map(|(label, _)| {
+                            let waiting = m != Mode::Timetable;
                             div()
                                 .debug_selector(move || format!("rail badge {}", m.name()))
                                 .absolute()
@@ -10096,8 +10432,16 @@ impl Footplate {
                                 .min_w(px(16.))
                                 .px(px(4.))
                                 .rounded_full()
-                                .bg(palette.accent)
-                                .text_color(palette.on_accent)
+                                .when(waiting, |el| {
+                                    el.bg(palette.accent).text_color(palette.on_accent)
+                                })
+                                .when(!waiting, |el| {
+                                    el.bg(Rgba {
+                                        a: 0.25,
+                                        ..palette.faint
+                                    })
+                                    .text_color(palette.text)
+                                })
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .flex()
@@ -10534,11 +10878,7 @@ impl Footplate {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" · ");
-        let remark = match row.tone.as_str() {
-            "red" => palette.warn,
-            "amber" => palette.accent,
-            _ => palette.faint,
-        };
+        let remark = remark_color(&row.remark, &row.tone, model.me(), palette);
         let late = late_line(&row.remark);
         let mut time = div()
             .flex_none()
@@ -10630,9 +10970,9 @@ impl Footplate {
     /// One bead's route as a strip: one dot per stage of its flow in
     /// travel order, each with the stage's name. The stages behind the
     /// bead read done, the bead's own reads current in the text colour,
-    /// and a stage ahead whose turn is a person's reads waiting, apart
-    /// from the rest. The current dot is not the accent: that is kept
-    /// for what waits on the person reading, and the strip is not that.
+    /// and the rest read ahead, a person's turn among them drawing no
+    /// colour: the accent is kept for what waits on the person reading
+    /// now, and the strip is not that.
     fn route_strip(&self, route: &Route, bead: &str, palette: Palette) -> impl IntoElement + use<> {
         let mut strip = div()
             .flex()
@@ -10651,7 +10991,6 @@ impl Footplate {
             let (fill, edge, label) = match n == route.current {
                 true => (palette.text, palette.text, palette.text),
                 false if n < route.current => (palette.faint, palette.faint, palette.faint),
-                false if stage.human => (rgba(0x00000000), palette.accent, palette.faint),
                 false => (rgba(0x00000000), palette.faint, palette.faint),
             };
             strip = strip.child(
@@ -10806,12 +11145,15 @@ impl Footplate {
                         .justify_center()
                         .child(row.unread.to_string()),
                 ),
+                // Unread mail waits on the person reading, so it
+                // reads in the accent; the yard's notices are FYI, and
+                // keep their muted badge above.
                 false => el.child(
                     div()
                         .flex_none()
                         .debug_selector(|| format!("row unread {}", name))
                         .text_sm()
-                        .text_color(palette.faint)
+                        .text_color(palette.accent)
                         .child(unread_words(row.unread)),
                 ),
             })
@@ -11345,7 +11687,7 @@ impl Footplate {
                         div()
                             .id(SharedString::from(format!("page run {hash}")))
                             .debug_selector(move || format!("page run {hash}"))
-                            .text_color(palette.accent)
+                            .text_color(palette.link)
                             .cursor_pointer()
                             .on_click(move |_, _, cx| (run)(&url, cx))
                             .child("run"),
@@ -11384,7 +11726,7 @@ impl Footplate {
                             let hash = hash.clone();
                             move || format!("page open {hash}")
                         })
-                        .text_color(palette.accent)
+                        .text_color(palette.link)
                         .cursor_pointer()
                         .on_click(move |_, _, cx| (open)(&url, cx))
                         .child("Open"),
@@ -11409,7 +11751,7 @@ impl Footplate {
                             div()
                                 .id(SharedString::from(format!("page run {hash}")))
                                 .debug_selector(move || format!("page run {hash}"))
-                                .text_color(palette.accent)
+                                .text_color(palette.link)
                                 .cursor_pointer()
                                 .on_click(move |_, _, cx| (run)(&url, cx))
                                 .child("run"),
@@ -11504,7 +11846,7 @@ impl Footplate {
                                 let hash = hash.clone();
                                 move || format!("file open {hash}")
                             })
-                            .text_color(palette.accent)
+                            .text_color(palette.link)
                             .cursor_pointer()
                             .on_click(move |_, _, cx| (open)(&url, cx))
                             .child("Open"),
@@ -11609,7 +11951,9 @@ impl Footplate {
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .when(entry.mine, |el| el.text_color(palette.accent))
+                    // Their own name draws dim: the accent is kept for
+                    // what waits on them.
+                    .when(entry.mine, |el| el.text_color(palette.faint))
                     .child(entry.from.clone()),
             )
             .into_any_element()
@@ -11991,7 +12335,17 @@ impl Footplate {
                     .child(self.line.clone())
                     // The draft stays as typed while the yard is
                     // reconnecting, with the reason beside the line.
-                    .when(self.reconnecting(), |el| el.child(send_held(palette))),
+                    .when(self.reconnecting(), |el| el.child(send_held(palette)))
+                    // The cheatsheet's hint, where `?` is the line's
+                    // text: the keys open it with a click instead.
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .text_xs()
+                            .child(keys_hint("keys hint line", palette, cx)),
+                    ),
             )
     }
 
@@ -12123,9 +12477,16 @@ impl Footplate {
                 div()
                     .px_4()
                     .py_2()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_1()
                     .text_sm()
                     .text_color(palette.faint)
-                    .child("x marks one notice read, X all of them; mail is read when shown here"),
+                    .child("x marks one notice read, X all of them; mail is read when shown here")
+                    .child("·")
+                    .child(keys_hint("keys hint yard", palette, cx)),
             )
     }
 
@@ -12628,11 +12989,8 @@ impl Footplate {
             .border_color(rgba(0x00000000))
             .hover(|style| style.border_color(palette.line))
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
-        let remark = match row.tone.as_str() {
-            "red" => palette.warn,
-            "amber" => palette.accent,
-            _ => palette.faint,
-        };
+        let me = self.model.as_ref().map(Model::me).unwrap_or_default();
+        let remark = remark_color(&row.remark, &row.tone, me, palette);
         let mut time = div()
             .flex_none()
             .debug_selector({
@@ -12831,7 +13189,7 @@ impl Footplate {
                                 move || format!("bead open {bead}")
                             })
                             .text_sm()
-                            .text_color(palette.accent)
+                            .text_color(palette.link)
                             .cursor_pointer()
                             .on_click(move |_, _, cx| (open)(&url, cx))
                             .child("Open")
@@ -12867,11 +13225,7 @@ impl Footplate {
                     ),
             )
             .children((!detail.expected.is_empty()).then(|| {
-                let remark = match detail.tone.as_str() {
-                    "red" => palette.warn,
-                    "amber" => palette.accent,
-                    _ => palette.faint,
-                };
+                let remark = remark_color(&detail.remark, &detail.tone, model.me(), palette);
                 div()
                     .flex()
                     .items_center()
@@ -13483,8 +13837,9 @@ impl Footplate {
                             ),
                     ),
             );
-            // The keys of a secret, run or setup ask's card: an ordinary
-            // card carries each key on its control, and lists none.
+            // The keys of a secret, run or setup ask's card: an
+            // ordinary card carries each key on its control, and lists
+            // none. Every card carries the cheatsheet's hint.
             let keys = match (&ask.secret, &ask.run, &ask.setup) {
                 (Some(_), _, _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
                 (None, Some(_), _) => run_keys(!elsewhere, unwritable.is_none()),
@@ -13497,9 +13852,20 @@ impl Footplate {
                 ),
                 (None, None, None) => String::new(),
             };
-            card = card.when(!keys.is_empty(), |card| {
-                card.child(div().text_sm().text_color(palette.faint).child(keys))
-            });
+            let prose = !keys.is_empty();
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .children(prose.then(|| div().child(keys)))
+                    .children(prose.then(|| div().child("·")))
+                    .child(keys_hint("keys hint card", palette, cx)),
+            );
         } else {
             let bead_click = bead_id.clone();
             card = card.child(
@@ -14202,7 +14568,20 @@ impl Footplate {
                     None => decided_keys(&detail),
                 },
             };
-            body = body.child(div().text_sm().text_color(palette.faint).child(keys));
+            let prose = !keys.is_empty();
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .children(prose.then(|| div().child(keys)))
+                    .children(prose.then(|| div().child("·")))
+                    .child(keys_hint("keys hint decided", palette, cx)),
+            );
             let expand_label = if detail.expanded { "fold" } else { "expand" };
             let bead_click = bead.to_string();
             body = body.child(
@@ -14444,6 +14823,7 @@ impl Render for Footplate {
             .on_action(cx.listener(Self::focus_words))
             .on_action(cx.listener(Self::focus_filter))
             .on_action(cx.listener(Self::leave))
+            .on_action(cx.listener(|this, _: &ShowKeys, _, cx| this.toggle_keys(cx)))
             .on_action(cx.listener(Self::jump_newest))
             .on_action(cx.listener(Self::jump_oldest))
             .on_action(cx.listener(|this, _: &PageUp, window, cx| this.page(false, window, cx)))
@@ -14530,12 +14910,15 @@ impl Render for Footplate {
         // is, over that: over whatever shows, the settings and the first
         // run with it.
         let shown = shown.children(self.switching.map(|at| self.switcher(at, palette, cx)));
-        match &self.image_open {
-            Some(open) => shown
-                .child(self.image_layer(open, window, cx))
-                .into_any_element(),
-            None => shown.into_any_element(),
-        }
+        let shown = match &self.image_open {
+            Some(open) => shown.child(self.image_layer(open, window, cx)),
+            None => shown,
+        };
+        // The cheatsheet over everything else, as esc shuts it first.
+        let keys = self.show_keys.then(|| self.keys_view());
+        shown
+            .children(keys.map(|view| self.keys_layer(view, palette, cx)))
+            .into_any_element()
     }
 }
 
@@ -14634,7 +15017,7 @@ mod tests {
         );
         assert_eq!(
             DECLINE_IS_NO_PICK,
-            "Decline is not a pick, and not \u{201c}you decide\u{201d}: the asker must find another way."
+            "Say no to all options. The asker finds another way."
         );
     }
 
@@ -21513,6 +21896,142 @@ mod tests {
         assert_eq!(waits_head(2), "2 wait on you");
         assert_eq!(quiet_head(false, 1), "▸ Quiet · 1");
         assert_eq!(quiet_head(true, 5), "▾ Quiet · 5");
+    }
+
+    /// A remark reads waiting only where it waits on the reader: late
+    /// reads red, a held bead and a wait naming them read waiting, a
+    /// wait for anyone else reads dim, and nothing reads at all.
+    #[test]
+    fn remarks_read_waiting_only_where_they_wait_on_the_reader() {
+        let palette = Palette::of(Look::Dark, WindowAppearance::Dark);
+        assert_eq!(remark_color("late", "amber", "jo", palette), palette.warn);
+        assert_eq!(
+            remark_color("late by 40m", "amber", "jo", palette),
+            palette.warn
+        );
+        assert_eq!(remark_color("held", "red", "jo", palette), palette.accent);
+        assert_eq!(
+            remark_color("waits for jo", "amber", "jo", palette),
+            palette.accent
+        );
+        assert_eq!(
+            remark_color("waits for jo", "amber", "ada", palette),
+            palette.faint
+        );
+        assert_eq!(
+            remark_color("waits for jo, ada", "amber", "ada", palette),
+            palette.accent
+        );
+        assert_eq!(remark_color("", "none", "jo", palette), palette.faint);
+    }
+
+    /// The cheatsheet names every key of the open view: the view's own
+    /// keys first, then the window's, which answer everywhere. `?`
+    /// itself is named where it is bound, and nowhere a line takes it
+    /// as text.
+    #[test]
+    fn the_cheatsheet_names_every_key_of_the_open_view() {
+        let rows = |view: KeysView| {
+            keys_for(view)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>()
+        };
+        let window = [
+            format!("{SECONDARY}+[ · {SECONDARY}+]"),
+            format!("{SECONDARY}+y"),
+            format!("{SECONDARY}+1–9"),
+            format!("{SECONDARY}+,"),
+            format!("{SECONDARY}+= · {SECONDARY}+- · {SECONDARY}+0"),
+            format!("{SECONDARY}+shift+l"),
+        ];
+        for view in [
+            KeysView::Switcher,
+            KeysView::Settings,
+            KeysView::Conversation,
+            KeysView::Card,
+            KeysView::Yard,
+            KeysView::Timetable,
+            KeysView::Away,
+        ] {
+            let shown = rows(view);
+            assert_eq!(&shown[shown.len() - window.len()..], &window, "{view:?}");
+        }
+        assert!(rows(KeysView::Card).contains(&"d".to_string()));
+        assert!(rows(KeysView::Card).contains(&"?".to_string()));
+        assert!(rows(KeysView::Switcher).contains(&"?".to_string()));
+        assert!(rows(KeysView::Switcher).contains(&"+".to_string()));
+        assert!(rows(KeysView::Yard).contains(&"shift+x".to_string()));
+        assert!(!rows(KeysView::Conversation).contains(&"?".to_string()));
+        assert!(!rows(KeysView::Settings).contains(&"?".to_string()));
+    }
+
+    /// `?` opens the cheatsheet of the open card's keys; esc and `?`
+    /// again shut it, the hint opens it with a click, and in the
+    /// switcher it names the switcher's keys.
+    #[gpui::test]
+    fn question_opens_the_cheatsheet_and_esc_shuts_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        // The line starts focused, so esc holds the window's keys
+        // first; then `?` opens the card's list, with its hint on
+        // the card.
+        cx.simulate_keystrokes("escape");
+        assert!(drawn(cx, "keys hint"));
+        assert!(!view.read_with(cx, |v, _| v.show_keys));
+        cx.simulate_keystrokes("?");
+        wait(cx, "the cheatsheet", |cx| {
+            drawn(cx, "keys") && view.read_with(cx, |v, _| v.show_keys)
+        });
+        assert!(drawn(cx, "keys row d"));
+        // `?` again shuts it, and so does esc.
+        cx.simulate_keystrokes("?");
+        wait(cx, "the cheatsheet shut", |cx| {
+            !view.read_with(cx, |v, _| v.show_keys)
+        });
+        cx.simulate_keystrokes("?");
+        wait(cx, "the cheatsheet", |cx| {
+            view.read_with(cx, |v, _| v.show_keys)
+        });
+        cx.simulate_keystrokes("escape");
+        wait(cx, "the cheatsheet shut", |cx| {
+            !view.read_with(cx, |v, _| v.show_keys)
+        });
+        // The hint opens it with a click.
+        click_on(cx, "keys hint");
+        wait(cx, "the cheatsheet", |cx| {
+            view.read_with(cx, |v, _| v.show_keys)
+        });
+        cx.simulate_keystrokes("escape");
+        // In the switcher it names the switcher's keys.
+        cx.simulate_keystrokes("secondary-y");
+        wait(cx, "the switcher", |cx| drawn(cx, "switcher"));
+        cx.simulate_keystrokes("?");
+        wait(cx, "the cheatsheet", |cx| {
+            drawn(cx, "keys") && view.read_with(cx, |v, _| v.show_keys)
+        });
+        assert!(drawn(cx, "keys row +"));
+        assert_eq!(view.read_with(cx, |v, _| v.keys_view()), KeysView::Switcher);
     }
 
     /// A late overrun stands under the ETA: `late by 40m` where the

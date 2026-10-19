@@ -134,10 +134,20 @@ pub struct Palette {
     /// The open row, and a row under the pointer.
     pub open: Rgba,
     pub hover: Rgba,
-    /// The user's own name, the unread count, the cursor.
+    /// What waits on the person reading (unread mail, open asks, a bead
+    /// held by them), and the controls that say yes: the primary button,
+    /// the chosen segment, the checked box. Nothing else is this colour:
+    /// links are the link blue, late is the error red, and their own name
+    /// is dim.
     pub accent: Rgba,
     pub on_accent: Rgba,
     pub warn: Rgba,
+    /// Links: in messages, ask and bead ids, and the small controls that
+    /// open an address or reset one (Open, run, reveal, reset). Blue in
+    /// either look, at text contrast on every ground. No design token
+    /// names a blue, so these two are the pass's own, held by the test
+    /// below.
+    pub link: Rgba,
     /// A linked name's peer suffix (`@airy`), in its own colour, so what
     /// crosses a link reads apart from this yard's own names.
     pub peer: Rgba,
@@ -172,6 +182,7 @@ impl Palette {
                 accent: rgb(0xe8a33d),
                 on_accent: rgb(0x1e2024),
                 warn: rgb(0xf0764f),
+                link: rgb(0x7aa2f7),
                 peer: rgb(PEER_DARK),
                 ok: rgb(0x7fb069),
                 selection: rgba(0xe8a33d55),
@@ -190,6 +201,7 @@ impl Palette {
                 accent: rgb(0xa8600a),
                 on_accent: rgb(0xffffff),
                 warn: rgb(0xb3401c),
+                link: rgb(0x1a56c8),
                 peer: rgb(PEER_LIGHT),
                 ok: rgb(0x3d8b4f),
                 selection: rgba(0xa8600a40),
@@ -296,6 +308,29 @@ mod tests {
                 assert_ne!(ground, palette.ok, "{ground:?}");
                 assert_ne!(ground, palette.warn, "{ground:?}");
             }
+        }
+    }
+
+    #[test]
+    fn links_are_blue_at_text_contrast_on_every_ground_in_either_look() {
+        // The review's blue for links; no design token names one.
+        let dark = Palette::of(Look::Dark, WindowAppearance::Dark);
+        let light = Palette::of(Look::Light, WindowAppearance::Light);
+        assert_eq!((dark.link, light.link), (rgb(0x7aa2f7), rgb(0x1a56c8)));
+        for palette in [dark, light] {
+            // The code ground is translucent, so no ratio is computed
+            // for it: over any of these it lifts them by a shade, and
+            // the link still reads.
+            for ground in [palette.side, palette.ground, palette.hover, palette.open] {
+                assert!(
+                    contrast(palette.link, ground) >= 4.5,
+                    "{:?} on {ground:?}",
+                    palette.link
+                );
+            }
+            assert_ne!(palette.link, palette.accent);
+            assert_ne!(palette.link, palette.warn);
+            assert_ne!(palette.link, palette.text);
         }
     }
 
