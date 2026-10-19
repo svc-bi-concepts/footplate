@@ -17,7 +17,7 @@ use gpui::{
     div, img, prelude::*, px, relative, rems, rgba, white,
 };
 
-use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client};
+use crate::api::{self, Address, Arrival, BlobFile, BlobRef, Client, Reaction};
 use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
 use crate::draft::{self, Attachment, Drafts, Found};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
@@ -2394,6 +2394,9 @@ pub struct Footplate {
     /// The rail's mode icon the pointer stands on, if any: its glyph
     /// brightens, as quiet text does.
     rail_hover: Option<Mode>,
+    /// The mail the pointer stands on, by seq, if any: its row of
+    /// reactions to tap stands under it.
+    react_hover: Option<u64>,
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
@@ -2722,6 +2725,13 @@ impl Footplate {
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("keys") {
             this.show_keys = true;
         }
+        // The reactions-hover shot poses the pointer on the answer, so
+        // its row of reactions to tap stands under it. A debug build's
+        // alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-hover") {
+            this.react_hover = Some(13);
+        }
         this
     }
 
@@ -2957,6 +2967,7 @@ impl Footplate {
             switching: None,
             show_keys: false,
             rail_hover: None,
+            react_hover: None,
             declining: None,
             secret,
             filter,
@@ -5545,6 +5556,31 @@ impl Footplate {
                     cx,
                 ),
                 Err(unsent) => this.unsent(&yard, &to, &at, unsent, cx),
+            },
+        );
+    }
+
+    /// Puts `emoji` on the mail `seq` as the user: a tap on the user's
+    /// own current reaction takes it away instead, and a tap on another
+    /// replaces it. Once the yard took it the conversation is read again;
+    /// what the yard refused is said, and a yard with no such call hides
+    /// the row.
+    fn react(&mut self, seq: u64, emoji: &str, cx: &mut Context<Self>) {
+        let mine = self.model.as_ref().and_then(|m| m.own_reaction(seq));
+        let emoji = match mine.as_deref() == Some(emoji) {
+            true => String::new(),
+            false => emoji.to_string(),
+        };
+        let session = self.session;
+        self.ask_through(
+            cx,
+            move |client, me| client.react(seq, &emoji, me),
+            move |this, reacted, cx| match reacted {
+                Ok(()) => this.change_in(session, cx, |m| m.reacted(seq)),
+                Err(err) => this.change_in(session, cx, |m| {
+                    m.react_failed(&err);
+                    Vec::new()
+                }),
             },
         );
     }
@@ -12329,34 +12365,57 @@ impl Footplate {
             )
     }
 
-    fn entry_head(&self, entry: &Entry, palette: Palette) -> AnyElement {
+    /// The mail `seq` knows the pointer stands on it: while it does,
+    /// the row of reactions a tap puts stands under the mail.
+    fn hover_react(
+        seq: u64,
+        el: gpui::Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let entity = cx.entity();
+        el.on_hover(move |hovered, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.react_hover = match hovered {
+                    true => Some(seq),
+                    false => None,
+                };
+                cx.notify();
+            });
+        })
+    }
+
+    fn entry_head(&self, entry: &Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let seq = entry.seq;
-        div()
-            .flex()
-            .gap_2()
-            .debug_selector(|| format!("head {seq}"))
-            .child(
-                div()
-                    .text_color(palette.faint)
-                    .child(model::clock(&entry.at, &chrono::Local)),
-            )
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    // Their own name draws dim: the accent is kept for
-                    // what waits on them.
-                    .when(entry.mine, |el| el.text_color(palette.faint))
-                    .child(entry.from.clone()),
-            )
-            .into_any_element()
+        Self::hover_react(
+            seq,
+            div()
+                .id(("head", seq))
+                .flex()
+                .gap_2()
+                .debug_selector(|| format!("head {seq}")),
+            cx,
+        )
+        .child(
+            div()
+                .text_color(palette.faint)
+                .child(model::clock(&entry.at, &chrono::Local)),
+        )
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                // Their own name draws dim: the accent is kept for
+                // what waits on them.
+                .when(entry.mine, |el| el.text_color(palette.faint))
+                .child(entry.from.clone()),
+        )
+        .into_any_element()
     }
 
     fn entry_body(&self, entry: Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let seq = entry.seq;
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
+        let hovered = self.react_hover == Some(seq)
+            && self.model.as_ref().is_some_and(|m| !m.react_too_old());
+        Self::hover_react(seq, div().id(("body", seq)).w_full().flex().flex_col(), cx)
             // A correction carries its label above its text, so it reads
             // as no new thought.
             .when(entry.correction, |el| {
@@ -12380,6 +12439,21 @@ impl Footplate {
                     select::text_with_refs(seq, entry.text, entry.refs, on_ref, &self.selection),
                 ))
             })
+            // The parties' reactions, one a line, in faint words under
+            // the text.
+            .when(!entry.reactions.is_empty(), |el| {
+                el.child(
+                    div()
+                        .ml_4()
+                        .debug_selector(|| format!("reactions {seq}"))
+                        .children(entry.reactions.iter().map(|r| {
+                            div()
+                                .text_sm()
+                                .text_color(palette.faint)
+                                .child(model::plain(&format!("{} {}", r.emoji, r.from)))
+                        })),
+                )
+            })
             .children(
                 entry
                     .asks
@@ -12401,7 +12475,49 @@ impl Footplate {
                         .child(format!("· {standing}")),
                 )
             })
+            .when(hovered, |el| {
+                el.child(self.react_row(seq, &entry.reactions, palette, cx))
+            })
             .into_any_element()
+    }
+
+    /// The reactions a tap puts on the mail, in a row under it while the
+    /// pointer stands on it: the yard's fixed set, the user's own current
+    /// one on the open ground. A tap on that one takes it away, and a tap
+    /// on another puts it instead.
+    fn react_row(
+        &self,
+        seq: u64,
+        reactions: &[Reaction],
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let me = self.model.as_ref().map(Model::me).unwrap_or_default();
+        let mine = reactions
+            .iter()
+            .find(|r| r.from == me)
+            .map(|r| r.emoji.as_str());
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .pl_4()
+            .pt_1()
+            .debug_selector(|| format!("react row {seq}"));
+        for emoji in model::REACTIONS {
+            let tapped = format!("react {seq} {emoji}");
+            row = row.child(
+                quiet_button(emoji.to_string(), palette)
+                    .id(SharedString::from(tapped.clone()))
+                    .debug_selector({
+                        let tapped = tapped.clone();
+                        move || tapped.clone()
+                    })
+                    .when(mine == Some(emoji), |el| el.bg(palette.open))
+                    .on_click(cx.listener(move |this, _, _, cx| this.react(seq, emoji, cx))),
+            );
+        }
+        row.into_any_element()
     }
 
     fn entry(&self, entry: Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -12409,7 +12525,7 @@ impl Footplate {
         div()
             .flex()
             .flex_col()
-            .when(head, |el| el.child(self.entry_head(&entry, palette)))
+            .when(head, |el| el.child(self.entry_head(&entry, palette, cx)))
             .child(self.entry_body(entry, palette, cx))
             .into_any_element()
     }
@@ -12482,7 +12598,7 @@ impl Footplate {
                 out.push(day_break(day, palette));
             }
             if entry.head {
-                out.push(reading_row(self.entry_head(&entry, palette), true));
+                out.push(reading_row(self.entry_head(&entry, palette, cx), true));
             }
             out.push(reading_row(self.entry_body(entry, palette, cx), false));
         }
@@ -17491,6 +17607,116 @@ mod tests {
         (view, cx)
     }
 
+    /// The open conversation's reactions, by mail: each mail's seq
+    /// with its parties' emoji and who put them.
+    fn reactions_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(u64, Vec<(String, String)>)> {
+        view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .map(|m| {
+                    m.entries()
+                        .into_iter()
+                        .map(|e| {
+                            (
+                                e.seq,
+                                e.reactions.into_iter().map(|r| (r.emoji, r.from)).collect(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    fn reaction_event(seq: u64, actor: &str, target: u64, emoji: &str) -> String {
+        json!({"seq": seq, "kind": "reaction", "actor": actor, "at": "2026-10-08T09:31:00Z",
+            "data": {"seq": target, "emoji": emoji}})
+        .to_string()
+    }
+
+    #[gpui::test]
+    fn a_letter_s_reactions_show_and_a_tap_puts_replaces_and_clears(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &["Shall I land it?", "Land it."]);
+        yard.answer("React", "{}");
+        let (view, cx) = opened(&yard, &["Shall I land it?", "Land it."], cx);
+        // Mail the yard sends no reactions on reads as it always has.
+        assert!(!drawn(cx, "reactions 12"));
+        assert!(!drawn(cx, "reactions 13"));
+
+        // Hovering the letter shows the six to tap.
+        hover_on(cx, "text 12");
+        assert!(drawn(cx, "react row 12"));
+        for emoji in ["👍", "👎", "❤️", "🎉", "👀", "✅"] {
+            assert!(drawn(cx, &format!("react 12 {emoji}")), "{emoji}");
+        }
+
+        // A tap puts it, and the conversation is read again.
+        click_on(cx, "react 12 👍");
+        wait(cx, "the reaction put", |_| {
+            yard.asked("React") == [json!({"seq": 12, "emoji": "👍", "actor": "jo"})]
+        });
+        wait(cx, "the conversation read again", |_| {
+            yard.asked("Conversation").last()
+                == Some(&json!({"a": "jo", "b": "yardmaster", "after": 13}))
+        });
+        yard.emit(&reaction_event(21, "jo", 12, "👍"));
+        wait(cx, "the reaction under the letter", |cx| {
+            reactions_of(&view, cx) == [(12, vec![("👍".into(), "jo".into())]), (13, vec![])]
+        });
+        assert!(drawn(cx, "reactions 12"));
+
+        // A tap on another replaces it.
+        click_on(cx, "react 12 🎉");
+        wait(cx, "the reaction replaced", |_| {
+            yard.asked("React").last() == Some(&json!({"seq": 12, "emoji": "🎉", "actor": "jo"}))
+        });
+        yard.emit(&reaction_event(22, "jo", 12, "🎉"));
+        wait(cx, "the replacement under the letter", |cx| {
+            reactions_of(&view, cx) == [(12, vec![("🎉".into(), "jo".into())]), (13, vec![])]
+        });
+
+        // A tap on the user's own current one takes it away.
+        click_on(cx, "react 12 🎉");
+        wait(cx, "the reaction taken away", |_| {
+            yard.asked("React").last() == Some(&json!({"seq": 12, "emoji": "", "actor": "jo"}))
+        });
+        yard.emit(&reaction_event(23, "jo", 12, ""));
+        wait(cx, "no reaction under the letter", |cx| {
+            reactions_of(&view, cx) == [(12, vec![]), (13, vec![])]
+        });
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    #[gpui::test]
+    fn a_yard_with_no_react_hides_the_row_and_says_nothing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &["Shall I land it?", "Land it."]);
+        // React is none the yard answers: it has no such call.
+        let (view, cx) = opened(&yard, &["Shall I land it?", "Land it."], cx);
+
+        // The row stands until the yard says it has no such call.
+        hover_on(cx, "text 12");
+        assert!(drawn(cx, "react row 12"));
+        click_on(cx, "react 12 👍");
+        wait(cx, "the reaction refused", |_| {
+            yard.asked("React") == [json!({"seq": 12, "emoji": "👍", "actor": "jo"})]
+        });
+        wait(cx, "the yard known too old", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().react_too_old())
+        });
+        assert_eq!(notice(&view, cx), "");
+        // Hovering another letter shows no row: the yard takes none.
+        hover_on(cx, "text 13");
+        cx.run_until_parked();
+        assert!(!drawn(cx, "react row 13"));
+    }
+
     /// Where the text of the mail `seq` is drawn.
     fn text_bounds(cx: &mut VisualTestContext, seq: u64) -> gpui::Bounds<gpui::Pixels> {
         cx.run_until_parked();
@@ -20582,6 +20808,18 @@ yardr.dev
                            "words": "after Friday,\nthe freeze is over then", "actor": "jo"})]
         });
         assert_eq!(typed(&view, cx), "");
+    }
+
+    /// Moves the pointer where `selector` is drawn.
+    fn hover_on(cx: &mut VisualTestContext, selector: &str) {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        let bounds = cx
+            .debug_bounds(at)
+            .unwrap_or_else(|| panic!("nothing is drawn for {selector}"));
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::default());
     }
 
     /// Clicks where `selector` is drawn.

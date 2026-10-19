@@ -46,7 +46,9 @@ use crate::yard::Env;
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, the yardmaster's conversation naming an ask and two
-/// bead ids, and the cheatsheet open over an open card.
+/// bead ids, the cheatsheet open over an open card, and the
+/// yardmaster's conversation with the parties' reactions under two
+/// mails, with the row of reactions to tap under one of them.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -110,6 +112,8 @@ pub const STATES: &[&str] = &[
     "decisions",
     "decisions-filtered",
     "keys",
+    "reactions",
+    "reactions-hover",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -1040,6 +1044,33 @@ fn populate(yard: &Yard, state: &str) {
                 ], "decided": []}})
                 .to_string(),
             );
+        }
+        "reactions" | "reactions-hover" => {
+            // The yardmaster's conversation with the parties' reactions
+            // under two mails: jo's on the question, and both parties'
+            // on the answer, with a third mail without any. The hover
+            // state poses the pointer on the answer, so its row of
+            // reactions to tap stands under it.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                &json!({"result": [
+                    {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "Shall I land it?", "read": true,
+                     "reactions": [{"from": "jo", "emoji": "👍"}]},
+                    {"seq": 13, "at": "2026-10-08T09:36:00Z", "from": "jo", "to": "yardmaster",
+                     "text": "Land it.", "read": true,
+                     "reactions": [{"from": "jo", "emoji": "✅"},
+                                   {"from": "yardmaster", "emoji": "👀"}]},
+                    {"seq": 14, "at": "2026-10-08T09:42:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "Landed.", "read": true},
+                ]})
+                .to_string(),
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         }
         "mail" | "image" => {
             // The yardmaster's mail carries a page and an image, as the
@@ -1974,6 +2005,16 @@ mod tests {
                     assert_eq!(letters[0].files.len(), 2, "{state}");
                     assert!(crate::model::is_page(&letters[0].files[0]), "{state}");
                     assert!(!crate::model::is_page(&letters[0].files[1]), "{state}");
+                }
+                "reactions" | "reactions-hover" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    // Three mails, the first with one reaction and the
+                    // second with both parties', the third with none.
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 3, "{state}");
+                    assert_eq!(letters[0].reactions.len(), 1, "{state}");
+                    assert_eq!(letters[1].reactions.len(), 2, "{state}");
+                    assert!(letters[2].reactions.is_empty(), "{state}");
                 }
                 "refs" => {
                     // The run ask the first mail names, and the two bead

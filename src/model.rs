@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
     DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer,
-    Ran, Run, Secret, Setup, User,
+    Ran, Reaction, Run, Secret, Setup, User,
 };
 use crate::markdown;
 use crate::select;
@@ -276,7 +276,13 @@ pub struct Entry {
     /// The open asks its text names, each once, in order: the previews
     /// under it, each with its card a tap away.
     pub asks: Vec<AskPreview>,
+    /// The parties' emoji on the mail, by who put them, as the yard
+    /// answered them: shown under its text.
+    pub reactions: Vec<Reaction>,
 }
+
+/// The reactions a tap puts: the yard's fixed set, in its order.
+pub const REACTIONS: [&str; 6] = ["👍", "👎", "❤️", "🎉", "👀", "✅"];
 
 /// An open ask a mail names, as the preview under it shows it: the
 /// question's first line, who asked and how long it waits. The card
@@ -845,6 +851,10 @@ pub struct Model {
     /// The yard has no Flows call: as above, for the flows half of the
     /// Lines view.
     flows_too_old: bool,
+    /// The yard has no React call: one from before reactions. The row
+    /// the reactions are tapped on is hidden, and no notice is raised.
+    /// A reaction answered clears it.
+    react_too_old: bool,
     /// The timetable row a travelling bead was opened from: the board, a
     /// line or No line. The list's open row and the details' back link
     /// while the bead is open.
@@ -3411,6 +3421,7 @@ impl Model {
                 day,
                 refs,
                 asks,
+                reactions: l.reactions.clone(),
             });
         }
         out
@@ -3674,14 +3685,71 @@ impl Model {
             .collect()
     }
 
+    /// A reaction was put on the mail `seq`, or taken away from it. It
+    /// also comes from the stream; reading the conversation that holds
+    /// the mail shows it when the stream is lost at this moment, and
+    /// costs what is new. The yard answered, so it has the call.
+    pub fn reacted(&mut self, seq: u64) -> Vec<Effect> {
+        self.react_too_old = false;
+        let name = self
+            .convo
+            .iter()
+            .find(|(_, c)| c.iter().any(|l| l.seq == seq))
+            .map(|(name, _)| name.clone());
+        name.map(|name| vec![self.read(&name)]).unwrap_or_default()
+    }
+
+    /// Whether the yard has no React call: one from before reactions,
+    /// which hides the row the reactions are tapped on.
+    pub fn react_too_old(&self) -> bool {
+        self.react_too_old
+    }
+
+    /// The user's own reaction on the mail `seq`, if they put one and the
+    /// window holds the mail: a tap on it takes it away, and a tap on
+    /// another puts that one instead.
+    pub fn own_reaction(&self, seq: u64) -> Option<String> {
+        self.convo
+            .values()
+            .flat_map(|c| c.iter())
+            .find(|l| l.seq == seq)?
+            .reactions
+            .iter()
+            .find(|r| r.from == self.me)
+            .map(|r| r.emoji.clone())
+    }
+
+    /// A reaction was not put. A yard without the call hides the row
+    /// the reactions are tapped on, and no notice is raised. Anything
+    /// else is said as a notice, as ever.
+    pub fn react_failed(&mut self, err: &api::Error) {
+        // The yard's one answer with no code of its own: its words are
+        // read here, as `not_given` reads them, and when they change
+        // this is shown as any refusal.
+        match err {
+            api::Error::Refused { message, .. } if message.starts_with("no such method") => {
+                self.react_too_old = true;
+            }
+            _ => {
+                self.notice = format!("not reacted: {err}");
+            }
+        }
+    }
+
     /// Puts `l` into the conversation with `name`, in order. A mail it has
     /// already (the stream and the yard both tell of each) only gains what
-    /// `l` knows more: that it was read, or where it stands.
+    /// `l` knows more: that it was read, its reactions, or where it stands.
     fn add(&mut self, name: &str, l: Letter) {
         let c = self.convo.entry(name.to_string()).or_default();
         match c.binary_search_by_key(&l.seq, |have| have.seq) {
             Ok(i) => {
                 c[i].read |= l.read;
+                // A re-read carries the reactions as they stand; the
+                // stream's mail tells of none, so an empty one leaves
+                // what is held.
+                if !l.reactions.is_empty() {
+                    c[i].reactions = l.reactions;
+                }
                 // Mail to another yard only goes on from queued, and the
                 // stream tells of it as queued whenever it tells.
                 if !l.delivery.is_empty() && l.delivery != "queued" {
@@ -3881,6 +3949,10 @@ impl Model {
                 }
                 Vec::new()
             }
+            "reaction" => {
+                self.reaction(e);
+                Vec::new()
+            }
             "notifications_read" => {
                 let (reader, through) = (e.text("reader"), e.number("through"));
                 if reader == self.me {
@@ -4012,6 +4084,29 @@ impl Model {
             effects.push(Effect::Users);
         }
         effects
+    }
+
+    /// A reaction event: the target letter's reactions gain the
+    /// reactor's emoji, or lose it on a clear. The letter is in one
+    /// conversation; the others are left as they are. One the window
+    /// does not hold is none read yet, and its read carries them.
+    fn reaction(&mut self, e: &Event) {
+        let target = e.number("seq");
+        let emoji = e.text("emoji");
+        for c in self.convo.values_mut() {
+            let Ok(i) = c.binary_search_by_key(&target, |l| l.seq) else {
+                continue;
+            };
+            c[i].reactions.retain(|r| r.from != e.actor);
+            if !emoji.is_empty() {
+                c[i].reactions.push(Reaction {
+                    from: e.actor.clone(),
+                    emoji: emoji.to_string(),
+                });
+                c[i].reactions.sort_by(|a, b| a.from.cmp(&b.from));
+            }
+            break;
+        }
     }
 
     /// A mail the yard wrote that one of this yard's was not delivered:
@@ -6151,6 +6246,126 @@ mod tests {
         // newest page, whatever the stream put into it.
         m.event(&mail_to_jo(30, "assembly"));
         assert_eq!(m.sent("assembly"), [page("assembly", 0)]);
+    }
+
+    fn reacted_by(from: &str, emoji: &str) -> Reaction {
+        Reaction {
+            from: from.into(),
+            emoji: emoji.into(),
+        }
+    }
+
+    #[test]
+    fn reactions_show_under_the_letter_and_move_with_the_stream() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.select(Selected::Conversation("yardmaster".into()));
+        m.conversation(
+            "yardmaster",
+            vec![
+                Letter {
+                    reactions: vec![reacted_by("jo", "👍")],
+                    ..letter(12, "yardmaster", "jo", "Shall I land it?")
+                },
+                letter(13, "jo", "yardmaster", "Land it."),
+            ],
+        );
+        let entries = m.entries();
+        assert_eq!(entries[0].reactions, [reacted_by("jo", "👍")]);
+        // A yard from before reactions sends no such field: the mail
+        // reads as it always has.
+        assert_eq!(entries[1].reactions, []);
+
+        // The other party's lands from the stream, by who put it.
+        assert_eq!(
+            m.event(&event(
+                21,
+                "reaction",
+                "yardmaster",
+                json!({"seq": 12, "emoji": "🎉"}),
+            )),
+            []
+        );
+        assert_eq!(
+            m.entries()[0].reactions,
+            [reacted_by("jo", "👍"), reacted_by("yardmaster", "🎉")]
+        );
+        // A new one replaces the old one.
+        m.event(&event(
+            22,
+            "reaction",
+            "jo",
+            json!({"seq": 12, "emoji": "❤️"}),
+        ));
+        assert_eq!(
+            m.entries()[0].reactions,
+            [reacted_by("jo", "❤️"), reacted_by("yardmaster", "🎉")]
+        );
+        // A clear takes it away.
+        m.event(&event(
+            23,
+            "reaction",
+            "yardmaster",
+            json!({"seq": 12, "emoji": ""}),
+        ));
+        assert_eq!(m.entries()[0].reactions, [reacted_by("jo", "❤️")]);
+        // One on a letter the window does not hold changes nothing: its
+        // read carries them.
+        m.event(&event(
+            24,
+            "reaction",
+            "jo",
+            json!({"seq": 99, "emoji": "👍"}),
+        ));
+        assert_eq!(m.entries()[0].reactions, [reacted_by("jo", "❤️")]);
+
+        // A re-read carries what the letter holds now; one that tells
+        // of none leaves what is held.
+        m.conversation(
+            "yardmaster",
+            vec![Letter {
+                reactions: vec![reacted_by("yardmaster", "👀")],
+                ..letter(12, "yardmaster", "jo", "Shall I land it?")
+            }],
+        );
+        assert_eq!(m.entries()[0].reactions, [reacted_by("yardmaster", "👀")]);
+        m.conversation(
+            "yardmaster",
+            vec![letter(12, "yardmaster", "jo", "Shall I land it?")],
+        );
+        assert_eq!(m.entries()[0].reactions, [reacted_by("yardmaster", "👀")]);
+    }
+
+    #[test]
+    fn after_a_react_the_conversation_that_holds_the_mail_is_read_again() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.conversation("yardmaster", vec![letter(12, "yardmaster", "jo", "first")]);
+        assert_eq!(m.reacted(12), [read("yardmaster", 12)]);
+        // A mail the window does not hold reads nothing.
+        assert_eq!(m.reacted(99), []);
+    }
+
+    #[test]
+    fn a_yard_without_react_hides_the_row_and_says_nothing() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert!(!m.react_too_old());
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        m.react_failed(&refused("no such method React"));
+        assert!(m.react_too_old());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+        // A reaction answered clears it.
+        m.conversation("yardmaster", vec![letter(12, "yardmaster", "jo", "x")]);
+        assert_eq!(m.reacted(12), [read("yardmaster", 12)]);
+        assert!(!m.react_too_old());
+        // Anything else is a notice, as ever.
+        m.react_failed(&refused("only the letter's sender or receiver may react"));
+        assert!(!m.react_too_old());
+        assert_eq!(
+            m.notice,
+            "not reacted: only the letter's sender or receiver may react"
+        );
     }
 
     #[test]

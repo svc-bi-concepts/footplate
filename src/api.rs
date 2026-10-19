@@ -425,6 +425,17 @@ pub struct Page {
     pub more: bool,
 }
 
+/// One party's emoji on a mail, as [`Client::react`] put it there.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Reaction {
+    /// Who put it: the mail's sender or its receiver.
+    #[serde(default)]
+    pub from: String,
+    /// Which of the yard's fixed set it is.
+    #[serde(default)]
+    pub emoji: String,
+}
+
 /// One mail, of an inbox or a conversation.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Letter {
@@ -439,6 +450,11 @@ pub struct Letter {
     pub text: String,
     #[serde(default)]
     pub read: bool,
+    /// The parties' emoji on the mail, by who put them. A yard from
+    /// before reactions sends no such field, and the mail reads as it
+    /// always has.
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
     /// The files it carries, in the order it was sent with them.
     #[serde(default, deserialize_with = "or_default")]
     pub files: Vec<BlobRef>,
@@ -2516,6 +2532,19 @@ impl Client {
             args["files"] = json!(files);
         }
         self.answer("MailPeer", args)
+    }
+
+    /// Puts the party `actor`'s reaction on the mail `seq`: one of the
+    /// yard's fixed set, or `""` to take it away. One party holds one
+    /// reaction: a new one replaces the old one. It answers nothing; the
+    /// reaction is then a `reaction` event in the stream, and `reactions`
+    /// on the letter.
+    pub fn react(&self, seq: u64, emoji: &str, actor: &str) -> Result<()> {
+        self.call(
+            "React",
+            json!({ "seq": seq, "emoji": emoji, "actor": actor }),
+        )
+        .map(drop)
     }
 
     /// The mail between the user `a` and `b`, oldest first, newer than
@@ -5048,6 +5077,60 @@ mod tests {
             "{err:?}"
         );
         assert!(!err.not_found());
+    }
+
+    #[test]
+    fn a_reaction_is_put_and_taken_away() {
+        let yard = Yard::start();
+        yard.answer("React", "{}");
+        let client = yard.client();
+        client.react(13, "🎉", "jo").unwrap();
+        client.react(13, "", "jo").unwrap();
+        assert_eq!(
+            yard.asked("React"),
+            vec![
+                json!({"seq": 13, "emoji": "🎉", "actor": "jo"}),
+                json!({"seq": 13, "emoji": "", "actor": "jo"}),
+            ]
+        );
+
+        // What the yard refuses is said in its words.
+        yard.answer(
+            "React",
+            r#"{"error": {"code": "error", "message": "emoji 🍌 is none of 👍 👎 ❤️ 🎉 👀 ✅"}}"#,
+        );
+        let err = client.react(13, "🍌", "jo").unwrap_err();
+        assert_eq!(err.to_string(), "emoji 🍌 is none of 👍 👎 ❤️ 🎉 👀 ✅");
+
+        // A yard from before reactions has no such call.
+        let old = Yard::start();
+        let err = old.client().react(13, "👍", "jo").unwrap_err();
+        assert_eq!(err.to_string(), "no such method React");
+    }
+
+    #[test]
+    fn a_letter_carries_its_parties_reactions_or_none() {
+        let yard = Yard::start();
+        yard.answer(
+            "Conversation",
+            r#"{"result": [
+                {"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo",
+                 "text": "Shall I land it?", "read": false,
+                 "reactions": [{"from": "jo", "emoji": "👍"}]},
+                {"seq": 13, "at": "2026-10-08T09:31:00Z", "from": "jo", "to": "yardmaster",
+                 "text": "Land it.", "read": true}]}"#,
+        );
+        let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+        assert_eq!(
+            letters[0].reactions,
+            vec![Reaction {
+                from: "jo".into(),
+                emoji: "👍".into()
+            }]
+        );
+        // A yard from before reactions sends no such field, and the mail
+        // reads as it always has.
+        assert_eq!(letters[1].reactions, vec![]);
     }
 
     /// The PNG of docs/api.md: one pixel, 70 bytes.
