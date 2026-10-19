@@ -1658,12 +1658,17 @@ impl Model {
     }
 
     /// The arrivals board could not be read again. A yard without the
-    /// call is no error: the Lines pane says the yard is too old, and no
-    /// notice is raised. Anything else is said as a notice, as ever.
+    /// call has no rows to show: the Lines pane says it is too old, and
+    /// no notice is raised. Anything else is said as a notice, as ever.
     pub fn arrivals_failed(&mut self, err: &api::Error) {
         match lines_too_old(err) {
-            true => self.arrivals_too_old = true,
-            false => self.notice = format!("the arrivals could not be read: {err}"),
+            true => {
+                self.arrivals.clear();
+                self.arrivals_too_old = true;
+            }
+            false => {
+                self.notice = format!("the arrivals could not be read: {err}");
+            }
         }
     }
 
@@ -1792,12 +1797,20 @@ impl Model {
     }
 
     /// The flows view could not be read again. A yard without the call
-    /// is no error: the Lines pane says the yard is too old, and no
-    /// notice is raised. Anything else is said as a notice, as ever.
-    pub fn flows_failed(&mut self, err: &api::Error) {
+    /// has no rows to show: the Lines pane says it is too old, and no
+    /// notice is raised. An open line falls back to the board. Anything
+    /// else is said as a notice, as ever.
+    pub fn flows_failed(&mut self, err: &api::Error) -> Vec<Effect> {
         match lines_too_old(err) {
-            true => self.flows_too_old = true,
-            false => self.notice = format!("the flows could not be read: {err}"),
+            true => {
+                self.flows = Flows::default();
+                self.flows_too_old = true;
+                self.reselect()
+            }
+            false => {
+                self.notice = format!("the flows could not be read: {err}");
+                Vec::new()
+            }
         }
     }
 
@@ -8559,12 +8572,30 @@ mod tests {
         assert!(!LINES_TOO_OLD.contains("Flows"));
 
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.arrivals(Arrivals {
+            rows: vec![api::Arrival {
+                bead: "yd-zulu".into(),
+                ..Default::default()
+            }],
+        });
+        let _ = m.flows(Flows {
+            travelling: 1,
+            depots: vec![api::FlowDepot {
+                name: "yardr".into(),
+                travelling: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
         m.arrivals_failed(&refused("no such method Arrivals"));
         assert!(m.arrivals_too_old());
+        assert!(m.arrival_rows().is_empty());
         assert!(!m.flows_too_old());
         assert!(m.notice.is_empty(), "{}", m.notice);
-        m.flows_failed(&refused("no such method Flows"));
+        let _ = m.flows_failed(&refused("no such method Flows"));
         assert!(m.flows_too_old());
+        assert_eq!(m.travelling(), 0);
+        assert!(m.depots().is_empty());
         assert!(m.notice.is_empty(), "{}", m.notice);
 
         // A board read again clears its half alone.
@@ -8590,7 +8621,7 @@ mod tests {
             api::Error::Protocol("Flows: status 200, and no JSON object".into()),
             api::Error::Down(std::io::Error::other("the yard went away")),
         ] {
-            m.flows_failed(&err);
+            let _ = m.flows_failed(&err);
             assert!(!m.flows_too_old());
             assert_eq!(m.notice, format!("the flows could not be read: {err}"));
             m.notice.clear();

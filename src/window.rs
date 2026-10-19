@@ -5367,10 +5367,7 @@ impl Footplate {
                     |client, _| client.flows(),
                     move |this, flows, cx| match flows {
                         Ok(board) => this.change_in(session, cx, |m| m.flows(board)),
-                        Err(err) => this.change_in(session, cx, |m| {
-                            m.flows_failed(&err);
-                            Vec::new()
-                        }),
+                        Err(err) => this.change_in(session, cx, |m| m.flows_failed(&err)),
                     },
                 ),
                 Effect::Timetable { from, until } => self.ask_in(
@@ -23289,9 +23286,18 @@ yardr.dev
     fn a_lines_call_read_again_says_an_old_yard_and_notices_the_rest(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_board());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        wait(cx, "the arrivals and flows", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.arrival_rows().len() == 3 && m.travelling() == 3)
+            })
+        });
         // The board read again past an answer the yard has no call for:
-        // too old, with no notice, and the flows half reads on.
+        // its old rows go with it, and no notice is raised.
         yard.answer_once_status(
             "Arrivals",
             200,
@@ -23300,7 +23306,9 @@ yardr.dev
         yard.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 1}}"#);
         wait(cx, "the yard too old for arrivals", |cx| {
             view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| m.arrivals_too_old())
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.arrivals_too_old() && m.arrival_rows().is_empty())
             })
         });
         cx.run_until_parked();
@@ -23308,9 +23316,32 @@ yardr.dev
         view.read_with(cx, |v, _| {
             assert!(!v.model.as_ref().unwrap().flows_too_old());
         });
+        // The panel's call can become unavailable on a later read too:
+        // its old rows go, and the same quiet words stand in their place.
+        yard.answer_once_status(
+            "Flows",
+            200,
+            r#"{"error": {"code": "error", "message": "no such method Flows"}}"#,
+        );
+        yard.emit(r#"{"seq": 22, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 2}}"#);
+        wait(cx, "the yard too old for flows", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.flows_too_old() && m.travelling() == 0 && m.depots().is_empty()
+                })
+            })
+        });
+        assert_eq!(notice(&view, cx), "");
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        cx.run_until_parked();
+        assert!(drawn(cx, "lines too old"));
+        to_departures(cx);
+        assert!(drawn(cx, "lines too old"));
+        assert_eq!(notice(&view, cx), "");
         // A re-read the yard serves unreadably is a notice, as ever.
         yard.answer_once_status("Flows", 200, r#"{"result": {"travelling": [7]}}"#);
-        yard.emit(r#"{"seq": 22, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 2}}"#);
+        yard.emit(r#"{"seq": 23, "kind": "noted", "actor": "yardmaster", "bead": "bead-a", "data": {"note": 3}}"#);
         wait(cx, "why the flows could not be read", |cx| {
             !notice(&view, cx).is_empty()
         });
@@ -23320,7 +23351,7 @@ yardr.dev
             notice(&view, cx)
         );
         view.read_with(cx, |v, _| {
-            assert!(!v.model.as_ref().unwrap().flows_too_old());
+            assert!(v.model.as_ref().unwrap().flows_too_old());
         });
     }
 
