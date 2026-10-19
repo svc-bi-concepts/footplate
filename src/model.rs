@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
     DecidedAsk, Event, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer, Ran,
-    Run, Secret, User,
+    Run, Secret, Setup, User,
 };
 use crate::markdown;
 use crate::select;
@@ -665,6 +665,14 @@ pub struct DecisionAsk {
     /// the control that approves, and its question and context are marked
     /// as the asker's.
     pub run: Option<Run>,
+    /// The setup a setup ask proposes: its card has the yard's block with
+    /// the account choice and the presets to pick from, and the control
+    /// that approves the pick with the account together. Its question and
+    /// context are marked as the asker's, as a run ask's are.
+    pub setup: Option<Setup>,
+    /// The candidate taken with a tap, by source name; empty where none
+    /// is. A filled secret field types another instead.
+    pub account: String,
 }
 
 /// A bead's open asks, as the open row shows them: one card each.
@@ -716,6 +724,11 @@ pub struct DecidedDetail {
     pub secret: Option<Secret>,
     /// The command a run ask proposes, as on its open card.
     pub run: Option<Run>,
+    /// The setup a setup ask proposes, as on its open card.
+    pub setup: Option<Setup>,
+    /// The candidate taken with a tap, by source name; empty where none
+    /// is. A filled secret field types another instead.
+    pub account: String,
     /// What the yard ran when the ask was approved; none until it is.
     pub ran: Option<Ran>,
 }
@@ -908,6 +921,10 @@ pub struct Model {
     /// The run asks whose carried texts stand shown, by bead and ask: the
     /// tap behind the yard's sentences.
     texts: HashSet<(String, u64)>,
+    /// The setup ask's candidate taken with a tap, by bead and ask and
+    /// source name. A filled secret field types another instead, and
+    /// clears this.
+    account: HashMap<(String, u64), String>,
     /// Which ask of a bead with several the keys act on, by bead.
     current: HashMap<String, u64>,
     /// The seq of the last `crew_status` applied to each crew member: a
@@ -2266,12 +2283,20 @@ impl Model {
                     let full = self.bead_ask(bead, ask.ask);
                     DecisionAsk {
                         ask: ask.ask,
-                        question: card_question(&ask.question, &ask.asker, ask.run.is_some()),
+                        question: card_question(
+                            &ask.question,
+                            &ask.asker,
+                            ask.run.is_some() || ask.setup.is_some(),
+                        ),
                         asker: ask.asker.clone(),
                         waits: waits(&ask.since, now),
                         recommend_label: full.map(recommend_label).unwrap_or_default(),
                         context: full.map_or(Vec::new(), |f| {
-                            card_context(&f.context, &ask.asker, ask.run.is_some())
+                            card_context(
+                                &f.context,
+                                &ask.asker,
+                                ask.run.is_some() || ask.setup.is_some(),
+                            )
                         }),
                         options: full.map_or(Vec::new(), card_options),
                         recommend: full.map_or(0, |f| f.recommend),
@@ -2287,6 +2312,8 @@ impl Model {
                         state: full.map_or("open".to_string(), |f| f.state.clone()),
                         secret: ask.secret.clone(),
                         run: ask.run.clone(),
+                        setup: ask.setup.clone(),
+                        account: self.account_choice(bead, ask.ask),
                     }
                 })
                 .collect(),
@@ -2330,7 +2357,7 @@ impl Model {
             bead: a.bead.clone(),
             title: a.bead_title.clone(),
             ask: a.ask,
-            question: card_question(&a.question, &a.asker, a.run.is_some()),
+            question: card_question(&a.question, &a.asker, a.run.is_some() || a.setup.is_some()),
             asker: a.asker.clone(),
             state: a.state.clone(),
             state_line: decided_state(a, zone),
@@ -2340,7 +2367,7 @@ impl Model {
             return_at: a.return_at.clone(),
             recommend_label: full.map(recommend_label).unwrap_or_default(),
             context: full.map_or(Vec::new(), |f| {
-                card_context(&f.context, &a.asker, a.run.is_some())
+                card_context(&f.context, &a.asker, a.run.is_some() || a.setup.is_some())
             }),
             options: full.map_or(Vec::new(), card_options),
             recommend: full.map_or(0, |f| f.recommend),
@@ -2357,6 +2384,8 @@ impl Model {
             doc,
             secret: a.secret.clone(),
             run: a.run.clone(),
+            setup: a.setup.clone(),
+            account: self.account_choice(bead, ask),
             ran: a.ran.clone(),
         })
     }
@@ -2507,6 +2536,11 @@ impl Model {
         if self.run(bead, ask).is_some() || full.run.is_some() {
             return None;
         }
+        // Nor a setup ask: its preset pick goes with the account in the
+        // approval, which has a key and a call of its own.
+        if self.setup(bead, ask).is_some() || full.setup.is_some() {
+            return None;
+        }
         let words = words.trim().to_string();
         // An ask with no options wants words: they are the answer.
         if full.options.is_empty() {
@@ -2583,6 +2617,7 @@ impl Model {
                     concealed: open.concealed,
                     given: Vec::new(),
                     run: open.run,
+                    setup: open.setup,
                     ran: None,
                 },
             );
@@ -2590,6 +2625,7 @@ impl Model {
             return Vec::new();
         }
         self.chosen.remove(&(bead.to_string(), ask));
+        self.account.remove(&(bead.to_string(), ask));
         let mut effects = self.reselect();
         effects.push(Effect::Asks);
         effects.push(Effect::Bead {
@@ -2770,6 +2806,158 @@ impl Model {
         effects
     }
 
+    /// The setup the ask proposes when it is a setup ask, open or dealt
+    /// with.
+    pub fn setup(&self, bead: &str, ask: u64) -> Option<&Setup> {
+        let open = self.open.iter().filter(|a| a.bead == bead && a.ask == ask);
+        let decided = self
+            .decided
+            .iter()
+            .filter(|a| a.bead == bead && a.ask == ask);
+        open.map(|a| &a.setup)
+            .chain(decided.map(|a| &a.setup))
+            .next()?
+            .as_ref()
+    }
+
+    /// What the control on the ask's card approves: the setup of a setup
+    /// ask that is open or put aside. One that was approved, declined or
+    /// taken back has no control: a setup runs once for one ask, and the
+    /// yard refuses an approval of an ask that is asked no more.
+    pub fn setup_approving(&self, bead: &str, ask: u64) -> Option<&Setup> {
+        let closed = self
+            .decided
+            .iter()
+            .any(|a| a.bead == bead && a.ask == ask && a.state != "put aside");
+        self.setup(bead, ask).filter(|_| !closed)
+    }
+
+    /// The preset the approval picks: the option chosen, else the
+    /// recommended one. None where the bead is not read yet, where the
+    /// ask sets up nothing, or where nothing is chosen and nothing is
+    /// recommended.
+    pub fn setup_pick(&self, bead: &str, ask: u64) -> Option<u64> {
+        let full = self.bead_ask(bead, ask)?;
+        if full.options.is_empty() || full.setup.is_none() {
+            return None;
+        }
+        let chosen = self
+            .chosen
+            .get(&(bead.to_string(), ask))
+            .copied()
+            .unwrap_or(0);
+        let pick = if chosen != 0 { chosen } else { full.recommend };
+        (pick != 0 && pick <= full.options.len() as u64).then_some(pick)
+    }
+
+    /// The yard approved a setup ask with the preset picked: the ask moves
+    /// to "Decided" at once, and the queue and the bead are read again for
+    /// what the yard says. The server carries the setup out after the
+    /// call, so the approval reads as being carried out until the queue is
+    /// read again. `option` is the preset pick the call carried.
+    pub fn setup_approved(
+        &mut self,
+        bead: &str,
+        ask: u64,
+        option: u64,
+        approved: &api::SetupApproved,
+    ) -> Vec<Effect> {
+        let ran = Some(Ran {
+            argv: vec!["setup".to_string(), approved.pack.clone()],
+            result: approved.result.clone(),
+            failed: false,
+        });
+        if let Some(dealt) = self
+            .decided
+            .iter_mut()
+            .find(|a| a.bead == bead && a.ask == ask)
+        {
+            dealt.state = "answered".to_string();
+            dealt.option = option;
+            dealt.option_label = approved.preset.clone();
+            dealt.given = approved.given.clone();
+            dealt.ran = ran;
+            dealt.return_at.clear();
+        } else if let Some(at) = self
+            .open
+            .iter()
+            .position(|a| a.bead == bead && a.ask == ask)
+        {
+            let open = self.open.remove(at);
+            self.decided.insert(
+                0,
+                DecidedAsk {
+                    bead: open.bead,
+                    bead_title: open.bead_title,
+                    topic: open.topic,
+                    ask: open.ask,
+                    question: open.question,
+                    asker: open.asker,
+                    since: open.since,
+                    state: "answered".to_string(),
+                    option,
+                    option_label: approved.preset.clone(),
+                    words: String::new(),
+                    by: String::new(),
+                    return_at: String::new(),
+                    secret: open.secret,
+                    concealed: open.concealed,
+                    given: approved.given.clone(),
+                    run: open.run,
+                    setup: open.setup,
+                    ran,
+                },
+            );
+        } else {
+            return Vec::new();
+        }
+        self.chosen.remove(&(bead.to_string(), ask));
+        self.account.remove(&(bead.to_string(), ask));
+        let mut effects = self.reselect();
+        effects.push(Effect::Asks);
+        effects.push(Effect::Bead {
+            bead: bead.to_string(),
+        });
+        effects
+    }
+
+    /// The setup ask's candidate taken with a tap, by source name; empty
+    /// where none is taken, or where the yard lists it no more.
+    pub fn account_choice(&self, bead: &str, ask: u64) -> String {
+        let taken = self.account.get(&(bead.to_string(), ask));
+        let listed = self.setup(bead, ask).is_some_and(|setup| {
+            taken.is_some_and(|taken| setup.candidates.iter().any(|c| &c.source == taken))
+        });
+        match (taken, listed) {
+            (Some(taken), true) => taken.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Takes the setup ask's candidate with a tap: a tap on the taken one
+    /// takes it back, and a tap on another takes that one instead. One
+    /// the yard lists no more is not taken.
+    pub fn take_account(&mut self, bead: &str, ask: u64, source: &str) {
+        let listed = self
+            .setup(bead, ask)
+            .is_some_and(|setup| setup.candidates.iter().any(|c| c.source == source));
+        if !listed {
+            return;
+        }
+        let key = (bead.to_string(), ask);
+        if self.account.get(&key).is_some_and(|taken| taken == source) {
+            self.account.remove(&key);
+        } else {
+            self.account.insert(key, source.to_string());
+        }
+    }
+
+    /// Takes back whatever candidate the setup ask's card took: a filled
+    /// secret field types another instead.
+    pub fn clear_account(&mut self, bead: &str, ask: u64) {
+        self.account.remove(&(bead.to_string(), ask));
+    }
+
     /// The ask is put aside: it leaves the list and returns as the yard
     /// says.
     pub fn deferred(&mut self, bead: &str, ask: u64) -> Vec<Effect> {
@@ -2801,10 +2989,12 @@ impl Model {
                 concealed: open.concealed,
                 given: Vec::new(),
                 run: open.run,
+                setup: open.setup,
                 ran: None,
             },
         );
         self.chosen.remove(&(bead.to_string(), ask));
+        self.account.remove(&(bead.to_string(), ask));
         let mut effects = self.reselect();
         effects.push(Effect::Asks);
         effects.push(Effect::Bead {
@@ -2848,10 +3038,12 @@ impl Model {
                 concealed: open.concealed,
                 given: Vec::new(),
                 run: open.run,
+                setup: open.setup,
                 ran: None,
             },
         );
         self.chosen.remove(&(bead.to_string(), ask));
+        self.account.remove(&(bead.to_string(), ask));
         let mut effects = self.reselect();
         effects.push(Effect::Asks);
         effects.push(Effect::Bead {
@@ -4244,6 +4436,7 @@ where
         options if options > 1 => format!("{options} options"),
         _ if ask.secret.is_some() => "secret wanted".to_string(),
         _ if ask.run.is_some() => "approval wanted".to_string(),
+        _ if ask.setup.is_some() => "approval wanted".to_string(),
         _ => "words wanted".to_string(),
     };
     [
@@ -4262,7 +4455,9 @@ where
 /// the asker; a secret given and a words answer are words.
 pub fn outcome_of(ask: &DecidedAsk) -> Outcome {
     match ask.state.as_str() {
-        "answered" if !ask.given.is_empty() => Outcome::Words,
+        // A setup approval holds the names given too, with the preset
+        // and what the yard runs: it is approved, not words.
+        "answered" if !ask.given.is_empty() && ask.setup.is_none() => Outcome::Words,
         "answered" if ask.run.is_some() || ask.ran.is_some() => Outcome::Approved,
         "answered" if ask.option != 0 => Outcome::Approved,
         "answered" => Outcome::Words,
@@ -4395,8 +4590,15 @@ where
 {
     match ask.state.as_str() {
         // A secret ask's answer is the names, never a value.
-        "answered" if !ask.given.is_empty() => format!("you gave {}", ask.given.join(", ")),
+        "answered" if !ask.given.is_empty() && ask.setup.is_none() => {
+            format!("you gave {}", ask.given.join(", "))
+        }
         "declined" if ask.secret.is_some() => "you declined".to_string(),
+        // A setup ask's answer is the pack with the preset picked, and
+        // the names given where the account was typed.
+        "answered" if ask.setup.is_some() && ask.ran.is_some() => {
+            setup_state(ask, ask.setup.as_ref().unwrap(), ask.ran.as_ref().unwrap())
+        }
         // A run ask's answer is the command the yard ran, whole; what it
         // printed stands under it on the card. One the yard has not
         // carried out yet reads as being carried out, and one whose
@@ -4425,6 +4627,80 @@ where
         "taken back" => taken_back(ask),
         _ => format!("{} · {}", ask.asker, plain(&ask.state)),
     }
+}
+
+/// What one dealt with did with a setup ask, in plain words: `approved,
+/// being carried out: setup of pack courier, preset read to crew
+/// yardmaster; gave COURIER_ACCOUNT`, `approved, ran: …` once the server
+/// has carried it out, `approved, failed: …` where that failed, with what
+/// it printed under it on the card. As a run ask's three readings are.
+fn setup_state(ask: &DecidedAsk, setup: &Setup, ran: &Ran) -> String {
+    let preset = match ask.option_label.is_empty() {
+        true => format!("preset {}", ask.option),
+        false => format!("preset {}", plain(&ask.option_label)),
+    };
+    let mut what = format!(
+        "setup of pack {}, {} to {}",
+        plain(&setup.pack),
+        preset,
+        setup_grantees(&setup.to)
+    );
+    if !ask.given.is_empty() {
+        what.push_str(&format!("; gave {}", ask.given.join(", ")));
+    }
+    let reading = if ran.failed {
+        "approved, failed"
+    } else if ran.result == CARRY_PENDING {
+        "approved, being carried out"
+    } else {
+        "approved, ran"
+    };
+    format!("{reading}: {what}")
+}
+
+/// Who a setup ask's grants are for, in words: each crew member and each
+/// group by name, the last two joined with "and", as the yard's card has
+/// it (`granteesWord` in internal/store/runask_setup.go of the yardr
+/// repository).
+pub fn setup_grantees(to: &[api::SetupGrantee]) -> String {
+    let words: Vec<String> = to
+        .iter()
+        .filter_map(|t| {
+            if !t.crew.is_empty() {
+                Some(format!("crew {}", plain(&t.crew)))
+            } else if !t.group.is_empty() {
+                Some(format!("group {}", plain(&t.group)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    match words.len() {
+        0 => String::new(),
+        1 | 2 => words.join(" and "),
+        _ => format!(
+            "{} and {}",
+            words[..words.len() - 1].join(", "),
+            words[words.len() - 1]
+        ),
+    }
+}
+
+/// What approving a setup ask does, in one line: the apply, the account
+/// and the grants, as the yard's card has it (`Summary` in
+/// internal/store/runask_setup.go of the yardr repository).
+pub fn setup_summary(setup: &Setup) -> String {
+    format!(
+        "yardr pack apply {}, the account {}, and the preset's grants to {}",
+        plain(&setup.pack),
+        setup
+            .account
+            .iter()
+            .map(|name| plain(name))
+            .collect::<Vec<_>>()
+            .join(" and "),
+        setup_grantees(&setup.to)
+    )
 }
 
 /// What the yard answered to a secret that was given, in one line: the
@@ -4493,7 +4769,7 @@ pub fn approved_line(approved: &api::Approved) -> String {
     }
 }
 
-/// Whether the yard has no `ApproveAsk` for this window: one from before
+/// Whether the yard has no approval call for this window: one from before
 /// the call, or one whose listener does not serve it to this device, which
 /// it says in the same words. The card then sends its person to a terminal.
 pub fn approves_elsewhere(err: &api::Error) -> bool {
@@ -4510,10 +4786,39 @@ pub fn note_files_too_old(err: &api::Error) -> bool {
     matches!(err, api::Error::Refused { message, .. } if message.starts_with("argument \"files\""))
 }
 
-/// Why a run ask was not approved, for the card. A call that ended without
-/// an answer may have run the command all the same, so it is never said to
-/// be approved or not: the card, read again, says which. A refusal is the
-/// yard's words, whole.
+/// What the yard answered to a setup approval, in one line: the pack with
+/// the preset picked and who the grants are for, with the names given or
+/// the candidate taken, and that the server carries the setup out after
+/// the call. The card that proposed it leaves with the approval.
+pub fn setup_approved_line(setup: &Setup, approved: &api::SetupApproved) -> String {
+    let mut what = format!(
+        "setup of pack {}, preset {} to {}",
+        plain(&approved.pack),
+        plain(&approved.preset),
+        setup_grantees(&setup.to)
+    );
+    if !approved.account.is_empty() {
+        what.push_str(&format!("; took {}", plain(&approved.account)));
+    } else if !approved.given.is_empty() {
+        what.push_str(&format!("; gave {}", approved.given.join(", ")));
+    }
+    format!("approved, being carried out: {what}")
+}
+
+/// The command that approves a setup ask in a terminal on the yard's
+/// machine: the way for a window the yard takes no approval from. Where
+/// the card lists candidates, the account goes by name or typed.
+pub fn setup_approve_command(bead: &str, ask: u64, candidates: bool) -> String {
+    match candidates {
+        true => format!("yardr bead answer {bead} {ask} <n> --secret, or <n> --account <source>"),
+        false => format!("yardr bead answer {bead} {ask} <n> --secret"),
+    }
+}
+
+/// Why a run or setup ask was not approved, for the card. A call that
+/// ended without an answer may have run all the same, so it is never said
+/// to be approved or not: the card, read again, says which. A refusal is
+/// the yard's words, whole.
 pub fn not_approved(err: &api::Error) -> String {
     match err {
         api::Error::Down(_) | api::Error::Protocol(_) => {
@@ -8247,6 +8552,7 @@ mod tests {
             secret: None,
             concealed: true,
             run: None,
+            setup: None,
         }
     }
 
@@ -8277,6 +8583,7 @@ mod tests {
             concealed: true,
             given: Vec::new(),
             run: None,
+            setup: None,
             ran: None,
         }
     }
@@ -10311,6 +10618,303 @@ mod tests {
         m.open[0].concealed = false;
         m.declined("yd-crm", 18, "");
         assert!(!m.concealed("yd-crm", 18));
+    }
+
+    fn courier() -> Setup {
+        Setup {
+            pack: "courier".into(),
+            account: vec!["COURIER_ACCOUNT".into()],
+            account_file: "/home/jo/.yardr/sources/courier.env".into(),
+            candidates: vec![api::SetupCandidate {
+                source: "courier-existing".into(),
+                file: "/home/jo/.yardr/sources/courier-existing.env".into(),
+                values: [(
+                    "COURIER_ACCOUNT".to_string(),
+                    "jo@example.test".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            }],
+            does: vec![
+                "pack courier (embedded in yardr doctest), of kind source, into the yard: it adds 1 source and copies 1 command file (1 command), and changes nothing else. It makes no hook and sets no credential's file.".into(),
+                "the account COURIER_ACCOUNT: already given for courier-existing (COURIER_ACCOUNT=jo@example.test, in /home/jo/.yardr/sources/courier-existing.env). Take it with --account courier-existing, or type another unseen (written to /home/jo/.yardr/sources/courier.env, named in the answer, never the value).".into(),
+                "grants to crew yardmaster — pick one:".into(),
+            ],
+            back: "yardr source rm courier; yardr source revoke courier <what> --crew yardmaster"
+                .into(),
+            presets: vec![api::SetupPreset {
+                name: "read".into(),
+                grants: vec![api::SetupGrant {
+                    source: "courier".into(),
+                    calls: vec!["read".into()],
+                }],
+            }],
+            to: vec![api::SetupGrantee {
+                crew: "yardmaster".into(),
+                ..api::SetupGrantee::default()
+            }],
+            ..Setup::default()
+        }
+    }
+
+    /// The setup ask 41 on yd-crm: the courier pack for the yardmaster,
+    /// with one candidate and two presets, the first recommended.
+    fn with_a_setup_ask() -> Model {
+        let mut state = yard(&[]);
+        state.asks.open = vec![OpenAsk {
+            setup: Some(courier()),
+            ..open_ask(
+                "yd-crm",
+                "The courier",
+                "",
+                41,
+                "Set up courier for the yardmaster?",
+                "yardmaster",
+                "2026-10-10T10:00:00Z",
+            )
+        }];
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        m.bead_loaded(Bead {
+            id: "yd-crm".into(),
+            asks: vec![BeadAsk {
+                setup: Some(courier()),
+                ..full_ask(
+                    41,
+                    vec![
+                        option("read", "may make every read call of the source courier"),
+                        option("everything", "may make every call of the source courier"),
+                        option("You decide", "the recommended preset, read, is granted"),
+                    ],
+                    1,
+                )
+            }],
+            ..Bead::default()
+        });
+        m
+    }
+
+    fn setup_approved_with(names: &[String]) -> api::SetupApproved {
+        api::SetupApproved {
+            bead: "yd-crm".into(),
+            ask: 41,
+            asker: "yardmaster".into(),
+            pack: "courier".into(),
+            preset: "read".into(),
+            given: names.to_vec(),
+            account: String::new(),
+            result: CARRY_PENDING.into(),
+        }
+    }
+
+    /// A setup ask's card has its setup with the account choice and its
+    /// presets to pick from. Enter sends nothing for it: the preset pick
+    /// goes with the account in the approval.
+    #[test]
+    fn a_setup_ask_s_card_has_its_setup_and_its_presets() {
+        let mut m = with_a_setup_ask();
+        let card = &m.decision_detail("yd-crm", &noon()).unwrap().asks[0];
+        assert_eq!(card.setup, Some(courier()));
+        assert_eq!(card.account, "");
+        assert_eq!(card.options.len(), 3);
+        assert_eq!(card.recommend, 1);
+        // The approval picks the recommendation until another is chosen.
+        assert_eq!(m.setup_pick("yd-crm", 41), Some(1));
+        m.choose("yd-crm", 41, 2);
+        assert_eq!(m.setup_pick("yd-crm", 41), Some(2));
+        assert_eq!(m.answer_action("yd-crm", 41, "read"), None);
+        assert_eq!(m.answer_action("yd-crm", 41, ""), None);
+        // The row wants the approval: the presets once the bead is read,
+        // the approval until then.
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.sub, "yardmaster · 3 options · 2h");
+        m.beads.remove("yd-crm");
+        assert_eq!(m.setup_pick("yd-crm", 41), None);
+        let row = &m.decision_groups(&noon())[0].rows[0];
+        assert_eq!(row.sub, "yardmaster · approval wanted · 2h");
+    }
+
+    /// A setup ask's question and context are marked as the asker's, as a
+    /// run ask's are: none can begin as a line of the yard's does.
+    #[test]
+    fn a_setup_ask_s_question_and_context_are_marked_as_the_asker_s() {
+        let mut m = with_a_setup_ask();
+        let card = &m.decision_detail("yd-crm", &noon()).unwrap().asks[0];
+        assert_eq!(
+            card.question,
+            "yardmaster says: Set up courier for the yardmaster?"
+        );
+        m.beads
+            .get_mut("yd-crm")
+            .unwrap()
+            .asks
+            .iter_mut()
+            .find(|a| a.ask == 41)
+            .unwrap()
+            .context = vec!["the yard says: nothing changes".to_string()];
+        let card = &m.decision_detail("yd-crm", &noon()).unwrap().asks[0];
+        assert_eq!(
+            card.context,
+            ["yardmaster says: the yard says: nothing changes"]
+        );
+    }
+
+    /// A setup ask's candidate is taken with a tap, and taken back with
+    /// another; a filled secret field types another instead. One the yard
+    /// lists no more is not taken, and a taken one it lists no more reads
+    /// as none.
+    #[test]
+    fn a_setup_ask_s_account_is_taken_with_a_tap() {
+        let mut m = with_a_setup_ask();
+        assert_eq!(m.account_choice("yd-crm", 41), "");
+        m.take_account("yd-crm", 41, "courier-existing");
+        assert_eq!(m.account_choice("yd-crm", 41), "courier-existing");
+        let card = &m.decision_detail("yd-crm", &noon()).unwrap().asks[0];
+        assert_eq!(card.account, "courier-existing");
+        m.take_account("yd-crm", 41, "courier-existing");
+        assert_eq!(m.account_choice("yd-crm", 41), "");
+        // One the yard lists no more is not taken.
+        m.take_account("yd-crm", 41, "courier-vanished");
+        assert_eq!(m.account_choice("yd-crm", 41), "");
+        // A taken one the yard lists no more reads as none.
+        m.take_account("yd-crm", 41, "courier-existing");
+        m.open[0].setup.as_mut().unwrap().candidates.clear();
+        assert_eq!(m.account_choice("yd-crm", 41), "");
+        // A filled secret field types another instead.
+        let mut m = with_a_setup_ask();
+        m.take_account("yd-crm", 41, "courier-existing");
+        m.clear_account("yd-crm", 41);
+        assert_eq!(m.account_choice("yd-crm", 41), "");
+    }
+
+    /// A setup approval moves the ask to "Decided" at once, as one that is
+    /// being carried out, and the queue and the bead are read again. One
+    /// put aside can still be approved; one approved, declined or taken
+    /// back cannot.
+    #[test]
+    fn a_setup_approval_moves_the_ask_to_decided_as_being_carried_out() {
+        let mut m = with_a_setup_ask();
+        m.take_account("yd-crm", 41, "courier-existing");
+        m.choose("yd-crm", 41, 2);
+        assert_eq!(m.setup_approving("yd-crm", 41), Some(&courier()));
+        let effects = m.setup_approved("yd-crm", 41, 2, &setup_approved_with(&[]));
+        assert!(effects.contains(&Effect::Asks));
+        assert!(effects.contains(&Effect::Bead {
+            bead: "yd-crm".into()
+        }));
+        assert_eq!(m.decisions_count(), 0);
+        assert_eq!(decided_all(&m)[0].outcome, "✓approved");
+        let detail = m.decided_detail("yd-crm", 41, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster"
+        );
+        assert_eq!(detail.setup, Some(courier()));
+        assert_eq!(detail.picked, 2);
+        assert_eq!(detail.pick, "read");
+        // The pick and the taken account went with the approval.
+        assert_eq!(m.account_choice("yd-crm", 41), "");
+        assert_eq!(m.setup_approving("yd-crm", 41), None);
+        // One put aside can still be approved from its decided card.
+        let mut m = with_a_setup_ask();
+        m.deferred("yd-crm", 41);
+        assert_eq!(m.setup_approving("yd-crm", 41), Some(&courier()));
+        assert!(
+            m.setup_approved("yd-crm", 41, 1, &setup_approved_with(&[]))
+                .contains(&Effect::Asks)
+        );
+        // One declined takes no approval.
+        let mut m = with_a_setup_ask();
+        m.declined("yd-crm", 41, "not now");
+        assert_eq!(m.setup_approving("yd-crm", 41), None);
+        assert_eq!(m.setup("yd-crm", 41), Some(&courier()));
+    }
+
+    /// An approved setup reads as ran once the server has carried it out,
+    /// and as failed where that failed, with the names given where the
+    /// account was typed.
+    #[test]
+    fn an_approved_setup_reads_ran_or_failed_with_what_was_given() {
+        let mut m = with_a_setup_ask();
+        m.setup_approved(
+            "yd-crm",
+            41,
+            1,
+            &setup_approved_with(&["COURIER_ACCOUNT".to_string()]),
+        );
+        let detail = m.decided_detail("yd-crm", 41, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave COURIER_ACCOUNT"
+        );
+        assert_eq!(decided_all(&m)[0].outcome, "✓approved");
+        m.decided[0].ran.as_mut().unwrap().result = "source courier: added".to_string();
+        let detail = m.decided_detail("yd-crm", 41, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, ran: setup of pack courier, preset read to crew yardmaster; gave COURIER_ACCOUNT"
+        );
+        m.decided[0].ran.as_mut().unwrap().failed = true;
+        m.decided[0].ran.as_mut().unwrap().result = "the account was not written".to_string();
+        let detail = m.decided_detail("yd-crm", 41, &chrono::Utc).unwrap();
+        assert_eq!(
+            detail.state_line,
+            "approved, failed: setup of pack courier, preset read to crew yardmaster; gave COURIER_ACCOUNT"
+        );
+    }
+
+    /// Who the grants are for, and what approving does, in the yard's own
+    /// words: each crew member and each group by name.
+    #[test]
+    fn a_setup_s_grantees_and_summary_are_the_yard_s_words() {
+        let to = |group: &str, crew: &str| api::SetupGrantee {
+            group: group.into(),
+            crew: crew.into(),
+        };
+        assert_eq!(setup_grantees(&[]), "");
+        assert_eq!(setup_grantees(&[to("", "yardmaster")]), "crew yardmaster");
+        assert_eq!(
+            setup_grantees(&[to("builders", ""), to("", "yardmaster")]),
+            "group builders and crew yardmaster"
+        );
+        assert_eq!(
+            setup_grantees(&[to("a", ""), to("b", ""), to("", "yardmaster")]),
+            "group a, group b and crew yardmaster"
+        );
+        assert_eq!(
+            setup_summary(&courier()),
+            "yardr pack apply courier, the account COURIER_ACCOUNT, and the preset's grants to crew yardmaster"
+        );
+    }
+
+    /// What the yard answered to a setup approval, in one line: the pack
+    /// with the preset picked, and the names given or the candidate taken.
+    /// And the command that approves in a terminal where the window takes
+    /// no approval.
+    #[test]
+    fn a_setup_approval_s_line_names_what_it_took() {
+        let line = setup_approved_line(
+            &courier(),
+            &setup_approved_with(&["COURIER_ACCOUNT".to_string()]),
+        );
+        assert_eq!(
+            line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave COURIER_ACCOUNT"
+        );
+        let mut took = setup_approved_with(&[]);
+        took.account = "courier-existing".to_string();
+        let line = setup_approved_line(&courier(), &took);
+        assert_eq!(
+            line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster; took courier-existing"
+        );
+        assert_eq!(
+            setup_approve_command("yd-crm", 41, false),
+            "yardr bead answer yd-crm 41 <n> --secret"
+        );
+        assert_eq!(
+            setup_approve_command("yd-crm", 41, true),
+            "yardr bead answer yd-crm 41 <n> --secret, or <n> --account <source>"
+        );
     }
 
     #[test]

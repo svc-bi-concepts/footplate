@@ -99,6 +99,11 @@ const CONTEXT: &str = "Footplate";
 /// conversation open, with the line focused to type words in, or with the
 /// history's filter focused, those keys are the line's text.
 const NO_LINE_CONTEXT: &str = "FootplateNoLine";
+/// Where the account of a setup ask is typed in: its approval's key
+/// approves from the field too, with what the field holds. Only that key
+/// is bound here: a decline's words must not approve, and no other card's
+/// field approves anything.
+const SETUP_SECRET_CONTEXT: &str = "FootplateSetupSecret";
 /// Where the switcher's list is open: the arrows move in it, Enter opens
 /// the yard they are on, esc leaves it, + adds a yard, and no key is a
 /// card's.
@@ -689,6 +694,23 @@ fn take_back_label(back_by: &str) -> String {
 /// What it says over the command of one that takes no approval any more.
 const RUN_PROPOSED: &str = "the command this ask proposed:";
 
+/// What a setup ask's card says over what approving does, while it can be
+/// approved: the words `yardr chat` has for it, led by the yard the setup
+/// runs in. With several yards in one window, the sentence over a setup
+/// is where it must be plain which of them runs it.
+fn setup_runs(yard: &str) -> String {
+    format!(
+        "in {yard}, when you approve, the yard applies the pack, takes the account, and grants the preset you pick, and nothing else:"
+    )
+}
+
+/// What it says over the setup of one that takes no approval any more.
+const SETUP_PROPOSED: &str = "the setup this ask proposed:";
+
+/// What a setup ask's card says over its candidates: a tap takes one, and
+/// a filled secret field types another.
+const SETUP_TAKE: &str = "take one with a tap, or type another below:";
+
 /// What a run ask's card says in place of the control that approves, where
 /// the yard does not have the call or does not serve it to this window.
 const APPROVE_ELSEWHERE: &str =
@@ -701,6 +723,27 @@ fn run_keys(approves: bool, writable: bool) -> String {
     if approves {
         keys.push(format!("{APPROVE_KEY} approves"));
         keys.push("enter alone approves nothing".to_string());
+    }
+    if writable {
+        keys.push("a ask about this".to_string());
+    }
+    keys.join(" · ")
+}
+
+/// The keys of a setup ask's card: the approval with its key, the field
+/// that types the account, and the same answer in a terminal on the
+/// yard's machine. Where the yard takes no approval from this window, the
+/// card says where it does in place of the control, and lists no keys.
+fn setup_keys(bead: &str, ask: u64, candidates: bool, approves: bool, writable: bool) -> String {
+    let mut keys: Vec<String> = Vec::new();
+    if approves {
+        keys.push(format!("{APPROVE_KEY} approves"));
+        keys.push("enter alone approves nothing".to_string());
+        keys.push("i types the account".to_string());
+        keys.push(format!(
+            "or in a terminal: {}",
+            model::setup_approve_command(bead, ask, candidates)
+        ));
     }
     if writable {
         keys.push("a ask about this".to_string());
@@ -730,15 +773,14 @@ struct RunText {
     section: &'static str,
 }
 
-/// Every text a run ask holds, in the order a terminal prints them: each
-/// carried source's declaration, command files, file changes and removed
-/// entries' texts, then each plan file's change and new text. The headings
-/// are the terminal's words, so the two readings agree. An empty text is
-/// no text: a removed entry that is not text, and a plan object with
-/// neither a change nor a new text, stand in the yard's sentences alone.
-fn run_texts(run: &api::Run) -> Vec<RunText> {
+/// Every text carried sources hold, in the order a terminal prints them:
+/// each declaration, command files, file changes and removed entries'
+/// texts. A run ask and a setup ask hold the same: the headings are the
+/// terminal's words, so the readings agree. An empty text is no text: a
+/// removed entry that is not text stands in the yard's sentences alone.
+fn carried_texts(carried: &[api::RunSource]) -> Vec<RunText> {
     let mut texts = Vec::new();
-    for carried in &run.carried {
+    for carried in carried {
         texts.push(RunText {
             heading: format!(
                 "the declaration of source {}, whole as carried:",
@@ -782,6 +824,15 @@ fn run_texts(run: &api::Run) -> Vec<RunText> {
             });
         }
     }
+    texts
+}
+
+/// Every text a run ask holds, in the order a terminal prints them: its
+/// carried sources' texts, then each plan file's change and new text. A
+/// plan object with neither a change nor a new text stands in the yard's
+/// sentences alone.
+fn run_texts(run: &api::Run) -> Vec<RunText> {
+    let mut texts = carried_texts(&run.carried);
     if let Some(pack) = &run.pack
         && let Some(plan) = &pack.plan
     {
@@ -919,6 +970,23 @@ fn give_label(secret: &api::Secret, typed: usize) -> String {
     }
 }
 
+/// One candidate of a setup ask's account choice: the source with the
+/// account its file holds, in the yard's own words (`setupAccountLine` in
+/// internal/store/runask_setup.go of the yardr repository).
+fn candidate_line(candidate: &api::SetupCandidate) -> String {
+    let pairs: Vec<String> = candidate
+        .values
+        .iter()
+        .map(|(name, value)| format!("{}={}", model::plain(name), model::plain(value)))
+        .collect();
+    format!(
+        "{} — {} (in {})",
+        model::plain(&candidate.source),
+        pairs.join(", "),
+        model::plain(&candidate.file)
+    )
+}
+
 /// The toggle beside a secret ask's field: `Show` draws what is typed as
 /// typed, for a look, `Hide` draws marks again. The value is unchanged
 /// either way: it goes in its call as ever.
@@ -941,7 +1009,7 @@ fn show_button(
 /// them, and with a recommendation and no pick the recommendation's does;
 /// on another yard's bead words alone go as no note.
 fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
-    if ask.secret.is_some() || ask.run.is_some() || ask.chosen != 0 {
+    if ask.secret.is_some() || ask.run.is_some() || ask.setup.is_some() || ask.chosen != 0 {
         return false;
     }
     if ask.options.is_empty() {
@@ -1268,6 +1336,7 @@ pub fn bind_keys(cx: &mut App) {
         // never with Enter alone: the habit of answering picks must not
         // run a command.
         KeyBinding::new("secondary-enter", Approve, Some(NO_LINE_CONTEXT)),
+        KeyBinding::new("secondary-enter", Approve, Some(SETUP_SECRET_CONTEXT)),
         KeyBinding::new("d", Decline, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("a", AskAbout, Some(NO_LINE_CONTEXT)),
         KeyBinding::new("e", Expand, Some(NO_LINE_CONTEXT)),
@@ -2134,7 +2203,18 @@ impl Footplate {
         // The card's Give and Send buttons are disabled while their field
         // is empty: the window is drawn again with what is typed.
         cx.observe(&line, |_, _, cx| cx.notify()).detach();
-        cx.observe(&secret, |_, _, cx| cx.notify()).detach();
+        cx.observe(&secret, |this, secret, cx| {
+            // A filled secret field types another: whatever candidate the
+            // setup card took is taken back as the field fills.
+            if !secret.read(cx).text().is_empty()
+                && let Some((bead, ask)) = this.open_ask()
+                && let Some(model) = this.model.as_mut()
+            {
+                model.clear_account(&bead, ask);
+            }
+            cx.notify();
+        })
+        .detach();
         // The history's filter: what is typed is the model's, as it is
         // typed, and the window draws the rows again only when it changed.
         let filter = cx.new(|cx| {
@@ -4311,7 +4391,8 @@ impl Footplate {
             model.is_some_and(|m| {
                 m.secret(bead, *ask).is_some()
                     || m.taken_back(bead, *ask)
-                    || (m.run(bead, *ask).is_some() && self.declining.as_ref() != Some(open))
+                    || ((m.run(bead, *ask).is_some() || m.setup(bead, *ask).is_some())
+                        && self.declining.as_ref() != Some(open))
             })
         });
         if no_line && !self.settings_open {
@@ -4328,15 +4409,32 @@ impl Footplate {
                 });
             });
         }
-        let wanted = self.giving().map(|secret| {
-            let at = self.secret_typed.len();
-            let name = secret.env.get(at).cloned().unwrap_or_default();
-            let of = match secret.env.len() {
-                0 | 1 => String::new(),
-                n => format!(" ({} of {n})", at + 1),
-            };
-            format!("{name} for the source {}{of}", secret.source)
-        });
+        let wanted = self
+            .giving()
+            .map(|secret| {
+                let at = self.secret_typed.len();
+                let name = secret.env.get(at).cloned().unwrap_or_default();
+                let of = match secret.env.len() {
+                    0 | 1 => String::new(),
+                    n => format!(" ({} of {n})", at + 1),
+                };
+                format!("{name} for the source {}{of}", secret.source)
+            })
+            .or_else(|| {
+                self.setup_account().map(|(names, pack)| {
+                    let at = self.secret_typed.len();
+                    match names.get(at) {
+                        Some(name) => {
+                            let of = match names.len() {
+                                0 | 1 => String::new(),
+                                n => format!(" ({} of {n})", at + 1),
+                            };
+                            format!("{name} for the setup of {pack}{of}")
+                        }
+                        None => format!("typed — {APPROVE_KEY} approves"),
+                    }
+                })
+            });
         self.secret.update(cx, |field, cx| {
             field.set_placeholder(&wanted.unwrap_or_default(), cx)
         });
@@ -4362,6 +4460,21 @@ impl Footplate {
             let model = self.model.as_ref();
             model.is_some_and(|m| m.run(&bead, ask).is_some())
         })
+    }
+
+    /// The setup the control on the open card approves, when its ask is
+    /// a setup ask that can be approved.
+    fn setup_approvable(&self) -> Option<api::Setup> {
+        let (bead, ask) = self.open_ask()?;
+        self.model.as_ref()?.setup_approving(&bead, ask).cloned()
+    }
+
+    /// What the open card's field takes beside the preset pick, when its
+    /// ask is a setup ask that can be approved: the account names with
+    /// the pack they set up.
+    fn setup_account(&self) -> Option<(Vec<String>, String)> {
+        let setup = self.setup_approvable()?;
+        Some((setup.account, setup.pack))
     }
 
     /// Nothing typed of a secret stays in the window: not in the field, and
@@ -4971,7 +5084,9 @@ impl Footplate {
     /// the yard is asked and whatever it answers, and what the window says
     /// afterwards is the yard's words or footplate's, on the card, never
     /// the value. An ask of several names takes them one after the other
-    /// and sends them together.
+    /// and sends them together. Enter in the field of a setup ask takes
+    /// one account name the same way, and the approval sends them with
+    /// the preset pick.
     fn give(&mut self, cx: &mut Context<Self>) {
         // Held as a conversation's sends are: the value stays in the
         // field, with the reason beside Give.
@@ -4981,8 +5096,14 @@ impl Footplate {
         let Some((bead, ask)) = self.card() else {
             return;
         };
-        let Some(secret) = self.giving() else {
-            return;
+        // A secret ask's names go in their own call; a setup ask's wait
+        // for the approval, which sends them with the preset pick.
+        let secret = self.giving();
+        let setup = self.setup_account();
+        let names = match (&secret, &setup) {
+            (Some(secret), _) => secret.env.clone(),
+            (None, Some((names, _))) => names.clone(),
+            (None, None) => return,
         };
         // What is pasted often ends in a line break, which nobody sees
         // among the marks and which the yard refuses at either end.
@@ -4991,7 +5112,7 @@ impl Footplate {
             .update(cx, |field, cx| field.take_text(cx))
             .trim()
             .to_string();
-        let Some(name) = secret.env.get(self.secret_typed.len()) else {
+        let Some(name) = names.get(self.secret_typed.len()) else {
             return self.forget_secret(cx);
         };
         if value.is_empty() {
@@ -5000,10 +5121,14 @@ impl Footplate {
         self.secret_typed.push(value);
         self.notice(String::new(), cx);
         self.refused.remove(&(bead.clone(), ask));
-        if self.secret_typed.len() < secret.env.len() {
+        if self.secret_typed.len() < names.len() {
+            return self.shown(cx);
+        }
+        if secret.is_none() {
             return self.shown(cx);
         }
         let values: Vec<(String, String)> = secret
+            .unwrap()
             .env
             .into_iter()
             .zip(std::mem::take(&mut self.secret_typed))
@@ -5040,26 +5165,36 @@ impl Footplate {
         );
     }
 
-    /// Approves the open card's run ask: its key and its button. The call
-    /// names the ask and nothing of the command, which the yard runs as it
-    /// stored it. What the window says afterwards is the yard's: the
-    /// command as it ran with what it printed, or the refusal whole, on
-    /// the card. A call that ended without an answer is never said to be
-    /// approved or not, and a yard without the call for this window has
-    /// its card say where to approve.
+    /// Approves the open card's run or setup ask: its key and its button.
+    /// A run ask's approval names the ask and nothing of the command,
+    /// which the yard runs as it stored it; a setup ask's the preset pick
+    /// with the account together.
     fn approve(&mut self, cx: &mut Context<Self>) {
         let Some((bead, ask)) = self.card() else {
             return;
         };
         let at = (bead.clone(), ask);
-        if self.approvable().is_none()
-            || self.approve_elsewhere.contains(&at)
+        if self.approve_elsewhere.contains(&at)
             || self.approving.is_some()
             || self.client.is_none()
             || self.reconnecting()
         {
             return;
         }
+        if self.approvable().is_some() {
+            self.send_approve(bead, ask, cx);
+        } else if self.setup_approvable().is_some() {
+            self.approve_setup(bead, ask, cx);
+        }
+    }
+
+    /// Approves the open card's run ask. What the window says afterwards
+    /// is the yard's: the command as it ran with what it printed, or the
+    /// refusal whole, on the card. A call that ended without an answer is
+    /// never said to be approved or not, and a yard without the call for
+    /// this window has its card say where to approve.
+    fn send_approve(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        let at = (bead.clone(), ask);
         self.declining = None;
         self.approving = Some(at.clone());
         self.shown(cx);
@@ -5099,6 +5234,164 @@ impl Footplate {
                 }
             },
         );
+    }
+
+    /// Approves the open card's setup ask: the preset pick, the option
+    /// chosen or the recommended one, with the account together. A filled
+    /// secret field types another; else the tap takes its file. What the
+    /// window says afterwards is the yard's: that the server carries the
+    /// setup out, or the refusal whole, on the card. A call that ended
+    /// without an answer is never said to be approved or not, and a yard
+    /// without the call for this window has its card say where to approve.
+    fn approve_setup(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        let at = (bead.clone(), ask);
+        let Some(option) = self.model.as_ref().and_then(|m| m.setup_pick(&bead, ask)) else {
+            let unread = !self.model.as_ref().is_some_and(|m| m.has_bead(&bead));
+            return self.notice(
+                match unread {
+                    true => "reading the bead: approve once its presets show".to_string(),
+                    false => "pick a preset first".to_string(),
+                },
+                cx,
+            );
+        };
+        let Some(setup) = self.setup_approvable() else {
+            return;
+        };
+        // The field's value goes with what Enter took, as the next name;
+        // what is pasted often ends in a line break, which nobody sees
+        // among the marks and which the yard refuses at either end.
+        let field = self.secret.read(cx).text().trim().to_string();
+        let mut typed = self.secret_typed.clone();
+        if !field.is_empty() {
+            typed.push(field);
+        }
+        let names = &setup.account;
+        if names.is_empty() {
+            return self.notice(
+                "the yard asked for no account names: read the card again".to_string(),
+                cx,
+            );
+        }
+        if typed.len() > names.len() {
+            return self.notice(
+                "the account is typed: clear the field to approve it".to_string(),
+                cx,
+            );
+        }
+        let have = typed.len();
+        let values: Option<Vec<(String, String)>> = match have == names.len() {
+            true => Some(names.iter().cloned().zip(typed).collect()),
+            false => None,
+        };
+        let account = match (&values, self.model.as_ref()) {
+            (None, Some(model)) => match model.account_choice(&bead, ask) {
+                taken if taken.is_empty() => None,
+                taken => Some(taken),
+            },
+            _ => None,
+        };
+        if values.is_none() && account.is_none() {
+            if have == 0 {
+                return self.notice(
+                    match setup.candidates.is_empty() {
+                        true => "type the account".to_string(),
+                        false => "take a candidate, or type the account".to_string(),
+                    },
+                    cx,
+                );
+            }
+            let next = &names[have];
+            return self.notice(format!("type {next} for the account"), cx);
+        }
+        self.declining = None;
+        self.approving = Some(at.clone());
+        self.shown(cx);
+        self.notice(String::new(), cx);
+        self.refused.remove(&at);
+        // The approval is the yard's it was pressed in: what came of it is
+        // that yard's, and is said there, wherever the window is by then.
+        let session = self.session;
+        self.ask_through(
+            cx,
+            move |client, me| {
+                let approved = client.approve_setup(
+                    &bead,
+                    ask,
+                    option,
+                    values.as_deref(),
+                    account.as_deref(),
+                    me,
+                );
+                (approved, values)
+            },
+            move |this, (approved, values), cx| {
+                let held = this.held.values_mut().find(|h| h.session == session);
+                let (approving, elsewhere) = match held {
+                    _ if session == this.session => {
+                        (&mut this.approving, &mut this.approve_elsewhere)
+                    }
+                    Some(held) => (&mut held.approving, &mut held.approve_elsewhere),
+                    None => return,
+                };
+                *approving = None;
+                let (bead, ask) = at.clone();
+                match approved {
+                    Ok(approved) => {
+                        let line = model::setup_approved_line(&setup, &approved);
+                        this.forget_secret(cx);
+                        this.change_in(session, cx, |m| {
+                            m.setup_approved(&bead, ask, option, &approved)
+                        });
+                        this.schedule_return_in(session, cx);
+                        this.notice_in(session, line, cx);
+                    }
+                    Err(err) if model::approves_elsewhere(&err) => {
+                        elsewhere.insert(at);
+                        this.notice_in(session, String::new(), cx);
+                    }
+                    Err(err) => {
+                        let down = matches!(err, api::Error::Down(_));
+                        let why = model::not_approved(&err);
+                        // The yard repeats no value in a refusal. Should
+                        // anything on the way do so, it is not shown.
+                        let echoes = values.as_ref().is_some_and(|values| {
+                            values.iter().any(|(_, value)| why.contains(value.as_str()))
+                        });
+                        let why = match echoes {
+                            true => "not approved: the yard refused it".to_string(),
+                            false => why,
+                        };
+                        this.refused_in(session, (bead.clone(), ask), why, cx);
+                        // A call that ended without an answer may have
+                        // approved all the same: the queue is read again
+                        // for what the yard says.
+                        if down {
+                            this.change_in(session, cx, |_| vec![Effect::Asks]);
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    /// Takes the setup ask's candidate with a tap: whatever is typed of
+    /// another is forgotten, since a filled secret field types another
+    /// instead.
+    fn take_account_for(&mut self, bead: String, ask: u64, source: String, cx: &mut Context<Self>) {
+        let approving = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.setup_approving(&bead, ask).is_some());
+        if !approving {
+            return;
+        }
+        self.forget_secret(cx);
+        self.change(cx, |m| {
+            m.take_account(&bead, ask, &source);
+            Vec::new()
+        });
+        self.shown(cx);
     }
 
     /// Enter on a card: the pick with the line's words in the one answer,
@@ -5841,9 +6134,11 @@ impl Footplate {
         if self.run_card() && self.declining.is_none() {
             return;
         }
-        let field = match self.giving() {
-            Some(_) => &self.secret,
-            None => &self.line,
+        // A setup ask's card has the secret field for its account, as a
+        // secret ask's has it for its value.
+        let field = match self.giving().is_some() || self.setup_approvable().is_some() {
+            true => &self.secret,
+            false => &self.line,
         };
         window.focus(&field.focus_handle(cx));
     }
@@ -12808,7 +13103,8 @@ impl Footplate {
         let mut card = div().flex().flex_col().gap_2();
         // The question, with how long it waits beside it. The yard and the
         // bead stand once in the head above, not again on every card.
-        let question = if ask.run.is_some() {
+        let asker_marked = ask.run.is_some() || ask.setup.is_some();
+        let question = if asker_marked {
             Self::marked_question(
                 format!("run question {bead_id} {ask_seq}"),
                 &ask.question,
@@ -12846,10 +13142,11 @@ impl Footplate {
                 .text_color(palette.faint)
                 .child(format!("asked by {}", ask.asker)),
         );
-        // The context lines: text as it was written, and no block in it. A
-        // run ask's each begin with who says them, and wrap under the words.
+        // The context lines: text as it was written, and no block in it.
+        // A run or setup ask's each begin with who says them, and wrap
+        // under the words.
         for (line, text) in ask.context.iter().enumerate() {
-            if ask.run.is_some() {
+            if asker_marked {
                 card = card.child(Self::marked_asker_line(
                     format!("run context {bead_id} {ask_seq} {line}"),
                     text,
@@ -12892,83 +13189,109 @@ impl Footplate {
         // last as the yard lists it. A secret ask has none and wants no
         // words: what it asks for is said in the yard's line, as it is.
         // Nor has a run ask: the yard's block is the last of its card, with
-        // the control that approves directly under it.
+        // the control that approves directly under it. A setup ask has the
+        // yard's block with its account choice first, and its presets to
+        // pick from under it, as an ordinary ask's options.
         let elsewhere = self.approve_elsewhere.contains(&(bead_id.clone(), ask_seq));
         if let Some(secret) = &ask.secret {
             card = card.child(self.secret_lines(secret, palette));
         } else if let Some(run) = &ask.run {
             card = card.child(self.run_block(&bead_id, ask_seq, run, true, palette, cx));
-        } else if ask.options.is_empty() {
-            card = card.child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("words wanted"),
-            );
         } else {
-            let mut marked = false;
-            for option in &ask.options {
-                let marker = if option.number == answered {
-                    "●"
-                } else {
-                    "○"
-                };
-                let text = format!(
-                    "{} {}. {} — {}",
-                    marker, option.number, option.label, option.consequence
-                );
-                let n = option.number;
-                let bead_click = bead_id.clone();
-                card = card.child(
-                    div()
-                        .id(SharedString::from(format!("pick {bead_id} {ask_seq} {n}")))
-                        .debug_selector(|| format!("pick {bead_id} {ask_seq} {n}"))
-                        .cursor_pointer()
-                        .rounded_md()
-                        .when(n == answered, |el| el.bg(palette.open))
-                        .when(n != answered, |el| {
-                            el.hover(|style| style.bg(palette.hover))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pick_for(bead_click.clone(), ask_seq, n, cx)
-                        }))
-                        .child(text),
-                );
-                // The recommended one with its why, under its own row: the
-                // one place the card names the recommendation.
-                if ask.recommend != 0 && n == ask.recommend {
-                    marked = true;
+            if let Some(setup) = &ask.setup {
+                card = card.child(self.setup_block(&bead_id, ask_seq, setup, true, palette, cx));
+                card = card.child(self.setup_candidates(
+                    &bead_id,
+                    ask_seq,
+                    setup,
+                    &ask.account,
+                    palette,
+                    cx,
+                ));
+            }
+            if ask.options.is_empty() {
+                if ask.setup.is_none() {
+                    card = card.child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("words wanted"),
+                    );
+                }
+            } else {
+                let mut marked = false;
+                for option in &ask.options {
+                    let marker = if option.number == answered {
+                        "●"
+                    } else {
+                        "○"
+                    };
+                    let text = format!(
+                        "{} {}. {} — {}",
+                        marker, option.number, option.label, option.consequence
+                    );
+                    let n = option.number;
+                    let bead_click = bead_id.clone();
+                    card = card.child(
+                        div()
+                            .id(SharedString::from(format!("pick {bead_id} {ask_seq} {n}")))
+                            .debug_selector(|| format!("pick {bead_id} {ask_seq} {n}"))
+                            .cursor_pointer()
+                            .rounded_md()
+                            .when(n == answered, |el| el.bg(palette.open))
+                            .when(n != answered, |el| {
+                                el.hover(|style| style.bg(palette.hover))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pick_for(bead_click.clone(), ask_seq, n, cx)
+                            }))
+                            .child(text),
+                    );
+                    // The recommended one with its why, under its own row: the
+                    // one place the card names the recommendation.
+                    if ask.recommend != 0 && n == ask.recommend {
+                        marked = true;
+                        card = card.child(div().text_sm().child(recommended_line(&ask.why)));
+                    }
+                }
+                // A recommendation the options do not hold stands past them, as
+                // nothing else names it.
+                if ask.recommend != 0 && !marked {
                     card = card.child(div().text_sm().child(recommended_line(&ask.why)));
                 }
             }
-            // A recommendation the options do not hold stands past them, as
-            // nothing else names it.
-            if ask.recommend != 0 && !marked {
-                card = card.child(div().text_sm().child(recommended_line(&ask.why)));
-            }
         }
         if current {
-            // A line for words, or the field of a secret in its place.
-            let field = match ask.secret {
-                Some(_) => self.secret.clone(),
-                None => self.line.clone(),
+            // A run or setup ask takes words only with a decline: its card
+            // has the line while one is asked for. A setup ask's field
+            // takes its account otherwise, as a secret ask's takes its
+            // value.
+            let declining = self.declining.as_ref() == Some(&(bead_id.clone(), ask_seq));
+            // A line for words, or the field of a secret in its place. A
+            // setup ask's account is typed in the secret field too.
+            let secret_field = (ask.secret.is_some() || ask.setup.is_some()) && !declining;
+            let field = match secret_field {
+                true => self.secret.clone(),
+                false => self.line.clone(),
             };
             let focus = field.focus_handle(cx);
-            let kind = if ask.secret.is_some() {
-                "secret"
-            } else {
-                "words"
-            };
+            let kind = if secret_field { "secret" } else { "words" };
             // Where this yard takes no approval from this window, the card
             // says where it does, in place of the control.
-            if ask.run.is_some() && elsewhere {
-                card = card.child(self.approve_elsewhere_lines(&bead_id, ask_seq, palette));
+            if (ask.run.is_some() || ask.setup.is_some()) && elsewhere {
+                let command = match &ask.setup {
+                    Some(setup) => model::setup_approve_command(
+                        &bead_id,
+                        ask_seq,
+                        !setup.candidates.is_empty(),
+                    ),
+                    None => model::approve_command(&bead_id, ask_seq),
+                };
+                card =
+                    card.child(self.approve_elsewhere_lines(&bead_id, ask_seq, command, palette));
             }
-            // A run ask takes words only with a decline: its card has the
-            // line while one is asked for, and at no other time.
-            let declining = self.declining.as_ref() == Some(&(bead_id.clone(), ask_seq));
             // A secret's field stands beside its toggle: Show draws what
             // is typed as typed, for a look, Hide draws marks again.
-            let toggle = ask.secret.as_ref().map(|_| {
+            let toggle = secret_field.then(|| {
                 show_button(
                     format!("show {bead_id} {ask_seq}"),
                     self.secret_shown,
@@ -12976,32 +13299,40 @@ impl Footplate {
                     cx,
                 )
             });
-            card = card.when(ask.run.is_none() || declining, |card| {
-                let boxed = div()
-                    .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(palette.line)
-                    .bg(palette.side)
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        window.focus(&focus);
-                        window.prevent_default();
-                    })
-                    .child(field);
-                match toggle {
-                    Some(toggle) => card.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(boxed.flex_1())
-                            .child(toggle),
-                    ),
-                    None => card.child(boxed),
-                }
-            });
+            card = card.when(
+                ask.run.is_none() || ask.setup.is_some() || declining,
+                |card| {
+                    let boxed = div()
+                        .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
+                        // A setup ask's account field takes its approval's key
+                        // too, with what the field holds.
+                        .when(ask.setup.is_some() && secret_field, |el| {
+                            el.key_context(SETUP_SECRET_CONTEXT)
+                        })
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(palette.line)
+                        .bg(palette.side)
+                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                            window.focus(&focus);
+                            window.prevent_default();
+                        })
+                        .child(field);
+                    match toggle {
+                        Some(toggle) => card.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(boxed.flex_1())
+                                .child(toggle),
+                        ),
+                        None => card.child(boxed),
+                    }
+                },
+            );
             // Under the line the files attached to the ask's note, with
             // why a marked one cannot go: what Enter sends with the
             // words. A file is drawn by its name: footplate shows no
@@ -13047,8 +13378,9 @@ impl Footplate {
                     !self.secret.read(cx).text().is_empty(),
                 )),
                 (Some(_), None) => None,
-                // A run ask's one button approves, and sends no words.
-                (None, _) if ask.run.is_some() => None,
+                // A run or setup ask's one button approves, and sends no
+                // words.
+                (None, _) if ask.run.is_some() || ask.setup.is_some() => None,
                 (None, _) => ask
                     .options
                     .iter()
@@ -13103,15 +13435,18 @@ impl Footplate {
                     .when_some(send, |el, (id, text, enabled)| {
                         el.child(send_button(id, text, enabled && !held, palette, cx))
                     })
-                    .when(ask.run.is_some() && !elsewhere, |el| {
-                        el.child(approve_button(
-                            format!("approve {bead_id} {ask_seq}"),
-                            &self.yard,
-                            self.approving.is_none() && !held,
-                            palette,
-                            cx,
-                        ))
-                    })
+                    .when(
+                        (ask.run.is_some() || ask.setup.is_some()) && !elsewhere,
+                        |el| {
+                            el.child(approve_button(
+                                format!("approve {bead_id} {ask_seq}"),
+                                &self.yard,
+                                self.approving.is_none() && !held,
+                                palette,
+                                cx,
+                            ))
+                        },
+                    )
                     .when(held, |el| el.child(send_held(palette)))
                     .child(ask_about)
                     .child(
@@ -13137,12 +13472,19 @@ impl Footplate {
                             ),
                     ),
             );
-            // The keys of a secret or run ask's card: an ordinary card
-            // carries each key on its control, and lists none.
-            let keys = match (&ask.secret, &ask.run) {
-                (Some(_), _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
-                (None, Some(_)) => run_keys(!elsewhere, unwritable.is_none()),
-                (None, None) => String::new(),
+            // The keys of a secret, run or setup ask's card: an ordinary
+            // card carries each key on its control, and lists none.
+            let keys = match (&ask.secret, &ask.run, &ask.setup) {
+                (Some(_), _, _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
+                (None, Some(_), _) => run_keys(!elsewhere, unwritable.is_none()),
+                (None, None, Some(setup)) => setup_keys(
+                    &bead_id,
+                    ask_seq,
+                    !setup.candidates.is_empty(),
+                    !elsewhere,
+                    unwritable.is_none(),
+                ),
+                (None, None, None) => String::new(),
             };
             card = card.when(!keys.is_empty(), |card| {
                 card.child(div().text_sm().text_color(palette.faint).child(keys))
@@ -13285,16 +13627,44 @@ impl Footplate {
                     .child(format!("the yard says: {}", model::plain(does))),
             );
         }
+        block = block.child(self.block_end(
+            "run",
+            (bead, ask),
+            &run_texts(run),
+            (&run.back, &run.back_by),
+            palette,
+            cx,
+        ));
+        block
+    }
+
+    /// The end of a run or setup ask's block: the ask's own texts behind
+    /// one tap, for checking the yard's reading against them, and the
+    /// commands that take it back, with who may run them. `kind` is whose
+    /// block it is, for the texts' selectors. The approval is live whether
+    /// or not the tap was opened.
+    fn block_end(
+        &self,
+        kind: &str,
+        at: (&str, u64),
+        texts: &[RunText],
+        back: (&str, &str),
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let (bead, ask) = at;
+        let (back, back_by) = back;
+        let card_key = select::key((bead, ask));
+        let mut end = div().flex().flex_col().gap_1();
         // The ask's own texts, behind one tap: the approval is live
         // whether or not it was opened.
-        let texts = run_texts(run);
         let texts_shown = self
             .model
             .as_ref()
             .is_some_and(|m| m.texts_shown(bead, ask));
         if !texts.is_empty() {
             let bead_click = bead.to_string();
-            block = block.child(
+            end = end.child(
                 div()
                     .id(SharedString::from(format!("texts {bead} {ask}")))
                     .debug_selector(|| format!("texts {bead} {ask}"))
@@ -13309,7 +13679,7 @@ impl Footplate {
         }
         if texts_shown {
             for (ix, text) in texts.iter().enumerate() {
-                block = block
+                end = end
                     .child(
                         div()
                             .text_sm()
@@ -13318,7 +13688,7 @@ impl Footplate {
                     )
                     .child(
                         div()
-                            .debug_selector(|| format!("run text {bead} {ask} {ix}"))
+                            .debug_selector(|| format!("{kind} text {bead} {ask} {ix}"))
                             .child(select::text_with_code_copy(
                                 expanded_text_key(card_key, text.section, ix, &text.text),
                                 fenced(&model::plain(&text.text)),
@@ -13328,18 +13698,18 @@ impl Footplate {
                     );
             }
         }
-        let back = model::plain(&run.back);
+        let back = model::plain(back);
         if !back.is_empty() {
-            block = block
+            end = end
                 .child(
                     div()
                         .text_sm()
                         .text_color(palette.faint)
-                        .child(take_back_label(&model::plain(&run.back_by))),
+                        .child(take_back_label(&model::plain(back_by))),
                 )
                 .child(
                     div()
-                        .debug_selector(|| format!("run back {bead} {ask}"))
+                        .debug_selector(|| format!("{kind} back {bead} {ask}"))
                         .child(select::text(
                             expanded_text_key(card_key, "back", 0, &back),
                             fenced(&back),
@@ -13347,19 +13717,123 @@ impl Footplate {
                         )),
                 );
         }
+        end
+    }
+
+    /// What a setup ask proposes, in the one block of its card, which is
+    /// all the yard's and none of it the asker's: what approving does, in
+    /// one line; the yard's sentences for what it changes, each on its own
+    /// line; the texts the ask holds behind one tap, for checking the
+    /// yard's reading against them; and the commands that take it back,
+    /// with who may run them. `open` is an ask that can still be approved.
+    /// The approval is live whether or not the tap was opened.
+    fn setup_block(
+        &self,
+        bead: &str,
+        ask: u64,
+        setup: &api::Setup,
+        open: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let over = match open {
+            true => setup_runs(&self.yard),
+            false => SETUP_PROPOSED.to_string(),
+        };
+        let summary = model::setup_summary(setup);
+        let mut block = div()
+            .debug_selector(|| format!("setup {bead} {ask}"))
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.side)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .debug_selector(|| over.clone())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(over.clone()),
+            )
+            .child(
+                div()
+                    .debug_selector(|| format!("setup summary {bead} {ask}"))
+                    .child(summary),
+            );
+        for (ix, does) in setup.does.iter().enumerate() {
+            block = block.child(
+                div()
+                    .debug_selector(|| format!("setup does {bead} {ask} {ix}"))
+                    .child(format!("the yard says: {}", model::plain(does))),
+            );
+        }
+        block = block.child(self.block_end(
+            "setup",
+            (bead, ask),
+            &carried_texts(&setup.carried),
+            (&setup.back, &setup.back_by),
+            palette,
+            cx,
+        ));
         block
     }
 
-    /// Where a run ask is approved when this yard takes no approval from
-    /// this window: a terminal on the yard's machine, with the command in a
-    /// block that copies it.
+    /// The setup ask's account choice: each candidate the yard lists with
+    /// the account its file holds, to take with a tap. `taken` is the one
+    /// taken, by source name, empty where none is.
+    fn setup_candidates(
+        &self,
+        bead: &str,
+        ask: u64,
+        setup: &api::Setup,
+        taken: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut choice = div().flex().flex_col().gap_1();
+        if setup.candidates.is_empty() {
+            return choice.into_any_element();
+        }
+        choice = choice.child(div().text_sm().text_color(palette.faint).child(SETUP_TAKE));
+        for candidate in &setup.candidates {
+            let is_taken = candidate.source == taken;
+            let marker = if is_taken { "●" } else { "○" };
+            let text = format!("{marker} {}", candidate_line(candidate));
+            let source = candidate.source.clone();
+            let bead_click = bead.to_string();
+            choice = choice.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "account {bead} {ask} {}",
+                        candidate.source
+                    )))
+                    .debug_selector(|| format!("account {bead} {ask} {}", candidate.source))
+                    .cursor_pointer()
+                    .rounded_md()
+                    .when(is_taken, |el| el.bg(palette.open))
+                    .when(!is_taken, |el| el.hover(|style| style.bg(palette.hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.take_account_for(bead_click.clone(), ask, source.clone(), cx)
+                    }))
+                    .child(text),
+            );
+        }
+        choice.into_any_element()
+    }
+
+    /// Where a run or setup ask is approved when this yard takes no
+    /// approval from this window: a terminal on the yard's machine, with
+    /// the command in a block that copies it.
     fn approve_elsewhere_lines(
         &self,
         bead: &str,
         ask: u64,
+        command: String,
         palette: Palette,
     ) -> impl IntoElement + use<> {
-        let command = model::approve_command(bead, ask);
         div()
             .debug_selector(|| format!("approve elsewhere {bead} {ask}"))
             .flex()
@@ -13435,7 +13909,8 @@ impl Footplate {
             .flex_col()
             .gap_2();
         // The question, and what was decided with who and when.
-        let question = if detail.run.is_some() {
+        let asker_marked = detail.run.is_some() || detail.setup.is_some();
+        let question = if asker_marked {
             Self::marked_question(
                 format!("run decided question {bead} {ask}"),
                 &detail.question,
@@ -13475,7 +13950,7 @@ impl Footplate {
         } else {
             // The context, the options to pick again, the recommendation.
             for (line, text) in detail.context.iter().enumerate() {
-                if detail.run.is_some() {
+                if asker_marked {
                     body = body.child(Self::marked_asker_line(
                         format!("run decided context {bead} {ask} {line}"),
                         text,
@@ -13485,11 +13960,22 @@ impl Footplate {
                     body = body.child(div().child(text.clone()));
                 }
             }
+            // Whether a put-aside run or setup ask can still be approved
+            // from here: one approved, declined or taken back takes no
+            // approval.
+            let approving = model.approving(bead, ask).is_some();
+            let setup_approving = model.setup_approving(bead, ask).is_some();
+            let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
             // An ask with no options shows none: the answer's words are in
             // the state line, and nothing is wanted. Nor does one taken
-            // back: there is nothing to pick.
+            // back: there is nothing to pick. Nor a setup ask past its
+            // approval: its presets are picked with the account, which a
+            // put-aside one still takes below.
             let taken_back = detail.state == "taken back";
-            if !detail.options.is_empty() && !taken_back {
+            if !detail.options.is_empty()
+                && !taken_back
+                && (detail.setup.is_none() || setup_approving)
+            {
                 for option in &detail.options {
                     // The circle marks the pick; a newly chosen option is
                     // the highlighted one, and the button says what it sends.
@@ -13537,12 +14023,15 @@ impl Footplate {
             // A run ask has the yard's block, and under it the control
             // that approves while it is only put aside: one approved,
             // declined or taken back takes no approval.
-            let approving = model.approving(bead, ask).is_some();
-            let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
             if let Some(run) = &detail.run {
                 body = body.child(self.run_block(bead, ask, run, approving, palette, cx));
                 if approving && elsewhere {
-                    body = body.child(self.approve_elsewhere_lines(bead, ask, palette));
+                    body = body.child(self.approve_elsewhere_lines(
+                        bead,
+                        ask,
+                        model::approve_command(bead, ask),
+                        palette,
+                    ));
                 } else if approving {
                     body = body.child(div().flex().child(approve_button(
                         format!("approve {bead} {ask}"),
@@ -13553,32 +14042,64 @@ impl Footplate {
                     )));
                 }
             }
-            // A line for words with the later pick, or the field of a
-            // secret to give it again: a declined one takes none, one taken
-            // back has neither, and no
-            // line for words stands where a value could be typed in sight.
+            // A setup ask has the yard's block with its account choice,
+            // and under it the control that approves while it is only put
+            // aside. Its presets stand to pick above.
+            if let Some(setup) = &detail.setup {
+                body = body.child(self.setup_block(bead, ask, setup, setup_approving, palette, cx));
+                if setup_approving {
+                    body = body.child(self.setup_candidates(
+                        bead,
+                        ask,
+                        setup,
+                        &detail.account,
+                        palette,
+                        cx,
+                    ));
+                    if elsewhere {
+                        body = body.child(self.approve_elsewhere_lines(
+                            bead,
+                            ask,
+                            model::setup_approve_command(bead, ask, !setup.candidates.is_empty()),
+                            palette,
+                        ));
+                    } else {
+                        body = body.child(div().flex().child(approve_button(
+                            format!("approve {bead} {ask}"),
+                            &self.yard,
+                            self.approving.is_none() && !self.reconnecting(),
+                            palette,
+                            cx,
+                        )));
+                    }
+                }
+            }
+            // A line for words with the later pick, the field of a secret
+            // to give it again, or the field of a put-aside setup for its
+            // account: a declined one takes none, one taken back has
+            // neither, and no line for words stands where a value could be
+            // typed in sight.
             let giving = model.giving(bead, ask);
-            let field = match detail.secret {
-                Some(_) => self.secret.clone(),
-                None => self.line.clone(),
+            let setup_field = setup_approving && detail.setup.is_some();
+            let secret_field = detail.secret.is_some() || setup_field;
+            let field = match secret_field {
+                true => self.secret.clone(),
+                false => self.line.clone(),
             };
             let focus = field.focus_handle(cx);
-            let kind = if detail.secret.is_some() {
-                "secret"
-            } else {
-                "words"
-            };
-            let words = detail.secret.is_none() && detail.run.is_none();
-            let fielded = !taken_back && (words || giving.is_some());
+            let kind = if secret_field { "secret" } else { "words" };
+            let words = detail.secret.is_none() && detail.run.is_none() && detail.setup.is_none();
+            let fielded = !taken_back && (words || giving.is_some() || setup_field);
             // A secret's field stands beside its toggle, as on an open
             // card.
-            let toggle = detail
-                .secret
-                .as_ref()
-                .map(|_| show_button(format!("show {bead} {ask}"), self.secret_shown, palette, cx));
+            let toggle = secret_field
+                .then(|| show_button(format!("show {bead} {ask}"), self.secret_shown, palette, cx));
             body = body.when(fielded, |body| {
                 let boxed = div()
                     .debug_selector(|| format!("{kind} {bead} {ask}"))
+                    // A setup ask's account field takes its approval's key
+                    // too, with what the field holds.
+                    .when(setup_field, |el| el.key_context(SETUP_SECRET_CONTEXT))
                     .px_3()
                     .py_2()
                     .rounded_md()
@@ -13605,6 +14126,17 @@ impl Footplate {
             // Under it the button that sends the field, exactly as Enter
             // does: the value again on a secret, the words where they are
             // the answer, the new pick where one is chosen.
+            // Why the yard did not take the card's answer, in place, as on
+            // an open card: an approval refused from here is shown whole.
+            if let Some(why) = self.refused.get(&(bead.to_string(), ask)) {
+                body = body.child(
+                    div()
+                        .debug_selector(|| format!("refused {bead} {ask}"))
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {why}")),
+                );
+            }
             let send = match (&detail.secret, giving) {
                 _ if taken_back => None,
                 (Some(_), Some(secret)) => Some((
@@ -13613,7 +14145,7 @@ impl Footplate {
                     !self.secret.read(cx).text().is_empty(),
                 )),
                 (Some(_), None) => None,
-                (None, _) if detail.run.is_some() => None,
+                (None, _) if detail.run.is_some() || detail.setup.is_some() => None,
                 (None, _) => detail
                     .options
                     .iter()
@@ -13638,19 +14170,29 @@ impl Footplate {
             // As an open card's: held while the yard is reconnecting,
             // with the reason beside the button that would send.
             let held = self.reconnecting();
-            let sendable = send.is_some() || (detail.run.is_some() && approving && !elsewhere);
+            let sendable = send.is_some()
+                || (detail.run.is_some() && approving && !elsewhere)
+                || (detail.setup.is_some() && setup_approving && !elsewhere);
             body = body.when_some(send, |body, (id, text, enabled)| {
                 body.child(send_button(id, text, enabled && !held, palette, cx))
             });
             body = body.when(held && sendable, |body| body.child(send_held(palette)));
-            body = body.child(div().text_sm().text_color(palette.faint).child(
-                match detail.secret {
-                    Some(_) if giving.is_some() => secret_keys(bead, ask, false),
-                    Some(_) => String::new(),
-                    None if detail.run.is_some() => run_keys(approving && !elsewhere, false),
+            let keys = match detail.secret {
+                Some(_) if giving.is_some() => secret_keys(bead, ask, false),
+                Some(_) => String::new(),
+                None if detail.run.is_some() => run_keys(approving && !elsewhere, false),
+                None => match &detail.setup {
+                    Some(setup) => setup_keys(
+                        bead,
+                        ask,
+                        !setup.candidates.is_empty(),
+                        setup_approving && !elsewhere,
+                        false,
+                    ),
                     None => decided_keys(&detail),
                 },
-            ));
+            };
+            body = body.child(div().text_sm().text_color(palette.faint).child(keys));
             let expand_label = if detail.expanded { "fold" } else { "expand" };
             let bead_click = bead.to_string();
             body = body.child(
@@ -14148,6 +14690,8 @@ mod tests {
             state: "open".to_string(),
             secret: None,
             run: None,
+            setup: None,
+            account: String::new(),
         }
     }
 
@@ -29318,6 +29862,740 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// The courier pack's sentences as the yard cards them: the pack
+    /// line, the credential with where it goes, the call with its path
+    /// whole, the mint with its digest whole, the account, and the grants
+    /// with their grantee.
+    const SETUP_PACK_LINE: &str = "pack courier (embedded in yardr doctest), of kind source, into the yard: it adds 1 source and copies 1 command file (1 command), and changes nothing else. It makes no hook and sets no credential's file.";
+    const SETUP_CREDENTIAL: &str = "source courier: its calls go to https://courier.example.com/api. Its credential is the variable COURIER_TOKEN (the name, never the value), minted from COURIER_ACCOUNT by courier-mint, sent in the header \"Authorization: Bearer {credential}\" on every call.";
+    const SETUP_CALL: &str =
+        "call ping (read): GET /me. It takes no parameter, and sends no query.";
+    const SETUP_MINT: &str = "its mint courier-mint is copied to <home>/sources/courier/courier-mint, sha256 275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc mode 0700. It runs with the operator's local logins, and a mint_command the operator sets wins over it.";
+    const SETUP_GRANTS: &str = "grants to crew yardmaster — pick one:";
+    const SETUP_BACK: &str =
+        "yardr source rm courier; yardr source revoke courier <what> --crew yardmaster";
+    const SETUP_DECLARATION: &str =
+        "name: courier\nbase: https://courier.example.com/api\ncredential: COURIER_TOKEN\n";
+    const SETUP_MINT_FILE: &str = "#!/bin/sh\n# mint COURIER_TOKEN from COURIER_ACCOUNT\nexec courier-mint \"$COURIER_ACCOUNT\"\n";
+    const SETUP_MINT_SHA: &str = "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc";
+
+    /// The shared account values a candidate file holds for `account`.
+    fn setup_values(account: &[&str]) -> Value {
+        let mut values = serde_json::Map::new();
+        for name in account {
+            let value = match *name {
+                "COURIER_ACCOUNT" => "jo@example.test",
+                "GITHUB_APP_ID" => "123456",
+                "GITHUB_KEY_PATH" => "/home/jo/.courier/key.pem",
+                _ => "typed",
+            };
+            values.insert(name.to_string(), json!(value));
+        }
+        Value::Object(values)
+    }
+
+    /// The setup the courier ask proposes, for `account`, with the one
+    /// candidate where `candidates`.
+    fn setup_of(account: &[&str], candidates: bool) -> Value {
+        let names = account.join(" and ");
+        let account_line = match candidates {
+            true => {
+                let pairs: Vec<String> = account
+                    .iter()
+                    .map(|name| {
+                        let value = setup_values(account)
+                            .get(*name)
+                            .and_then(Value::as_str)
+                            .unwrap_or("typed")
+                            .to_string();
+                        format!("{name}={value}")
+                    })
+                    .collect();
+                format!(
+                    "the account {names}: already given for courier-existing ({}, in /home/jo/.yardr/sources/courier-existing.env). Take it with --account courier-existing, or type another unseen (written to /home/jo/.yardr/sources/courier.env, named in the answer, never the value).",
+                    pairs.join(", ")
+                )
+            }
+            false => format!(
+                "the account {names}: type it unseen. It is written to /home/jo/.yardr/sources/courier.env, named in the answer, never the value."
+            ),
+        };
+        let candidates = match candidates {
+            true => json!([{"source": "courier-existing",
+                             "file": "/home/jo/.yardr/sources/courier-existing.env",
+                             "values": setup_values(account)}]),
+            false => json!([]),
+        };
+        json!({"pack": "courier", "account": account,
+               "account_file": "/home/jo/.yardr/sources/courier.env",
+               "candidates": candidates,
+               "does": [SETUP_PACK_LINE, SETUP_CREDENTIAL, SETUP_CALL, SETUP_MINT,
+                        account_line, SETUP_GRANTS],
+               "back": SETUP_BACK,
+               "carried": [{"name": "courier", "text": SETUP_DECLARATION,
+                             "files": [{"program": "courier-mint", "text": SETUP_MINT_FILE,
+                                        "sha256": SETUP_MINT_SHA}]}],
+               "presets": [{"name": "read", "grants": [{"source": "courier", "calls": ["read"]}]},
+                           {"name": "everything",
+                            "grants": [{"source": "courier", "calls": ["read", "put"]}]}],
+               "to": [{"crew": "yardmaster"}]})
+    }
+
+    /// The setup ask 7 on bead-s as the queue lists it, open.
+    fn queued_setup(account: &[&str], candidates: bool) -> Value {
+        json!({
+            "bead": "bead-s", "bead_title": "The courier", "topic": "", "ask": 7,
+            "question": "Set up courier for the yardmaster?", "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z", "setup": setup_of(account, candidates)
+        })
+    }
+
+    /// The bead of that ask, with two presets and `you decide`,
+    /// `recommend` recommended.
+    fn bead_setup(account: &[&str], candidates: bool, recommend: u64) -> String {
+        json!({"result": {"id": "bead-s", "title": "The courier", "body": "The body.",
+            "stage": "new", "labels": [], "notes": [], "asks": [
+                {"ask": 7, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": "Set up courier for the yardmaster?",
+                 "context": ["The yardmaster reads the courier to work beads."],
+                 "options": [{"label": "read", "consequence": "may make every read call of the source courier (https://courier.example.com/api): today that is ping"},
+                             {"label": "everything", "consequence": "may make every call of the source courier (https://courier.example.com/api)"},
+                             {"label": "You decide", "consequence": "the recommended preset, read, is granted"}],
+                 "recommend": recommend, "why": "reading is the job",
+                 "state": "open", "setup": setup_of(account, candidates)}]}})
+        .to_string()
+    }
+
+    /// The window on a yard whose one open ask is that setup ask, its
+    /// card open and read.
+    fn opened_on_a_setup_ask<'a>(
+        yard: &Yard,
+        account: &[&str],
+        candidates: bool,
+        recommend: u64,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_setup(account, candidates)], "decided": []}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_setup(account, candidates, recommend));
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// A setup ask's card: the yard's block with what approving does, each
+    /// sentence whole — the credential's placement, the call's path, the
+    /// mint's digest, the account and the grants — the account choice with
+    /// each candidate's address, the presets to pick from, and the
+    /// take-backs. A tap takes the candidate, and the approval sends the
+    /// preset pick with it; the ask reads as being carried out until the
+    /// yard says it ran.
+    #[gpui::test]
+    fn a_setup_ask_s_card_shows_its_setup_and_is_approved_with_a_tap(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+
+        // The yard's block, with what approving does and each sentence.
+        assert!(drawn(cx, "setup bead-s 7"));
+        assert!(drawn(cx, "setup summary bead-s 7"));
+        for ix in 0..6 {
+            assert!(drawn(cx, &format!("setup does bead-s 7 {ix}")), "does {ix}");
+        }
+        let setup = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decision_detail("bead-s", &chrono::Utc::now())
+                .unwrap()
+                .asks[0]
+                .setup
+                .clone()
+                .unwrap()
+        });
+        assert_eq!(setup.pack, "courier");
+        assert!(
+            setup.does[1].contains("sent in the header"),
+            "{}",
+            setup.does[1]
+        );
+        assert!(setup.does[2].contains("GET /me"), "{}", setup.does[2]);
+        assert!(setup.does[3].contains(SETUP_MINT_SHA), "{}", setup.does[3]);
+        assert_eq!(
+            model::setup_summary(&setup),
+            "yardr pack apply courier, the account COURIER_ACCOUNT, and the preset's grants to crew yardmaster"
+        );
+        // The asker's lines are marked as the asker's: none can begin as
+        // a line of the yard's does.
+        let card = view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .decision_detail("bead-s", &chrono::Utc::now())
+                .unwrap()
+                .asks[0]
+                .clone()
+        });
+        assert!(card.question.starts_with("yardmaster says: "));
+        assert!(card.context[0].starts_with("yardmaster says: "));
+        // The account choice with the candidate's address, the presets to
+        // pick from, and the take-backs; the secret field, and no line
+        // for words.
+        assert!(drawn(cx, "account bead-s 7 courier-existing"));
+        assert!(drawn(cx, "pick bead-s 7 1"));
+        assert!(drawn(cx, "pick bead-s 7 2"));
+        assert!(drawn(cx, "pick bead-s 7 3"));
+        assert!(drawn(cx, "setup back bead-s 7"));
+        assert!(drawn(cx, "secret bead-s 7"));
+        assert!(!drawn(cx, "words bead-s 7"));
+
+        // The ask's own texts behind one tap, copied to the letter.
+        click_on(cx, "texts bead-s 7");
+        wait(cx, "the texts", |cx| drawn(cx, "setup text bead-s 7 0"));
+        assert!(drawn(cx, "setup text bead-s 7 1"));
+        let chip = run_chip(&view, cx, run_text("declaration", SETUP_DECLARATION)).unwrap();
+        cx.simulate_click(chip, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(SETUP_DECLARATION));
+
+        // Enter alone approves nothing.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+
+        // A tap takes the candidate, and the approval sends the
+        // recommended preset with it.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
+                "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
+                "setup": setup_of(&["COURIER_ACCOUNT"], true),
+                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
+            .to_string(),
+        );
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "read", "account": "courier-existing",
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        let taken = view.read_with(cx, |v, _| {
+            v.model.as_ref().unwrap().account_choice("bead-s", 7)
+        });
+        assert_eq!(taken, "courier-existing");
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; took courier-existing"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1,
+                     "account": "courier-existing", "actor": "jo"})]
+        );
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        // Among the decided it reads as being carried out, with the
+        // yard's block and no control.
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster"
+        );
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        // A setup runs once for one ask: the model takes no approval for
+        // it again, and no key calls the yard again.
+        assert!(!view.read_with(cx, |v, _| {
+            v.model
+                .as_ref()
+                .unwrap()
+                .setup_approving("bead-s", 7)
+                .is_some()
+        }));
+        cx.simulate_keystrokes("secondary-enter enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup").len(), 1);
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        // Its block stands on its decided card too, with the ask's own
+        // texts behind the tap, copied to the letter.
+        assert!(view.read_with(cx, |v, _| {
+            v.model.as_ref().unwrap().texts_shown("bead-s", 7)
+        }));
+        let chip = run_chip(&view, cx, run_text("declaration", SETUP_DECLARATION)).unwrap();
+        cx.simulate_click(chip, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(SETUP_DECLARATION));
+    }
+
+    /// A setup ask's account typed in its field: marks while it is typed,
+    /// taken with Enter, and the approval sends the values with the preset
+    /// pick. A filled field types another: whatever candidate the card
+    /// took is taken back as it fills, and a tap forgets what is typed.
+    /// The value is in the call's body and nowhere else in the window. An
+    /// approval the yard refuses is shown whole, and a call that ends
+    /// without an answer is never said to be approved or not.
+    #[gpui::test]
+    fn a_setup_ask_s_account_is_typed_unseen_and_approved_with_its_preset(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+        let nowhere = |view: &Entity<Footplate>, cx: &mut VisualTestContext, when: &str| {
+            let kept = kept_outside_the_field(view, cx, dir.path());
+            assert!(!kept.contains(VALUE), "{when}: {kept}");
+        };
+        let marks = |n: usize| "\u{2022}".repeat(n);
+        assert_eq!(
+            secret_field(&view, cx).2,
+            "COURIER_ACCOUNT for the setup of courier"
+        );
+
+        // A tap takes the candidate; typing takes it back as the field
+        // fills, and the value is marks.
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .model
+                .as_ref()
+                .unwrap()
+                .account_choice("bead-s", 7)),
+            "courier-existing"
+        );
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        let (typed_in, shown, _) = secret_field(&view, cx);
+        assert_eq!((typed_in.as_str(), shown), (VALUE, marks(VALUE.len())));
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .model
+                .as_ref()
+                .unwrap()
+                .account_choice("bead-s", 7)),
+            ""
+        );
+        nowhere(&view, cx, "typed");
+        // And a tap forgets what is typed.
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        assert_eq!(secret_field(&view, cx).0, "");
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .model
+                .as_ref()
+                .unwrap()
+                .account_choice("bead-s", 7)),
+            "courier-existing"
+        );
+
+        // Typed again and taken with Enter, the approval sends the values
+        // with the recommended preset.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(secret_field(&view, cx).0, "");
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
+                "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
+                "setup": setup_of(&["COURIER_ACCOUNT"], true), "given": ["COURIER_ACCOUNT"],
+                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
+            .to_string(),
+        );
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "read", "given": ["COURIER_ACCOUNT"],
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave COURIER_ACCOUNT"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1,
+                     "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"})]
+        );
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave COURIER_ACCOUNT"
+        );
+        nowhere(&view, cx, "approved");
+        for call in yard.calls() {
+            if call != "ApproveSetup" {
+                let asked = format!("{:?}", yard.asked(&call));
+                assert!(!asked.contains(VALUE), "{call}: {asked}");
+            }
+        }
+    }
+
+    /// An approval the yard refuses is shown whole on a setup ask's card.
+    /// A call that ends without an answer is never said to be approved or
+    /// not, and the queue is read again for what the yard says, since the
+    /// call may have approved all the same.
+    #[gpui::test]
+    fn a_setup_approval_the_yard_refuses_is_shown_whole(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+
+        // The yard goes away over the call: never "approved". The call
+        // may have approved all the same, so the queue is read again for
+        // what the yard says.
+        let reads = yard.asked("UserAsks").len();
+        yard.answer_nothing("ApproveSetup");
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "no answer", |cx| {
+            refused_of(&view, cx, "bead-s", 7) == "the yard did not answer; read the card again"
+        });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
+        assert!(drawn(cx, "approve bead-s 7"));
+        wait(cx, "the queue read again", |_| {
+            yard.asked("UserAsks").len() == reads + 1
+        });
+
+        // The yard refuses, since it changed after the ask was written:
+        // its words, whole, and nothing ran, so nothing is read again.
+        let stale = "ask 7 on bead-s: the candidate courier-existing holds COURIER_ACCOUNT=jo@example.test no more: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+        yard.answer(
+            "ApproveSetup",
+            &json!({"error": {"code": "error", "message": stale}}).to_string(),
+        );
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "refused", |cx| {
+            refused_of(&view, cx, "bead-s", 7) == format!("not approved: {stale}")
+        });
+        assert!(drawn(cx, "refused bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
+        assert_eq!(yard.asked("ApproveSetup").len(), 2);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("UserAsks").len(), reads + 1);
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A setup ask's approval wants the preset pick and the account
+    /// together: with neither it says which is missing, and a chosen
+    /// preset goes in place of the recommended one.
+    #[gpui::test]
+    fn a_setup_ask_s_preset_is_picked_and_its_account_is_wanted(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+
+        // With neither the pick's account nor a candidate, the approval
+        // says which is missing, and calls nothing.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "take a candidate, or type the account");
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+
+        // A chosen preset goes in place of the recommended one.
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "everything",
+                "account": "courier-existing", "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        click_on(cx, "pick bead-s 7 2");
+        cx.run_until_parked();
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset everything to crew yardmaster; took courier-existing"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 2,
+                     "account": "courier-existing", "actor": "jo"})]
+        );
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// `d` on a setup ask's card, then words and Enter: `DeclineAsk`
+    /// with the words, and no approval.
+    #[gpui::test]
+    fn a_setup_ask_s_decline_sends_its_words(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (_view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+        cx.simulate_keystrokes("d");
+        wait(cx, "the line of a decline", |cx| {
+            drawn(cx, "words bead-s 7")
+        });
+        cx.simulate_input("not this week");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk")
+                == [json!({"bead": "bead-s", "ask": 7, "words": "not this week", "actor": "jo"})]
+        });
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+    }
+
+    /// A setup ask with no recommended preset wants one picked before it
+    /// is approved.
+    #[gpui::test]
+    fn a_setup_ask_without_a_recommendation_wants_its_preset_picked(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 0, &file, cx);
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "pick a preset first");
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A setup ask of several names takes them one after the other, and
+    /// the approval sends them together with the preset pick. With none
+    /// listed it wants the account typed.
+    #[gpui::test]
+    fn a_setup_ask_of_several_names_takes_them_one_after_the_other(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(
+            &yard,
+            &["GITHUB_APP_ID", "GITHUB_KEY_PATH"],
+            false,
+            1,
+            &file,
+            cx,
+        );
+        assert_eq!(
+            secret_field(&view, cx).2,
+            "GITHUB_APP_ID for the setup of courier (1 of 2)"
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "type the account");
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+
+        // The first taken with Enter, the approval wants the second.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("123456");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            secret_field(&view, cx).2,
+            "GITHUB_KEY_PATH for the setup of courier (2 of 2)"
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "type GITHUB_KEY_PATH for the account");
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+
+        // The second still in the field goes with the first.
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "read",
+                "given": ["GITHUB_APP_ID", "GITHUB_KEY_PATH"],
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        cx.simulate_input("/home/jo/.courier/key.pem");
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave GITHUB_APP_ID, GITHUB_KEY_PATH"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1,
+                     "values": {"GITHUB_APP_ID": "123456",
+                                "GITHUB_KEY_PATH": "/home/jo/.courier/key.pem"},
+                     "actor": "jo"})]
+        );
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A setup ask put aside is approved from its card among the decided,
+    /// with its presets to pick, its account choice and its field. A
+    /// refusal there is shown whole, as on an open card.
+    #[gpui::test]
+    fn a_setup_ask_is_approved_after_it_was_put_aside(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+
+        let mut put_aside = queued_setup(&["COURIER_ACCOUNT"], true);
+        put_aside["state"] = json!("put aside");
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [put_aside]}}).to_string(),
+        );
+        cx.simulate_keystrokes("x");
+        wait(cx, "put aside", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .unwrap()
+                    .decided_detail("bead-s", 7, &chrono::Utc)
+                    .is_some_and(|d| d.state == "put aside")
+            })
+        });
+        assert_eq!(yard.asked("DeferAsk").len(), 1);
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+
+        // Its presets pick, its candidates take, and its field types,
+        // from among the decided too.
+        click_on(cx, "pick bead-s 7 2");
+        cx.run_until_parked();
+        assert_eq!(decided_detail_of(&view, cx, "bead-s", 7).chosen, 2);
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .model
+                .as_ref()
+                .unwrap()
+                .account_choice("bead-s", 7)),
+            "courier-existing"
+        );
+        cx.simulate_keystrokes("i");
+        cx.simulate_input(VALUE);
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .model
+                .as_ref()
+                .unwrap()
+                .account_choice("bead-s", 7)),
+            ""
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // A refusal from here is shown whole on its card.
+        let stale = "ask 7 on bead-s: the yard applied courier after the ask was written: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+        yard.answer(
+            "ApproveSetup",
+            &json!({"error": {"code": "error", "message": stale}}).to_string(),
+        );
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "refused", |cx| {
+            refused_of(&view, cx, "bead-s", 7) == format!("not approved: {stale}")
+        });
+        assert!(drawn(cx, "refused bead-s 7"));
+
+        // Approved from here: the chosen preset with the typed values.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
+                "asker": "yardmaster", "state": "answered", "option": 2, "option_label": "everything",
+                "setup": setup_of(&["COURIER_ACCOUNT"], true), "given": ["COURIER_ACCOUNT"],
+                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
+            .to_string(),
+        );
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "everything", "given": ["COURIER_ACCOUNT"],
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        click_on(cx, "approve bead-s 7");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset everything to crew yardmaster; gave COURIER_ACCOUNT"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [
+                json!({"bead": "bead-s", "ask": 7, "option": 2,
+                         "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"}),
+                json!({"bead": "bead-s", "ask": 7, "option": 2,
+                         "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"}),
+            ]
+        );
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset everything to crew yardmaster; gave COURIER_ACCOUNT"
+        );
+    }
+
+    /// Against a yard that does not have the call, the setup card says to
+    /// approve at the yard's terminal, with that command in a block that
+    /// copies it, and has no control that approves.
+    #[gpui::test]
+    fn a_setup_ask_from_a_yard_that_takes_no_approval_is_approved_at_its_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+        assert!(drawn(cx, "approve bead-s 7"));
+        assert!(!drawn(cx, "approve elsewhere bead-s 7"));
+
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "where to approve", |cx| {
+            drawn(cx, "approve elsewhere bead-s 7")
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1,
+                     "account": "courier-existing", "actor": "jo"})]
+        );
+        // In place of the control, and not beside it.
+        let elsewhere = view.read_with(cx, |v, _| {
+            v.approve_elsewhere.contains(&("bead-s".to_string(), 7))
+        });
+        assert!(elsewhere);
+        assert!(drawn(cx, "setup bead-s 7"));
+        assert_eq!(notice(&view, cx), "");
+        // The command that approves there, copied to the letter.
+        let terminal = "yardr bead answer bead-s 7 <n> --secret, or <n> --account <source>";
+        let chip = run_chip(&view, cx, run_text("approve", terminal)).unwrap();
+        cx.simulate_click(chip, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(terminal));
+        // The key asks the yard no second time.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup").len(), 1);
     }
 
     /// `d` on a run ask's card, then words and Enter: `DeclineAsk` with

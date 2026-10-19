@@ -11,7 +11,7 @@
 //! HTTP are written out, since a call is one request on one connection and
 //! neither needs a runtime nor a client library with a unix connector.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
@@ -726,6 +726,139 @@ pub struct Approved {
     pub result: String,
 }
 
+/// The setup a setup ask proposes: the pack with the yard's sentences for
+/// what approving it does, the account to type beside the preset pick or
+/// the candidates to take instead, and the presets the ask's options
+/// count. All of it is the yard's, written from its own records when the
+/// ask was, and none of it the asker's. Such an ask is approved with
+/// `ApproveSetup`, with the preset pick and the account together.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Setup {
+    /// The embedded pack to set up, of kind source.
+    #[serde(default)]
+    pub pack: String,
+    /// The build the pack is embedded in, as the card shows it. Absent on
+    /// a yard from before the ask said.
+    #[serde(default)]
+    pub label: String,
+    /// The names to type unseen beside the preset pick: the mint's inputs
+    /// where the pack's credential is minted, else every credential name.
+    #[serde(default, deserialize_with = "or_default")]
+    pub account: Vec<String>,
+    /// The file a typed value goes to, on the yard's machine.
+    #[serde(default)]
+    pub account_file: String,
+    /// The yard sources whose account the card offers to reuse; none
+    /// where none matches.
+    #[serde(default, deserialize_with = "or_default")]
+    pub candidates: Vec<SetupCandidate>,
+    /// The yard's sentences for what approving changes and what is there
+    /// now: the pack, each source with where its credential goes and each
+    /// call with its method and path, the mint with its digest, the
+    /// account, and the grants with their grantee. Each on its own line,
+    /// never a summary.
+    #[serde(default, deserialize_with = "or_default")]
+    pub does: Vec<String>,
+    /// The commands that take the setup back.
+    #[serde(default)]
+    pub back: String,
+    /// Who may run `back`, in words that stand before "can take it back".
+    /// Absent where that is anyone.
+    #[serde(default)]
+    pub back_by: String,
+    /// What the pack brings: each source's declaration with its command
+    /// files' texts, the yard's own bytes for checking behind the card.
+    #[serde(default, deserialize_with = "or_default")]
+    pub carried: Vec<RunSource>,
+    /// The pack's presets with their grants, in the order the ask's
+    /// options count them.
+    #[serde(default, deserialize_with = "or_default")]
+    pub presets: Vec<SetupPreset>,
+    /// Who the grants are for.
+    #[serde(default, deserialize_with = "or_default")]
+    pub to: Vec<SetupGrantee>,
+}
+
+/// One source already in the yard whose account the setup card offers to
+/// reuse: the source by name, the file holding the shared account inputs,
+/// and the shared input names and values the file holds. Only yard-level
+/// source files are ever candidates, never a user's own.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SetupCandidate {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub file: String,
+    /// The shared account input names and values the file holds, in the
+    /// order of their names.
+    #[serde(default, deserialize_with = "or_default")]
+    pub values: BTreeMap<String, String>,
+}
+
+/// One preset of a setup ask's pack: the pack author's named grant
+/// suggestion, with what of each source it grants. The author's about
+/// line is no part of it: the card renders each preset's calls from the
+/// declarations, in the ask's options.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SetupPreset {
+    /// The preset's name, as the option's label shows it.
+    #[serde(default)]
+    pub name: String,
+    /// What of each source the preset grants.
+    #[serde(default, deserialize_with = "or_default")]
+    pub grants: Vec<SetupGrant>,
+}
+
+/// What of one source a preset grants: `read` for every read call, calls
+/// by name.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SetupGrant {
+    /// The source the pack declares.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub calls: Vec<String>,
+}
+
+/// One grantee of a setup ask's grants: the group, and so each session it
+/// starts, or the crew member. Exactly one is named.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SetupGrantee {
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub crew: String,
+}
+
+/// What `ApproveSetup` answers: the pack with the preset picked, the
+/// names given or the candidate taken, and that the server carries the
+/// setup out after the call.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SetupApproved {
+    #[serde(default)]
+    pub bead: String,
+    #[serde(default)]
+    pub ask: u64,
+    #[serde(default)]
+    pub asker: String,
+    #[serde(default)]
+    pub pack: String,
+    #[serde(default)]
+    pub preset: String,
+    /// The account names that were given; none where a candidate was
+    /// taken instead.
+    #[serde(default, deserialize_with = "or_default")]
+    pub given: Vec<String>,
+    /// The candidate taken instead of typing; empty where the values
+    /// were typed.
+    #[serde(default)]
+    pub account: String,
+    /// `approved, to be carried out`: the server carries the setup out
+    /// after the call.
+    #[serde(default)]
+    pub result: String,
+}
+
 /// One open question addressed to the user, as the queue lists it: the
 /// question in plain words, without its options or context, which the card
 /// reads with `Bead`.
@@ -759,6 +892,9 @@ pub struct OpenAsk {
     /// The command a run ask proposes; absent on any other ask.
     #[serde(default)]
     pub run: Option<Run>,
+    /// The setup a setup ask proposes; absent on any other ask.
+    #[serde(default)]
+    pub setup: Option<Setup>,
 }
 
 /// One that is open no more: answered, put aside or declined by the user,
@@ -810,7 +946,11 @@ pub struct DecidedAsk {
     /// The command a run ask proposes; absent on any other ask.
     #[serde(default)]
     pub run: Option<Run>,
-    /// What the yard ran when a run ask was approved; none until it is.
+    /// The setup a setup ask proposes; absent on any other ask.
+    #[serde(default)]
+    pub setup: Option<Setup>,
+    /// What the yard ran when a run ask was approved, or what it carries
+    /// out for an approved setup ask; none until it is.
     #[serde(default)]
     pub ran: Option<Ran>,
 }
@@ -895,7 +1035,11 @@ pub struct BeadAsk {
     /// The command a run ask proposes; absent on any other ask.
     #[serde(default)]
     pub run: Option<Run>,
-    /// What the yard ran when a run ask was approved; none until it is.
+    /// The setup a setup ask proposes; absent on any other ask.
+    #[serde(default)]
+    pub setup: Option<Setup>,
+    /// What the yard ran when a run ask was approved, or what it carries
+    /// out for an approved setup ask; none until it is.
     #[serde(default)]
     pub ran: Option<Ran>,
 }
@@ -2229,6 +2373,37 @@ impl Client {
         self.answer("ApproveAsk", args)
     }
 
+    /// Approves a setup ask: the yard then applies the pack, takes the
+    /// account, and grants the preset picked, as its operator. The call
+    /// names the ask with the preset pick counting the ask's options, and
+    /// exactly one of the typed values and the picked candidate settles
+    /// the account: `values` is left out where a candidate is taken, and
+    /// `account` where the values are typed. A value is the person's
+    /// secret: it is in this call's body and in nothing else of the
+    /// client, no error and no log.
+    pub fn approve_setup(
+        &self,
+        bead: &str,
+        ask: u64,
+        option: u64,
+        values: Option<&[(String, String)]>,
+        account: Option<&str>,
+        actor: &str,
+    ) -> Result<SetupApproved> {
+        let mut args = json!({ "bead": bead, "ask": ask, "option": option, "actor": actor });
+        if let Some(values) = values {
+            let values: serde_json::Map<String, Value> = values
+                .iter()
+                .map(|(name, value)| (name.clone(), json!(value)))
+                .collect();
+            args["values"] = json!(values);
+        }
+        if let Some(account) = account {
+            args["account"] = json!(account);
+        }
+        self.answer("ApproveSetup", args)
+    }
+
     /// Puts the ask aside: it leaves the queue and comes back as the yard
     /// says.
     pub fn defer_ask(&self, bead: &str, ask: u64, actor: &str) -> Result<()> {
@@ -3180,6 +3355,168 @@ mod tests {
             let err = approve().unwrap_err();
             assert!(matches!(err, Error::Down(_)), "{way}: {err:?}");
         }
+    }
+
+    /// A setup ask is approved in its own call, which names the ask with
+    /// the preset pick counting the ask's options, and exactly one of the
+    /// typed values and the picked candidate: by name on the socket and
+    /// at an address alike, as the yard takes them on each.
+    #[test]
+    fn a_setup_ask_is_approved_with_its_preset_and_its_account() {
+        const VALUE: &str = "ops@example.com";
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            let client = yard.client();
+            let way = client.place();
+            let values = [("COURIER_ACCOUNT".to_string(), VALUE.to_string())];
+            let without = |err: &Error| {
+                assert!(!err.to_string().contains(VALUE), "{way}: {err}");
+                assert!(!format!("{err:?}").contains(VALUE), "{way}: {err:?}");
+            };
+            // A yard that does not have the call, or does not serve it to
+            // this window, says so as of any method.
+            let err = client
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo")
+                .unwrap_err();
+            assert_eq!(err.to_string(), "no such method ApproveSetup", "{way}");
+            without(&err);
+            // One that has it answers the pack with the preset picked and
+            // that the server carries the setup out after the call.
+            yard.answer(
+                "ApproveSetup",
+                r#"{"result": {"bead": "yd-crm", "ask": 41, "asker": "yardmaster",
+                    "pack": "courier", "preset": "read", "given": ["COURIER_ACCOUNT"],
+                    "result": "approved, to be carried out"}}"#,
+            );
+            let approved = client
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo")
+                .unwrap();
+            assert_eq!(approved.pack, "courier", "{way}");
+            assert_eq!(approved.preset, "read", "{way}");
+            assert_eq!(approved.given, ["COURIER_ACCOUNT"], "{way}");
+            assert_eq!(approved.account, "", "{way}");
+            assert_eq!(approved.result, "approved, to be carried out", "{way}");
+            assert_eq!(
+                yard.asked("ApproveSetup").last(),
+                Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
+                             "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"})),
+                "{way}"
+            );
+            // The value is in the body alone: no line of the request's head
+            // has it.
+            let head = yard.last_request();
+            assert!(head.contains("/call/ApproveSetup"), "{way}: {head}");
+            assert!(!head.contains(VALUE), "{way}: {head}");
+            // A taken candidate goes with no values.
+            yard.answer(
+                "ApproveSetup",
+                r#"{"result": {"bead": "yd-crm", "ask": 41, "asker": "yardmaster",
+                    "pack": "courier", "preset": "read", "account": "courier-existing",
+                    "result": "approved, to be carried out"}}"#,
+            );
+            let approved = client
+                .approve_setup("yd-crm", 41, 1, None, Some("courier-existing"), "jo")
+                .unwrap();
+            assert_eq!(approved.account, "courier-existing", "{way}");
+            assert!(approved.given.is_empty(), "{way}");
+            assert_eq!(
+                yard.asked("ApproveSetup").last(),
+                Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
+                             "account": "courier-existing", "actor": "jo"})),
+                "{way}"
+            );
+            // The yard says no, in its words, whole.
+            let refusal = "ask 41 on yd-crm: the candidate courier-existing holds COURIER_ACCOUNT=ops@example.com no more: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+            yard.answer(
+                "ApproveSetup",
+                &json!({"error": {"code": "error", "message": refusal}}).to_string(),
+            );
+            let err = client
+                .approve_setup("yd-crm", 41, 1, None, Some("courier-existing"), "jo")
+                .unwrap_err();
+            assert_eq!(err.to_string(), refusal, "{way}");
+            // The yard went away over the call: no reply, and no word on
+            // whether the approval landed.
+            yard.answer_nothing("ApproveSetup");
+            let err = client
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo")
+                .unwrap_err();
+            assert!(matches!(err, Error::Down(_)), "{way}: {err:?}");
+            without(&err);
+        }
+    }
+
+    #[test]
+    fn a_setup_ask_in_the_queue_and_on_the_bead() {
+        let yard = Yard::start();
+        let setup = json!({"pack": "courier", "label": "embedded in yardr doctest",
+            "account": ["COURIER_ACCOUNT"], "account_file": "/home/jo/.yardr/sources/courier.env",
+            "candidates": [{"source": "courier-existing",
+                            "file": "/home/jo/.yardr/sources/courier-existing.env",
+                            "values": {"COURIER_ACCOUNT": "jo@example.test"}}],
+            "does": ["pack courier (embedded in yardr doctest), of kind source, into the yard: it adds 1 source and copies 1 command file (1 command), and changes nothing else. It makes no hook and sets no credential's file.",
+                     "the account COURIER_ACCOUNT: already given for courier-existing (COURIER_ACCOUNT=jo@example.test, in /home/jo/.yardr/sources/courier-existing.env). Take it with --account courier-existing, or type another unseen (written to /home/jo/.yardr/sources/courier.env, named in the answer, never the value).",
+                     "grants to crew yardmaster — pick one:"],
+            "back": "yardr source rm courier; yardr source revoke courier <what> --crew yardmaster",
+            "carried": [{"name": "courier", "text": "name: courier\n",
+                         "files": [{"program": "courier-mint", "text": "#!/bin/sh\n", "sha256": "2752"}]}],
+            "presets": [{"name": "read", "grants": [{"source": "courier", "calls": ["read"]}]},
+                        {"name": "everything", "grants": [{"source": "courier", "calls": ["read", "put"]}]}],
+            "to": [{"crew": "yardmaster"}]});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {
+                "open": [{"bead": "yd-crm", "ask": 41, "question": "Set up courier for the yardmaster?",
+                          "asker": "yardmaster", "setup": setup}],
+                "decided": [{"bead": "yd-crm", "ask": 40, "question": "Set up courier for the yardmaster?",
+                             "asker": "yardmaster", "state": "answered", "option": 1,
+                             "option_label": "read", "setup": setup,
+                             "given": ["COURIER_ACCOUNT"],
+                             "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}},
+                            {"bead": "yd-crm", "ask": 16, "question": "Move them now?",
+                             "asker": "yardmaster", "state": "answered", "option": 1}]
+            }})
+            .to_string(),
+        );
+        let asks = yard.client().user_asks("jo").unwrap();
+        let asked = asks.open[0].setup.as_ref().unwrap();
+        assert_eq!(asked.pack, "courier");
+        assert_eq!(asked.account, ["COURIER_ACCOUNT"]);
+        assert_eq!(asked.account_file, "/home/jo/.yardr/sources/courier.env");
+        let candidate = asked.candidates.first().unwrap();
+        assert_eq!(candidate.source, "courier-existing");
+        assert_eq!(
+            candidate.values.get("COURIER_ACCOUNT").map(String::as_str),
+            Some("jo@example.test")
+        );
+        assert_eq!(asked.does.len(), 3);
+        assert!(asked.back.starts_with("yardr source rm courier"));
+        assert_eq!(asked.carried[0].name, "courier");
+        assert_eq!(asked.carried[0].files[0].program, "courier-mint");
+        assert_eq!(asked.presets[1].name, "everything");
+        assert_eq!(asked.presets[1].grants[0].calls, ["read", "put"]);
+        assert_eq!(asked.to[0].crew, "yardmaster");
+        assert_eq!(asks.decided[0].setup.as_ref(), Some(asked));
+        assert_eq!(asks.decided[0].given, ["COURIER_ACCOUNT"]);
+        let did = asks.decided[0].ran.as_ref().unwrap();
+        assert_eq!(did.line(), "yardr setup courier");
+        assert_eq!(did.result, "approved, to be carried out");
+        // Any other ask has none.
+        assert_eq!(asks.decided[1].setup, None);
+
+        yard.answer(
+            "Bead",
+            &json!({"result": {"id": "yd-crm", "asks": [
+                {"ask": 41, "question": "Set up courier for the yardmaster?",
+                 "options": [{"label": "read", "consequence": "may make every read call of the source courier"},
+                             {"label": "You decide", "consequence": "the recommended preset, read, is granted"}],
+                 "recommend": 1, "why": "reading is the job", "state": "open", "setup": setup}
+            ]}})
+            .to_string(),
+        );
+        let bead = yard.client().bead("yd-crm").unwrap();
+        assert_eq!(bead.asks[0].setup.as_ref(), Some(asked));
+        assert_eq!(bead.asks[0].options.len(), 2);
+        assert_eq!(bead.asks[0].recommend, 1);
     }
 
     #[test]

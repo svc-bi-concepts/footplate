@@ -263,6 +263,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `DeclineAsk` | `d`, on an open card: the ask declined with words, not a pick and not "you decide"; a secret ask with none |
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
 | `ApproveAsk` | `cmd+enter` (`ctrl+enter` on Linux) or the Approve button, on a run ask's card: the ask named, and nothing of the command |
+| `ApproveSetup` | the same key and button, on a setup ask's card: the preset pick with the account together — the typed values, or the candidate taken. A value is in the call's body and in nothing else of the window |
 | `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read; shift-`x` or the head's button: every notice read |
 
@@ -978,6 +979,32 @@ ran:` there, with the command and, under it, what it printed; one the yard
 has not carried out yet reads `approved, being carried out:`, and one whose
 carrying out failed reads `approved, failed:` with the failure under it.
 
+A setup ask proposes a source pack to set up, with the account and the
+grants that go with it: its card has the yard's block with what approving
+does, in one line, and the yard's sentences for what it changes, each on
+its own line — the pack, each source with where its credential goes and
+each call with its method and path, the mint with its digest, the
+account, and the grants with their grantee. Under the block is the
+account choice: each candidate the yard lists with the account its file
+holds, to take with a tap, or the secret field to type another in. The
+presets stand to pick under that, each with what it grants, and the
+take-backs close the block; the ask's own texts stand behind one tap, for
+checking the yard's reading against them. ⌘↵ (`ctrl+enter` on Linux) or
+the Approve button approves the preset pick with the account together;
+Enter alone approves nothing. Afterwards the window says `approved, being
+carried out:` with the pack, the preset and who the grants are for, since
+the server carries the setup out after the call; among the decided it
+reads `approved, ran:` once the yard has carried it out, or `approved,
+failed:` where that failed, with what it printed under it. An approval
+the yard refuses is shown whole on the card, as when the yard has changed
+since the ask was written, and a call that ends with no answer is never
+said to be approved or not: the queue is read again for what the yard
+says. Where the yard takes no approval from this window, the card says so
+in place of the button, with the command that approves in a terminal in a
+block that copies it. `x` puts a setup ask
+aside and `d` declines it with words; one put aside can be approved from
+its card under "Decided".
+
 | Key | Does |
 |---|---|
 | `enter` | sends the draft, the line and the files attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
@@ -997,8 +1024,8 @@ carrying out failed reads `approved, failed:` with the failure under it.
 | a click on a folded history row | opens it to show its rows, shut |
 | `/`, in decisions | opens the history with its filter typed in; `esc` leaves the filter, and what is typed stands |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
-| `i`, on a card | types the words in, or a secret in its field; the window holds the card's keys |
-| `cmd+enter` (`ctrl+enter` on Linux), on a run ask's card | approves it: the yard runs the command the card shows. No other card answers to it, and Enter alone approves nothing |
+| `i`, on a card | types the words in, or a secret in its field; a setup ask's account too. The window holds the card's keys |
+| `cmd+enter` (`ctrl+enter` on Linux), on a run or setup ask's card | approves it: the yard runs the command the card shows, or applies the setup with the preset pick and the account. No other card answers to it, and Enter alone approves nothing |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | shift-`x`, on the open `yard` row | marks every notice read, as the button in the row's head does, shown with their count while one is unread |
 | `x`, on an open card | puts the ask aside |
