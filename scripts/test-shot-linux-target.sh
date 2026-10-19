@@ -1,7 +1,8 @@
 #!/bin/sh
 # Each checkout's shot builds in its own directory under the shared target
 # volume, launches that binary, and prunes stale trees before building: no
-# shot ever runs another checkout's binary.
+# shot ever runs another checkout's binary. The live list it hands the prune
+# names each checkout's tree exactly as its own.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -58,6 +59,7 @@ case "$command" in
         printf '%s\n' "$*" >> "$MOCK_LOG"
         case "$*" in
             *swaymsg*-t\ get_tree*) echo '{"app_id":"footplate"}' ;;
+            *cat*.shot-live-*) cat > "$MOCK_LOG.stdin" ;;
         esac
         exit 0
         ;;
@@ -75,7 +77,18 @@ cat > "$tmp/bin/sleep" <<'MOCK_SLEEP'
 #!/bin/sh
 exit 0
 MOCK_SLEEP
-chmod +x "$tmp/bin/docker" "$tmp/bin/sleep"
+# The depot's live checkouts, as `git worktree list --porcelain` prints
+# them: both checkouts under test, so each shot's live list names both.
+# GIT_FAIL=1 says git cannot list them.
+cat > "$tmp/bin/git" <<MOCK_GIT
+#!/bin/sh
+if [ "\${GIT_FAIL:-0}" = 1 ]; then
+    exit 1
+fi
+printf 'worktree %s\nHEAD 0000000\nbranch refs/heads/main\n\n' "$tmp/t1/checkout"
+printf 'worktree %s\nHEAD 0000000\nbranch refs/heads/yard/x\n\n' "$tmp/t2/checkout"
+MOCK_GIT
+chmod +x "$tmp/bin/docker" "$tmp/bin/sleep" "$tmp/bin/git"
 
 fail() {
     echo "test-shot-linux-target.sh: $1" >&2
@@ -130,5 +143,36 @@ grep -F -q -- "/target/.shot-active/checkout-$key1-" "$tmp/log-t1" \
     || fail "the shot registered no active target marker"
 grep -F -q -- "rm -f /target/.shot-active/checkout-$key1-" "$tmp/log-t1" \
     || fail "the shot did not remove its active target marker"
+
+# The live list reaches the prune helper: the shot writes its depot's live
+# trees (each checkout's tree named exactly as its own, plus the release
+# tree sharing the volume) and hands the file to the prune, then removes it.
+grep -F -q -- "cat > /target/.shot-live-" "$tmp/log-t1" \
+    || fail "the shot wrote no live list"
+prune_line=$(grep -F 'shot-linux-prune.sh' "$tmp/log-t1" | head -n 1)
+case "$prune_line" in
+    *"/target/.shot-live-"*) ;;
+    *) fail "the prune took no live list: $prune_line" ;;
+esac
+for want in "checkout-$key1" "release-checkout-$key1" "checkout-$key2" "release-checkout-$key2"; do
+    grep -F -x -q -- "$want" "$tmp/log-t1.stdin" \
+        || fail "the live list names no $want: $(cat "$tmp/log-t1.stdin" 2>/dev/null)"
+done
+grep -F -q -- "rm -f /target/.shot-live-" "$tmp/log-t1" \
+    || fail "the shot did not remove its live list"
+
+# Where git cannot list the depot, the shot prunes as before, with no live
+# list, and says so.
+fallback=$(GIT_FAIL=1 MOCK_LOG=$tmp/log-fallback PATH="$tmp/bin:$PATH" "$tmp/t1/checkout/scripts/shot-linux.sh" 2>"$tmp/stderr-fallback")
+note_shot "$fallback"
+fallback_prune=$(grep -F 'shot-linux-prune.sh' "$tmp/log-fallback" | head -n 1)
+case "$fallback_prune" in
+    *".shot-live-"*) fail "a shot with no live list pruned with one: $fallback_prune" ;;
+esac
+if grep -F -q -- "cat > /target/.shot-live-" "$tmp/log-fallback"; then
+    fail "a shot with no live list wrote one"
+fi
+grep -F -q "could not list the depot's checkouts" "$tmp/stderr-fallback" \
+    || fail "a shot with no live list did not say so: $(cat "$tmp/stderr-fallback")"
 
 echo "test-shot-linux-target.sh: pass"

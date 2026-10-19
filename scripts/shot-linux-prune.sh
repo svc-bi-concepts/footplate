@@ -3,12 +3,17 @@
 # them was written in the last week. Active builds leave markers so another
 # build cannot prune a tree while it is in use. Says what went, on stderr;
 # files at the volume's root are left alone.
+# With a live list (a fifth argument naming a file with one live tree name
+# per line), a removed checkout's tree goes at once instead of after a
+# week, and its markers go with it; a live checkout's tree keeps the 7-day
+# rule. Without one, prune as before.
 set -e
 
 root=${1:?target volume is required}
 own=${2:?own build tree is required}
 marker=${3:?active build marker is required}
 label=${4:-shot-linux.sh}
+live_list=${5:-}
 active=$root/.shot-active
 mkdir -p "$active"
 
@@ -24,15 +29,29 @@ for stale_marker in "$active"/*; do
     fi
 done
 
+# A missing live list is an old caller, or a caller whose list never
+# arrived: prune as before, never from an empty list.
+have_live=false
+if [ -n "$live_list" ]; then
+    if [ -f "$live_list" ] && [ -r "$live_list" ]; then
+        have_live=true
+    else
+        echo "$label: no live list at $live_list; pruning as before" >&2
+    fi
+fi
+live() {
+    grep -F -x -q "$1" "$live_list" 2>/dev/null
+}
+
 for d in "$root"/*; do
     [ -d "$d" ] || continue
     if [ "$d" = "$own" ]; then
         continue
     fi
-    if find "$d" -mtime -7 -print 2>/dev/null | grep -q .; then
+    name=${d##*/}
+    if [ "$name" = ".shot-active" ]; then
         continue
     fi
-    name=${d##*/}
     in_use=false
     for shot in "$active/$name-"*; do
         if [ -f "$shot" ]; then
@@ -43,9 +62,37 @@ for d in "$root"/*; do
     if [ "$in_use" = true ]; then
         continue
     fi
+    if [ "$have_live" = true ] && ! live "$name"; then
+        if rm -rf "$d"; then
+            echo "$label: pruned build tree of a removed checkout $d" >&2
+        else
+            echo "$label: could not prune build tree of a removed checkout $d" >&2
+        fi
+        continue
+    fi
+    if find "$d" -mtime -7 -print 2>/dev/null | grep -q .; then
+        continue
+    fi
     if rm -rf "$d"; then
         echo "$label: pruned stale build tree $d" >&2
     else
         echo "$label: could not prune stale build tree $d" >&2
     fi
 done
+
+# Markers of removed checkouts go with their trees: a crashed shot's marker
+# must not guard its tree forever. After the loop, so a marker still guards
+# its tree for this run.
+if [ "$have_live" = true ]; then
+    for m in "$active"/*; do
+        [ -f "$m" ] || continue
+        if [ "$m" = "$marker" ]; then
+            continue
+        fi
+        tree=${m##*/}
+        tree=${tree%-*}
+        if ! live "$tree"; then
+            rm -f "$m"
+        fi
+    done
+fi

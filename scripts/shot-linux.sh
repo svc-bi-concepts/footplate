@@ -131,6 +131,16 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 
+# The build tree's name for a checkout's path: its directory's name through
+# the container's alphabet, then a hash of the path, so two checkouts with
+# the same directory name stay apart. One function for this shot's own tree
+# and the live list below, so the two can never disagree.
+tree_name() {
+    _base=$(basename "$1")
+    _base=$(printf '%s' "$_base" | tr -c 'a-zA-Z0-9_.-' '-' | tr 'A-Z' 'a-z')
+    _hash=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+    printf '%s-%s\n' "$_base" "$_hash"
+}
 # One container per checkout, from its directory's name: two builders' shots
 # never share one, and a container always looks at the checkout that made it.
 # SHOT_CONTAINER names another one. The container is removed when the shot
@@ -147,15 +157,17 @@ target_vol=footplate-shot-target
 # the checkout's path keeps two checkouts with the same directory name
 # apart; only the registry and git checkouts in cargo's home are still
 # shared, and cargo locks those.
-path_hash=$(printf '%s' "$root" | cksum | cut -d' ' -f1)
-target_dir=/target/$suffix-$path_hash
-target_marker=/target/.shot-active/$suffix-$path_hash-$$
+tree=$(tree_name "$root")
+target_dir=/target/$tree
+target_marker=/target/.shot-active/$tree-$$
+live_file=/target/.shot-live-$$
 
 # The shot leaves nothing behind: the container goes when the script ends,
 # however it ends.
 cleanup() {
     # Let later shots prune this tree once this shot has finished using it.
     docker exec "$name" rm -f "$target_marker" >/dev/null 2>&1 || true
+    docker exec "$name" rm -f "$live_file" >/dev/null 2>&1 || true
     docker rm -f "$name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -173,10 +185,41 @@ linux_provision "$name"
 echo "shot-linux.sh: container $name, volumes $cargo_vol $target_vol" >&2
 
 # Build trees of checkouts long gone are pruned before building: each costs
-# GBs no shot will warm from. Only trees with nothing written in the last
-# week go, never this shot's own or another active shot's, and the helper
-# says what went.
-docker exec "$name" sh /src/scripts/shot-linux-prune.sh /target "$target_dir" "$target_marker" >&2
+# GBs no shot will warm from. The depot's live checkouts go to the helper,
+# so a removed checkout's tree goes at once; a live checkout's tree keeps
+# the 7-day rule. Never this shot's own or another active shot's, and the
+# helper says what went.
+live_arg=""
+if live_paths=$(git -C "$root" worktree list --porcelain 2>/dev/null); then
+    live_names=$(printf '%s\n' "$live_paths" | sed -n 's/^worktree //p' | {
+        while IFS= read -r live_checkout; do
+            [ -n "$live_checkout" ] || continue
+            live_tree=$(tree_name "$live_checkout")
+            # A live checkout's release tree shares the volume
+            # (scripts/release.sh): list it too, so a shot never drops a
+            # release it warms from.
+            printf '%s\nrelease-%s\n' "$live_tree" "$live_tree"
+        done
+        # This checkout runs this shot, so it is live even where git did
+        # not list it.
+        live_own=$(tree_name "$root")
+        printf '%s\nrelease-%s\n' "$live_own" "$live_own"
+    })
+    if [ -n "$live_names" ] \
+        && printf '%s\n' "$live_names" | docker exec -i "$name" sh -c "cat > $live_file" >/dev/null 2>&1; then
+        live_arg=$live_file
+    else
+        echo "shot-linux.sh: could not write the live list; pruning as before" >&2
+    fi
+else
+    echo "shot-linux.sh: could not list the depot's checkouts; pruning as before" >&2
+fi
+if [ -n "$live_arg" ]; then
+    docker exec "$name" sh /src/scripts/shot-linux-prune.sh /target "$target_dir" "$target_marker" shot-linux.sh "$live_arg" >&2
+    docker exec "$name" rm -f "$live_arg" >/dev/null 2>&1 || true
+else
+    docker exec "$name" sh /src/scripts/shot-linux-prune.sh /target "$target_dir" "$target_marker" >&2
+fi
 
 docker exec "$name" sh -c 'cd /src && /cargo/bin/cargo build --locked' >&2
 
