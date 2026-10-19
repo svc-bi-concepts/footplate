@@ -21875,6 +21875,7 @@ mod tests {
     fn the_banner_counts_what_waits_on_you() {
         assert_eq!(waits_head(1), "1 waits on you");
         assert_eq!(waits_head(2), "2 wait on you");
+        assert_eq!(waits_head(55), "55 wait on you");
         assert_eq!(quiet_head(false, 1), "▸ Quiet · 1");
         assert_eq!(quiet_head(true, 5), "▾ Quiet · 5");
     }
