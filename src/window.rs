@@ -11103,14 +11103,6 @@ impl Footplate {
         self.column(body, palette, cx)
     }
 
-    /// One arrival of the board: the title, the bead's route as a
-    /// strip of one dot per stage, and faint the id, line and remark on
-    /// the last line. The expected arrival stands in mono at the row's
-    /// end, right-aligned, with a late mark in red beneath it instead
-    /// of beside the row; any other remark stays in the row, a red one
-    /// in the warn colour, amber in the accent, with `you` first among
-    /// whom it waits for. The platform stands over the row, as its
-    /// group's head, and not in it. A click opens the bead's details.
     /// One row of the departures board: the expected arrival in
     /// mono, the bead's title with its headcode faint after it, the
     /// platform as a plain word, the line, and the remark last in its
@@ -13743,14 +13735,27 @@ impl Footplate {
                     .pb_1()
                     .child(
                         div()
-                            .debug_selector({
-                                let (flow, stage) = (flow.name.clone(), stage.stage.clone());
-                                move || format!("column {flow} {stage} head")
-                            })
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(stage.stage.clone()),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .children(lamp_dot(
+                                stage_lamp(stage),
+                                format!("column {} {} lamp", flow.name, stage.stage),
+                                palette,
+                            ))
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let (flow, stage) =
+                                            (flow.name.clone(), stage.stage.clone());
+                                        move || format!("column {flow} {stage} head")
+                                    })
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(stage.stage.clone()),
+                            ),
                     )
                     .child(match stage.terminal {
                         true => div()
@@ -13825,14 +13830,26 @@ impl Footplate {
                     .pb_1()
                     .child(
                         div()
-                            .debug_selector({
-                                let flow = flow.name.clone();
-                                move || format!("column {flow} backlog head")
-                            })
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(stage.stage.clone()),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .children(lamp_dot(
+                                stage_lamp(stage),
+                                format!("column {} backlog lamp", flow.name),
+                                palette,
+                            ))
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let flow = flow.name.clone();
+                                        move || format!("column {flow} backlog head")
+                                    })
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(stage.stage.clone()),
+                            ),
                     )
                     .child(
                         div()
@@ -13945,6 +13962,7 @@ impl Footplate {
             .rounded_lg()
             .border_1()
             .border_color(palette.line)
+            .bg(palette.side)
             .flex()
             .flex_col()
             .gap_1()
@@ -17912,10 +17930,9 @@ mod tests {
         ])
     }
 
-    /// The board the fake yard serves: three rows, draft's two around
-    /// review's one, beside the platforms in travel order, review
-    /// before draft, so the first appearance differs from the served
-    /// order.
+    /// The board the fake yard serves: three rows in served order and
+    /// an extra platforms list in a different order, which the flat
+    /// board does not use to regroup them.
     fn arrivals_board() -> String {
         json!({"result": {
             "rows": arrivals_board_rows(),
@@ -18160,7 +18177,7 @@ mod tests {
                 {"name": "yardr", "kind": "git", "travelling": 5, "flows": [
                     {"name": "default", "type": "", "source": "store", "stages": [
                         {"stage": "backlog", "group": "mckean", "human": true,
-                         "lamp": "none", "terminal": false, "beads": backlog},
+                         "lamp": "turn", "terminal": false, "beads": backlog},
                         {"stage": "new", "group": "muse-builders", "human": false,
                          "lamp": "turn", "terminal": false, "limit": 3, "taken": 2,
                          "beads": [
@@ -23801,6 +23818,18 @@ mod tests {
             );
             assert!(
                 drawn(cx, &format!("column default {stage} group")),
+                "{stage}"
+            );
+        }
+        for stage in ["backlog", "new", "review"] {
+            assert!(
+                drawn(cx, &format!("column default {stage} lamp")),
+                "{stage}"
+            );
+        }
+        for stage in ["decide", "siding", "merged"] {
+            assert!(
+                !drawn(cx, &format!("column default {stage} lamp")),
                 "{stage}"
             );
         }
