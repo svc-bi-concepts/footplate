@@ -9715,7 +9715,7 @@ impl Footplate {
                     .id("keys card")
                     .debug_selector(|| "keys card".to_string())
                     .max_w(rems(38.))
-                    .max_h(relative(0.85))
+                    .max_h(relative(0.9))
                     .overflow_y_scroll()
                     .rounded_lg()
                     .border_1()
