@@ -3490,6 +3490,12 @@ impl Footplate {
             self.keep_typed(&from, cx);
         }
         self.returning = None;
+        // The pointer's mark on a letter is of the yard that is left: a
+        // seq alone names a letter, so the yard shown next would have its
+        // own mail of that number under the bar. Its emoji's mark goes
+        // with it, as where the open row changes.
+        self.react_hover = None;
+        self.emoji_hover = None;
         let words = std::mem::take(&mut self.ask_words);
         if !words.is_empty() {
             self.kept_words.insert(self.yard.clone(), words);
@@ -6961,6 +6967,13 @@ impl Footplate {
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shut_menu();
         self.settings_open = !self.settings_open;
+        // The sheet takes the whole window: no letter is drawn under it, and
+        // a pointer that leaves one is told of no leave. The mark goes with
+        // the sheet, or the bar would wait over that letter when the
+        // conversation shows again. Its emoji's mark goes with it, as where
+        // the open row changes.
+        self.react_hover = None;
+        self.emoji_hover = None;
         // A card under the settings is not in view, and neither is its
         // field: nothing typed of a secret waits there.
         self.forget_secret(cx);
@@ -7667,7 +7680,15 @@ impl Footplate {
                 }
                 this.switch_busy = None;
                 match down {
-                    Ok(down) if down.confirm => this.switch_question = Some(down),
+                    Ok(down) if down.confirm => {
+                        // The question takes the conversation's place: no
+                        // letter is drawn under it, and the pointer that
+                        // leaves one is told of no leave. The mark goes
+                        // with it, as with the settings, and its emoji's.
+                        this.react_hover = None;
+                        this.emoji_hover = None;
+                        this.switch_question = Some(down);
+                    }
                     Ok(down) => {
                         let troubles = down.troubles();
                         if !troubles.is_empty() {
@@ -12462,8 +12483,15 @@ impl Footplate {
 
     /// The letter's head, with the bar of reactions at its right while the
     /// pointer stands on the letter: the head is the letter's first line,
-    /// where it has one.
-    fn entry_head(&self, entry: &Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// where it has one. `at` is the time it says: the time alone where a
+    /// separator above names the day, with the date where none does.
+    fn entry_head(
+        &self,
+        entry: &Entry,
+        at: String,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let seq = entry.seq;
         Self::hover_react(
             seq,
@@ -12483,8 +12511,9 @@ impl Footplate {
         )
         .child(
             div()
+                .debug_selector(|| format!("clock {seq} {at}"))
                 .text_color(palette.faint)
-                .child(model::clock(&entry.at, &chrono::Local)),
+                .child(at),
         )
         .child(
             div()
@@ -12679,12 +12708,17 @@ impl Footplate {
         row.into_any_element()
     }
 
+    /// A mail among the yard row's notices. No separator names its day
+    /// there, so its head says the date with the time, as a notice does.
     fn entry(&self, entry: Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let head = entry.head;
         div()
             .flex()
             .flex_col()
-            .when(head, |el| el.child(self.entry_head(&entry, palette, cx)))
+            .when(head, |el| {
+                let at = model::clock(&entry.at, &chrono::Local);
+                el.child(self.entry_head(&entry, at, palette, cx))
+            })
             .child(self.entry_body(entry, palette, cx))
             .into_any_element()
     }
@@ -12757,7 +12791,10 @@ impl Footplate {
                 out.push(day_break(day, palette));
             }
             if entry.head {
-                out.push(reading_row(self.entry_head(&entry, palette, cx), true));
+                // A separator above names the day, over this group or an
+                // earlier one of it: the head says the time alone.
+                let at = model::clock_time(&entry.at, &chrono::Local);
+                out.push(reading_row(self.entry_head(&entry, at, palette, cx), true));
             }
             out.push(reading_row(self.entry_body(entry, palette, cx), false));
         }
@@ -17806,6 +17843,16 @@ mod tests {
             .to_string()
     }
 
+    /// `at` (RFC 3339) in the zone of the person reading, written as
+    /// `format` has it: the time a head says, whatever zone the test runs in.
+    fn local(at: &str, format: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(at)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format(format)
+            .to_string()
+    }
+
     fn mails(yard: &Yard, texts: &[&str]) {
         let mails: Vec<serde_json::Value> = texts
             .iter()
@@ -18328,6 +18375,150 @@ mod tests {
         assert!(!reacting(&view, cx), "by the keys");
     }
 
+    /// The settings take the whole window while they show: no letter is
+    /// drawn under them, and a pointer that leaves the one it stood on is
+    /// told of no leave. The bar of reactions does not wait over that letter
+    /// when the conversation shows again, nor does the zoom of the emoji the
+    /// pointer stood on. (Read at `reacting`, as above.)
+    #[gpui::test]
+    fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_the_settings_were_open(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        let reacting = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.reacting(12))
+        };
+        let emoji = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.emoji_hover.clone())
+        };
+
+        // The pointer on the letter, the settings open, the pointer to the
+        // place of the list, and the settings shut.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(reacting(&view, cx));
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+        hover_on(cx, "rows");
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None, "on the letter");
+        assert!(!reacting(&view, cx), "on the letter");
+
+        // The same from an emoji of the bar. The pointer on the letter puts
+        // the bar over it again, and nothing of the emoji stands.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(reacting(&view, cx));
+        assert_eq!(emoji(&view, cx), None);
+        hover_on(cx, "react 12 🎉");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Bar)));
+        assert_eq!(emoji(&view, cx), Some((12, "🎉".to_string())));
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+        hover_on(cx, "rows");
+        view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None, "on the bar");
+        assert!(!reacting(&view, cx), "on the bar");
+        assert_eq!(emoji(&view, cx), None, "on the bar");
+    }
+
+    /// A switch of yard holds the yard aside and shows the other: the
+    /// letters of the yard left are not drawn, and the seq alone names a
+    /// letter, so the other yard's mail of that number would stand under
+    /// the mark the pointer left behind. The bar does not wait over it, in
+    /// the other yard or when this one is shown again.
+    #[gpui::test]
+    fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_another_yard_was_open(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let (view, cx) = opened_on_two_yards(dir.path(), (&near, &second), &Told::new(), true, cx);
+        let reacting = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.reacting(12))
+        };
+
+        // The pointer on mail 12, the second home shown, which has a mail
+        // 12 of its own; the pointer to the place of the list, and this
+        // machine's yard shown again.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(reacting(&view, cx));
+        view.update_in(cx, |v, window, cx| v.switch_to("second home", window, cx));
+        assert_eq!(open_yard(&view, cx), "second home");
+        wait(cx, "the second home's conversation", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None, "in the second home");
+        assert!(!reacting(&view, cx), "in the second home");
+        hover_on(cx, "rows");
+        view.update_in(cx, |v, window, cx| v.switch_to("this machine", window, cx));
+        assert_eq!(open_yard(&view, cx), "this machine");
+        wait(cx, "this machine's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None, "back on this machine");
+        assert!(!reacting(&view, cx), "back on this machine");
+
+        // The pointer on the letter puts the bar over it again.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(reacting(&view, cx));
+    }
+
+    /// The question before stopping stands where the conversation does,
+    /// with the list beside it: no letter is drawn under it, and a pointer
+    /// that leaves the one it stood on when the question came is told of no
+    /// leave. The bar does not wait over that letter once the question is
+    /// answered.
+    #[gpui::test]
+    fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_the_question_before_stopping_stood(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status.1", 0, &standin::status(true, false));
+        standin::answers(&program, "status", 0, &standin::status(true, false));
+        standin::answers(&program, "down.1", 1, &standin::down_confirm());
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the running yard read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+
+        // Stop asks first, and the pointer stands on the letter when the
+        // question comes.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        view.update(cx, |v, cx| v.stop_yard(cx));
+        wait(cx, "the question", |cx| {
+            settled(&view, cx) && drawn(cx, "stop question")
+        });
+        hover_on(cx, "leave running");
+        click_on(cx, "leave running");
+        wait(cx, "left running", |cx| {
+            view.read_with(cx, |v, _| v.switch_question.is_none())
+        });
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None);
+        assert!(!view.read_with(cx, |v, _| v.reacting(12)));
+    }
+
     /// The yard row draws a mail's head and body in one element, with
     /// nothing between them: the bar floats over the head's line there
     /// too, and moves nothing.
@@ -18377,6 +18568,37 @@ mod tests {
         hover_on(cx, "react 31 👍");
         assert_eq!(pointer_on(&view, cx), Some((31, Piece::Bar)));
         assert_eq!(stand(cx), at_rest, "the bar moved a mail");
+    }
+
+    /// No separator names a day on the yard row, where a mail stands among
+    /// notices that say their dates: its head says the date with the time,
+    /// not the time alone as the conversation's heads do.
+    #[gpui::test]
+    fn a_mail_on_the_yard_row_says_its_date_with_its_time(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.converse(
+            "yard",
+            vec![
+                json!({"seq": 30, "at": "2026-10-08T09:31:00Z", "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": true}),
+            ],
+        );
+        mails(&yard, &["Hello."]);
+        let (view, cx) = opened(&yard, &["Hello."], cx);
+        view.update_in(cx, |v, window, cx| v.select(Selected::Yard, window, cx));
+        wait(cx, "the yard's mail on the yard row", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.selected() == Some(&Selected::Yard) && m.yard_mail().len() == 1
+                })
+            })
+        });
+        frames(cx);
+        let at = "2026-10-08T09:31:00Z";
+        let dated = local(at, "%m-%d %H:%M");
+        let time = local(at, "%H:%M");
+        assert!(drawn(cx, &format!("clock 30 {dated}")));
+        assert!(!drawn(cx, &format!("clock 30 {time}")));
     }
 
     /// Where the text of the mail `seq` is drawn.
@@ -18630,18 +18852,37 @@ mod tests {
             &yard,
             &["the grant is ready", "correction the grant is not ready"],
         );
-        let (_, cx) = opened(
-            &yard,
-            &["the grant is ready", "correction the grant is not ready"],
-            cx,
-        );
+        // The label says the word, so the text under it starts after it;
+        // the plain mail's text is as it was written.
+        let (view, cx) = opened(&yard, &["the grant is ready", "the grant is not ready"], cx);
         // The correction carries its label above its text; the plain mail
         // carries none.
         assert!(!drawn(cx, "correction 12"));
         assert!(drawn(cx, "correction 13"));
+        // What is drawn under the label is what a drag over it selects: the
+        // text from its first letter to its last.
+        let said = "the grant is not ready";
+        let (from, to) = (
+            place(cx, 13, said, 0, 1.),
+            place(cx, 13, said, said.len(), -1.),
+        );
+        drag(cx, from, to);
+        assert_eq!(selected(&view, cx).as_deref(), Some(said));
         // The yardmaster idles in jo's yard: the header says so beside
         // the name.
         assert!(drawn(cx, "conversation state"));
+    }
+
+    /// A text that is the word alone draws the label and no body: the label
+    /// says all of it.
+    #[gpui::test]
+    fn a_correction_that_is_its_word_alone_draws_the_label_and_no_text(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &["**Correction:**"]);
+        let (_, cx) = opened(&yard, &[""], cx);
+        assert!(drawn(cx, "correction 12"));
+        assert!(!drawn(cx, "text 12"));
     }
 
     #[gpui::test]
@@ -25751,6 +25992,49 @@ yardr.dev
             middle <= pane + px(1.),
             "the composer stands off the column's middle: {frame:?} in {rows:?}"
         );
+    }
+
+    /// A head stands under the separator that names its day, so it says
+    /// the time alone: the first group of a day, and a later group of the
+    /// same day under the same separator. The mails are far enough apart
+    /// to fall on two days in any zone.
+    #[gpui::test]
+    fn the_heads_under_a_day_s_separator_say_the_time_alone(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "one", "read": true},
+                {"seq": 13, "at": "2026-10-13T09:33:00Z", "from": "yardmaster", "to": "jo", "text": "two", "read": true},
+                {"seq": 14, "at": "2026-10-13T09:41:00Z", "from": "jo", "to": "yardmaster", "text": "three", "read": true},
+                {"seq": 15, "at": "2026-10-15T08:05:00Z", "from": "yardmaster", "to": "jo", "text": "four", "read": true},
+            ]})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &["one", "two", "three", "four"], cx);
+        // Two groups on the 13th, the second past the first's five minutes
+        // and under the one separator, and one on the 15th under its own.
+        let entries = view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries());
+        let heads: Vec<bool> = entries.iter().map(|e| e.head).collect();
+        let days: Vec<bool> = entries.iter().map(|e| e.day.is_some()).collect();
+        assert_eq!(heads, [true, false, true, true]);
+        assert_eq!(days, [true, false, false, true]);
+
+        // Each head says the time of its group in the reader's zone, and
+        // no date: the separator above names it.
+        for (seq, at) in [
+            (12, "2026-10-13T09:30:00Z"),
+            (14, "2026-10-13T09:41:00Z"),
+            (15, "2026-10-15T08:05:00Z"),
+        ] {
+            let time = local(at, "%H:%M");
+            let dated = local(at, "%m-%d %H:%M");
+            assert!(drawn(cx, &format!("clock {seq} {time}")), "mail {seq}");
+            assert!(!drawn(cx, &format!("clock {seq} {dated}")), "mail {seq}");
+        }
+        // The mail that reads under the first head has none of its own.
+        assert!(!drawn(cx, "head 13"));
     }
 
     /// The notice under the mail stands in the reading column, with the

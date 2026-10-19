@@ -280,7 +280,8 @@ pub struct Entry {
     /// `Yesterday`, or the weekday with the day and the month.
     pub day: Option<String>,
     /// The mail amends what came before: its first word is `correction`,
-    /// and it carries the label, so it reads as no new thought.
+    /// and it carries the label, so it reads as no new thought. Its `text`
+    /// is what follows the word, which the label says.
     pub correction: bool,
     /// The asks and bead ids its text names that the yard said, each
     /// where it stands in its block: the chips, and what opening one
@@ -2257,7 +2258,7 @@ impl Model {
             "answered" if ask.option_label == YOU_DECIDE => Vec::new(),
             _ => vec![ask.asker.as_str()],
         };
-        let at = asked_clock(&ask.since, zone);
+        let at = clock_time(&ask.since, zone);
         if !at.is_empty() {
             detail.push(&at);
         }
@@ -3427,12 +3428,18 @@ impl Model {
             };
             before = Some(l);
             let text = plain(&l.text);
+            // A correction's label says its word: its text is what follows
+            // it, and the references stand in that.
+            let (correction, text) = match correction(&text) {
+                Some(said) => (true, said.to_string()),
+                None => (false, text),
+            };
             let (refs, asks) = self.entry_refs(&text, &known, &now);
             out.push(Entry {
                 seq: l.seq,
                 at: l.at.clone(),
                 from: l.from.clone(),
-                correction: correction(&text),
+                correction,
                 text,
                 files: l.files.clone(),
                 mine,
@@ -4464,6 +4471,20 @@ where
     }
 }
 
+/// A time (RFC 3339, as the yard gives it) as the time of day alone, in the
+/// zone of the person reading: `13:20`. For a time that stands under a day
+/// the screen names already: the conversation's separator, the history's
+/// day group. Nothing for a time that cannot be read.
+pub fn clock_time<Tz: TimeZone>(at: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match DateTime::parse_from_rfc3339(at) {
+        Ok(t) => t.with_timezone(zone).format("%H:%M").to_string(),
+        Err(_) => String::new(),
+    }
+}
+
 /// Whether the mail `after` reads under `before`'s name and time: from the
 /// same sender, within five minutes of it, on the same day in the zone of
 /// the person reading. A time that cannot be read stands on its own.
@@ -4483,15 +4504,64 @@ fn grouped<Tz: TimeZone>(before: &Letter, after: &Letter, zone: &Tz) -> bool {
     first.with_timezone(zone).date_naive() == next.with_timezone(zone).date_naive()
 }
 
-/// Whether the mail amends what came before: its first word is
-/// `correction`, however it is capitalized, and whatever follows it.
-/// A longer word that starts that way is none: `correctional` is no
-/// correction.
-fn correction(text: &str) -> bool {
-    text.trim_start()
-        .split(|c: char| !c.is_alphanumeric())
-        .find(|word| !word.is_empty())
-        .is_some_and(|first| first.eq_ignore_ascii_case("correction"))
+/// What the mail says under its `correction` label, where it amends what
+/// came before: its first word is `correction`, however it is capitalized,
+/// and whatever follows it. A longer word that starts that way is none:
+/// `correctional` is no correction.
+///
+/// The label says the word, so the text starts after it: the marks before
+/// the word (`**`, `(`), those stuck to it (`**:`, `)`), the space after it
+/// and a dash set off by spaces go with it. What opens the text itself
+/// stays, so that its Markdown does. Where the word does not cut out
+/// cleanly the text stays whole, as it was drawn before: a word with
+/// letters stuck to it (`correction's`) is a word of the text, and a mark
+/// stuck before it that nothing closes beside it wraps the whole text
+/// (`**Correction: …**`), which would be left with its closing alone.
+fn correction(text: &str) -> Option<&str> {
+    let from = text.find(char::is_alphanumeric)?;
+    let (before, from_word) = text.split_at(from);
+    let (word, after) = from_word.split_at(
+        from_word
+            .find(|c: char| !c.is_alphanumeric())
+            .unwrap_or(from_word.len()),
+    );
+    if !word.eq_ignore_ascii_case("correction") {
+        return None;
+    }
+    let rest = after.trim_start_matches(|c: char| !c.is_alphanumeric() && !c.is_whitespace());
+    let opening = &before[before.trim_end_matches(|c: char| !c.is_whitespace()).len()..];
+    let closing = &after[..after.len() - rest.len()];
+    if rest.starts_with(char::is_alphanumeric) || !closes(opening, closing) {
+        return Some(text);
+    }
+    // A dash between spaces parts the word from the text; one after a line
+    // break is a list's bullet, and stays.
+    let spaced = rest.trim_start_matches([' ', '\t']);
+    let rest = match spaced.strip_prefix(['-', '–', '—']) {
+        Some(dashed) if dashed.is_empty() || dashed.starts_with(char::is_whitespace) => dashed,
+        _ => rest,
+    };
+    Some(rest.trim_start())
+}
+
+/// Whether the marks `closing`, stuck after a word, close the marks
+/// `opening` stuck before it, each in the order it was opened: `(` by `)`,
+/// `**` by `:**`.
+fn closes(opening: &str, closing: &str) -> bool {
+    let mut left = closing;
+    opening.chars().rev().all(|open| {
+        let close = match open {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '<' => '>',
+            other => other,
+        };
+        left.find(close).is_some_and(|at| {
+            left = &left[at + close.len_utf8()..];
+            true
+        })
+    })
 }
 
 /// The day `at` (RFC 3339, as the yard gives it) falls on in the zone of
@@ -4717,18 +4787,6 @@ fn decided_day(day: Option<NaiveDate>, today: NaiveDate) -> String {
         return format!("{} {}", day.day(), day.format("%b"));
     }
     format!("{} {} {}", day.day(), day.format("%b"), day.year())
-}
-
-/// An ask's asked time as the history's rows show it: `11:53` in the zone
-/// of the person reading. Nothing for a time that cannot be read.
-fn asked_clock<Tz: TimeZone>(since: &str, zone: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    match DateTime::parse_from_rfc3339(since) {
-        Ok(t) => t.with_timezone(zone).format("%H:%M").to_string(),
-        Err(_) => String::new(),
-    }
 }
 
 /// What became of an ask its asker asks no more: `taken back by <by>:
@@ -6607,7 +6665,7 @@ mod tests {
             "**correction**: the card is ask 6893",
             "(correction) the card is ask 6893",
         ] {
-            assert!(correction(text), "{text:?}");
+            assert!(correction(text).is_some(), "{text:?}");
         }
         for text in [
             "",
@@ -6615,7 +6673,7 @@ mod tests {
             "correctional facilities",
             "a correction follows",
         ] {
-            assert!(!correction(text), "{text:?}");
+            assert_eq!(correction(text), None, "{text:?}");
         }
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.conversation(
@@ -6625,8 +6683,93 @@ mod tests {
                 letter(13, "yardmaster", "jo", "correction the card is ask 6893"),
             ],
         );
-        let corrections: Vec<bool> = m.entries().into_iter().map(|e| e.correction).collect();
+        let entries = m.entries();
+        let corrections: Vec<bool> = entries.iter().map(|e| e.correction).collect();
         assert_eq!(corrections, [false, true]);
+        // The label says the word: the text under it starts after it, and
+        // the plain mail is as it was written.
+        let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["the card is ask 6891", "the card is ask 6893"]);
+    }
+
+    #[test]
+    fn a_correction_s_text_starts_after_its_word_and_the_marks_around_it() {
+        for (text, said) in [
+            (
+                "correction the edit card is ask 6893, not 6891",
+                "the edit card is ask 6893, not 6891",
+            ),
+            ("Correction: the card is ask 6893", "the card is ask 6893"),
+            ("  CORRECTION - ask 6893", "ask 6893"),
+            ("Correction — ask 6893", "ask 6893"),
+            (
+                "**correction**: the card is ask 6893",
+                "the card is ask 6893",
+            ),
+            (
+                "**Correction:** the card is ask 6893",
+                "the card is ask 6893",
+            ),
+            ("(correction) the card is ask 6893", "the card is ask 6893"),
+            ("*Correction:* the card is ask 6893", "the card is ask 6893"),
+            ("[correction] the card is ask 6893", "the card is ask 6893"),
+            ("correction\n\nthe card is ask 6893", "the card is ask 6893"),
+            // The word alone leaves nothing under the label.
+            ("correction", ""),
+            ("**correction**:", ""),
+            ("(Correction)", ""),
+            ("correction -", ""),
+        ] {
+            assert_eq!(correction(text), Some(said), "{text:?}");
+        }
+        // What opens the text stays as written, with its Markdown: a mark
+        // that is not stuck to the word is the text's.
+        for (text, said) in [
+            (
+                "correction: `src/model.rs` is the file",
+                "`src/model.rs` is the file",
+            ),
+            (
+                "correction **ask 6893**, not 6891",
+                "**ask 6893**, not 6891",
+            ),
+            ("correction: (the card)", "(the card)"),
+            ("correction: -3 degrees", "-3 degrees"),
+            (
+                "Correction:\n- ask 6893\n- ask 6891",
+                "- ask 6893\n- ask 6891",
+            ),
+        ] {
+            assert_eq!(correction(text), Some(said), "{text:?}");
+        }
+        // Where the word does not cut out cleanly the text stays whole: a
+        // word with letters stuck to it is a word of the text, and a mark
+        // that opens the whole text and nothing closes beside the word
+        // would be left with its closing alone.
+        for text in [
+            "correction's effect",
+            "correction-ish",
+            "correction:the card",
+            "**Correction: ask 6893, not 6891.**",
+            "(correction: the card is ask 6893.)",
+        ] {
+            assert_eq!(correction(text), Some(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_correction_s_chips_stand_in_the_text_under_its_label() {
+        let m = refs_model(
+            &["correction: the card is ask 3."],
+            vec![refs_open("yardr-n8ta", 3)],
+            vec![],
+        );
+        let entries = m.entries();
+        assert!(entries[0].correction);
+        assert_eq!(entries[0].text, "the card is ask 3.");
+        assert_eq!(entries[0].refs.len(), 1);
+        assert_eq!(&entries[0].text[entries[0].refs[0].range.clone()], "ask 3");
+        assert_eq!(entries[0].asks.len(), 1);
     }
 
     #[test]
@@ -8621,6 +8764,11 @@ mod tests {
         assert_eq!(clock("2026-12-31T23:30:00.123456Z", &zone), "01-01 01:30");
         assert_eq!(clock("", &zone), "");
         assert_eq!(clock("yesterday", &zone), "");
+        // The time of day alone, for a time that stands under its day.
+        assert_eq!(clock_time("2026-10-05T11:20:00Z", &zone), "13:20");
+        assert_eq!(clock_time("2026-12-31T23:30:00.123456Z", &zone), "01:30");
+        assert_eq!(clock_time("", &zone), "");
+        assert_eq!(clock_time("yesterday", &zone), "");
     }
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nthe rest";
