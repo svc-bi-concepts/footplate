@@ -1928,6 +1928,17 @@ struct Anchor {
     off: Pixels,
 }
 
+/// A piece of a letter the pointer can stand on: its head, its body, or
+/// the bar of reactions floating over it. They are drawn apart, and each
+/// tells the window of the pointer on its own: see
+/// [`Footplate::hover_react`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Piece {
+    Head,
+    Body,
+    Bar,
+}
+
 /// Where a yard stood when it was left for another: each mode's open row
 /// and its list's scroll, and the scroll of what the open row showed. Of
 /// a conversation and the yard row that is how far above its newest the
@@ -2394,9 +2405,9 @@ pub struct Footplate {
     /// The rail's mode icon the pointer stands on, if any: its glyph
     /// brightens, as quiet text does.
     rail_hover: Option<Mode>,
-    /// The mail the pointer stands on, by seq, if any: its row of
-    /// reactions to tap stands under it.
-    react_hover: Option<u64>,
+    /// The mail the pointer stands on, by seq, and the piece of it, if
+    /// any: its bar of reactions to tap floats over it.
+    react_hover: Option<(u64, Piece)>,
     /// The ask decline was pressed on with an empty line: the next Enter
     /// sends the typed words as the decline, and esc leaves it.
     declining: Option<(String, u64)>,
@@ -2725,12 +2736,13 @@ impl Footplate {
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("keys") {
             this.show_keys = true;
         }
-        // The reactions-hover shot poses the pointer on the answer, so
-        // its row of reactions to tap stands under it. A debug build's
+        // The reactions-hover shot poses the pointer on the last mail,
+        // which reads under the one above's head: its bar of reactions
+        // to tap floats over the end of its first line. A debug build's
         // alone, as above.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-hover") {
-            this.react_hover = Some(13);
+            this.react_hover = Some((15, Piece::Body));
         }
         this
     }
@@ -12365,31 +12377,51 @@ impl Footplate {
             )
     }
 
-    /// The mail `seq` knows the pointer stands on it: while it does,
-    /// the row of reactions a tap puts stands under the mail.
+    /// The mail `seq` knows the pointer stands on `piece` of it: while it
+    /// does, the bar of reactions a tap puts floats over the mail.
+    ///
+    /// The pointer can leave one piece for another within a single move,
+    /// and the window tells of the two in no fixed order. A piece that is
+    /// left clears only the mark it set itself, so that it never undoes
+    /// the mark of the piece the pointer came to.
     fn hover_react(
         seq: u64,
+        piece: Piece,
         el: gpui::Stateful<Div>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let entity = cx.entity();
         el.on_hover(move |hovered, _, cx| {
             entity.update(cx, |this, cx| {
+                let here = Some((seq, piece));
                 this.react_hover = match hovered {
-                    true => Some(seq),
-                    false => None,
+                    true => here,
+                    false if this.react_hover == here => None,
+                    false => return,
                 };
                 cx.notify();
             });
         })
     }
 
+    /// Whether the bar of reactions floats over the mail `seq`: the
+    /// pointer stands on it, and the yard takes reactions.
+    fn reacting(&self, seq: u64) -> bool {
+        self.react_hover.is_some_and(|(at, _)| at == seq)
+            && self.model.as_ref().is_some_and(|m| !m.react_too_old())
+    }
+
+    /// The letter's head, with the bar of reactions at its right while the
+    /// pointer stands on the letter: the head is the letter's first line,
+    /// where it has one.
     fn entry_head(&self, entry: &Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let seq = entry.seq;
         Self::hover_react(
             seq,
+            Piece::Head,
             div()
                 .id(("head", seq))
+                .relative()
                 .flex()
                 .gap_2()
                 .debug_selector(|| format!("head {seq}")),
@@ -12408,14 +12440,24 @@ impl Footplate {
                 .when(entry.mine, |el| el.text_color(palette.faint))
                 .child(entry.from.clone()),
         )
+        .when(self.reacting(seq), |el| {
+            el.child(self.react_row(seq, &entry.reactions, palette, cx))
+        })
         .into_any_element()
     }
 
+    /// The letter's body. A letter that reads under another's head has no
+    /// head of its own, so its bar of reactions floats over its first line.
     fn entry_body(&self, entry: Entry, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let seq = entry.seq;
-        let hovered = self.react_hover == Some(seq)
-            && self.model.as_ref().is_some_and(|m| !m.react_too_old());
-        Self::hover_react(seq, div().id(("body", seq)).w_full().flex().flex_col(), cx)
+        let hovered = !entry.head && self.reacting(seq);
+        let body = div()
+            .id(("body", seq))
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col();
+        Self::hover_react(seq, Piece::Body, body, cx)
             // A correction carries its label above its text, so it reads
             // as no new thought.
             .when(entry.correction, |el| {
@@ -12481,10 +12523,15 @@ impl Footplate {
             .into_any_element()
     }
 
-    /// The reactions a tap puts on the mail, in a row under it while the
-    /// pointer stands on it: the yard's fixed set, the user's own current
-    /// one on the open ground. A tap on that one takes it away, and a tap
-    /// on another puts it instead.
+    /// The reactions a tap puts on the mail, in a bar that floats over the
+    /// top right of the letter while the pointer stands on it: it is
+    /// absolute in the head or body that draws it, so it takes no room
+    /// and the letter keeps its place and its height. Its own ground and
+    /// hairline keep the text under it from showing through, the kit's
+    /// popover shadow lifts it, and it blocks the mouse, so that a tap on
+    /// it is no press on that text. The yard's fixed set, the user's own
+    /// current one on the open ground. A tap on that one takes it away,
+    /// and a tap on another puts it instead.
     fn react_row(
         &self,
         seq: u64,
@@ -12497,13 +12544,36 @@ impl Footplate {
             .iter()
             .find(|r| r.from == me)
             .map(|r| r.emoji.as_str());
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .gap_1()
-            .pl_4()
-            .pt_1()
-            .debug_selector(|| format!("react row {seq}"));
+        // The bar is a piece of the letter of its own: the mouse it blocks
+        // is the letter's, so the letter's head or body no longer has the
+        // pointer where the bar stands.
+        let mut row = Self::hover_react(
+            seq,
+            Piece::Bar,
+            div()
+                .id(("react", seq))
+                .absolute()
+                .top_0()
+                .right_0()
+                .flex()
+                .flex_row()
+                .gap_1()
+                .px_1()
+                .rounded_md()
+                .border_1()
+                .border_color(palette.line)
+                .bg(palette.ground)
+                // The kit's popover shadow, 6 pixels down and 20 blurred.
+                .shadow(vec![gpui::BoxShadow {
+                    color: palette.shadow.into(),
+                    offset: gpui::point(px(0.), px(6.)),
+                    blur_radius: px(20.),
+                    spread_radius: px(0.),
+                }])
+                .occlude()
+                .debug_selector(|| format!("react row {seq}")),
+            cx,
+        );
         for emoji in model::REACTIONS {
             let tapped = format!("react {seq} {emoji}");
             row = row.child(
@@ -17758,6 +17828,279 @@ mod tests {
         hover_on(cx, "text 13");
         cx.run_until_parked();
         assert!(!drawn(cx, "react row 13"));
+    }
+
+    /// The yardmaster's mails 12 and 13 form one group, the first with the
+    /// head over them and a reaction of jo's under it, and jo's 14 on the
+    /// next day heads another: a letter with a head, one that reads under
+    /// it, and another with a head. The yard takes reactions.
+    fn grouped_letters(yard: &Yard) {
+        yard.answer("React", "{}");
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "one", "read": true,
+                 "reactions": [{"from": "jo", "emoji": "👍"}]},
+                {"seq": 13, "at": "2026-10-13T09:33:00Z", "from": "yardmaster", "to": "jo", "text": "two", "read": true},
+                {"seq": 14, "at": "2026-10-14T08:05:00Z", "from": "jo", "to": "yardmaster", "text": "three", "read": true},
+            ]})
+            .to_string(),
+        );
+    }
+
+    /// What the window keeps of where the pointer stands on a letter.
+    fn pointer_on(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<(u64, Piece)> {
+        view.read_with(cx, |v, _| v.react_hover)
+    }
+
+    /// Where every row of the open conversation stands, and the head, the
+    /// text and the reactions of each mail: what a bar of reactions
+    /// floating over a letter must leave as it was.
+    fn letters_stand(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Vec<Bounds<Pixels>> {
+        frames(cx);
+        let (mut stand, mails) = view.read_with(cx, |v, _| {
+            let rows: Vec<Bounds<Pixels>> = (0..)
+                .map_while(|ix| v.conversation.bounds_for_item(ix))
+                .collect();
+            let mails: Vec<(u64, bool, bool)> = v
+                .model
+                .as_ref()
+                .map(|m| {
+                    m.entries()
+                        .into_iter()
+                        .map(|e| (e.seq, e.head, !e.reactions.is_empty()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (rows, mails)
+        });
+        for (seq, head, reacted) in mails {
+            if head {
+                stand.push(bounds_now(cx, &format!("head {seq}")));
+            }
+            stand.push(bounds_now(cx, &format!("text {seq}")));
+            if reacted {
+                stand.push(bounds_now(cx, &format!("reactions {seq}")));
+            }
+        }
+        stand
+    }
+
+    /// Whether two edges stand at one place, within a pixel.
+    fn near(a: Pixels, b: Pixels) -> bool {
+        f32::from(a - b).abs() < 1.
+    }
+
+    /// The bar of reactions floats over the top right of the letter: in the
+    /// head's line where the letter has a head, over the first line of its
+    /// body where it reads under another's. It takes no room: with the
+    /// pointer on a letter, every row and every mail stands where it stood
+    /// with the pointer elsewhere.
+    #[gpui::test]
+    fn the_bar_of_reactions_floats_over_a_letter_and_moves_nothing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        let heads: Vec<bool> = view.read_with(cx, |v, _| {
+            let entries = v.model.as_ref().unwrap().entries();
+            entries.iter().map(|e| e.head).collect()
+        });
+        assert_eq!(heads, [true, false, true]);
+        let at_rest = letters_stand(&view, cx);
+        assert_eq!(pointer_on(&view, cx), None);
+
+        // The pointer on a letter's head or on its text, a letter with a
+        // head or one without: the bar is over that letter, and no row,
+        // head, text or reaction stands anywhere else than at rest.
+        for (on, seq) in [
+            ("text 12", 12),
+            ("head 12", 12),
+            ("text 13", 13),
+            ("head 14", 14),
+            ("text 14", 14),
+        ] {
+            hover_on(cx, on);
+            assert_eq!(pointer_on(&view, cx).map(|(at, _)| at), Some(seq), "{on}");
+            assert!(drawn(cx, &format!("react row {seq}")), "{on}");
+            assert_eq!(
+                letters_stand(&view, cx),
+                at_rest,
+                "the pointer on {on} moved a letter"
+            );
+        }
+
+        // A letter with a head has the bar in the head's line, at the
+        // column's right.
+        hover_on(cx, "text 12");
+        let bar = bounds_of(cx, "react row 12");
+        let (head, text) = (bounds_now(cx, "head 12"), bounds_now(cx, "text 12"));
+        assert!(
+            near(head.right(), text.right()),
+            "the head stands as wide as the column: {head:?} over {text:?}"
+        );
+        assert!(
+            near(bar.right(), head.right()),
+            "the bar is at the column's right: {bar:?} in {head:?}"
+        );
+        assert!(
+            near(bar.top(), head.top()),
+            "the bar is in the head's line: {bar:?} in {head:?}"
+        );
+        assert!(
+            bar.bottom() <= text.top(),
+            "the bar is over none of the text: {bar:?} over {text:?}"
+        );
+
+        // One that reads under another's has it over the first line of its
+        // body.
+        hover_on(cx, "text 13");
+        let bar = bounds_of(cx, "react row 13");
+        let text = bounds_now(cx, "text 13");
+        assert!(
+            near(bar.right(), text.right()),
+            "the bar is at the column's right: {bar:?} over {text:?}"
+        );
+        assert!(
+            near(bar.top(), text.top()),
+            "the bar is over the first line: {bar:?} over {text:?}"
+        );
+
+        // Off the letters it is gone, and they stand as they stood.
+        hover_on(cx, "conversation top");
+        assert_eq!(pointer_on(&view, cx), None);
+        assert_eq!(letters_stand(&view, cx), at_rest);
+    }
+
+    /// The pointer goes from the letter onto the bar, along it, and back,
+    /// and the bar stays over the letter: the window tells of the piece
+    /// the pointer left and of the one it came to in no fixed order, and
+    /// each of the pieces (the head, the body, the bar) keeps only its own
+    /// mark.
+    #[gpui::test]
+    fn the_bar_stays_while_the_pointer_goes_from_the_letter_onto_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+
+        // A letter with a head has the bar in the head, a line above its
+        // text: the pointer goes up to it from the text, across the gap
+        // between the two rows.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        hover_on(cx, "react 12 👍");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Bar)));
+        hover_on(cx, "react 12 🎉");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Bar)));
+        // Back down onto the text, and up onto the head and the bar again.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        hover_on(cx, "head 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Head)));
+        hover_on(cx, "react 12 ✅");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Bar)));
+
+        // A tap on the bar reacts, and the bar is still there.
+        click_on(cx, "react 12 ✅");
+        wait(cx, "the reaction put", |_| {
+            yard.asked("React") == [json!({"seq": 12, "emoji": "✅", "actor": "jo"})]
+        });
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Bar)));
+
+        // The letter that reads under another's has the bar over its text.
+        hover_on(cx, "text 13");
+        assert_eq!(pointer_on(&view, cx), Some((13, Piece::Body)));
+        hover_on(cx, "react 13 🎉");
+        assert_eq!(pointer_on(&view, cx), Some((13, Piece::Bar)));
+        hover_on(cx, "text 13");
+        assert_eq!(pointer_on(&view, cx), Some((13, Piece::Body)));
+
+        // Off the letter, the bar goes.
+        hover_on(cx, "conversation top");
+        assert_eq!(pointer_on(&view, cx), None);
+    }
+
+    /// A press on the bar is no press on the text under it: it starts no
+    /// selection there, as a press beside the bar does.
+    #[gpui::test]
+    fn a_press_on_the_bar_is_no_press_on_the_text_under_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+
+        // A drag along the text of 13 selects it.
+        let (from, to) = (place(cx, 13, "two", 0, 0.), place(cx, 13, "two", 3, 0.));
+        drag(cx, from, to);
+        assert_eq!(selected(&view, cx).as_deref(), Some("two"));
+
+        // The bar is over the text's first line, at its right: a drag from
+        // the bar to the start of the text starts no selection, and the
+        // press drops the one there was, as a press outside the text does.
+        hover_on(cx, "text 13");
+        let on_bar = bounds_of(cx, "react 13 🎉").center();
+        drag(cx, on_bar, from);
+        assert_eq!(selected(&view, cx), None);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("React"), Vec::<serde_json::Value>::new());
+    }
+
+    /// The yard row draws a mail's head and body in one element, with
+    /// nothing between them: the bar floats over the head's line there
+    /// too, and moves nothing.
+    #[gpui::test]
+    fn the_bar_of_reactions_floats_over_a_mail_on_the_yard_row_too(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("React", "{}");
+        yard.converse(
+            "yard",
+            vec![
+                json!({"seq": 30, "at": "2026-10-08T09:31:00Z", "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": true}),
+                json!({"seq": 31, "at": "2026-10-08T09:32:00Z", "from": "yard", "to": "jo", "text": "not delivered: rate_limited", "read": true}),
+            ],
+        );
+        mails(&yard, &["Hello."]);
+        let (view, cx) = opened(&yard, &["Hello."], cx);
+        view.update_in(cx, |v, window, cx| v.select(Selected::Yard, window, cx));
+        wait(cx, "the yard's mail on the yard row", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.selected() == Some(&Selected::Yard) && m.yard_mail().len() == 2
+                })
+            })
+        });
+        frames(cx);
+        let stand = |cx: &mut VisualTestContext| {
+            ["head 30", "text 30", "head 31", "text 31"].map(|at| bounds_of(cx, at))
+        };
+        let at_rest = stand(cx);
+
+        hover_on(cx, "text 31");
+        assert_eq!(pointer_on(&view, cx), Some((31, Piece::Body)));
+        let bar = bounds_of(cx, "react row 31");
+        assert_eq!(stand(cx), at_rest, "the bar moved a mail");
+        let (head, text) = (bounds_now(cx, "head 31"), bounds_now(cx, "text 31"));
+        assert!(
+            near(bar.right(), head.right()),
+            "the bar is at the list's right: {bar:?} in {head:?}"
+        );
+        assert!(
+            near(bar.top(), head.top()),
+            "the bar is in the head's line: {bar:?} in {head:?}"
+        );
+        // The head's line is no taller than the bar, within a pixel, for
+        // the rounding of the lines' heights.
+        assert!(
+            bar.bottom() <= text.top() + px(1.),
+            "the bar is over none of the text: {bar:?} over {text:?}"
+        );
+
+        // The pointer goes up onto the bar, and the bar stays.
+        hover_on(cx, "react 31 👍");
+        assert_eq!(pointer_on(&view, cx), Some((31, Piece::Bar)));
+        assert_eq!(stand(cx), at_rest, "the bar moved a mail");
     }
 
     /// Where the text of the mail `seq` is drawn.

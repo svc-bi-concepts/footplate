@@ -209,8 +209,8 @@ open ask and the 156-item history open: day groups and a folded
 look-alike row), `decisions-filtered` (that history with `docs`
 in its filter), `keys` (the cheatsheet open over an open card),
 `reactions` (the conversation with the parties' reactions under
-two mails) and `reactions-hover` (that conversation with the row
-of reactions to tap under one mail).
+three mails) and `reactions-hover` (that conversation with the bar
+of reactions to tap floating over one mail).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
@@ -264,7 +264,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `Mail` | Enter, in a conversation with a crew member or a user of this yard, your own too |
 | `PutBlob` for each file, then `Mail` with their hashes and names | Enter, when files are attached to the draft |
 | `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
-| `React` | a tap on one of the row of reactions under the hovered mail: the emoji, or nothing on the user's own current one, which takes it away |
+| `React` | a tap on one of the bar of reactions floating over the hovered mail: the emoji, or nothing on the user's own current one, which takes it away |
 | `AnswerAsk` | Enter, or the Answer button, on a card: the option chosen — the recommendation until another is picked — with the line's words in the one answer; an ask with no options is answered with words |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
 | `PutBlob` for each file, then `AddNote` with their hashes and names | Enter, on a card whose note has files attached |

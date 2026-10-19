@@ -51,8 +51,8 @@
 # and a folded look-alike row), `decisions-filtered` (that history
 # with `docs` in its filter), `keys` (the cheatsheet open over an
 # open card), `reactions` (the conversation with the parties'
-# reactions under two mails) and `reactions-hover` (that
-# conversation with the row of reactions to tap under one mail).
+# reactions under three mails) and `reactions-hover` (that
+# conversation with the bar of reactions to tap floating over one mail).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the

@@ -47,8 +47,8 @@ use crate::yard::Env;
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, the yardmaster's conversation naming an ask and two
 /// bead ids, the cheatsheet open over an open card, and the
-/// yardmaster's conversation with the parties' reactions under two
-/// mails, with the row of reactions to tap under one of them.
+/// yardmaster's conversation with the parties' reactions under three
+/// mails, with the bar of reactions to tap floating over one of them.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -1047,10 +1047,13 @@ fn populate(yard: &Yard, state: &str) {
         }
         "reactions" | "reactions-hover" => {
             // The yardmaster's conversation with the parties' reactions
-            // under two mails: jo's on the question, and both parties'
-            // on the answer, with a third mail without any. The hover
-            // state poses the pointer on the answer, so its row of
-            // reactions to tap stands under it.
+            // under three mails: jo's on the question, both parties' on
+            // the answer, and jo's on a last one, with a mail between
+            // without any. The last reads under the one above's head and
+            // is long enough to run under the bar. The hover state poses
+            // the pointer on it, so its bar of reactions to tap floats
+            // over the end of its first line with jo's own marked, and
+            // no mail moves.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -1067,6 +1070,10 @@ fn populate(yard: &Yard, state: &str) {
                                    {"from": "yardmaster", "emoji": "👀"}]},
                     {"seq": 14, "at": "2026-10-08T09:42:00Z", "from": "yardmaster", "to": "jo",
                      "text": "Landed.", "read": true},
+                    {"seq": 15, "at": "2026-10-08T09:43:00Z", "from": "yardmaster", "to": "jo",
+                     "text": "On main. The gate passed, the branch is gone and its worktree with it, and no other bead waits on this one. The next release has no blockers: its notes are drafted and wait for you whenever you want them.",
+                     "read": true,
+                     "reactions": [{"from": "jo", "emoji": "🎉"}]},
                 ]})
                 .to_string(),
             );
@@ -2008,13 +2015,15 @@ mod tests {
                 }
                 "reactions" | "reactions-hover" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
-                    // Three mails, the first with one reaction and the
-                    // second with both parties', the third with none.
+                    // Four mails, the first with one reaction and the
+                    // second with both parties', the third with none and
+                    // the fourth with one.
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
-                    assert_eq!(letters.len(), 3, "{state}");
+                    assert_eq!(letters.len(), 4, "{state}");
                     assert_eq!(letters[0].reactions.len(), 1, "{state}");
                     assert_eq!(letters[1].reactions.len(), 2, "{state}");
                     assert!(letters[2].reactions.is_empty(), "{state}");
+                    assert_eq!(letters[3].reactions.len(), 1, "{state}");
                 }
                 "refs" => {
                     // The run ask the first mail names, and the two bead

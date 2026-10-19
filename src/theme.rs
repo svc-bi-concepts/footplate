@@ -158,6 +158,9 @@ pub struct Palette {
     pub selection: Rgba,
     /// The ground under code, over whatever the text stands on.
     pub code: Rgba,
+    /// The colour of the kit's popover shadow, under what floats over the
+    /// window's content: the bar of reactions over a mail.
+    pub shadow: Rgba,
 }
 
 impl Palette {
@@ -190,6 +193,7 @@ impl Palette {
                 ok: rgb(0x7fb069),
                 selection: rgba(0xd3602f55),
                 code: rgba(0xffffff14),
+                shadow: rgba(0x04050766),
             }
         } else {
             Palette {
@@ -210,6 +214,7 @@ impl Palette {
                 ok: rgb(0x3d8b4f),
                 selection: rgba(0xd3602f40),
                 code: rgba(0x0000000f),
+                shadow: rgba(0x1414141f),
             }
         }
     }
@@ -408,6 +413,16 @@ mod tests {
             assert_ne!(palette.peer, palette.text);
             assert_ne!(palette.peer, palette.faint);
         }
+    }
+
+    #[test]
+    fn the_shadow_is_the_kit_s_popover_shadow_in_either_look() {
+        // --shadow-popover is rgba(4, 5, 7, .4) on dusk and
+        // rgba(20, 20, 20, .12) on the light theme.
+        let dark = Palette::of(Look::Dark, WindowAppearance::Dark);
+        let light = Palette::of(Look::Light, WindowAppearance::Light);
+        assert_eq!(dark.shadow, rgba(0x04050766));
+        assert_eq!(light.shadow, rgba(0x1414141f));
     }
 
     #[test]
