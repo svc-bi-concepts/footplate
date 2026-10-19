@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>footplate Lines panel mock — footplate-qskt</title>
+<style>
+:root{
+--dusk-950:#101112;--dusk-900:#161718;--dusk-850:#1C1D1F;--dusk-800:#232426;--dusk-750:#2A2B2E;--dusk-700:#333538;
+--ink-100:#E9E9EA;--ink-300:#ABADB0;--ink-500:#808286;
+--yard-400:#E2794A;--yard-500:#D3602F;--yard-600:#B54E22;
+--signal-green:#4CC38A;--signal-red:#E5675A;
+--sans:"IBM Plex Sans","Noto Sans","Cantarell","Segoe UI",system-ui,sans-serif;
+--mono:"IBM Plex Mono",ui-monospace,"DejaVu Sans Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#101112;font-family:var(--sans);padding:24px}
+body.single{padding:0}
+body.single h1,body.single .sub,body.single h2{display:none}
+h1{color:#E9E9EA;font:600 18px/24px var(--sans);margin-bottom:4px}
+.sub{color:#ABADB0;font:400 13px/18px var(--sans);margin-bottom:8px;max-width:900px}
+h2{color:#E9E9EA;font:600 14px/18px var(--sans);margin:22px 0 8px}
+.framewrap{display:inline-block;border:1px solid #333538}
+.win{
+--surface-app:var(--dusk-900);--surface-raised:var(--dusk-850);--surface-sunken:var(--dusk-950);
+--surface-hover:var(--dusk-800);--border-subtle:#27282B;--border-strong:var(--dusk-700);
+--text-primary:var(--ink-100);--text-secondary:var(--ink-300);--text-disabled:var(--ink-500);
+--text-accent:var(--yard-400);--accent:var(--yard-500);--status-running:var(--signal-green);--status-error:#E5675A;
+display:flex;background:var(--surface-app);color:var(--text-primary);
+font:400 13px/18px var(--sans);overflow:hidden;text-align:left}
+.win[data-theme="light"]{
+--surface-app:#F7F7F6;--surface-raised:#FFFFFF;--surface-sunken:#EDEDEB;--surface-hover:#EDEDEB;
+--border-subtle:#E2E2DF;--border-strong:#CFCFCB;--text-primary:#161718;--text-secondary:#5B5E64;
+--text-disabled:#8E9196;--text-accent:var(--yard-600);--status-running:#1F9A60;--status-error:#B3382C}
+/* rail, 64px with labels (as shipped) */
+.rail{width:64px;flex:none;border-right:1px solid var(--border-subtle);background:var(--surface-sunken);
+display:flex;flex-direction:column;align-items:center;padding:8px 0;position:relative}
+.chip{width:40px;height:40px;border-radius:8px;background:var(--yard-500);color:#161718;
+font:600 13px/40px var(--sans);text-align:center}
+.mode{width:52px;border-radius:6px;color:var(--text-secondary);text-align:center;padding:4px 0 3px;margin-top:4px}
+.mode .lb{font:400 10px/12px var(--sans)}
+.mode.on{background:var(--surface-hover);color:var(--text-primary)}
+.modewrap{position:relative}
+.badge{position:absolute;top:0;right:0;min-width:16px;height:16px;border-radius:999px;padding:0 4px;
+font:600 11px/16px var(--sans);text-align:center;background:var(--accent);color:#fff}
+.badge.mut{background:var(--border-strong);color:var(--text-primary)}
+.rail .foot{position:absolute;bottom:8px;left:0;right:0;text-align:center}
+/* list, 270px */
+.list{width:270px;flex:none;border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;overflow:hidden;background:var(--surface-app)}
+.status{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border-subtle);flex:none}
+.dot{width:8px;height:8px;border-radius:999px;background:var(--status-running);flex:none}
+.status .st{font-weight:500}
+.status .act{margin-left:auto;color:var(--text-secondary)}
+.sect{display:flex;justify-content:space-between;align-items:baseline;padding:10px 12px 4px;flex:none}
+.sect .t{font-weight:600}.sect .c{color:var(--text-secondary);font-size:12px}
+.lrow{margin:2px 4px;padding:6px 8px;border-radius:6px}
+.lrow.on{background:var(--surface-hover)}
+.lrow .l1{display:flex;justify-content:space-between;gap:8px}
+.lrow .nm{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lrow .l2{font-size:12px;line-height:16px;color:var(--text-secondary)}
+/* pane */
+.pane{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.phead{padding:12px;border-bottom:1px solid var(--border-subtle);flex:none}
+.phead .t{font:600 15px/20px var(--sans)}
+.phead .s{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.phead .sum{font-size:12px;line-height:16px;color:var(--text-secondary);margin-top:2px}
+.phead .sum .w{color:var(--text-primary)}
+.phead .sum .wait{color:var(--text-accent);font-weight:500}
+.phead .row{display:flex;align-items:flex-start;gap:8px}
+.toggle{margin-left:auto;flex:none;display:flex;gap:12px;font-size:12px;padding-top:2px}
+.toggle .on{color:var(--text-primary);font-weight:600}
+.toggle .off{color:var(--text-secondary)}
+.pbody{flex:1;overflow:hidden;padding:12px;position:relative}
+/* panel tracks */
+.track{display:flex;border-bottom:1px solid var(--border-subtle);min-height:64px}
+.namecell{width:120px;flex:none;padding:8px 8px 8px 0}
+.namecell .d{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.namecell .f{font-size:12px;line-height:16px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bcell{width:52px;flex:none;background:var(--surface-sunken);border-left:1px solid var(--border-subtle);
+text-align:center;padding-top:8px}
+.bcell .n{font:600 15px/20px var(--sans)}
+.bcell .w{font-size:11px;line-height:14px;color:var(--text-secondary)}
+.cell{width:92px;flex:none;border-left:1px solid var(--border-subtle);padding:6px 6px 6px 8px;position:relative;background:var(--surface-sunken)}
+.cell.lit{background:var(--surface-raised)}
+.cell .sn{font-size:11px;line-height:14px;color:var(--text-disabled);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell.lit .sn{color:var(--text-secondary)}
+.lamp{display:inline-block;width:8px;height:8px;border-radius:999px;margin-right:4px;vertical-align:0}
+.lamp.turn{background:var(--text-accent)}.lamp.fault{background:var(--status-error)}
+.trackline{height:1px;background:var(--border-strong);margin:5px -6px 5px -8px}
+.trackline.dashed{background:repeating-linear-gradient(90deg,var(--border-strong) 0 5px,transparent 5px 9px);height:1px}
+.hc{display:flex;align-items:center;gap:4px;font:500 12px/16px var(--mono);color:var(--text-primary);white-space:nowrap}
+.hc.work{font-weight:700}
+.hc.turn{color:var(--text-accent)}
+.hc.fault{color:var(--status-error)}
+.hc .rd{width:6px;height:6px;border-radius:999px;background:var(--status-running);flex:none}
+.hc .ld{width:6px;height:6px;border-radius:999px;background:var(--status-error);flex:none;margin-left:auto}
+.hc.more{color:var(--text-secondary);font-family:var(--sans);font-size:12px}
+.stub{display:flex;gap:8px;align-items:center;background:var(--surface-sunken);border-bottom:1px solid var(--border-subtle);
+padding:5px 8px 5px 128px;font-size:12px;color:var(--text-secondary)}
+.stub .hc{font-size:12px}
+.quietrow{padding:8px 0;font-size:12px;color:var(--text-secondary);border-bottom:1px solid var(--border-subtle)}
+.buffer{display:inline-block;width:3px;height:14px;background:var(--text-secondary);vertical-align:-2px;margin-left:4px}
+/* line columns */
+.cols{display:flex;height:100%}
+.col{width:176px;flex:none;border-left:1px solid var(--border-subtle);padding:0 8px;overflow:hidden}
+.col:first-child{border-left:0}
+.colhead{padding:6px 0 6px;border-bottom:1px solid var(--border-strong)}
+.colhead.lamp-turn{border-bottom-color:var(--text-accent)}
+.colhead.lamp-fault{border-bottom-color:var(--status-error)}
+.colhead.dashed{border-bottom-style:dashed}
+.colhead .sn{font-weight:600}
+.colhead .gw{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.card{background:var(--surface-raised);border:1px solid var(--border-subtle);border-radius:8px;padding:8px;margin-top:8px}
+.card .h{font:600 12px/16px var(--mono)}
+.card .ti{font-weight:500}
+.card .m{font-size:12px;line-height:16px;color:var(--text-secondary)}
+.card .m .wait{color:var(--text-accent)}
+.card .m .bad{color:var(--status-error)}
+.card .ex{font:400 12px/16px var(--mono);color:var(--text-secondary)}
+.nothing{font-size:12px;color:var(--text-secondary);padding-top:8px}
+.btitle{padding:3px 0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* departures table */
+.dtable{width:100%;border-collapse:collapse;font-size:13px}
+.dtable th{font:500 12px/16px var(--sans);color:var(--text-secondary);text-align:left;padding:4px 8px 6px 0;border-bottom:1px solid var(--border-subtle)}
+.dtable td{padding:6px 8px 6px 0;border-bottom:1px solid var(--border-subtle);vertical-align:top}
+.dtable .ex{font:400 12px/18px var(--mono);white-space:nowrap}
+.dtable .hc2{font:400 12px/16px var(--mono);color:var(--text-secondary)}
+.dtable .wait{color:var(--text-accent)}
+.dtable .bad{color:var(--status-error)}
+.waitsline{font-size:12px;color:var(--text-accent);font-weight:500;padding-bottom:8px}
+.capline{font-size:12px;color:var(--text-secondary);padding-top:8px}
+</style></head>
+<body>
+<h1>footplate Lines as a signalling panel — mock for design footplate-qskt</h1>
+<p class="sub">Frames are exact pixels: the floor is 616 by 360, the large 1200 by 800, rail 64 and list 270 inside them.
+Tokens copied from yardr-design tokens/colors.css: one rust accent for waiting, green only for the running dot,
+red only for faults. Data is made up but plausible. Panel cells: name 120, backlog 52, stages 92 — the floor
+frame is cut mid-cell on purpose, because the panel scrolls sideways there and never re-lays itself out.</p>
+<div id="frames"></div>
+<script>
+var TRACK = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="butt"><path d="M7 1.5v21M17 1.5v21" stroke-width="2"/><path d="M4.5 5.5h15M4.5 12h15M4.5 18.5h15" stroke-width="3"/></svg>';
+var LAMP = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21v-8"/><circle cx="12" cy="7" r="4"/></svg>';
+var SEM = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 21V4"/><path d="M6 5l11 6"/><circle cx="6" cy="4" r="1.4" fill="currentColor"/></svg>';
+var GEAR = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7" stroke-dasharray="3.2 2.6"/></svg>';
+function rail(){
+  return '<div class="rail"><div class="chip">ya</div>'
+  + '<div class="modewrap"><div class="mode">' + LAMP + '<div class="lb">Crew</div></div><div class="badge">2</div></div>'
+  + '<div class="modewrap"><div class="mode">' + SEM + '<div class="lb">Decide</div></div><div class="badge">2</div></div>'
+  + '<div class="modewrap"><div class="mode on">' + TRACK + '<div class="lb">Lines</div></div><div class="badge mut">3</div></div>'
+  + '<div class="foot"><div class="mode">' + GEAR + '<div class="lb">Settings</div></div></div></div>';
+}
+function list(open){
+  function r(nm,l2,on){return '<div class="lrow'+(on?' on':'')+'"><div class="l1"><div class="nm">'+nm+'</div></div><div class="l2">'+l2+'</div></div>';}
+  return '<div class="list"><div class="status"><div class="dot"></div><div class="st">Running</div><div class="act">Stop</div></div>'
+  + '<div class="sect"><div class="t">Timetable</div><div class="c">7 in transit</div></div>'
+  + r('arrivals','7 in transit', open==='arrivals')
+  + r('yardr','4 in transit', open==='yardr')
+  + r('footplate','2 in transit', open==='footplate')
+  + r('No line','1 in transit', open==='noline')
+  + '<div class="lrow"><div class="l1"><div class="nm" style="color:var(--text-secondary)">&#9656; Quiet &middot; 3 lines</div></div><div class="l2">nothing in transit</div></div>'
+  + '</div>';
+}
+function hc(code, cls, dot){
+  return '<div class="hc '+(cls||'')+'">'+(dot?'<span class="rd"></span>':'')+code+'</div>';
+}
+function cell(stage, lamp, human, codes, terminal){
+  var lit = codes && codes.length;
+  return '<div class="cell'+(lit?' lit':'')+'"><div class="sn">'
+  + (lamp?'<span class="lamp '+lamp+'"></span>':'') + stage + (human?' &middot; people':'')
+  + (terminal?'<span class="buffer" title="buffer stop"></span>':'') + '</div>'
+  + '<div class="trackline'+(human?' dashed':'')+'"></div>'
+  + (codes||[]).join('') + '</div>';
+}
+function track(depot, flow, backlog, cells){
+  return '<div class="track"><div class="namecell"><div class="d">'+depot+'</div><div class="f">'+flow+'</div></div>'
+  + '<div class="bcell"><div class="n">'+backlog+'</div><div class="w">backlog</div></div>' + cells.join('') + '</div>';
+}
+function panel(){
+  var t1 = track('yardr','default',49,[
+    cell('shape','',0,[]),
+    cell('new','',0,[hc('xb5b','work',1), hc('v6q3','')]),
+    cell('review','fault',0,[hc('kxej','fault')]),
+    cell('review-security','',0,[]),
+    cell('approved','',0,[]),
+    cell('merged','',0,[],1)]);
+  var t2 = track('yardr','design',5,[
+    cell('draft','',0,[hc('qskt','work',1)]),
+    cell('decide','turn',1,[hc('0y2t','turn')]),
+    cell('critique','',0,[]),
+    cell('approved','',0,[]),
+    cell('merged','',0,[],1)]);
+  var t3 = track('footplate','default',9,[
+    cell('new','fault',0,[hc('p512','fault')]),
+    cell('review','turn',0,[hc('fc47','turn')]),
+    cell('approved','',0,[]),
+    cell('merged','',0,[],1)]);
+  var stub = '<div class="stub"><span>Elsewhere &middot; 1</span>' + hc('9f2c','') + '</div>';
+  var noline = '<div class="track"><div class="namecell"><div class="d">No line</div><div class="f">no depot</div></div>'
+    + '<div class="cell lit" style="width:240px"><div class="sn">travelling</div><div class="trackline"></div>'
+    + hc('ymkt','') + hc('c546','') + '</div></div>';
+  var quiet = '<div class="quietrow">&#9656; Quiet &middot; yardr-design, signalbox, aiquokka &middot; nothing in transit</div>';
+  return '<div class="phead"><div class="row"><div><div class="t">arrivals</div>'
+  + '<div class="s">7 in transit &middot; all lines</div>'
+  + '<div class="sum"><span class="w">3 working</span> &middot; <span class="wait">2 waiting on you</span> &middot; 1 held</div></div>'
+  + '<div class="toggle"><span class="on">Panel</span><span class="off">Departures</span></div></div></div>'
+  + '<div class="pbody">' + t1 + t2 + t3 + stub + noline + quiet + '</div>';
+}
+function line(){
+  function col(sn, gw, cls, dashed, inner){
+    return '<div class="col"><div class="colhead '+(cls||'')+(dashed?' dashed':'')+'"><div class="sn">'+sn+'</div><div class="gw">'+gw+'</div></div>'+inner+'</div>';
+  }
+  function card(h, ti, m, ex){return '<div class="card"><div class="h">'+h+'</div><div class="ti">'+ti+'</div><div class="m">'+m+'</div><div class="ex">'+ex+'</div></div>';}
+  var backlog = col('backlog','you &middot; to shape','',
+    0,'<div class="nothing">49 waiting</div>'
+    + '<div class="btitle">Crew status should say what bead&hellip;</div><div class="btitle">Landing gate timing flakes&hellip;</div>'
+    + '<div class="btitle">route rm with an unknown id&hellip;</div><div class="btitle">The 55-row waits banner&hellip;</div>'
+    + '<div class="btitle">A secret card&rsquo;s show/hide toggle&hellip;</div><div class="btitle">Socket reads for a remote yard&hellip;</div>'
+    + '<div class="nothing">+43 more</div>');
+  var cols = '<div class="cols">' + backlog
+  + col('shape','yardmaster','',0,'<div class="nothing">nothing here</div>')
+  + col('new','builders &middot; 2 of 3 seats','',0,
+      card('xb5b','Originator 9: the web view leads a group login','worked by builder-2 &middot; 41 min at new','27m&ndash;1h17 &middot; <span class="bad">late by 12m</span>')
+    + card('v6q3','Arrivals rows: the route strip&rsquo;s stages','waits for a seat','40m&ndash;1h'))
+  + col('decide','people &middot; waiting on a person','lamp-turn',1,
+      card('0y2t','Lines as a signalling panel','<span class="wait">waits for you</span> &middot; 2 questions','&mdash;'))
+  + col('review','reviewers &middot; 1 of 2 seats','lamp-fault',0,
+      card('kxej','Socket reads for a remote yard&rsquo;s style','<span class="bad">stalled &middot; session failed</span>','&mdash;'))
+  + col('review-security','sec-review','',0,'<div class="nothing">nothing here</div>')
+  + col('approved','lander','',0,'<div class="nothing">nothing here</div>')
+  + col('merged','terminal <span class="buffer"></span>','',0,'<div class="nothing">nothing here</div>')
+  + '</div>';
+  return '<div class="phead"><div class="t">yardr &middot; default</div><div class="s">4 in transit &middot; 49 in backlog &middot; flow from store</div></div>'
+  + '<div class="pbody" style="padding-top:6px">' + cols + '</div>';
+}
+function departures(){
+  function row(ex, ti, hc2, plat, ln, rem){
+    return '<tr><td class="ex">'+ex+'</td><td>'+ti+' <span class="hc2">'+hc2+'</span></td><td>'+plat+'</td><td>'+ln+'</td><td>'+rem+'</td></tr>';
+  }
+  return '<div class="phead"><div class="row"><div><div class="t">arrivals</div><div class="s">7 in transit &middot; all lines</div></div>'
+  + '<div class="toggle"><span class="off">Panel</span><span class="on">Departures</span></div></div></div>'
+  + '<div class="pbody"><div class="waitsline">2 wait on you</div>'
+  + '<table class="dtable"><tr><th>Expected</th><th>Bead</th><th>Platform</th><th>Line</th><th>Remark</th></tr>'
+  + row('11&ndash;25m','Arrivals rows: the route strip&rsquo;s stages','v6q3','new','yardr','')
+  + row('11&ndash;25m','I made fire: simplify Who owns the fire','ymkt','new','no line','')
+  + row('27m&ndash;1h17','Originator 9: the web view leads a group login','xb5b','new','yardr','<span class="bad">late by 12m</span>')
+  + row('40m&ndash;1h','Crew status should say what bead&hellip;','5bd7','new','yardr','waits for a seat')
+  + row('&mdash;','A secret card&rsquo;s input has a show/hide toggle','fc47','review','footplate','<span class="wait">waits for you</span>')
+  + row('&mdash;','Socket reads for a remote yard&rsquo;s style','kxej','review','yardr','<span class="bad">stalled</span>')
+  + '</table><div class="capline">6 of 7 shown</div></div>';
+}
+var VIEWS = {panel: panel, line: line, departures: departures};
+var HEADS = {
+ 'panel-floor': 'Lines panel &middot; 616 by 360',
+ 'panel-large': 'Lines panel &middot; 1200 by 800',
+ 'line-large': 'One line as columns (yardr &middot; default) &middot; 1200 by 800',
+ 'departures-floor': 'Departures board (arrivals, restyled) &middot; 616 by 360',
+ 'departures-large': 'Departures board (arrivals, restyled) &middot; 1200 by 800'};
+var FRAMES = [
+ {id:'panel-floor-dark', key:'panel-floor', w:616, h:360, theme:'dark', view:'panel', open:'arrivals'},
+ {id:'panel-floor-light', key:'panel-floor', w:616, h:360, theme:'light', view:'panel', open:'arrivals'},
+ {id:'panel-large-dark', key:'panel-large', w:1200, h:800, theme:'dark', view:'panel', open:'arrivals'},
+ {id:'panel-large-light', key:'panel-large', w:1200, h:800, theme:'light', view:'panel', open:'arrivals'},
+ {id:'line-large-dark', key:'line-large', w:1200, h:800, theme:'dark', view:'line', open:'yardr'},
+ {id:'line-large-light', key:'line-large', w:1200, h:800, theme:'light', view:'line', open:'yardr'},
+ {id:'departures-floor-dark', key:'departures-floor', w:616, h:360, theme:'dark', view:'departures', open:'arrivals'},
+ {id:'departures-large-light', key:'departures-large', w:1200, h:800, theme:'light', view:'departures', open:'arrivals'}];
+var only = location.hash ? location.hash.slice(1) : '';
+var html = '';
+FRAMES.forEach(function(f){
+  if (only && only !== f.id) return;
+  var win = '<div class="framewrap"><div class="win" id="'+f.id+'" data-theme="'+f.theme+'" style="width:'+f.w+'px;height:'+f.h+'px">'
+    + rail() + list(f.open) + '<div class="pane">' + VIEWS[f.view]() + '</div></div></div>';
+  html += only ? win : ('<h2>'+HEADS[f.key]+' &middot; '+f.theme+'</h2>' + win);
+});
+document.getElementById('frames').innerHTML = html;
+if (only) document.body.className = 'single';
+</script>
+</body></html>
