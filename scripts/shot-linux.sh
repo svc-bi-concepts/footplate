@@ -133,6 +133,22 @@ case "$look" in ""|light|dark) ;; *)
     exit 2
     ;;
 esac
+# SHOT_TEXT draws the window at that text size, 11 to 20 as the settings
+# name them. Empty is the usual 14, as ever.
+text=${SHOT_TEXT:-}
+case "$text" in
+    "") ;;
+    *[!0-9]*)
+        echo "shot-linux.sh: SHOT_TEXT must be 11 to 20" >&2
+        exit 2
+        ;;
+    *)
+        if [ "$text" -lt 11 ] || [ "$text" -gt 20 ]; then
+            echo "shot-linux.sh: SHOT_TEXT must be 11 to 20" >&2
+            exit 2
+        fi
+        ;;
+esac
 if ! command -v docker >/dev/null 2>&1; then
     echo "shot-linux.sh: docker is not on PATH" >&2
     exit 1
@@ -253,7 +269,7 @@ docker exec "$name" sh /src/scripts/shot-linux-stop.sh /tmp/shots/footplate.pid 
 # driver, so the picture is drawn in software and says so. A state opens it
 # against a fake yard serving that state instead, which the debug build
 # alone reads; empty, the first screen is shot.
-docker exec -e "SHOT_LOOK=$look" "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1
+docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1
     export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
     scratch=$(mktemp -d /tmp/shots/scratch.XXXXXX)
     mkdir -p "$scratch/home" "$scratch/config" "$scratch/data"
@@ -276,11 +292,17 @@ docker exec -e "SHOT_LOOK=$look" "$name" sh -c 'export XDG_RUNTIME_DIR=/run/user
     case "'"$state"'" in stopped|setup) up=false ;; *) up=true ;; esac
     printf "%s\n" "{\"home\": \"/tmp/shot-yard\", \"name\": \"shot\", \"operator\": \"Jo\", \"server\": {\"running\": $up, \"cli_build\": \"shot\"}, \"daemon\": {\"running\": $up, \"pid\": 0, \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot\", \"file\": \"/tmp/shot.service\", \"installed\": false, \"loaded\": false}}, \"herdr_login_service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.herdr.shot\", \"file\": \"/tmp/shot-herdr.service\", \"installed\": false, \"loaded\": false}, \"web\": {\"views\": [], \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot-web\", \"file\": \"/tmp/shot-web.service\", \"installed\": false, \"loaded\": false}}}" > "$bin/status.json"
     # A yard at an address opens from the settings: one far yard, open.
-    # A look for the shot rides in the same file where one is asked for.
-    look_json=""
-    if [ -n "$SHOT_LOOK" ]; then look_json=", \"look\": \"$SHOT_LOOK\""; fi
-    if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\""$look_json"}" > "$scratch/config/footplate/settings.json"; fi
-    if [ -n "$SHOT_LOOK" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != switcher ]; then printf "%s\n" "{\"look\": \"$SHOT_LOOK\"}" > "$scratch/config/footplate/settings.json"; fi
+    # A look or a text size for the shot rides in the same file where
+    # one is asked for.
+    shot_settings=""
+    if [ -n "$SHOT_LOOK" ]; then shot_settings="\"look\": \"$SHOT_LOOK\""; fi
+    if [ -n "$SHOT_TEXT" ]; then
+        if [ -n "$shot_settings" ]; then shot_settings="$shot_settings, "; fi
+        shot_settings="$shot_settings\"text\": $SHOT_TEXT"
+    fi
+    if [ -n "$shot_settings" ]; then shot_json=", $shot_settings"; else shot_json=""; fi
+    if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"$shot_json}" > "$scratch/config/footplate/settings.json"; fi
+    if [ -n "$shot_settings" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != switcher ]; then printf "%s\n" "{$shot_settings}" > "$scratch/config/footplate/settings.json"; fi
     chown -R shot:shot "$scratch"
     su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json SHOT_LOOK='$SHOT_LOOK' FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 

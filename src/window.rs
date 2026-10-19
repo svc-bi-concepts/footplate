@@ -167,19 +167,42 @@ const PANEL_MIN: f32 = 6.;
 const SWITCHER_MIN: f32 = 20.;
 const SWITCHER_MAX: f32 = 30.;
 
-/// A line view's stage column in pixels, and no narrower: the panel's
-/// track straightened, one column per stage in travel order.
+/// A line view's stage column in pixels at the usual text size, and no
+/// narrower: the panel's track straightened, one column per stage in
+/// travel order. Drawn through [`grown`], so it stands 176 wide at the
+/// usual size and grows with the text above it.
 const LINE_COLUMN: f32 = 176.;
 
-/// The departures board's fixed columns in pixels, drawn once:
-/// the expected arrival in mono, the bead's title with its headcode,
-/// the platform, the line, and the remark. Past the pane's edge the
-/// board scrolls sideways; the panel fits instead.
+/// A line view's column head in rems: its name with two lines of group
+/// words under it, bottom-aligned, so a column whose group wraps onto a
+/// second line puts its rule where a column whose group stands on one
+/// line does: the row's rules one straight track, as the panel's heads
+/// have it. A name line with two group lines at gpui's line height,
+/// 1.42 with 2 × 1.21, rounded up. A group that wants a third line
+/// makes its own column taller, as a panel head does.
+const LINE_HEAD: f32 = 3.9;
+
+/// The departures board's columns in pixels at the usual text size,
+/// drawn once: the expected arrival in mono, the bead's title with its
+/// headcode, the platform, the line, and the remark. Drawn through
+/// [`grown`], so each stands its width at the usual size and grows with
+/// the text above it. Past the pane's edge the board scrolls sideways;
+/// the panel fits instead. The line holds this yard's longest depot
+/// names: 88 cut `yardr-hosted` even at the usual size, so 92.
 const BOARD_EXPECTED: f32 = 80.;
 const BOARD_BEAD: f32 = 280.;
 const BOARD_PLATFORM: f32 = 120.;
-const BOARD_LINE: f32 = 88.;
+const BOARD_LINE: f32 = 92.;
 const BOARD_REMARK: f32 = 220.;
+
+/// A column `usual` pixels wide at the usual text size: that wide at
+/// smaller sizes too, and growing with the text above it, since the
+/// words in it stand in rems. A column in pixels alone cut its words at
+/// the larger text sizes; in rems alone it would narrow past what the
+/// design draws. `usual` over the usual 16-pixel rem is its width.
+fn grown(usual: f32) -> Div {
+    div().w(rems(usual / 16.)).min_w(px(usual))
+}
 
 /// How many backlog titles a line view's backlog column lists before
 /// "+N more".
@@ -11313,12 +11336,11 @@ impl Footplate {
         let sel = Selected::Bead(row.bead.clone());
         let remark = you_first(&row.remark, model.me());
         let color = remark_color(&row.remark, &row.tone, model.me(), palette);
-        let mut expected = div()
+        let mut expected = grown(BOARD_EXPECTED)
             .debug_selector({
                 let bead = bead.clone();
                 move || format!("arrival expected {bead}")
             })
-            .w(px(BOARD_EXPECTED))
             .flex_none()
             .truncate()
             .text_xs()
@@ -11356,12 +11378,11 @@ impl Footplate {
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
             .child(expected)
             .child(
-                div()
+                grown(BOARD_BEAD)
                     .debug_selector({
                         let bead = bead.clone();
                         move || format!("arrival bead {bead}")
                     })
-                    .w(px(BOARD_BEAD))
                     .flex_none()
                     .flex()
                     .flex_row()
@@ -11381,8 +11402,7 @@ impl Footplate {
                     .child(headcode),
             )
             .child(
-                div()
-                    .w(px(BOARD_PLATFORM))
+                grown(BOARD_PLATFORM)
                     .flex_none()
                     .truncate()
                     .debug_selector({
@@ -11392,8 +11412,7 @@ impl Footplate {
                     .child(row.platform.clone()),
             )
             .child(
-                div()
-                    .w(px(BOARD_LINE))
+                grown(BOARD_LINE)
                     .flex_none()
                     .truncate()
                     .debug_selector({
@@ -11406,8 +11425,7 @@ impl Footplate {
                     }),
             )
             .child(
-                div()
-                    .w(px(BOARD_REMARK))
+                grown(BOARD_REMARK)
                     .flex_none()
                     .truncate()
                     .text_color(color)
@@ -13411,11 +13429,10 @@ impl Footplate {
     }
 
     /// The departures board's column head: Expected, Bead, Platform,
-    /// Line and Remark over the rows' fixed columns.
+    /// Line and Remark over the rows' columns.
     fn departures_head(&self, palette: Palette) -> impl IntoElement + use<> {
         let cell = |words: &'static str, width: f32| {
-            div()
-                .w(px(width))
+            grown(width)
                 .flex_none()
                 .truncate()
                 .text_xs()
@@ -14161,12 +14178,11 @@ impl Footplate {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut column = div()
+        let mut column = grown(LINE_COLUMN)
             .debug_selector({
                 let (flow, stage) = (flow.name.clone(), stage.stage.clone());
                 move || format!("column {flow} {stage}")
             })
-            .w(px(LINE_COLUMN))
             .flex_none()
             .border_l_1()
             .border_color(palette.line)
@@ -14174,61 +14190,70 @@ impl Footplate {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .pb_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .children(lamp_dot(
-                                stage_lamp(stage),
-                                format!("column {} {} lamp", flow.name, stage.stage),
-                                palette,
-                            ))
-                            .child(
-                                div()
-                                    .debug_selector({
-                                        let (flow, stage) =
-                                            (flow.name.clone(), stage.stage.clone());
-                                        move || format!("column {flow} {stage} head")
-                                    })
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(stage.stage.clone()),
-                            ),
-                    )
-                    .child(match stage.terminal {
-                        true => div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(palette.faint)
-                            .child("terminal")
-                            .child(buffer_stop(
-                                format!("column {} {} stop", flow.name, stage.stage),
-                                palette,
-                            ))
-                            .into_any_element(),
-                        false => div()
-                            .debug_selector({
-                                let (flow, stage) = (flow.name.clone(), stage.stage.clone());
-                                move || format!("column {flow} {stage} group")
-                            })
-                            .truncate()
-                            .text_xs()
-                            .text_color(palette.faint)
-                            .child(stage_group_words(stage))
-                            .into_any_element(),
-                    }),
+                div().flex().flex_col().pb_1().child(
+                    // The name over two group lines, bottom-aligned:
+                    // the rules stand level across columns.
+                    div()
+                        .min_h(rems(LINE_HEAD))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .children(lamp_dot(
+                                    stage_lamp(stage),
+                                    format!("column {} {} lamp", flow.name, stage.stage),
+                                    palette,
+                                ))
+                                .child(
+                                    div()
+                                        .debug_selector({
+                                            let (flow, stage) =
+                                                (flow.name.clone(), stage.stage.clone());
+                                            move || format!("column {flow} {stage} head")
+                                        })
+                                        .truncate()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(stage.stage.clone()),
+                                ),
+                        )
+                        .child(match stage.terminal {
+                            true => div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(palette.faint)
+                                .child("terminal")
+                                .child(buffer_stop(
+                                    format!("column {} {} stop", flow.name, stage.stage),
+                                    palette,
+                                ))
+                                .into_any_element(),
+                            false => div()
+                                .debug_selector({
+                                    let (flow, stage) = (flow.name.clone(), stage.stage.clone());
+                                    move || format!("column {flow} {stage} group")
+                                })
+                                .text_xs()
+                                .text_color(palette.faint)
+                                .child(stage_group_words(stage))
+                                .into_any_element(),
+                        }),
+                ),
             )
-            .child(column_rule(stage_lamp(stage), stage.human, palette));
+            .child(
+                column_rule(stage_lamp(stage), stage.human, palette).debug_selector({
+                    let (flow, stage) = (flow.name.clone(), stage.stage.clone());
+                    move || format!("column {flow} {stage} rule")
+                }),
+            );
         if stage.beads.is_empty() {
             column = column.child(
                 div()
@@ -14256,12 +14281,11 @@ impl Footplate {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut column = div()
+        let mut column = grown(LINE_COLUMN)
             .debug_selector({
                 let flow = flow.name.clone();
                 move || format!("column {flow} backlog")
             })
-            .w(px(LINE_COLUMN))
             .flex_none()
             .border_l_1()
             .border_color(palette.line)
@@ -14269,46 +14293,55 @@ impl Footplate {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .pb_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .children(lamp_dot(
-                                stage_lamp(stage),
-                                format!("column {} backlog lamp", flow.name),
-                                palette,
-                            ))
-                            .child(
-                                div()
-                                    .debug_selector({
-                                        let flow = flow.name.clone();
-                                        move || format!("column {flow} backlog head")
-                                    })
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(stage.stage.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .debug_selector({
-                                let flow = flow.name.clone();
-                                move || format!("column {flow} backlog group")
-                            })
-                            .truncate()
-                            .text_xs()
-                            .text_color(palette.faint)
-                            .child(stage_group_words(stage)),
-                    ),
+                div().flex().flex_col().pb_1().child(
+                    // The name over two group lines, bottom-aligned:
+                    // the rules stand level across columns.
+                    div()
+                        .min_h(rems(LINE_HEAD))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .children(lamp_dot(
+                                    stage_lamp(stage),
+                                    format!("column {} backlog lamp", flow.name),
+                                    palette,
+                                ))
+                                .child(
+                                    div()
+                                        .debug_selector({
+                                            let flow = flow.name.clone();
+                                            move || format!("column {flow} backlog head")
+                                        })
+                                        .truncate()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(stage.stage.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .debug_selector({
+                                    let flow = flow.name.clone();
+                                    move || format!("column {flow} backlog group")
+                                })
+                                .text_xs()
+                                .text_color(palette.faint)
+                                .child(stage_group_words(stage)),
+                        ),
+                ),
             )
-            .child(column_rule(stage_lamp(stage), stage.human, palette))
+            .child(
+                column_rule(stage_lamp(stage), stage.human, palette).debug_selector({
+                    let flow = flow.name.clone();
+                    move || format!("column {flow} backlog rule")
+                }),
+            )
             .child(
                 div()
                     .debug_selector({
@@ -14479,7 +14512,7 @@ impl Footplate {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut column = div().w(px(LINE_COLUMN)).flex_none().flex().flex_col();
+        let mut column = grown(LINE_COLUMN).flex_none().flex().flex_col();
         for bead in &depot.elsewhere {
             column = column.child(self.bead_card(bead, None, now, mono.clone(), palette, cx));
         }
@@ -18938,6 +18971,64 @@ mod tests {
         json!({"result": arrivals_board_rows()}).to_string()
     }
 
+    /// The board with this yard's longest cells: a bead on the
+    /// `review-security` platform of the `yardr-hosted` line, expected
+    /// `20m–35m`, its title and remark past their cells, which hold one
+    /// line each; and a short held bead of the `yardr-design` line.
+    fn arrivals_longest() -> String {
+        json!({"result": {
+            "rows": [
+                {"bead": "yd-hosted",
+                 "title": "A title past its cell's end, truncated to one line",
+                 "platform": "review-security", "line": "yardr-hosted",
+                 "expected": "20m–35m",
+                 "remark": "late by 40m, and more words past the remark cell's end",
+                 "tone": "amber"},
+                {"bead": "yd-design", "title": "Short",
+                 "platform": "new", "line": "yardr-design", "expected": "—",
+                 "remark": "held", "tone": "red"},
+            ],
+            "platforms": ["new", "review-security"],
+        }})
+        .to_string()
+    }
+
+    /// One flow whose groups stand mixed: one line, two, one, one,
+    /// and a terminal row, each lit by a bead. The words are short
+    /// where the yard's own are long, so the test platform's wide font
+    /// wraps them as DejaVu does, and the rules' level is read from the
+    /// window, not computed from the font.
+    fn flows_mixed_groups() -> String {
+        let stage = |name: &str, group: &str, human: bool, terminal: bool| {
+            json!({"stage": name, "group": group, "human": human,
+                   "lamp": "turn", "terminal": terminal,
+                   "beads": [{"bead": format!("yd-{name}"),
+                              "title": "A bead", "expected": "—",
+                              "remark": "", "tone": "none",
+                              "working": false}]})
+        };
+        let seated = |name: &str, group: &str, limit: usize, taken: usize| {
+            let mut stage = stage(name, group, false, false);
+            stage["limit"] = json!(limit);
+            stage["taken"] = json!(taken);
+            stage
+        };
+        json!({"result": {"travelling": 5,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 5, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        stage("backlog", "siding", false, false),
+                        seated("new", "yardr-builders", 4, 0),
+                        stage("review", "outside", false, false),
+                        stage("decide", "", false, false),
+                        stage("approved", "", false, true),
+                    ]},
+                ], "elsewhere": []},
+            ],
+            "unassigned": []}})
+        .to_string()
+    }
+
     /// The flows view the fake yard serves beside the board: three
     /// travelling, yardr's two on its default flow's turn and quiet
     /// stages, footplate's one on a fault stage, and nothing without a
@@ -19343,7 +19434,10 @@ yardr.dev
 
     /// This yard's flows as `Flows` serves them, every stage lit by a bead
     /// and burning a lamp, so each head stands with the lamp beside it,
-    /// the widest it ever draws.
+    /// the widest it ever draws. Every routed stage carries this yard's
+    /// longest group of its kind with the seats the yard serves, so the
+    /// line view's group words stand their longest: the terminal stages
+    /// unrouted, as the yard serves them.
     fn flows_this_yard() -> String {
         let depots: Vec<Value> = this_yard()
             .iter()
@@ -19355,8 +19449,16 @@ yardr.dev
                             .stages
                             .iter()
                             .map(|(stage, human, terminal)| {
-                                json!({"stage": stage, "group": "g", "human": human,
+                                let (group, limit, taken): (&str, Option<usize>, Option<usize>) =
+                                    match (*terminal, stage.as_str(), *human) {
+                                        (true, _, _) => ("", None, None),
+                                        (_, "backlog", _) => ("backlog", Some(50), Some(0)),
+                                        (_, _, true) => ("decisions", Some(50), Some(0)),
+                                        _ => ("signalbox-pr-reviewers", Some(1), Some(0)),
+                                    };
+                                json!({"stage": stage, "group": group, "human": human,
                                        "lamp": "turn", "terminal": terminal,
+                                       "limit": limit, "taken": taken,
                                        "beads": [{"bead": format!("{depot}-{}-{stage}", flow.name),
                                                   "title": "A bead", "expected": "—",
                                                   "remark": "", "tone": "none",
@@ -19412,6 +19514,29 @@ yardr.dev
             })
             .sum();
         units as f32 / 2048. * size
+    }
+
+    /// How many lines `words` wraps onto in DejaVu Sans at `size` pixels
+    /// in a box `wide`, breaking greedily at spaces as the window does,
+    /// with the widest word beside it: whole where it fits the box.
+    fn dejavu_lines(words: &str, size: f32, wide: f32) -> (usize, f32) {
+        let space = dejavu_width(" ", size);
+        let mut lines = 1;
+        let mut line: f32 = 0.;
+        let mut widest: f32 = 0.;
+        for word in words.split(' ') {
+            let width = dejavu_width(word, size);
+            widest = widest.max(width);
+            if line == 0. {
+                line = width;
+            } else if line + space + width <= wide {
+                line += space + width;
+            } else {
+                lines += 1;
+                line = width;
+            }
+        }
+        (lines, widest)
     }
 
     /// One arrival's bead whole, as the Bead call answers it: the body,
@@ -26566,6 +26691,251 @@ yardr.dev
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// No word of the line view or the departures board is cut at any
+    /// text size: each column's head stands whole on one line, each
+    /// group wraps whole onto a second line at most, and the board's
+    /// platform, line and expected stand whole in their cells, while
+    /// titles and remarks truncate to one line as designed. The columns
+    /// are in rems with their usual widths as the floor, so they grow
+    /// with the text as the words do; in pixels they cut the words at
+    /// the larger sizes.
+    #[gpui::test]
+    fn the_line_view_and_the_board_hold_their_words_at_every_text_size(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_longest());
+        yard.answer("Flows", &flows_this_yard());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        // The served stages, each read as the window reads it, so the
+        // group words held are the window's own.
+        let served: Value = serde_json::from_str(&flows_this_yard()).unwrap();
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            let rem = f32::from(settings_of(&view, cx).rem());
+            // The board's words stand at seven eighths of a rem, the
+            // expected arrival at three quarters in mono.
+            let sm = 0.875 * rem;
+            // The longest platform, line and expected stand whole in
+            // their cells, as DejaVu draws them; the overlong title and
+            // remark truncate to one line, and every row stands one
+            // line high.
+            view.update_in(cx, |v, window, cx| {
+                v.select(Selected::Arrivals, window, cx);
+                v.set_departures(true, cx);
+            });
+            wait(cx, "the board", |cx| drawn(cx, "arrival yd-hosted"));
+            // One frame, read whole: a redraw per cell would draw the
+            // board dozens of times.
+            drawn(cx, "departures head");
+            for (bead, platform, line, expected) in [
+                ("yd-hosted", "review-security", "yardr-hosted", "20m–35m"),
+                ("yd-design", "new", "yardr-design", "—"),
+            ] {
+                let row = bounds_now(cx, &format!("arrival {bead}"));
+                assert!(
+                    f32::from(row.size.height) < rem * 2.5,
+                    "at {text} px the {bead} row wraps to two lines: {row:?}"
+                );
+                for (part, words) in [("platform", platform), ("line", line)] {
+                    let cell = bounds_now(cx, &format!("arrival {part} {bead}"));
+                    assert!(
+                        f32::from(cell.size.height) < rem * 1.6,
+                        "at {text} px the {part} wraps in {bead}: {cell:?}"
+                    );
+                    let wide = dejavu_width(words, sm);
+                    assert!(
+                        wide <= f32::from(cell.size.width),
+                        "at {text} px the {part} overflows its cell in {bead}: {wide} wide in {cell:?}"
+                    );
+                }
+                // The expected arrival stands in mono: no face
+                // footplate meets advances past 0.65 em, so that width
+                // per character holds it.
+                let cell = bounds_now(cx, &format!("arrival expected {bead}"));
+                let wide = 0.65 * (expected.chars().count() as f32) * 0.75 * rem;
+                assert!(
+                    wide <= f32::from(cell.size.width),
+                    "at {text} px the expected overflows its cell in {bead}: {wide} wide in {cell:?}"
+                );
+            }
+            for part in ["title", "remark"] {
+                let cell = bounds_now(cx, &format!("arrival {part} yd-hosted"));
+                assert!(
+                    f32::from(cell.size.height) < rem * 1.6,
+                    "at {text} px the overlong {part} wraps: {cell:?}"
+                );
+            }
+            // Every line: each column's head stands whole on one line,
+            // as DejaVu draws it bold with the lamp beside it, and each
+            // group wraps whole onto a second line at most. The test
+            // platform's wide font wraps the longest groups onto three
+            // lines, where DejaVu wraps two, so the wrap is held as
+            // DejaVu draws it against the column; the window only says
+            // the groups wrap, sanely.
+            for depot in served["result"]["depots"].as_array().unwrap() {
+                let name = depot["name"].as_str().unwrap();
+                view.update_in(cx, |v, window, cx| {
+                    v.select(Selected::Line(name.to_string()), window, cx)
+                });
+                wait(cx, "the line", |cx| drawn(cx, &format!("flow head {name}")));
+                drawn(cx, &format!("flow head {name}"));
+                for flow in depot["flows"].as_array().unwrap() {
+                    let flow_name = flow["name"].as_str().unwrap();
+                    for stage_json in flow["stages"].as_array().unwrap() {
+                        let stage: FlowStage = serde_json::from_value(stage_json.clone()).unwrap();
+                        let stage_name = stage.stage.as_str();
+                        let (column, head, group) = match stage_name {
+                            "backlog" => (
+                                format!("column {flow_name} backlog"),
+                                format!("column {flow_name} backlog head"),
+                                format!("column {flow_name} backlog group"),
+                            ),
+                            _ => (
+                                format!("column {flow_name} {stage_name}"),
+                                format!("column {flow_name} {stage_name} head"),
+                                format!("column {flow_name} {stage_name} group"),
+                            ),
+                        };
+                        let column = bounds_now(cx, &column);
+                        // The column's padding with its border, which
+                        // stand out of the words' room.
+                        let available = f32::from(column.size.width) - rem - 1.;
+                        // The head stands on one line, and DejaVu draws
+                        // it with the lamp and its gap beside it inside
+                        // the column: the lamp is half a rem, the gap a
+                        // quarter, and the semibold head is held a
+                        // seventh wider than its regular, as the
+                        // panel's names are.
+                        let head = bounds_now(cx, &head);
+                        assert!(
+                            f32::from(head.size.height) < rem * 1.6,
+                            "at {text} px the head wraps in {name} {flow_name} {stage_name}: {head:?}"
+                        );
+                        let wide = dejavu_width(stage_name, sm) * 8. / 7. + 0.75 * rem;
+                        assert!(
+                            wide <= available,
+                            "at {text} px the head overflows its column in {name} {flow_name} {stage_name}: {wide} wide in {column:?}"
+                        );
+                        // A terminal stage shows its stop, not words.
+                        if stage.terminal {
+                            continue;
+                        }
+                        let words = stage_group_words(&stage);
+                        let group = bounds_now(cx, &group);
+                        assert!(
+                            rem * 1.5 < f32::from(group.size.height),
+                            "at {text} px the group stands one line high, truncated, in {name} {flow_name} {stage_name}: {group:?}"
+                        );
+                        assert!(
+                            f32::from(group.size.height) < rem * 4.2,
+                            "at {text} px the group wraps past three lines in {name} {flow_name} {stage_name}: {group:?}"
+                        );
+                        let (lines, widest) = dejavu_lines(&words, 0.75 * rem, available);
+                        assert!(
+                            widest <= available,
+                            "at {text} px a group word is cut in {name} {flow_name} {stage_name}: {words:?}"
+                        );
+                        assert!(
+                            lines <= 2,
+                            "at {text} px the group wraps past two lines in {name} {flow_name} {stage_name}: {words:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every flow's rules stand level where groups wrap: a column whose
+    /// group stands on two lines puts its rule where a column of one
+    /// line does, and a terminal column with them. Each head stands two
+    /// group lines high with its words on the rule, bottom-aligned.
+    #[gpui::test]
+    fn the_line_view_s_rules_stand_level_with_wrapped_groups(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_mixed_groups());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            let rem = f32::from(settings_of(&view, cx).rem());
+            view.update_in(cx, |v, window, cx| {
+                v.select(Selected::Line("yardr".to_string()), window, cx)
+            });
+            wait(cx, "the line", |cx| drawn(cx, "flow head yardr"));
+            drawn(cx, "flow head yardr");
+            // The rules stand level: the backlog's, the stages', and
+            // the terminal's, a wrapped group beside single-line ones.
+            let mut low = f32::MAX;
+            let mut high = f32::MIN;
+            for rule in [
+                "column default backlog rule",
+                "column default new rule",
+                "column default review rule",
+                "column default decide rule",
+                "column default approved rule",
+            ] {
+                let top = f32::from(bounds_now(cx, rule).top());
+                low = low.min(top);
+                high = high.max(top);
+            }
+            assert!(
+                high - low < 1.,
+                "at {text} px the rules stand off level between {low} and {high}"
+            );
+            // At and above the usual size a group of two lines stands
+            // beside groups of one, so the level rules say something;
+            // at the smallest size the floor holds every group to one.
+            if text != settings::TEXT_MIN {
+                let wrapped = bounds_now(cx, "column default new group");
+                assert!(
+                    rem * 1.5 < f32::from(wrapped.size.height),
+                    "at {text} px the long group stands on one line: {wrapped:?}"
+                );
+                let single = bounds_now(cx, "column default review group");
+                assert!(
+                    f32::from(single.size.height) < rem * 1.5,
+                    "at {text} px the short group wraps: {single:?}"
+                );
+            }
+            // Every head's words stand on its rule: the padding below
+            // the head alone between them, bottom-aligned.
+            for (group, rule) in [
+                (
+                    "column default backlog group",
+                    "column default backlog rule",
+                ),
+                ("column default new group", "column default new rule"),
+                ("column default review group", "column default review rule"),
+                ("column default decide group", "column default decide rule"),
+            ] {
+                let words = bounds_now(cx, group);
+                let rule = bounds_now(cx, rule);
+                let gap = f32::from(rule.top() - words.bottom());
+                assert!(
+                    (gap - rem * 0.25).abs() < 1.,
+                    "at {text} px the head stands off its rule: {gap} in {words:?} {rule:?}"
+                );
             }
         }
     }
