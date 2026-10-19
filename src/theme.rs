@@ -140,8 +140,8 @@ pub struct Palette {
     /// fill uses `on_accent`; waiting text uses `text_accent`.
     pub accent: Rgba,
     pub on_accent: Rgba,
-    /// Yardr Design's text-accent token: a lighter rust on dark grounds
-    /// and a darker one on light grounds, each at text contrast.
+    /// A yard-rust text step at contrast on the window's surfaces: rust
+    /// 300 on dark (open rows are lighter than dusk) and rust 700 on light.
     pub text_accent: Rgba,
     pub warn: Rgba,
     /// Links: in messages, ask and bead ids, and the small controls that
@@ -183,7 +183,7 @@ impl Palette {
                 hover: rgb(0x23262c),
                 accent: rgb(0xd3602f),
                 on_accent: rgb(0x161718),
-                text_accent: rgb(0xe2794a),
+                text_accent: rgb(0xeba17e),
                 warn: rgb(0xf0764f),
                 link: rgb(0x7aa2f7),
                 peer: rgb(PEER_DARK),
@@ -203,7 +203,7 @@ impl Palette {
                 hover: rgb(0xe8e5df),
                 accent: rgb(0xd3602f),
                 on_accent: rgb(0x161718),
-                text_accent: rgb(0xb54e22),
+                text_accent: rgb(0x8f3c19),
                 warn: rgb(0xb3401c),
                 link: rgb(0x1a56c8),
                 peer: rgb(PEER_LIGHT),
@@ -377,8 +377,8 @@ mod tests {
     fn text_accent_uses_the_readable_yard_rust_step_in_either_look() {
         let dark = Palette::of(Look::Dark, WindowAppearance::Dark);
         let light = Palette::of(Look::Light, WindowAppearance::Light);
-        assert_eq!(dark.text_accent, rgb(0xe2794a));
-        assert_eq!(light.text_accent, rgb(0xb54e22));
+        assert_eq!(dark.text_accent, rgb(0xeba17e));
+        assert_eq!(light.text_accent, rgb(0x8f3c19));
         for palette in [dark, light] {
             for ground in [palette.side, palette.ground, palette.hover, palette.open] {
                 assert!(
