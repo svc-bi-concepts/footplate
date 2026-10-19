@@ -2103,6 +2103,9 @@ pub struct Footplate {
     /// The attachments that are images, by id, as they are drawn.
     thumbs: HashMap<u64, Arc<Image>>,
     focus: FocusHandle,
+    /// The board's waits banner's focus: a click takes it, and Enter
+    /// with it opens the decisions mode.
+    waits_focus: FocusHandle,
     /// The window this is drawn in: a change that comes with no key or
     /// click of its own, as the yard's answer does, moves the focus by it.
     handle: AnyWindowHandle,
@@ -2631,6 +2634,7 @@ impl Footplate {
             refused: HashMap::new(),
             thumbs: HashMap::new(),
             focus: cx.focus_handle(),
+            waits_focus: cx.focus_handle(),
             handle: window.window_handle(),
             icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
             ask_generation: 0,
@@ -12558,9 +12562,9 @@ impl Footplate {
             .flex()
             .flex_col()
             .gap_3();
-        let waiting = model.waiting_on_you();
-        if !waiting.is_empty() {
-            list = list.child(self.waits_banner(&waiting, palette, cx));
+        let waiting = model.waiting_on_you().len();
+        if waiting > 0 {
+            list = list.child(self.waits_banner(waiting, palette, cx));
         }
         let groups = model.arrival_groups();
         if groups.is_empty() {
@@ -12598,77 +12602,28 @@ impl Footplate {
     }
 
     /// The beads that wait on the person reading, above the table:
-    /// how many, then each with its title and an Open card button. A
-    /// click opens the bead's details, as its row does.
+    /// how many, as one quiet link. A click opens the decisions mode,
+    /// as Enter does with the focus on it.
     fn waits_banner(
         &self,
-        waiting: &[(&str, &str)],
+        waiting: usize,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut banner = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(palette.line)
-            .bg(palette.side)
+        div()
+            .id("waits banner")
             .debug_selector(|| "waits banner".to_string())
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(palette.accent)
-                    .child(waits_head(waiting.len())),
-            );
-        for &(bead, title) in waiting {
-            let bead = bead.to_string();
-            let sel = Selected::Bead(bead.clone());
-            banner = banner.child(
-                div()
-                    .id(SharedString::from(format!("waits {bead}")))
-                    .debug_selector({
-                        let bead = bead.clone();
-                        move || format!("waits {bead}")
-                    })
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .debug_selector({
-                                let bead = bead.clone();
-                                move || format!("waits title {bead}")
-                            })
-                            .child(title.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(palette.faint)
-                            .child(bead.clone()),
-                    )
-                    .child(
-                        small_button("Open card".to_string(), palette)
-                            .id(SharedString::from(format!("waits open {bead}")))
-                            .debug_selector({
-                                let bead = bead.clone();
-                                move || format!("waits open {bead}")
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select(sel.clone(), window, cx)
-                            })),
-                    ),
-            );
-        }
-        banner
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(palette.accent)
+            .cursor_pointer()
+            .track_focus(&self.waits_focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, _| window.focus(&this.waits_focus)),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.set_mode(Mode::Decisions, window, cx)))
+            .child(waits_head(waiting))
     }
 
     /// One platform's arrivals: the platform name and its count in the
@@ -14829,6 +14784,12 @@ impl Render for Footplate {
             .on_action(
                 cx.listener(|this, _: &Decide, window, cx| match this.switching {
                     Some(at) => this.switch_nth(at, window, cx),
+                    // The board's waits banner owns Enter with the focus
+                    // on it: no card is open there, and the link opens
+                    // the decisions mode, as a click does.
+                    None if this.card().is_none() && this.waits_focus.is_focused(window) => {
+                        this.set_mode(Mode::Decisions, window, cx)
+                    }
                     None => this.decide(cx),
                 }),
             )
@@ -17016,14 +16977,6 @@ mod tests {
             ],
         }})
         .to_string()
-    }
-
-    /// One bead beyond Arrivals' cap, whole, as the Bead call answers it.
-    fn bead_outside_arrivals() -> String {
-        let mut bead: Value = serde_json::from_str(&bead_zulu()).unwrap();
-        bead["result"]["id"] = json!("yd-hidden");
-        bead["result"]["title"] = json!("A wait beyond the table");
-        bead.to_string()
     }
 
     /// One bead travelling with no line whole, as the Bead call
@@ -21821,43 +21774,19 @@ mod tests {
         assert!(!drawn(cx, "arrival strip footplate-p512"));
     }
 
-    /// The board banners the beads that wait on the person reading:
-    /// how many above the table, each with its title and an Open card
-    /// button that opens the bead's details, as its row does. In the
-    /// row `you` stands first among whom it waits for.
+    /// The board banners how many beads wait on the person reading:
+    /// the head alone above the table, no row per bead, and a click
+    /// opens the decisions mode, as Enter does with the focus on it.
     #[gpui::test]
-    fn the_board_banners_the_beads_that_wait_on_you(cx: &mut TestAppContext) {
+    fn the_board_banners_how_many_wait_on_you(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_waits());
-        let mut flows: Value = serde_json::from_str(&flows_board()).unwrap();
-        flows["result"]["depots"][0]["travelling"] = json!(3);
-        flows["result"]["travelling"] = json!(4);
-        flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"][0]["remark"] =
-            json!("waits for yardmaster, jo");
-        flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "bead": "yd-hidden", "title": "A wait beyond the table",
-                "expected": "1h–2h", "remark": "waits for jo", "tone": "amber",
-                "working": false,
-            }));
-        yard.answer("Flows", &flows.to_string());
-        yard.answer("Bead", &bead_zulu());
+        yard.answer("Flows", &flows_board());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
-        assert!(drawn(cx, "waits banner"));
-        assert!(drawn(cx, "waits yd-zulu"));
-        assert!(drawn(cx, "waits title yd-zulu"));
-        assert!(drawn(cx, "waits open yd-zulu"));
-        assert!(drawn(cx, "waits yd-hidden"));
-        assert!(drawn(cx, "waits title yd-hidden"));
-        assert!(drawn(cx, "waits open yd-hidden"));
-        assert!(!drawn(cx, "arrival yd-hidden"));
-        assert!(!drawn(cx, "waits yd-alpha"));
         view.read_with(cx, |v, _| {
             assert_eq!(
                 v.model
@@ -21867,45 +21796,76 @@ mod tests {
                     .iter()
                     .map(|(bead, _)| *bead)
                     .collect::<Vec<_>>(),
-                ["yd-zulu", "yd-hidden"]
+                ["yd-zulu"]
             );
         });
+        assert!(drawn(cx, "waits banner"));
+        assert!(!drawn(cx, "waits yd-zulu"));
+        assert!(!drawn(cx, "waits title yd-zulu"));
+        assert!(!drawn(cx, "waits open yd-zulu"));
         let banner = bounds_of(cx, "waits banner").bottom();
         let group = bounds_of(cx, "arrival group new").top();
         assert!(
             banner <= group,
             "the banner stands below the table: {banner:?} {group:?}"
         );
-        click_on(cx, "waits open yd-zulu");
-        wait(cx, "the bead", |cx| drawn(cx, "bead asks yd-zulu"));
-        view.read_with(cx, |v, _| {
-            assert_eq!(
-                v.model.as_ref().unwrap().selected(),
-                Some(&Selected::Bead("yd-zulu".into()))
-            );
+        click_on(cx, "waits banner");
+        wait(cx, "the decisions mode", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
         });
+        to_timetable(&view, cx);
         click_on(cx, "row arrivals");
         wait(cx, "the arrivals board again", |cx| {
             drawn(cx, "arrival yd-zulu")
         });
-        yard.answer("Bead", &bead_outside_arrivals());
-        click_on(cx, "waits open yd-hidden");
-        wait(cx, "the outside bead selected", |cx| {
-            view.read_with(cx, |v, _| {
-                v.model.as_ref().unwrap().selected() == Some(&Selected::Bead("yd-hidden".into()))
-            })
+        cx.update(|window, cx| window.focus(&view.read(cx).waits_focus.clone()));
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the decisions mode by key", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
         });
-        wait(cx, "the outside bead read", |_| {
-            yard.asked("Bead").last() == Some(&json!({"bead": "yd-hidden"}))
-        });
-        wait(cx, "the bead outside arrivals", |cx| {
-            drawn(cx, "bead asks yd-hidden")
-        });
+    }
+
+    /// The banner holds fifty-five waits on its one line: the head
+    /// alone above the table, no row per bead, and a click opens the
+    /// decisions mode.
+    #[gpui::test]
+    fn the_banner_holds_fifty_five_waits_on_one_line(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_waits());
+        let mut flows: Value = serde_json::from_str(&flows_board()).unwrap();
+        let beads = flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"]
+            .as_array_mut()
+            .unwrap();
+        for n in 0..54 {
+            beads.push(json!({
+                "bead": format!("yd-w{n:02}"), "title": format!("Wait number {n}"),
+                "expected": "1h–2h", "remark": "waits for jo", "tone": "amber",
+                "working": false,
+            }));
+        }
+        yard.answer("Flows", &flows.to_string());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
         view.read_with(cx, |v, _| {
-            assert_eq!(
-                v.model.as_ref().unwrap().selected(),
-                Some(&Selected::Bead("yd-hidden".into()))
-            );
+            assert_eq!(v.model.as_ref().unwrap().waiting_on_you().len(), 55);
+        });
+        assert!(drawn(cx, "waits banner"));
+        assert!(!drawn(cx, "waits yd-zulu"));
+        assert!(!drawn(cx, "waits yd-w00"));
+        assert!(!drawn(cx, "waits yd-w53"));
+        assert!(!drawn(cx, "waits open yd-zulu"));
+        let banner = bounds_of(cx, "waits banner").bottom();
+        let group = bounds_of(cx, "arrival group new").top();
+        assert!(
+            banner <= group,
+            "the banner stands below the table: {banner:?} {group:?}"
+        );
+        click_on(cx, "waits banner");
+        wait(cx, "the decisions mode", |cx| {
+            rail_mode(&view, cx) == Mode::Decisions
         });
     }
 
