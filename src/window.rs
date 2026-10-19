@@ -28258,6 +28258,133 @@ yardr.dev
         );
     }
 
+    /// A run ask raised in a yard that is not open is counted by the
+    /// switcher as the stream tells of it, the system tells of it by the
+    /// yard's name, and the yard's decisions hold its card when the window
+    /// shows that yard: nothing is read by a restart. So it is of a far
+    /// yard, of one that was open and left, and of one that was away when
+    /// the ask was raised.
+    #[gpui::test]
+    fn a_run_ask_raised_in_a_yard_that_is_not_open_is_counted_told_of_and_held_by_its_decisions(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        for yard in [&near, &second, &far] {
+            yard.answer("Bead", &bead_run());
+        }
+        let file = three_yards(dir.path(), &second, &far);
+        let mut set = Settings::read(&file);
+        set.notifications.on = true;
+        set.write(&file).unwrap();
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let told = Told::new();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::opened(env, "jo".into(), Some(file.clone()), window, cx)
+                .notified_by(Box::new(told.clone()), cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the far yard", |cx| {
+            state_of(&view, cx, "far") == "1 mail"
+        });
+        wait(cx, "the far yard's stream", |_| {
+            far.streams_asked().len() == 1
+        });
+        assert_eq!(told.tellings(cx).len(), 0);
+        let run_ask =
+            || json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string();
+        let noted = |seq: u64| {
+            format!(
+                r#"{{"seq": {seq}, "kind": "noted", "actor": "yardmaster", "bead": "bead-s", "data": {{"note": 7}}, "at": "2026-10-08T09:31:00Z"}}"#
+            )
+        };
+
+        // The ask is raised in the far yard, as plantime's was: this
+        // machine's yard is the open one, and the far yard is counted by
+        // the switcher with no switch to it.
+        far.answer("UserAsks", &run_ask());
+        far.emit(&noted(41));
+        wait(cx, "the run ask counted in the far yard", |cx| {
+            state_of(&view, cx, "far") == "1 mail, 1 decision"
+        });
+        assert_eq!(open_yard(&view, cx), "this machine");
+        // The icon counts it with the second home's two mail and the far
+        // yard's own: nothing waits in the open yard.
+        assert_eq!(badge_of(&view, cx), 4);
+        assert_eq!(far.asked("AckUserInbox").len(), 0);
+        let tellings = told.tellings(cx);
+        let [telling] = tellings.as_slice() else {
+            panic!("{tellings:?}");
+        };
+        assert_eq!(telling.title, "far · yardmaster asks");
+        assert_eq!(telling.body, "Take more mail from airy?");
+        assert_eq!(telling.yard, "far");
+        assert_eq!(telling.target, Selected::Decision("bead-s".into()));
+
+        // The notification is activated: the window shows that yard as it
+        // stands, on the card, and does not read it from nothing.
+        let (loads, streams) = (far.asked("Head").len(), far.streams_asked().len());
+        told.activated
+            .0
+            .try_send(("far".into(), Selected::Decision("bead-s".into())))
+            .unwrap();
+        wait(cx, "the far yard's card", |cx| {
+            open_yard(&view, cx).contains("far")
+                && view.read_with(cx, |v, _| {
+                    v.model.as_ref().is_some_and(|m| {
+                        m.selected() == Some(&Selected::Decision("bead-s".into()))
+                            && m.has_bead("bead-s")
+                    })
+                })
+        });
+        assert_eq!(far.asked("Head").len(), loads);
+        assert_eq!(far.streams_asked().len(), streams);
+
+        // The yard that was open and is left goes on the same: an ask
+        // raised there is counted, and told of.
+        near.answer("UserAsks", &run_ask());
+        near.emit(&noted(31));
+        wait(cx, "the run ask counted in the yard that was left", |cx| {
+            state_of(&view, cx, "this machine") == "1 decision"
+        });
+        let tellings = told.tellings(cx);
+        let [telling] = tellings.as_slice() else {
+            panic!("{tellings:?}");
+        };
+        assert_eq!(telling.title, "this machine · yardmaster asks");
+
+        // A yard that is away when the ask is raised has it counted when
+        // it answers again, by itself and with no switch to it.
+        let socket = second.socket().to_path_buf();
+        second.stop();
+        wait(cx, "that the second home's yard is not reached", |cx| {
+            state_of(&view, cx, "second home") == "not reached: nothing answers"
+        });
+        let second = Yard::start_at(&socket);
+        a_second_yard_of_jo(&second);
+        second.answer("UserAsks", &run_ask());
+        wait(cx, "the run ask counted in the second home's yard", |cx| {
+            state_of(&view, cx, "second home") == "2 mail, 1 decision"
+        });
+        assert!(open_yard(&view, cx).contains("far"));
+    }
+
     fn a_far_yard_of_jo(yard: &Yard) {
         yard.answer("Head", r#"{"result": 40}"#);
         yard.answer(
