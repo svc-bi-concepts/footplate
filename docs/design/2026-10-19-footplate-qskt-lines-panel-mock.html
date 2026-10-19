@@ -90,7 +90,7 @@ text-align:center;padding-top:8px}
 .hc.turn{color:var(--text-accent)}
 .hc.fault{color:var(--status-error)}
 .hc .rd{width:6px;height:6px;border-radius:999px;background:var(--status-running);flex:none}
-.hc .ld{width:6px;height:6px;border-radius:999px;background:var(--status-error);flex:none;margin-left:auto}
+.late{color:var(--text-secondary)}
 .hc.more{color:var(--text-secondary);font-family:var(--sans);font-size:12px}
 .stub{display:flex;gap:8px;align-items:center;background:var(--surface-sunken);border-bottom:1px solid var(--border-subtle);
 padding:5px 8px 5px 128px;font-size:12px;color:var(--text-secondary)}
@@ -176,7 +176,7 @@ function panel(){
   var t1 = track('yardr','default',49,[
     cell('shape','',0,[]),
     cell('new','',0,[hc('xb5b','work',1), hc('v6q3','')]),
-    cell('review','fault',0,[hc('kxej','fault')]),
+    cell('review','fault',0,[hc('kxej','fault'), hc('9d4e','')]),
     cell('review-security','',0,[]),
     cell('approved','',0,[]),
     cell('merged','',0,[],1)]);
@@ -216,12 +216,13 @@ function line(){
   var cols = '<div class="cols">' + backlog
   + col('shape','yardmaster','',0,'<div class="nothing">nothing here</div>')
   + col('new','builders &middot; 2 of 3 seats','',0,
-      card('xb5b','Originator 9: the web view leads a group login','worked by builder-2 &middot; 41 min at new','27m&ndash;1h17 &middot; <span class="bad">late by 12m</span>')
+      card('xb5b','Originator 9: the web view leads a group login','worked by builder-2 &middot; 41 min at new','27m&ndash;1h17 &middot; <span class="late">late by 12m</span>')
     + card('v6q3','Arrivals rows: the route strip&rsquo;s stages','waits for a seat','40m&ndash;1h'))
   + col('decide','people &middot; waiting on a person','lamp-turn',1,
       card('0y2t','Lines as a signalling panel','<span class="wait">waits for you</span> &middot; 2 questions','&mdash;'))
   + col('review','reviewers &middot; 1 of 2 seats','lamp-fault',0,
-      card('kxej','Socket reads for a remote yard&rsquo;s style','<span class="bad">stalled &middot; session failed</span>','&mdash;'))
+      card('kxej','Socket reads for a remote yard&rsquo;s style','<span class="bad">stalled &middot; session failed</span>','&mdash;')
+    + card('9d4e','Flow stages should name their group&rsquo;s seats','blocked by kxej','&mdash;'))
   + col('review-security','sec-review','',0,'<div class="nothing">nothing here</div>')
   + col('approved','lander','',0,'<div class="nothing">nothing here</div>')
   + col('merged','terminal <span class="buffer"></span>','',0,'<div class="nothing">nothing here</div>')
@@ -239,7 +240,7 @@ function departures(){
   + '<table class="dtable"><tr><th>Expected</th><th>Bead</th><th>Platform</th><th>Line</th><th>Remark</th></tr>'
   + row('11&ndash;25m','Arrivals rows: the route strip&rsquo;s stages','v6q3','new','yardr','')
   + row('11&ndash;25m','I made fire: simplify Who owns the fire','ymkt','new','no line','')
-  + row('27m&ndash;1h17','Originator 9: the web view leads a group login','xb5b','new','yardr','<span class="bad">late by 12m</span>')
+  + row('27m&ndash;1h17','Originator 9: the web view leads a group login','xb5b','new','yardr','<span class="late">late by 12m</span>')
   + row('40m&ndash;1h','Crew status should say what bead&hellip;','5bd7','new','yardr','waits for a seat')
   + row('&mdash;','A secret card&rsquo;s input has a show/hide toggle','fc47','review','footplate','<span class="wait">waits for you</span>')
   + row('&mdash;','Socket reads for a remote yard&rsquo;s style','kxej','review','yardr','<span class="bad">stalled</span>')
