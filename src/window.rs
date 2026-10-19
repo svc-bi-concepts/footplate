@@ -26529,7 +26529,10 @@ yardr.dev
             for bead in ["yd-drifter", "yd-stray"] {
                 let code = bounds_now(cx, &format!("panel headcode {bead}"));
                 assert!(
-                    card.top() <= code.top() && code.bottom() <= card.bottom(),
+                    card.left() <= code.left()
+                        && code.right() <= card.right()
+                        && card.top() <= code.top()
+                        && code.bottom() <= card.bottom(),
                     "at {text} px the {bead} headcode stands off the No line card: {card:?} {code:?}"
                 );
             }
@@ -26543,12 +26546,18 @@ yardr.dev
             let track = bounds_now(cx, "panel track yardr default");
             let code = bounds_now(cx, "panel headcode yd-first");
             assert!(
-                track.top() <= code.top() && code.bottom() <= track.bottom(),
+                track.left() <= code.left()
+                    && code.right() <= track.right()
+                    && track.top() <= code.top()
+                    && code.bottom() <= track.bottom(),
                 "at {text} px the headcode stands off its track: {track:?} {code:?}"
             );
             let more = bounds_now(cx, "panel more yardr default new");
             assert!(
-                track.top() <= more.top() && more.bottom() <= track.bottom(),
+                track.left() <= more.left()
+                    && more.right() <= track.right()
+                    && track.top() <= more.top()
+                    && more.bottom() <= track.bottom(),
                 "at {text} px the +2 stands off its track: {track:?} {more:?}"
             );
             quiet
