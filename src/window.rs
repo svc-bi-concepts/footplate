@@ -173,14 +173,14 @@ const SWITCHER_MAX: f32 = 30.;
 /// usual size and grows with the text above it.
 const LINE_COLUMN: f32 = 176.;
 
-/// A line view's column head in rems: its name with two lines of group
+/// A line view's column head in rems: its name with three lines of group
 /// words under it, bottom-aligned, so a column whose group wraps onto a
-/// second line puts its rule where a column whose group stands on one
-/// line does: the row's rules one straight track, as the panel's heads
-/// have it. A name line with two group lines at gpui's line height,
-/// 1.42 with 2 × 1.21, rounded up. A group that wants a third line
+/// second or third line puts its rule level with a shorter group. The
+/// row's rules make one straight track, as the panel's heads have it.
+/// A name line with three group lines at gpui's line height,
+/// 1.42 with 3 × 1.21, rounded up. A group that wants a fourth line
 /// makes its own column taller, as a panel head does.
-const LINE_HEAD: f32 = 3.9;
+const LINE_HEAD: f32 = 5.2;
 
 /// The departures board's columns in pixels at the usual text size,
 /// drawn once: the expected arrival in mono, the bead's title with its
@@ -18993,11 +18993,11 @@ mod tests {
         .to_string()
     }
 
-    /// One flow whose groups stand mixed: one line, two, one, one,
-    /// and a terminal row, each lit by a bead. The words are short
-    /// where the yard's own are long, so the test platform's wide font
-    /// wraps them as DejaVu does, and the rules' level is read from the
-    /// window, not computed from the font.
+    /// One flow whose groups stand mixed: one line, three, one, one,
+    /// and a terminal row, each lit by a bead. The long group combines
+    /// the longest routed name, a person group and seats; it takes
+    /// three DejaVu lines at the usual and largest sizes. The rules'
+    /// level is read from the window, not computed from the font.
     fn flows_mixed_groups() -> String {
         let stage = |name: &str, group: &str, human: bool, terminal: bool| {
             json!({"stage": name, "group": group, "human": human,
@@ -19007,8 +19007,8 @@ mod tests {
                               "remark": "", "tone": "none",
                               "working": false}]})
         };
-        let seated = |name: &str, group: &str, limit: usize, taken: usize| {
-            let mut stage = stage(name, group, false, false);
+        let seated = |name: &str, group: &str, limit: usize, taken: usize, human: bool| {
+            let mut stage = stage(name, group, human, false);
             stage["limit"] = json!(limit);
             stage["taken"] = json!(taken);
             stage
@@ -19018,7 +19018,7 @@ mod tests {
                 {"name": "yardr", "kind": "git", "travelling": 5, "flows": [
                     {"name": "default", "type": "", "source": "store", "stages": [
                         stage("backlog", "siding", false, false),
-                        seated("new", "yardr-builders", 4, 0),
+                        seated("new", "signalbox-pr-reviewers", 50, 0, true),
                         stage("review", "outside", false, false),
                         stage("decide", "", false, false),
                         stage("approved", "", false, true),
@@ -26858,9 +26858,9 @@ yardr.dev
     }
 
     /// Every flow's rules stand level where groups wrap: a column whose
-    /// group stands on two lines puts its rule where a column of one
-    /// line does, and a terminal column with them. Each head stands two
-    /// group lines high with its words on the rule, bottom-aligned.
+    /// group stands on three lines puts its rule where a column of one
+    /// line does, and a terminal column with them. Each head reserves
+    /// three group lines with its words on the rule, bottom-aligned.
     #[gpui::test]
     fn the_line_view_s_rules_stand_level_with_wrapped_groups(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -26870,6 +26870,11 @@ yardr.dev
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         cx.run_until_parked();
+        let served: Value = serde_json::from_str(&flows_mixed_groups()).unwrap();
+        let long_stage: FlowStage =
+            serde_json::from_value(served["result"]["depots"][0]["flows"][0]["stages"][1].clone())
+                .unwrap();
+        let long_group = stage_group_words(&long_stage);
         for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
             view.update(cx, |v, cx| {
                 let set = Settings {
@@ -26903,21 +26908,35 @@ yardr.dev
                 high - low < 1.,
                 "at {text} px the rules stand off level between {low} and {high}"
             );
-            // At and above the usual size a group of two lines stands
-            // beside groups of one, so the level rules say something;
-            // at the smallest size the floor holds every group to one.
-            if text != settings::TEXT_MIN {
-                let wrapped = bounds_now(cx, "column default new group");
-                assert!(
-                    rem * 1.5 < f32::from(wrapped.size.height),
-                    "at {text} px the long group stands on one line: {wrapped:?}"
-                );
-                let single = bounds_now(cx, "column default review group");
-                assert!(
-                    f32::from(single.size.height) < rem * 1.5,
-                    "at {text} px the short group wraps: {single:?}"
-                );
-            }
+            // DejaVu draws the long group on two lines at the smallest
+            // size and three at the usual and largest; the window keeps
+            // the whole group and leaves every rule level even there.
+            let column = bounds_now(cx, "column default new");
+            let available = f32::from(column.size.width) - rem - 1.;
+            let (lines, widest) = dejavu_lines(&long_group, 0.75 * rem, available);
+            let want = if text == settings::TEXT_MIN { 2 } else { 3 };
+            assert_eq!(
+                lines, want,
+                "at {text} px the long group should use {want} DejaVu lines: {long_group:?}"
+            );
+            assert!(
+                widest <= available,
+                "at {text} px a word is cut from the long group: {long_group:?}"
+            );
+            let wrapped = bounds_now(cx, "column default new group");
+            assert!(
+                rem * 1.5 < f32::from(wrapped.size.height),
+                "at {text} px the long group is truncated to one line: {wrapped:?}"
+            );
+            assert!(
+                f32::from(wrapped.size.height) < rem * 4.2,
+                "at {text} px the long group wraps past three lines: {wrapped:?}"
+            );
+            let single = bounds_now(cx, "column default review group");
+            assert!(
+                f32::from(single.size.height) < rem * 1.5,
+                "at {text} px the short group wraps: {single:?}"
+            );
             // Every head's words stand on its rule: the padding below
             // the head alone between them, bottom-aligned.
             for (group, rule) in [
