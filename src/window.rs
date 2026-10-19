@@ -453,8 +453,8 @@ fn post_note(
     Ok(())
 }
 
-/// The conversation's reading width: the mail and the composer stand
-/// full width up to 880 pixels, centred in the pane.
+/// The conversation's reading width: the mail, the notice and the
+/// composer stand full width up to 880 pixels, centred in the pane.
 const READING_WIDTH: f32 = 880.;
 
 /// A row of the reading column: full width, its content centred in
@@ -4072,6 +4072,12 @@ impl Footplate {
         if before_sel != after_sel {
             // Another row is open than the one the yard was left on.
             self.returning = None;
+            // The pointer's mark on a letter goes with the row. A letter
+            // that is not drawn is told of no leave, so a pointer that
+            // goes while the row is away would leave the mark standing,
+            // and the bar would be over that letter when the row is open
+            // again.
+            self.react_hover = None;
             match &after_sel {
                 Some(Selected::Decision(_))
                 | Some(Selected::Decided(_, _))
@@ -12872,14 +12878,21 @@ impl Footplate {
         pane.children(self.reconnect_strip(palette))
             .child(head)
             .child(mail)
+            // The notice stands in the reading column with the composer
+            // under it, and has the side margins the composer's frame has,
+            // so that its line starts where the frame does at any width.
             .when(!model.notice.is_empty(), |el| {
                 el.child(
-                    div()
-                        .px_4()
-                        .py_1()
-                        .text_sm()
-                        .text_color(palette.warn)
-                        .child(format!("! {}", model.notice)),
+                    reading_column(
+                        div()
+                            .debug_selector(|| "notice".to_string())
+                            .py_1()
+                            .text_sm()
+                            .text_color(palette.warn)
+                            .child(format!("! {}", model.notice))
+                            .into_any_element(),
+                    )
+                    .px_3(),
                 )
             })
             .child(
@@ -12889,7 +12902,8 @@ impl Footplate {
                 // not one, as reading_column has it; the side margins stand
                 // on the outer one so the frame meets the column's edges,
                 // and where the pane is narrower than the reading width the
-                // frame keeps today's margins.
+                // frame keeps today's margins. The notice above it has the
+                // same margins, so that the two start at one edge.
                 div().mx_3().child(
                     div().max_w(px(READING_WIDTH)).mx_auto().child(
                         div()
@@ -18044,6 +18058,67 @@ mod tests {
         assert_eq!(selected(&view, cx), None);
         cx.run_until_parked();
         assert_eq!(yard.asked("React"), Vec::<serde_json::Value>::new());
+    }
+
+    /// The pointer stands on a letter when another row is opened and
+    /// leaves the place while that row is open: a letter that is not drawn
+    /// is told of no leave. The bar of reactions does not wait over that
+    /// letter when its conversation is open again, as it waits over none
+    /// the pointer is not on, whether the other row was opened by a click
+    /// on it or by the keys. (The window's debug bounds keep every selector
+    /// once it was drawn, so what is drawn is read where the window decides
+    /// it, `reacting`.)
+    #[gpui::test]
+    fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_another_row_was_open(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        // The row after the yardmaster's has no mail, so no letter of the
+        // same number is drawn under the pointer there.
+        yard.converse("clerk@north", vec![]);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        let reacting = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.reacting(12))
+        };
+
+        // A click on another row, the yard's, and on the yardmaster's again;
+        // the pointer goes to the list in between.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(reacting(&view, cx));
+        view.update_in(cx, |v, window, cx| v.select(Selected::Yard, window, cx));
+        hover_on(cx, "rows");
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Conversation("yardmaster".into()), window, cx)
+        });
+        wait(cx, "the conversation open again", |cx| {
+            texts(&view, cx) == ["one", "two", "three"]
+        });
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None, "by a click");
+        assert!(!reacting(&view, cx), "by a click");
+
+        // The pointer on the letter puts the bar over it again; then Tab to
+        // the row after it, and back.
+        hover_on(cx, "text 12");
+        assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
+        assert!(reacting(&view, cx));
+        cx.simulate_keystrokes("tab");
+        wait(cx, "the row after the yardmaster's", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected_conversation() == Some("clerk@north")
+            })
+        });
+        hover_on(cx, "rows");
+        cx.simulate_keystrokes("shift-tab");
+        wait(cx, "the conversation open again", |cx| {
+            texts(&view, cx) == ["one", "two", "three"]
+        });
+        frames(cx);
+        assert_eq!(pointer_on(&view, cx), None, "by the keys");
+        assert!(!reacting(&view, cx), "by the keys");
     }
 
     /// The yard row draws a mail's head and body in one element, with
@@ -25322,6 +25397,81 @@ yardr.dev
         assert!(
             middle <= pane + px(1.),
             "the composer stands off the column's middle: {frame:?} in {rows:?}"
+        );
+    }
+
+    /// The notice under the mail stands in the reading column, with the
+    /// composer under it: its line starts where the composer's frame does,
+    /// on a wide window, where the column stands centred in the pane, and
+    /// on a narrow one, where the column is the pane less the frame's side
+    /// margins. It still wraps, and the composer stands below the last line
+    /// of it.
+    #[gpui::test]
+    fn the_notice_stands_in_the_reading_column_with_the_composer(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        grouped_letters(&yard);
+        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        view.update(cx, |v, cx| {
+            v.notice(
+                "the flows could not be read: the yard does not answer (connection timed out)"
+                    .into(),
+                cx,
+            )
+        });
+
+        // On a wide window the notice, the letters' heads and the frame
+        // stand on one left edge, well in from the pane's, and the notice
+        // is the one line.
+        let mut line = px(0.);
+        for width in [1920., 1280.] {
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            let pane = px(width) - bounds_of(cx, "rows").right();
+            assert!(
+                pane > px(READING_WIDTH + 24.),
+                "{width} is no wide window: the pane is {pane:?}"
+            );
+            let (notice, frame) = (bounds_of(cx, "notice"), bounds_of(cx, "composer"));
+            let head = bounds_of(cx, "head 12");
+            assert!(
+                near(notice.left(), frame.left()) && near(notice.left(), head.left()),
+                "at {width} the notice does not start where the frame and the letters do: {notice:?}, {frame:?}, {head:?}"
+            );
+            assert!(
+                near(notice.right(), frame.right()),
+                "at {width} the notice does not end where the frame does: {notice:?}, {frame:?}"
+            );
+            assert!(
+                notice.size.width <= px(READING_WIDTH),
+                "at {width} the notice runs past the column: {notice:?}"
+            );
+            line = notice.size.height;
+        }
+
+        // On a narrow one the notice has the frame's margins, wraps over
+        // more than the one line, and has the composer below it.
+        cx.simulate_resize(gpui::size(px(640.), px(800.)));
+        let pane = px(640.) - bounds_of(cx, "rows").right();
+        assert!(
+            pane < px(READING_WIDTH),
+            "640 is no narrow window: the pane is {pane:?}"
+        );
+        let (notice, frame) = (bounds_of(cx, "notice"), bounds_of(cx, "composer"));
+        assert!(
+            near(notice.left(), frame.left()),
+            "the notice does not start where the frame does: {notice:?}, {frame:?}"
+        );
+        assert!(
+            near(notice.right(), frame.right()),
+            "the notice does not end where the frame does: {notice:?}, {frame:?}"
+        );
+        assert!(
+            notice.size.height > line * 1.5,
+            "the notice does not wrap: {notice:?} against a line of {line:?}"
+        );
+        assert!(
+            notice.bottom() <= frame.top(),
+            "the composer stands inside the notice: {frame:?} under {notice:?}"
         );
     }
 

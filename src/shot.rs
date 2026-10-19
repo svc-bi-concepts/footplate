@@ -48,7 +48,9 @@ use crate::yard::Env;
 /// of them away, the yardmaster's conversation naming an ask and two
 /// bead ids, the cheatsheet open over an open card, and the
 /// yardmaster's conversation with the parties' reactions under three
-/// mails, with the bar of reactions to tap floating over one of them.
+/// mails, with the bar of reactions to tap floating over one of them, and
+/// the yardmaster's conversation with the notice a flows view that did not
+/// answer leaves under the mail.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -114,6 +116,7 @@ pub const STATES: &[&str] = &[
     "keys",
     "reactions",
     "reactions-hover",
+    "notice",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -660,9 +663,9 @@ fn populate(yard: &Yard, state: &str) {
         // read, the one that answers under the first screen's open
         // fields, the signed-out yard's, which the window never reaches
         // past the edge, the timetable states', which the window
-        // opens on the panel, the board, the bead and the flow, and the
+        // opens on the panel, the board, the bead and the flow, the
         // switcher's, which the window opens with the switcher's list
-        // standing.
+        // standing, and the notice's, whose flows view does not answer.
         "yardmaster"
         | "far"
         | "settings"
@@ -680,7 +683,8 @@ fn populate(yard: &Yard, state: &str) {
         | "arrival"
         | "flow"
         | "old-lines"
-        | "switcher" => {
+        | "switcher"
+        | "notice" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
             // grouping and the separators.
@@ -716,6 +720,13 @@ fn populate(yard: &Yard, state: &str) {
             // open.
             if state == "arrival" {
                 yard.answer("Bead", &bead_zulu());
+            }
+            // The call for the flows is taken and the connection closed
+            // with no reply, as by a server that went away over it: the
+            // yard reads on without them and says so in the notice that
+            // stands under the mail.
+            if state == "notice" {
+                yard.answer_nothing("Flows");
             }
         }
         "crew" => {
@@ -2024,6 +2035,23 @@ mod tests {
                     assert_eq!(letters[1].reactions.len(), 2, "{state}");
                     assert!(letters[2].reactions.is_empty(), "{state}");
                     assert_eq!(letters[3].reactions.len(), 1, "{state}");
+                }
+                "notice" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    // The yardmaster's six mails, and the flows view that
+                    // did not answer, as the notice the window says.
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 6, "{state}");
+                    assert!(
+                        loaded.flows_notice.as_deref().is_some_and(|notice| {
+                            notice.starts_with(
+                                "the flows could not be read: the yard does not answer (",
+                            )
+                        }),
+                        "{state}: {:?}",
+                        loaded.flows_notice
+                    );
+                    assert_eq!(loaded.arrivals_notice, None, "{state}");
                 }
                 "refs" => {
                     // The run ask the first mail names, and the two bead
