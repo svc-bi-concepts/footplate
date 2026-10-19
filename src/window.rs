@@ -14075,6 +14075,11 @@ impl Footplate {
             .flex()
             .flex_col()
             .gap_3();
+        // The list takes vertical moves alone: gpui hands a wheel move
+        // to every scroller under the pointer and spends a move along
+        // one axis on a scroller of the other, so the horizontal moves
+        // meant for the flows' columns would scroll the list as well.
+        list.style().restrict_scroll_to_axis = Some(true);
         if !depot.error.is_empty() {
             list = list.child(
                 div()
@@ -14128,6 +14133,9 @@ impl Footplate {
             .overflow_x_scroll()
             .flex()
             .flex_row();
+        // The columns take horizontal moves alone and leave the
+        // vertical ones to the list, for the same reason as the list.
+        columns.style().restrict_scroll_to_axis = Some(true);
         for stage in &flow.stages {
             columns = columns.child(match stage.stage.as_str() {
                 "backlog" => self
@@ -26957,6 +26965,157 @@ yardr.dev
                 );
             }
         }
+    }
+
+    /// Scrolls `delta` where `selector` stands, as the wheel does,
+    /// and draws the frame after it.
+    fn scroll_on(cx: &mut VisualTestContext, selector: &str, delta: gpui::Point<gpui::Pixels>) {
+        let position = bounds_now(cx, selector).center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(delta),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: gpui::TouchPhase::default(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// Where the line view's list stands: its offset, read from the
+    /// handle the list tracks.
+    fn line_offset_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Point<gpui::Pixels> {
+        view.read_with(cx, |v, _| v.decision.offset())
+    }
+
+    /// Stands the line view's list back at its top and draws the frame
+    /// after it, so each scroll of the test starts from the top.
+    fn line_top(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        view.read_with(cx, |v, _| {
+            v.decision.set_offset(gpui::point(px(0.), px(0.)))
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// Where one flow's columns stand sideways: the left edge of one of
+    /// its columns. The columns hold their offset in gpui's element
+    /// state, which no handle reads, so the test reads where a column
+    /// stands instead.
+    fn columns_left_of(cx: &mut VisualTestContext, column: &str) -> Pixels {
+        bounds_now(cx, column).left()
+    }
+
+    /// A scroll moves the line view along the axis it was given, never
+    /// diagonally: a vertical wheel move over a flow's columns, its
+    /// head or its backlog scrolls the list and leaves every flow's
+    /// columns where they stand, and a horizontal one scrolls only the
+    /// columns under the pointer, leaving the list where it stands.
+    /// Over a flow's head a horizontal move meets no columns, so
+    /// nothing moves.
+    #[gpui::test]
+    fn a_scroll_moves_the_line_view_along_its_axis(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_this_yard());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Line("footplate".to_string()), window, cx)
+        });
+        wait(cx, "the line", |cx| drawn(cx, "flow head footplate"));
+        // A window the board stands wider and taller than: the depot's
+        // eight columns against the pane, its four flows against the
+        // window's height.
+        cx.simulate_resize(gpui::size(px(1000.), px(600.)));
+        drawn(cx, "flow head footplate");
+        let over = view.read_with(cx, |v, _| v.decision.max_offset().height);
+        assert!(over > px(120.), "the line fits its pane: {over:?}");
+        // One column of every flow of the depot, to watch sideways.
+        let columns = [
+            "column default new",
+            "column design.design draft",
+            "column contributors.pr triage",
+            "column type/release build",
+        ];
+        let left: Vec<Pixels> = columns.iter().map(|c| columns_left_of(cx, c)).collect();
+        assert_eq!(line_offset_of(&view, cx).y, px(0.));
+        // Down over a flow's columns scrolls the list and leaves every
+        // flow's columns where they stand.
+        scroll_on(cx, "column default new", gpui::point(px(0.), px(-120.)));
+        assert_eq!(line_offset_of(&view, cx).y, px(-120.));
+        for (column, stood) in columns.iter().zip(left.iter()) {
+            assert_eq!(
+                columns_left_of(cx, column),
+                *stood,
+                "a downward scroll moved {column} sideways"
+            );
+        }
+        line_top(&view, cx);
+        // Down over the flow's head does the same.
+        scroll_on(cx, "flow default", gpui::point(px(0.), px(-120.)));
+        assert_eq!(line_offset_of(&view, cx).y, px(-120.));
+        for (column, stood) in columns.iter().zip(left.iter()) {
+            assert_eq!(
+                columns_left_of(cx, column),
+                *stood,
+                "a downward scroll over a head moved {column} sideways"
+            );
+        }
+        line_top(&view, cx);
+        // Down over the backlog does the same.
+        scroll_on(cx, "column default backlog", gpui::point(px(0.), px(-120.)));
+        assert_eq!(line_offset_of(&view, cx).y, px(-120.));
+        for (column, stood) in columns.iter().zip(left.iter()) {
+            assert_eq!(
+                columns_left_of(cx, column),
+                *stood,
+                "a downward scroll over the backlog moved {column} sideways"
+            );
+        }
+        line_top(&view, cx);
+        // Right over a flow's columns scrolls that flow's columns
+        // alone: the list and the other flows' columns stand where
+        // they stood.
+        scroll_on(cx, "column default new", gpui::point(px(-120.), px(0.)));
+        assert_eq!(line_offset_of(&view, cx).y, px(0.));
+        let stood = columns_left_of(cx, "column default new");
+        assert!(
+            stood < left[0],
+            "a sideways scroll left the columns under it standing: {stood:?}"
+        );
+        for (column, at) in columns[1..].iter().zip(left[1..].iter()) {
+            assert_eq!(
+                columns_left_of(cx, column),
+                *at,
+                "a sideways scroll over another flow moved {column}"
+            );
+        }
+        // Right over the flow's head meets no columns, so nothing
+        // moves.
+        scroll_on(cx, "flow default", gpui::point(px(-120.), px(0.)));
+        assert_eq!(line_offset_of(&view, cx).y, px(0.));
+        assert_eq!(columns_left_of(cx, "column default new"), stood);
+        // Right over another flow's backlog scrolls that flow's columns
+        // alone and leaves the list where it stands.
+        scroll_on(
+            cx,
+            "column design.design backlog",
+            gpui::point(px(-120.), px(0.)),
+        );
+        assert_eq!(line_offset_of(&view, cx).y, px(0.));
+        assert_eq!(columns_left_of(cx, "column default new"), stood);
+        let moved = columns_left_of(cx, "column design.design draft");
+        assert!(
+            moved < left[1],
+            "a sideways scroll over the backlog left its columns standing: {moved:?}"
+        );
     }
 
     /// At the narrowest window the arrivals panes hold: the list's row
