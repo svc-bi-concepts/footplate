@@ -4513,10 +4513,10 @@ fn grouped<Tz: TimeZone>(before: &Letter, after: &Letter, zone: &Tz) -> bool {
 /// the word (`**`, `(`), those stuck to it (`**:`, `)`), the space after it
 /// and a dash set off by spaces go with it. What opens the text itself
 /// stays, so that its Markdown does. Where the word does not cut out
-/// cleanly the text stays whole, as it was drawn before: a word with
-/// letters stuck to it (`correction's`) is a word of the text, and a mark
-/// stuck before it that nothing closes beside it wraps the whole text
-/// (`**Correction: …**`), which would be left with its closing alone.
+/// cleanly the text stays whole, as it was drawn before: a word joined to
+/// letters by an apostrophe or hyphen (`correction's`) is a word of the
+/// text, and a mark stuck before it that nothing closes beside the word
+/// wraps the whole text, which would be left with its closing alone.
 fn correction(text: &str) -> Option<&str> {
     let from = text.find(char::is_alphanumeric)?;
     let (before, from_word) = text.split_at(from);
@@ -4531,7 +4531,12 @@ fn correction(text: &str) -> Option<&str> {
     let rest = after.trim_start_matches(|c: char| !c.is_alphanumeric() && !c.is_whitespace());
     let opening = &before[before.trim_end_matches(|c: char| !c.is_whitespace()).len()..];
     let closing = &after[..after.len() - rest.len()];
-    if rest.starts_with(char::is_alphanumeric) || !closes(opening, closing) {
+    // A colon can touch the body (`correction:the`); an apostrophe or a
+    // hyphen joining letters keeps the whole word (`correction's`).
+    let joins_word = closing
+        .chars()
+        .all(|c| matches!(c, '\'' | '’' | '-' | '‐' | '‑'));
+    if (rest.starts_with(char::is_alphanumeric) && joins_word) || !closes(opening, closing) {
         return Some(text);
     }
     // A dash between spaces parts the word from the text; one after a line
@@ -6700,6 +6705,7 @@ mod tests {
                 "the edit card is ask 6893, not 6891",
             ),
             ("Correction: the card is ask 6893", "the card is ask 6893"),
+            ("correction:the card is ask 6893", "the card is ask 6893"),
             ("  CORRECTION - ask 6893", "ask 6893"),
             ("Correction — ask 6893", "ask 6893"),
             (
@@ -6749,7 +6755,6 @@ mod tests {
         for text in [
             "correction's effect",
             "correction-ish",
-            "correction:the card",
             "**Correction: ask 6893, not 6891.**",
             "(correction: the card is ask 6893.)",
         ] {
