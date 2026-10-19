@@ -827,7 +827,13 @@ fn decided_words(decided: usize) -> String {
 /// wait for someone else is not theirs to answer, so it never takes
 /// the accent.
 fn remark_color(remark: &str, tone: &str, held_by: &str, me: &str, palette: Palette) -> Rgba {
-    if tone == "red" && (!is_held(remark) || held_by_you(held_by, me)) {
+    if is_held(remark) {
+        if held_by_you(held_by, me) {
+            palette.warn
+        } else {
+            palette.faint
+        }
+    } else if tone == "red" {
         palette.warn
     } else if waits_on_you(remark, me) {
         palette.text_accent
@@ -874,7 +880,13 @@ fn headcode_color(
 ) -> Rgba {
     if working {
         palette.text
-    } else if tone == "red" && (!is_held(remark) || held_by_you(held_by, me)) {
+    } else if is_held(remark) {
+        if held_by_you(held_by, me) {
+            palette.warn
+        } else {
+            palette.text
+        }
+    } else if tone == "red" {
         palette.warn
     } else if waits_on_you(remark, me) {
         palette.text_accent
@@ -24965,6 +24977,10 @@ yardr.dev
             palette.warn
         );
         assert_eq!(
+            remark_color("held by jo", "none", "jo", "jo", palette),
+            palette.warn
+        );
+        assert_eq!(
             remark_color("stalled · session failed", "red", "", "jo", palette),
             palette.warn
         );
@@ -25120,6 +25136,10 @@ yardr.dev
         );
         assert_eq!(
             headcode_color(false, "held by jo", "red", "jo", "jo", palette),
+            palette.warn
+        );
+        assert_eq!(
+            headcode_color(false, "held by jo", "none", "jo", "jo", palette),
             palette.warn
         );
         assert_eq!(
