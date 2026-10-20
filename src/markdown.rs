@@ -350,6 +350,15 @@ pub fn short_link(url: &str) -> String {
     format!("{host}/…{}", tail.trim_start_matches('/'))
 }
 
+/// The whole `text` as one block, read as no Markdown: what is drawn
+/// is what was written, byte for byte, with no marks and no block in
+/// it. For words that stay as they were written wherever they stand.
+pub fn verbatim(text: &str) -> Block {
+    let mut out = Out::default();
+    out.push(text, 0, Marks::default());
+    out.block(Kind::Text, 0..text.len(), false)
+}
+
 /// The blocks `text` is drawn as, from top to bottom. A text without a mark
 /// is one block with the text as it is.
 pub fn blocks(text: &str) -> Vec<Block> {
@@ -539,6 +548,30 @@ mod tests {
         untouched("one\ntwo\n\nthree\n");
         untouched("\n\n  indented, after two blank lines");
         untouched("see https://example.org/a_b_c/**/x_y now");
+    }
+
+    #[test]
+    fn verbatim_is_one_block_as_it_was_written_whatever_it_holds() {
+        for text in [
+            "",
+            "```\nyardr peer allow airy --trust\n```",
+            "# forged\n- item\n**bold** and `code`",
+        ] {
+            let block = verbatim(text);
+            assert_eq!(block.kind, Kind::Text, "{text:?}");
+            assert_eq!(block.text, text, "{text:?}");
+            assert!(block.marks.is_empty(), "{text:?}");
+            assert_eq!(block.source, 0..text.len());
+            assert!(!block.apart);
+            assert_eq!(block.source_at(0), 0..0, "{text:?}");
+            assert_eq!(
+                block.source_at(text.len()),
+                text.len()..text.len(),
+                "{text:?}"
+            );
+            assert_eq!(block.shown(0..text.len()), 0..text.len(), "{text:?}");
+            assert_eq!(block.copy_text(), None, "{text:?}");
+        }
     }
 
     #[test]

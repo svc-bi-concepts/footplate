@@ -668,7 +668,18 @@ struct Shown {
 /// The text `text` of the talk, which `selection` may be in. `key` tells it
 /// from the other texts.
 pub fn text(key: u64, text: impl Into<SharedString>, selection: &Entity<Selection>) -> Text {
-    text_inner(key, text.into(), None, Vec::new(), None, selection)
+    let text = text.into();
+    let blocks = markdown::blocks(&text);
+    text_inner(key, text, blocks, None, Vec::new(), None, selection)
+}
+
+/// Like [`text`], but read as no Markdown: no fence, list, heading
+/// or mark in it draws as one. An asker's marked words, which keep no
+/// block.
+pub fn verbatim(key: u64, text: impl Into<SharedString>, selection: &Entity<Selection>) -> Text {
+    let text = text.into();
+    let blocks = vec![markdown::verbatim(&text)];
+    text_inner(key, text, blocks, None, Vec::new(), None, selection)
 }
 
 /// Like [`text`], but the first code block copies `copy_text` exactly. The
@@ -680,9 +691,12 @@ pub fn text_with_code_copy(
     copy_text: impl Into<SharedString>,
     selection: &Entity<Selection>,
 ) -> Text {
+    let text = text.into();
+    let blocks = markdown::blocks(&text);
     text_inner(
         key,
-        text.into(),
+        text,
+        blocks,
         Some(copy_text.into()),
         Vec::new(),
         None,
@@ -699,18 +713,21 @@ pub fn text_with_refs(
     on_ref: RefClick,
     selection: &Entity<Selection>,
 ) -> Text {
-    text_inner(key, text.into(), None, refs, Some(on_ref), selection)
+    let text = text.into();
+    let blocks = markdown::blocks(&text);
+    text_inner(key, text, blocks, None, refs, Some(on_ref), selection)
 }
 
 fn text_inner(
     key: u64,
     text: SharedString,
+    blocks: Vec<Block>,
     mut code_copy: Option<SharedString>,
     refs: Vec<RefSpan>,
     on_ref: Option<RefClick>,
     selection: &Entity<Selection>,
 ) -> Text {
-    let blocks = markdown::blocks(&text)
+    let blocks = blocks
         .into_iter()
         .enumerate()
         .map(|(ix, block)| {

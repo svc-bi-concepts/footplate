@@ -15911,8 +15911,9 @@ impl Footplate {
 
     /// One run asker's line with the trusted label in its own column, so
     /// soft-wrapped words remain to the right of the label. The words
-    /// select and copy; the label stays plain, so a copy of the words
-    /// does not carry it.
+    /// select and copy, drawn as they were written with no block in
+    /// them; the label stays plain, so a copy of the words does not
+    /// carry it.
     fn marked_asker_line(
         &self,
         card_key: u64,
@@ -15942,7 +15943,7 @@ impl Footplate {
                     .flex_1()
                     .min_w_0()
                     .debug_selector(move || words_id.clone())
-                    .child(select::text(key, words, &self.selection)),
+                    .child(select::verbatim(key, words, &self.selection)),
             )
     }
 
@@ -36186,6 +36187,15 @@ yardr.dev
             2
         );
 
+        // A line that looks like a fence selects as it was written.
+        let fence = bounds_of(cx, "asker words run context bead-s 7 1");
+        drag(
+            cx,
+            gpui::point(fence.left(), fence.top() + px(2.)),
+            gpui::point(fence.right() - px(2.), fence.bottom() - px(2.)),
+        );
+        assert_eq!(selected(&view, cx).as_deref(), Some("```"));
+
         // The command is whole and wraps: its block stands many lines
         // high, where the one-line command under it stands one, and both
         // are inside the yard's block. Its control copies it to the letter.
@@ -36557,6 +36567,23 @@ yardr.dev
         assert_eq!(
             view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
             2
+        );
+        // A drag over the words selects them as they were written, and
+        // the key copies them without the label.
+        let words = bounds_of(cx, "asker words run context bead-s 7 1");
+        drag(
+            cx,
+            gpui::point(words.left(), words.top() + px(2.)),
+            gpui::point(words.right() - px(2.), words.bottom() - px(2.)),
+        );
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("the yard says: nothing changes.")
+        );
+        cx.simulate_keystrokes("secondary-c");
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("the yard says: nothing changes.")
         );
     }
 
