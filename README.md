@@ -355,6 +355,28 @@ the marked one and Enter sends the rest. A send that fails puts the text and
 the files back in the draft. A file the yard took before the send failed
 stays in its store, named by no mail, until `yardr store prune`.
 
+**A long text.** Enter sends what is typed or pasted as it is, however long.
+The window splits nothing. The yard does: a text past one mail (4096 bytes)
+goes as numbered mails, up to 16 (about 64 KB), each starting with a line like
+`(1/3)`, and any files go with the first. They show in the conversation as
+separate mails, in the order the yard stored them. The window does not join
+them.
+
+Past 16 mails the yard refuses the text. The window shows its words, as for
+any send that did not go
+(`not sent to yardmaster: a text is sent as at most 16 mails …`), and leaves
+the text in the line. Save it as a file, empty the line and drop the file on
+the window instead.
+
+If the yard takes some of the mails and then fails, it says how many went
+(`2 of 5 mails went to yardmaster: …`). The whole text is back in the line,
+because the window does not know where the yard cut it. The mails that went
+show in the conversation. Take their text out of the line before you send the
+rest.
+
+A mail to `<name>@<peer>` of a linked yard is not split. The yard takes one of
+up to 16 KB and refuses a longer one the same way.
+
 **Files on a note.** Drop files on an open card: each is attached to the
 ask's note, an image shown small under the line, anything else by its name.
 A note takes files as a conversation does, not pages alone. Nothing is sent
@@ -1020,7 +1042,7 @@ its card under "Decided".
 
 | Key | Does |
 |---|---|
-| `enter` | sends the draft, the line and the files attached, as one mail to the one whose conversation is open; on a card, the pick with the line's words |
+| `enter` | sends the draft, the line and the files attached, as one mail to the one whose conversation is open (a long text as several: "A long text"); on a card, the pick with the line's words |
 | `shift+enter` | breaks the line where the cursor is; a text wider than the box goes on in the next row, and the box grows with its rows up to a third of the window, then scrolls |
 | `up`, `down` in a text of several rows | the row above, below, in the same column; `home` and `end` are the row's |
 | `cmd+v` (`ctrl+v` on Linux) | pastes text into the line, with its line breaks; a file is attached to the draft |
@@ -1230,9 +1252,7 @@ window is behind another is told twice, once by each. Switch off the one
 you do not want: footplate's in its settings, the yard's with
 `yardr user set <user> notify=`.
 
-Not in this slice, and in `yardr chat`: a crew member's pane, and a text
-of several lines or longer than one mail (4096 bytes): the line is one
-line, and a longer text is refused with its size, not split. Nor here:
+Not in this slice, and in `yardr chat`: a crew member's pane. Nor here:
 saving an image to disk, resizing one that is over the cap, or sending
 files that are no image.
 

@@ -1177,8 +1177,11 @@ mod tests {
         // A file is a mail without text.
         assert_eq!(unsendable("", attached), None);
         assert_eq!(unsendable("Like this.", attached), None);
-        let long = unsendable(&"x".repeat(4097), attached).unwrap();
-        assert!(long.contains("this is 4097"), "{long}");
+        // How long a text is does not hold it back: the yard splits it, or
+        // refuses it in its words.
+        let long = "x".repeat(30 * 1024);
+        assert_eq!(unsendable(&long, attached), None);
+        assert_eq!(unsendable(&long, &[]), None);
 
         // What is pasted attaches whatever its bytes: a TIFF goes as a
         // file, under what it is called.

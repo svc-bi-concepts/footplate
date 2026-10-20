@@ -19827,6 +19827,79 @@ mod tests {
         assert_eq!(typed(&view, cx), "");
     }
 
+    /// A text of any length goes to the yard as it is, the yard splits one
+    /// past a mail, and its parts are the separate mails it stored, none
+    /// joined. One the yard refuses, past 16 parts, is said in its words
+    /// where a send that did not go is, and stays in the line.
+    #[gpui::test]
+    fn a_long_text_goes_as_it_is_and_what_the_yard_refuses_of_one_stays_in_the_line(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        mails(&yard, &[LINK]);
+        let (view, cx) = opened(&yard, &[LINK], cx);
+
+        // About 30 KB, pasted: far past the 4096 bytes of a mail.
+        let long = ["The yard splits what is long."; 1000].join("\n");
+        assert!(long.len() > 29_000, "{}", long.len());
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(long.clone()));
+        cx.simulate_keystrokes("secondary-v");
+        assert_eq!(typed(&view, cx), long);
+        assert_eq!(notice(&view, cx), "");
+        cx.simulate_keystrokes("enter");
+        // One call with the whole text: splitting it is the yard's.
+        wait(cx, "the long text sent", |_| {
+            yard.asked("Mail") == [json!({"to": "yardmaster", "text": long, "actor": "jo"})]
+        });
+        wait(cx, "the line empty", |cx| typed(&view, cx).is_empty());
+        assert_eq!(notice(&view, cx), "");
+
+        // The yard stored three mails, numbered, and they are three in the
+        // conversation, as it has them.
+        let parts = [
+            "(1/3)\nThe yard splits what is long.\nThe yard splits what is long.",
+            "(2/3)\nThe yard splits what is long.\nThe yard splits what is long.",
+            "(3/3)\nThe yard splits what is long.",
+        ];
+        for (seq, part) in (21..).zip(parts) {
+            yard.emit(
+                &json!({"seq": seq, "kind": "mail", "actor": "jo", "at": "2026-10-08T09:31:00Z",
+                    "data": {"to": "yardmaster", "text": part}})
+                .to_string(),
+            );
+        }
+        wait(cx, "the parts, each a mail of its own", |cx| {
+            texts(&view, cx) == [LINK, parts[0], parts[1], parts[2]]
+        });
+
+        // Past 16 parts the yard refuses the text, in its words. They stand
+        // where the window says why a send did not go, and the text is
+        // still in the line, whole, with nothing marked: a file can take
+        // its place.
+        let too_long =
+            "a text is sent as at most 16 mails (about 64 KB): send it as a file (--file)";
+        yard.answer(
+            "Mail",
+            &json!({"error": {"code": "error", "message": too_long}}).to_string(),
+        );
+        let huge = ["The yard splits what is long."; 2400].join("\n");
+        assert!(huge.len() > 64 * 1024, "{}", huge.len());
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(huge.clone()));
+        cx.simulate_keystrokes("secondary-v enter");
+        wait(cx, "why the text was not sent", |cx| {
+            notice(&view, cx) == format!("not sent to yardmaster: {too_long}")
+        });
+        assert_eq!(typed(&view, cx), huge);
+        assert_eq!(attached(&view, cx), []);
+        assert_eq!(
+            yard.asked("Mail").last(),
+            Some(&json!({"to": "yardmaster", "text": huge, "actor": "jo"}))
+        );
+        assert_eq!(yard.asked("Mail").len(), 2);
+        assert_eq!(texts(&view, cx).len(), 4);
+    }
+
     #[gpui::test]
     fn the_line_still_copies_its_own_selection(cx: &mut TestAppContext) {
         let yard = Yard::start();

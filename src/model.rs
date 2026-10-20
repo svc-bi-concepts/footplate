@@ -22,9 +22,6 @@ use crate::select;
 /// The kind of message a link must carry out for mail to be written.
 const PEER_MAIL: &str = "mail";
 
-/// A mail holds this many bytes.
-pub const MAIL_BYTES: usize = 4096;
-
 /// The prefix of a bead label that makes it a topic; shown without it.
 const TOPIC_PREFIX: &str = "topic:";
 
@@ -5254,17 +5251,13 @@ where
     }
 }
 
-/// Why what is typed is not sent as it is, if it is not: a mail is 1 to
-/// 4096 bytes.
+/// Why what is typed is not sent as it is, if it is not: only a text with
+/// nothing in it is held back, and its reason is empty, since there is
+/// nothing to say. How long a text may be is the yard's to say: it sends
+/// one past a mail as numbered mails, and refuses one past what they hold,
+/// in its own words.
 pub fn unsendable(text: &str) -> Option<String> {
-    let bytes = text.trim().len();
-    match bytes {
-        0 => Some(String::new()),
-        n if n > MAIL_BYTES => Some(format!(
-            "a mail holds {MAIL_BYTES} bytes, and this is {n}: send it in parts"
-        )),
-        _ => None,
-    }
+    text.trim().is_empty().then(String::new)
 }
 
 /// The type of an image, read from its bytes as the yard reads it:
@@ -9283,12 +9276,17 @@ mod tests {
     }
 
     #[test]
-    fn a_mail_is_one_to_4096_bytes() {
+    fn only_an_empty_text_is_unsendable() {
         assert_eq!(unsendable("hello"), None);
+        assert_eq!(unsendable(""), Some(String::new()));
         assert_eq!(unsendable("  \n "), Some(String::new()));
+        // How long is the yard's to say: it splits a text past one mail
+        // (4096 bytes) and refuses one past 16 mails (64 KB) in its words,
+        // so even that one goes to it.
         assert_eq!(unsendable(&"x".repeat(4096)), None);
-        let long = unsendable(&"é".repeat(2049)).unwrap();
-        assert!(long.contains("this is 4098"), "{long}");
+        assert_eq!(unsendable(&"x".repeat(4097)), None);
+        assert_eq!(unsendable(&"x".repeat(30 * 1024)), None);
+        assert_eq!(unsendable(&"x".repeat(100 * 1024)), None);
     }
 
     fn open_ask(
