@@ -52,7 +52,9 @@
 #                           (default the release key, which signs yardr's
 #                           releases and footplate's alike)
 #   YARDR_RELEASE_KEY_PATH  the signer's secret key, as the five commands
-#                           name it (default ~/.minisign/<product>-release.key)
+#                           name it (default ~/.minisign/yardr-release.key,
+#                           the one key that signs yardr's releases and
+#                           footplate's alike)
 #   YARDR_RELEASE_REMOTE    the git remote the tag is fetched from and pushed
 #                           to (default origin)
 set -u
@@ -72,7 +74,7 @@ BUILD=${YARDR_RELEASE_BUILD:-scripts/release.sh}
 # The default keeps its ~ on every shell: quoted, it expands for whoever
 # pastes the commands, not here (bash would expand an unquoted one, dash
 # would not, and the note must read the same everywhere).
-KEYPATH=${YARDR_RELEASE_KEY_PATH:-"~/.minisign/$PRODUCT-release.key"}
+KEYPATH=${YARDR_RELEASE_KEY_PATH:-"~/.minisign/yardr-release.key"}
 REMOTE=${YARDR_RELEASE_REMOTE:-origin}
 
 # has_outcome <name>: whether the flow offers outcome <name> from here, asked
