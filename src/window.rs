@@ -24436,6 +24436,18 @@ yardr.dev
         // Clicking an option still picks it.
         click_on(cx, "pick bead-a 3 2");
         assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+
+        // The decided card's question selects and copies as well.
+        open_decided(&view, cx, "bead-a", 6);
+        let question = bounds_of(cx, "question bead-a 6");
+        drag(
+            cx,
+            gpui::point(question.left(), question.top() + px(2.)),
+            gpui::point(question.right() - px(2.), question.bottom() - px(2.)),
+        );
+        assert_eq!(selected(&view, cx).as_deref(), Some("Merge the docs?"));
+        cx.simulate_keystrokes("secondary-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("Merge the docs?"));
     }
 
     /// Words alone on an ordinary card have a Send button where Enter sends
