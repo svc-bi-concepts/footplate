@@ -914,7 +914,10 @@ from it you have not seen. A name of a linked yard that the operator trusts
 as a user of this yard (`yardr peer allow <peer> --trust <name>=<user>`)
 has no row of its own: its mail is in that user's row, and what you write
 there goes to whoever wrote last, as in `yardr chat`: one mail to one
-place, never a copy to the other. The empty line says where before you type
+place, never a copy to the other. What you wrote from a linked yard under
+such a name stands in the row of whoever you wrote to, as your own mail under
+the name you wrote it by, and answers nobody: what you type in that row goes
+to the one it is with. The empty line says where before you type
 (`Write to mckean@north`), or `Reading mckean` until all of the row is read,
 and Enter sends nothing until then. When the yard refuses it, the window
 says so with that address (`not sent to mckean@north: …`), keeps what you

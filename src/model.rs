@@ -284,7 +284,8 @@ pub struct Entry {
     pub text: String,
     /// The files it carries, shown under its text.
     pub files: Vec<BlobRef>,
-    /// The user's own.
+    /// The user's own, also what they wrote from a linked yard under a
+    /// name trusted as them, in a row that is not their own.
     pub mine: bool,
     /// Where a mail the user sent stands. Mails that stand alike share one
     /// line, under the last of them.
@@ -3433,7 +3434,7 @@ impl Model {
         let mut out: Vec<Entry> = Vec::with_capacity(letters.len());
         let mut before: Option<&Letter> = None;
         for l in letters {
-            let mine = l.from == self.me;
+            let mine = self.own(&l.from, sel);
             let standing = mine.then(|| self.standing(l));
             // The line is under the last of those that stand alike.
             if let Some(shown) = out.last_mut()
@@ -3569,8 +3570,10 @@ impl Model {
     /// Where what is typed goes, when a conversation is open. In the row
     /// of a user whom a name of a linked yard is trusted as it answers
     /// whoever wrote last, as `yardr chat` does: that name at its yard when
-    /// the newest mail that is not the window's own came from there, else
-    /// the user in this yard.
+    /// the newest mail that is not the user's own came from there, else the
+    /// user in this yard. Only a name trusted as the row's user is answered
+    /// at its yard: any other row goes to the one it is with, whoever else
+    /// wrote in it.
     pub fn target(&self) -> Option<Target> {
         let sel = self.selected.as_ref()?;
         let name = self.selected_conversation()?;
@@ -3584,7 +3587,8 @@ impl Model {
             .letters(sel)
             .into_iter()
             .rev()
-            .find(|l| l.from != self.me);
+            .find(|l| !self.own(&l.from, sel))
+            .filter(|l| self.trust.get(&l.from).is_some_and(|user| user == name));
         Some(match last.and_then(|l| l.from.split_once('@')) {
             Some((name, peer)) => Target::Peer {
                 name: name.to_string(),
@@ -3592,6 +3596,16 @@ impl Model {
             },
             None => Target::Crew(name.to_string()),
         })
+    }
+
+    /// Whether the mail `from` sent, as the row `sel` shows it, is the
+    /// user's own: their name, or a name a link trusts as them, which is
+    /// how they spoke from that yard. In their own row such a name is the
+    /// other end of the conversation instead: it wrote to them, a note to
+    /// themselves from there, and an answer goes back to it.
+    fn own(&self, from: &str, sel: &Selected) -> bool {
+        let theirs = matches!(sel, Selected::Conversation(row) if *row == self.me);
+        from == self.me || (!theirs && self.trust.get(from).is_some_and(|user| *user == self.me))
     }
 
     /// Whether the yard has the row `sel` to open.
@@ -8466,6 +8480,36 @@ mod tests {
         }
     }
 
+    /// A linked yard whose `ada` the link trusts as this yard's ada.
+    fn south() -> Peer {
+        Peer {
+            name: "south".into(),
+            send: vec!["mail".into()],
+            receive: vec!["mail".into()],
+            trust: [("ada".to_string(), "ada".to_string())].into(),
+            ..Peer::default()
+        }
+    }
+
+    /// A yard with the mayor for its crew, mckean for its user, and the
+    /// linked yard `yardr`, whose mckean the link trusts as this yard's.
+    fn plantime() -> State {
+        State {
+            me: "mckean".into(),
+            head: 20,
+            crew: vec![member("mayor", "running", "idle")],
+            peers: vec![Peer {
+                name: "yardr".into(),
+                send: vec!["mail".into()],
+                receive: vec!["mail".into()],
+                trust: [("mckean".to_string(), "mckean".to_string())].into(),
+                ..Peer::default()
+            }],
+            cursor: 5,
+            ..State::default()
+        }
+    }
+
     fn user(name: &str) -> User {
         User {
             name: name.into(),
@@ -8685,6 +8729,127 @@ mod tests {
         // An asker of that name is written to in the user's row.
         assert_eq!(m.conversation_with("jo@airy"), Some("jo"));
         assert_eq!(m.unwritable("jo@airy"), None);
+    }
+
+    #[test]
+    fn the_user_s_word_from_a_linked_yard_in_a_crew_member_s_row_does_not_send_the_answer_there() {
+        // footplate-zgtr: the mayor's row held a mail the user wrote from
+        // the linked yard, under the name trusted as them, and what was
+        // typed went to that name: mail to themselves, the mayor got none.
+        let (mut m, _) = Model::new(
+            plantime(),
+            Mode::Chat,
+            Some(Selected::Conversation("mayor".into())),
+        );
+        m.conversation("mayor", vec![letter(21, "mckean@yardr", "mayor", "hi")]);
+        assert_eq!(m.target(), Some(Target::Crew("mayor".into())));
+
+        // Nor does the mayor's own word, written after it, change that.
+        m.event(&event(
+            22,
+            "mail",
+            "mayor",
+            json!({"to": "mckean", "to_user": true, "text": "hello"}),
+        ));
+        assert_eq!(m.target(), Some(Target::Crew("mayor".into())));
+    }
+
+    #[test]
+    fn only_a_name_trusted_as_the_row_s_user_sends_the_answer_to_a_linked_yard() {
+        let mut state = plantime();
+        state.users = vec![user("ada"), user("mckean")];
+        state.peers.push(south());
+        let (mut m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation("mayor".into())),
+        );
+        // A name trusted as another user wrote last in the mayor's row, and
+        // so did one trusted as nobody: an `@` in the sender is no reason
+        // to answer there.
+        m.conversation(
+            "mayor",
+            vec![
+                letter(21, "ada@south", "mckean", "hi"),
+                letter(22, "zed@south", "mckean", "hello"),
+            ],
+        );
+        assert_eq!(m.target(), Some(Target::Crew("mayor".into())));
+    }
+
+    #[test]
+    fn the_user_s_word_from_a_linked_yard_stands_as_their_own_in_another_row_and_not_in_theirs() {
+        let (mut m, _) = Model::new(
+            plantime(),
+            Mode::Chat,
+            Some(Selected::Conversation("mayor".into())),
+        );
+        m.conversation(
+            "mayor",
+            vec![
+                letter(21, "mayor", "mckean", "Shall I plan the week?"),
+                letter(22, "mckean@yardr", "mayor", "hi"),
+            ],
+        );
+        // Under the name it was written by, drawn as theirs, with where it
+        // stands: the mayor has not read it.
+        assert_eq!(
+            m.entries()
+                .iter()
+                .map(|e| (e.from.as_str(), e.mine, e.standing.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("mayor", false, None),
+                ("mckean@yardr", true, Some("sent; mayor is idle"))
+            ]
+        );
+
+        // In their own row the same name is the other end: mail to them,
+        // as it is read.
+        m.select(Selected::Conversation("mckean".into()));
+        m.conversation("mckean", vec![letter(23, "mckean", "mckean", "a note")]);
+        m.conversation(
+            "mckean@yardr",
+            vec![letter(24, "mckean@yardr", "mckean", "from there")],
+        );
+        assert_eq!(
+            m.entries()
+                .iter()
+                .map(|e| (e.from.as_str(), e.mine))
+                .collect::<Vec<_>>(),
+            [("mckean", true), ("mckean@yardr", false)]
+        );
+    }
+
+    #[test]
+    fn a_name_trusted_as_the_user_is_not_who_wrote_last_in_another_user_s_row() {
+        let mut state = yard(&[]);
+        state.users = vec![user("ada"), user("jo")];
+        state.peers.push(airy());
+        state.peers.push(south());
+        let (mut m, _) = Model::new(
+            state,
+            Mode::Chat,
+            Some(Selected::Conversation("ada".into())),
+        );
+        // ada wrote from south, and the user answered from airy: the
+        // newest mail in her row is the user's own, so it is skipped as one
+        // from the user's name is, and the answer goes where ada wrote.
+        m.conversation(
+            "ada@south",
+            vec![letter(21, "ada@south", "jo", "hello from south")],
+        );
+        m.conversation("ada", vec![letter(22, "jo@airy", "ada", "hello from airy")]);
+        assert_eq!(
+            m.target(),
+            Some(Target::Peer {
+                name: "ada".into(),
+                peer: "south".into()
+            })
+        );
+        // Written to in this yard after, ada wrote last there.
+        m.event(&mail_to_jo(23, "ada"));
+        assert_eq!(m.target(), Some(Target::Crew("ada".into())));
     }
 
     #[test]
