@@ -7694,6 +7694,19 @@ impl Footplate {
             && !self.answered_while_adding
     }
 
+    /// Whether the open yard is a stopped one of this machine that is
+    /// reconnecting: the last reading says neither its server nor its
+    /// daemon runs. Its row reads Stopped, not Reconnecting: the
+    /// reading says what to start.
+    fn stopped_while_reconnecting(&self) -> bool {
+        self.reconnecting()
+            && matches!(self.switch_for(), SwitchFor::Near(_))
+            && matches!(
+                self.switch_status.as_ref(),
+                Some(status) if !status.server_running() && !status.daemon_running()
+            )
+    }
+
     /// Whether the yard answers under a way's open fields: it answered
     /// while they stood open, and is not away again since. The screen
     /// says so, and leaving the fields opens it.
@@ -10058,15 +10071,22 @@ impl Footplate {
     /// Start/Stop as a quiet text button at the right end. Running where
     /// it answers, Starting and Stopping while it is started or stopped,
     /// Stopped where nothing runs, or what the last start could not
-    /// start, in yardr's words. Where the yard answered in this run and
-    /// is away now, the row is the one quiet line that says so,
-    /// Reconnecting with a grey dot, and Start stands where a reading
-    /// knows what to start.
+    /// start, in yardr's words. A stopped yard reads Stopped while it
+    /// reconnects too: the reading says what to start. Where the yard
+    /// answered in this run and is away now, and the reading says
+    /// something still runs or none says yet, the row is the one quiet
+    /// line that says so, Reconnecting with a grey dot, and Start stands
+    /// where a reading knows what to start.
     fn switch_state(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let running = self.model.is_some() && (self.down.is_none() || self.answers_under_adding());
         let (state, dot, button): (String, Rgba, Option<(&str, &str)>) = match self.switch_busy {
             Some(SwitchBusy::Starting) => ("Starting…".to_string(), palette.accent, None),
             Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), palette.accent, None),
+            _ if self.stopped_while_reconnecting() => (
+                "Stopped".to_string(),
+                palette.faint,
+                Some(("switch start", "Start")),
+            ),
             _ if self.reconnecting() => (
                 "Reconnecting…".to_string(),
                 palette.faint,
@@ -34077,6 +34097,53 @@ yardr.dev
         });
         assert!(drawn(cx, "switch start"));
         assert!(view.read_with(cx, |v, _| v.yard_is_stopped()));
+    }
+
+    /// A yard that answered and is stopped reads Stopped with Start
+    /// while it reconnects, not Reconnecting: the last reading says
+    /// nothing runs, and says what to start. Where the reading says
+    /// something still runs, the row reads Reconnecting instead.
+    #[gpui::test]
+    fn the_status_row_reads_stopped_while_reconnecting_where_nothing_runs(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(false, false));
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the stopped yard read", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+        assert!(drawn(cx, "switch stop"));
+        // The yard goes down: its rows stay as last seen, and the row
+        // reads Stopped with Start. Reconnecting never paints: the
+        // reading already says nothing runs.
+        yard.stop();
+        wait(cx, "the stopped yard away", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.down.is_some())
+        });
+        assert!(view.read_with(cx, |v, _| v.reconnecting()));
+        assert!(drawn(cx, "switch start"));
+        assert!(!drawn(cx, "reconnecting"));
+        // Something still runs: a restart, or a crash with a process
+        // left. The row reads Reconnecting again.
+        standin::answers(&program, "status", 0, &standin::status(true, false));
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the running yard read", |cx| {
+            settled(&view, cx)
+                && view.read_with(cx, |v, _| {
+                    v.switch_status
+                        .as_ref()
+                        .is_some_and(|status| status.server_running())
+                })
+        });
+        assert!(view.read_with(cx, |v, _| v.reconnecting()));
+        assert!(drawn(cx, "reconnecting"));
     }
 
     /// A yard at an address has no switch, in the head or the settings:
