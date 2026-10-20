@@ -19925,6 +19925,34 @@ mod tests {
         .to_string()
     }
 
+    /// The board at its cap: fifteen arrivals in the served order, this
+    /// yard's longest platform, line, expected and remark among them, and
+    /// some remarked `waits for jo`, so that the waits banner stands above
+    /// the head and every row draws as tall as the board draws any.
+    fn arrivals_capped() -> String {
+        let rows: Vec<Value> = (1..=15)
+            .map(|n| {
+                let bead = format!("yd-r{n:02}");
+                match n % 3 {
+                    1 => json!({"bead": bead,
+                        "title": format!("Arrival number {n} with a title past its cell's end"),
+                        "platform": "review-security", "line": "yardr-hosted",
+                        "expected": "20m–35m",
+                        "remark": "late by 40m, and more words past the remark cell's end",
+                        "tone": "amber"}),
+                    2 => json!({"bead": bead, "title": format!("Arrival number {n}"),
+                        "platform": "new", "line": "yardr", "expected": "1h–2h",
+                        "remark": "waits for jo", "tone": "amber"}),
+                    _ => json!({"bead": bead, "title": format!("Arrival number {n}"),
+                        "platform": "draft", "line": "yardr-design", "expected": "—",
+                        "remark": "held", "tone": "red"}),
+                }
+            })
+            .collect();
+        json!({"result": {"rows": rows, "platforms": ["review-security", "new", "draft"]}})
+            .to_string()
+    }
+
     /// One flow whose groups stand mixed: one line, three, one, one,
     /// and a terminal row, each lit by a bead. The long group combines
     /// the longest routed name, a person group and seats; it takes
@@ -20230,6 +20258,45 @@ mod tests {
                 bead("yd-drifter", "A bead with no line"),
                 bead("yd-stray", "Another bead with no line"),
             ],
+        }})
+        .to_string()
+    }
+
+    /// The flows `flows_crowded` serves, in the served order.
+    const FLOWS_CROWDED: [&str; 6] = ["default", "release", "hotfix", "docs", "design", "triage"];
+
+    /// The flows view the line view's squeeze test draws: yardr's six
+    /// flows of three stages, two beads on one, one on another and none
+    /// on the terminal, each bead worked, remarked and aged so that its
+    /// card stands as tall as the line view draws any, and an Elsewhere
+    /// bead under them. That is more than the narrowest window's list
+    /// holds.
+    fn flows_crowded() -> String {
+        let bead = |bead: String| {
+            json!({"bead": bead, "title": "A bead on its stage", "expected": "1h–2h",
+                   "remark": "waits for jo", "tone": "amber", "working": true,
+                   "worker": "herdr yd-work-new",
+                   "entered_stage_at": "2026-10-10T10:00:00Z"})
+        };
+        let flow = |name: &str| {
+            json!({"name": name, "type": "", "source": "store", "stages": [
+                {"stage": "new", "group": "muse-builders", "human": false,
+                 "lamp": "turn", "beads": [
+                    bead(format!("yd-{name}-1")), bead(format!("yd-{name}-2"))]},
+                {"stage": "review", "group": "muse-reviewers", "human": false,
+                 "lamp": "none", "beads": [bead(format!("yd-{name}-3"))]},
+                {"stage": "merged", "group": "", "human": false,
+                 "lamp": "none", "terminal": true, "beads": []},
+            ]})
+        };
+        let flows: Vec<Value> = FLOWS_CROWDED.into_iter().map(flow).collect();
+        json!({"result": {
+            "travelling": 19,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 19, "flows": flows,
+                 "elsewhere": [bead("yd-pinned".to_string())]},
+            ],
+            "unassigned": [],
         }})
         .to_string()
     }
@@ -27681,6 +27748,170 @@ yardr.dev
                     "at {text} px unfolded {track} stands over the Quiet row: {quiet:?} {card:?}"
                 );
             }
+        }
+    }
+
+    /// The departures board holds its rows: with the cap's fifteen
+    /// arrivals, the waits banner over their head and the cap's line
+    /// under them, the banner, the head, each row and the line stand one
+    /// under another at every text size, and each row holds its cells.
+    /// The board is a scrolling column, whose children shrink under their
+    /// content where they carry a minimum height of their own, as the
+    /// panel's tracks did. The rows carry none, so the board scrolls over
+    /// them instead of squeezing them, and this test fails if that
+    /// changes.
+    #[gpui::test]
+    fn the_board_holds_its_rows_one_under_another_at_the_cap(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_capped());
+        // Eighteen travel and fifteen show: the cap's line stands
+        // under the rows.
+        yard.answer(
+            "Flows",
+            r#"{"result": {"travelling": 18, "depots": [], "unassigned": []}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        // The narrowest window the application opens (main.rs): fifteen
+        // rows cannot fit its board, so a column that shrinks its
+        // children squeezes the rows under their cells.
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Arrivals, window, cx);
+            v.set_departures(true, cx);
+        });
+        wait(cx, "the board", |cx| drawn(cx, "arrival yd-r15"));
+        let beads: Vec<String> = (1..=15).map(|n| format!("yd-r{n:02}")).collect();
+        let mut order = vec!["waits banner".to_string(), "departures head".to_string()];
+        order.extend(beads.iter().map(|bead| format!("arrival {bead}")));
+        order.push("arrivals capped".to_string());
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            // One frame, read whole: a redraw per row would draw the
+            // window again for each.
+            drawn(cx, "departures head");
+            // The banner, the head, the rows and the cap's line, each
+            // under the one before.
+            let mut last = ("the pane's title", bounds_now(cx, "arrivals head").bottom());
+            for what in &order {
+                let at = bounds_now(cx, what);
+                assert!(
+                    last.1 <= at.top(),
+                    "at {text} px {what} stands over {}: {at:?} under {:?}",
+                    last.0,
+                    last.1
+                );
+                last = (what.as_str(), at.bottom());
+            }
+            // Each row holds its cells, within a pixel: edges fall on
+            // half pixels, so a cell may stand half a pixel past its
+            // row's.
+            for bead in &beads {
+                let row = bounds_now(cx, &format!("arrival {bead}"));
+                for part in ["expected", "bead", "title", "platform", "line", "remark"] {
+                    let cell = bounds_now(cx, &format!("arrival {part} {bead}"));
+                    assert!(
+                        row.top() <= cell.top() + px(1.) && cell.bottom() <= row.bottom() + px(1.),
+                        "at {text} px the {part} stands off its row in {bead}: {row:?} {cell:?}"
+                    );
+                }
+            }
+            // The board runs past the window, or it held nothing to
+            // squeeze: a board squeezed to fit would fail above.
+            let window = cx.update(|window, _| window.viewport_size());
+            let capped = bounds_now(cx, "arrivals capped");
+            assert!(
+                capped.bottom() > window.height,
+                "at {text} px the capped board fits the window: {capped:?} in {window:?}"
+            );
+        }
+    }
+
+    /// The line view holds its flows: with six flows of cards and an
+    /// Elsewhere bead under them, each flow's name and each card stand
+    /// one under another at every text size, each card inside its
+    /// column, and the Elsewhere bead under the last flow. The list is a
+    /// scrolling column like the board, and its flows carry no minimum
+    /// height of their own either, so it scrolls over them instead of
+    /// squeezing them, and this test fails if that changes.
+    #[gpui::test]
+    fn the_line_view_holds_its_flows_one_under_another(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_crowded());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        cx.run_until_parked();
+        // The narrowest window the application opens (main.rs): six
+        // flows cannot fit its list, so a column that shrinks its
+        // children squeezes the flows and their cards spill over the
+        // next.
+        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        view.update_in(cx, |v, window, cx| {
+            v.select(Selected::Line("yardr".into()), window, cx)
+        });
+        wait(cx, "the line", |cx| drawn(cx, "flow head yardr"));
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            // One frame, read whole: a redraw per card would draw the
+            // window again for each.
+            drawn(cx, "flow head yardr");
+            // Each flow's name under the cards of the flow before, the
+            // cards inside their columns, within a pixel as the board's
+            // cells are.
+            let mut last = bounds_now(cx, "flow head yardr").bottom();
+            for flow in FLOWS_CROWDED {
+                let name = bounds_now(cx, &format!("flow {flow}"));
+                assert!(
+                    last <= name.top(),
+                    "at {text} px the {flow} flow stands over the one above it: {name:?} under {last:?}"
+                );
+                last = name.bottom();
+                for (stage, cards) in [("new", [1, 2].as_slice()), ("review", [3].as_slice())] {
+                    let column = bounds_now(cx, &format!("column {flow} {stage}"));
+                    for n in cards {
+                        let card = bounds_now(cx, &format!("card yd-{flow}-{n}"));
+                        assert!(
+                            column.top() <= card.top() + px(1.)
+                                && card.bottom() <= column.bottom() + px(1.),
+                            "at {text} px a card stands off its {stage} column in {flow}: {column:?} {card:?}"
+                        );
+                        last = last.max(card.bottom());
+                    }
+                }
+            }
+            let elsewhere = bounds_now(cx, "elsewhere");
+            let pinned = bounds_now(cx, "elsewhere card yd-pinned");
+            assert!(
+                last <= elsewhere.top(),
+                "at {text} px the Elsewhere head stands over the last flow: {elsewhere:?} under {last:?}"
+            );
+            assert!(
+                elsewhere.bottom() <= pinned.top(),
+                "at {text} px the Elsewhere bead stands over its head: {elsewhere:?} {pinned:?}"
+            );
+            // The line runs past the window, or it held nothing to
+            // squeeze: a line squeezed to fit would fail above.
+            let window = cx.update(|window, _| window.viewport_size());
+            assert!(
+                pinned.bottom() > window.height,
+                "at {text} px the crowded line fits the window: {pinned:?} in {window:?}"
+            );
         }
     }
 
