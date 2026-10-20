@@ -20,8 +20,9 @@ use crate::yard::Env;
 /// people, and unread notices, a long wrapped thread with an
 /// image, a long conversation over three days, grouped by sender, with
 /// short links and a correction, an open decision card of a plain
-/// ask, that card with one of jo's beads changed, so Lines carries its
-/// badge, an open card of a run ask,
+/// ask, that card with a selection posed over its context, that card
+/// with one of jo's beads changed, so Lines carries its badge, an open
+/// card of a run ask,
 /// a yard that is stopped, a yard at an
 /// address, the settings on each of their sections, the yards with a
 /// far yard's rename form open in its card, a running
@@ -84,6 +85,7 @@ pub const STATES: &[&str] = &[
     "thread",
     "column",
     "plain",
+    "plain-select",
     "lines",
     "run",
     "stopped",
@@ -808,7 +810,7 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.emit(r#"{"seq": 21, "kind": "created", "actor": "yardmaster", "bead": "yd-barn", "data": {"title": "Paint the barn", "stage": "new", "type": "task", "originator": "jo"}}"#);
         }
-        "plain" | "lines" | "keys" => {
+        "plain" | "plain-select" | "lines" | "keys" => {
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
@@ -1999,12 +2001,24 @@ mod tests {
                     assert_eq!(added.kind.as_str(), "created", "{state}");
                     assert_eq!(added.text("originator"), "jo", "{state}");
                 }
-                "plain" | "lines" | "keys" => {
+                "plain" | "plain-select" | "lines" | "keys" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
                     let bead = yard.client().bead("bead-a").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].options.len(), 3, "{state}");
                     assert_eq!(bead.asks[0].recommend, 1, "{state}");
+                    // The plain-select shot poses its selection over the
+                    // first of these lines, past its first word.
+                    if *state == "plain-select" {
+                        assert_eq!(
+                            bead.asks[0].context,
+                            [
+                                "The links file declares the new source.",
+                                "The move was tested."
+                            ],
+                            "{state}"
+                        );
+                    }
                     // The lines badge's bead, added past the head: one of
                     // jo's.
                     if *state == "lines" {

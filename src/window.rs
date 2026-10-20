@@ -2731,17 +2731,17 @@ fn shot_section() -> Option<Section> {
 
 /// The row a screenshot state opens on instead of the yard's own: the
 /// refused mail's conversation for the undelivered shot, the open card
-/// for the plain, page, run and secret shots (the refused shot's with
-/// its refusal), the board for the arrivals and departures shots, one
-/// arrival's bead for the arrival shot and yardr's line for the flow
-/// shot, else none. A debug build's alone.
+/// for the plain, plain-select, page, run and secret shots (the refused
+/// shot's with its refusal), the board for the arrivals and departures
+/// shots, one arrival's bead for the arrival shot and yardr's line for
+/// the flow shot, else none. A debug build's alone.
 fn shot_selected() -> Option<Selected> {
     // The card shots open their cards, in decisions: a debug build's
     // alone, as the settings and the draft of Footplate::opened.
     #[cfg(debug_assertions)]
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("undelivered") => return Some(Selected::Conversation("clerk@north".into())),
-        Ok("plain") | Ok("page") | Ok("lines") | Ok("keys") => {
+        Ok("plain") | Ok("plain-select") | Ok("page") | Ok("lines") | Ok("keys") => {
             return Some(Selected::Decision("bead-a".into()));
         }
         Ok("decisions") | Ok("decisions-filtered") => {
@@ -2764,6 +2764,31 @@ fn shot_selected() -> Option<Selected> {
 #[cfg(debug_assertions)]
 fn shot_departures() -> bool {
     std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("departures")
+}
+
+/// The selection the plain-select shot poses: the open card's first
+/// context line past its first word, as a drag over it would. A debug
+/// build's alone.
+#[cfg(debug_assertions)]
+fn pose_shot_selection(selection: &Entity<Selection>, model: &Model, cx: &mut Context<Footplate>) {
+    let Some((bead, ask)) = model.current_ask() else {
+        return;
+    };
+    let detail = model.decision_detail(&bead, &chrono::Local::now());
+    let Some(line) = detail
+        .as_ref()
+        .and_then(|detail| detail.asks.iter().find(|asked| asked.ask == ask))
+        .and_then(|asked| asked.context.first())
+    else {
+        return;
+    };
+    // Past the first word, so the shot shows a selection and not the
+    // whole line.
+    let start = line.find(' ').map(|at| at + 1).unwrap_or(0);
+    let key = expanded_text_key(select::key((bead, ask)), "context", 0, line);
+    selection.update(cx, |selection, cx| {
+        selection.pose(key, line.clone().into(), start..line.len(), cx)
+    });
 }
 
 impl Footplate {
@@ -5665,10 +5690,21 @@ impl Footplate {
                         move |client, _| client.bead(&bead)
                     },
                     move |this, answered, cx| match answered {
-                        Ok(bead) => this.change_in(session, cx, |m| {
-                            m.bead_loaded(bead);
-                            Vec::new()
-                        }),
+                        Ok(bead) => {
+                            this.change_in(session, cx, |m| {
+                                m.bead_loaded(bead);
+                                Vec::new()
+                            });
+                            // The plain-select shot poses a selection over
+                            // the open card's first context line, as a drag
+                            // over it would: a debug build's alone.
+                            #[cfg(debug_assertions)]
+                            if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("plain-select")
+                                && let Some(model) = this.model.as_ref()
+                            {
+                                pose_shot_selection(&this.selection, model, cx);
+                            }
+                        }
                         Err(err) => this.change_in(session, cx, |m| {
                             m.bead_failed(&bead, &err.to_string());
                             Vec::new()
@@ -6715,8 +6751,8 @@ impl Footplate {
         self.change(cx, |m| m.read_bead(&bead));
     }
 
-    /// Copies what is selected of the messages. The line copies its own
-    /// selection while the focus is in it.
+    /// Copies what is selected of the messages and the ask cards. The
+    /// line copies its own selection while the focus is in it.
     fn copy(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.selection.read(cx).text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -15403,6 +15439,7 @@ impl Footplate {
     ) -> impl IntoElement + use<> {
         let bead_id = detail.bead.clone();
         let ask_seq = ask.ask;
+        let card_key = select::key((bead_id.clone(), ask_seq));
         let current = ask.current;
         // The option Enter and the button answer: the pick, else the
         // recommendation, which stands preselected.
@@ -15416,14 +15453,20 @@ impl Footplate {
         // bead stand once in the head above, not again on every card.
         let asker_marked = ask.run.is_some() || ask.setup.is_some();
         let question = if asker_marked {
-            Self::marked_question(
+            self.marked_question(
+                card_key,
                 format!("run question {bead_id} {ask_seq}"),
                 &ask.question,
                 &ask.asker,
             )
             .into_any_element()
         } else {
-            div().child(ask.question.clone()).into_any_element()
+            select::text(
+                expanded_text_key(card_key, "question", 0, &ask.question),
+                ask.question.clone(),
+                &self.selection,
+            )
+            .into_any_element()
         };
         card = card.child(
             div()
@@ -15434,6 +15477,7 @@ impl Footplate {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .debug_selector(|| format!("question {bead_id} {ask_seq}"))
                         .text_lg()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(question),
@@ -15458,13 +15502,24 @@ impl Footplate {
         // under the words.
         for (line, text) in ask.context.iter().enumerate() {
             if asker_marked {
-                card = card.child(Self::marked_asker_line(
+                card = card.child(self.marked_asker_line(
+                    card_key,
+                    "context",
+                    line,
                     format!("run context {bead_id} {ask_seq} {line}"),
                     text,
                     &ask.asker,
                 ));
             } else {
-                card = card.child(div().child(text.clone()));
+                card = card.child(
+                    div()
+                        .debug_selector(|| format!("context {bead_id} {ask_seq} {line}"))
+                        .child(select::text(
+                            expanded_text_key(card_key, "context", line, text),
+                            text.clone(),
+                            &self.selection,
+                        )),
+                );
             }
         }
         // The bead whole, one disclosure away: beside the context it opens
@@ -15485,7 +15540,7 @@ impl Footplate {
         );
         if ask.expanded {
             card = card.child(self.expanded_body(
-                select::key((bead_id.clone(), ask_seq)),
+                card_key,
                 Expanded {
                     body: &detail.body,
                     notes: &detail.notes,
@@ -15505,7 +15560,7 @@ impl Footplate {
         // pick from under it, as an ordinary ask's options.
         let elsewhere = self.approve_elsewhere.contains(&(bead_id.clone(), ask_seq));
         if let Some(secret) = &ask.secret {
-            card = card.child(self.secret_lines(secret, palette));
+            card = card.child(self.secret_lines(&bead_id, ask_seq, secret, palette));
         } else if let Some(run) = &ask.run {
             card = card.child(self.run_block(&bead_id, ask_seq, run, true, palette, cx));
         } else {
@@ -15832,23 +15887,47 @@ impl Footplate {
     /// A run ask's question lines, each with the asker's label beside its
     /// words. When a line wraps, its continuation stays under the words,
     /// where no line of the yard's card begins.
-    fn marked_question(id: String, question: &str, asker: &str) -> impl IntoElement + use<> {
-        div().flex().flex_col().children(
-            question
-                .lines()
-                .enumerate()
-                .map(|(line, text)| Self::marked_asker_line(format!("{id} {line}"), text, asker)),
-        )
+    fn marked_question(
+        &self,
+        card_key: u64,
+        id: String,
+        question: &str,
+        asker: &str,
+    ) -> impl IntoElement + use<> {
+        div()
+            .flex()
+            .flex_col()
+            .children(question.lines().enumerate().map(|(line, text)| {
+                self.marked_asker_line(
+                    card_key,
+                    "question",
+                    line,
+                    format!("{id} {line}"),
+                    text,
+                    asker,
+                )
+            }))
     }
 
     /// One run asker's line with the trusted label in its own column, so
-    /// soft-wrapped words remain to the right of the label.
-    fn marked_asker_line(id: String, line: &str, asker: &str) -> impl IntoElement + use<> {
+    /// soft-wrapped words remain to the right of the label. The words
+    /// select and copy; the label stays plain, so a copy of the words
+    /// does not carry it.
+    fn marked_asker_line(
+        &self,
+        card_key: u64,
+        section: &str,
+        index: usize,
+        id: String,
+        line: &str,
+        asker: &str,
+    ) -> impl IntoElement + use<> {
         let prefix = format!("{asker} says: ");
         let words = line.strip_prefix(&prefix).unwrap_or(line).to_string();
         let label = prefix;
         let label_id = format!("asker label {id}");
         let words_id = format!("asker words {id}");
+        let key = expanded_text_key(card_key, section, index, &words);
         div()
             .flex()
             .items_start()
@@ -15863,14 +15942,22 @@ impl Footplate {
                     .flex_1()
                     .min_w_0()
                     .debug_selector(move || words_id.clone())
-                    .child(words),
+                    .child(select::text(key, words, &self.selection)),
             )
     }
 
     /// What a secret ask asks for: the yard's line, which is made from the
     /// source's declaration and never from the asker's words, and where
     /// the value goes.
-    fn secret_lines(&self, secret: &api::Secret, palette: Palette) -> impl IntoElement + use<> {
+    fn secret_lines(
+        &self,
+        bead: &str,
+        ask: u64,
+        secret: &api::Secret,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let card_key = select::key((bead, ask));
+        let key = expanded_text_key(card_key, "secret", 0, &secret.line);
         div()
             .flex()
             .flex_col()
@@ -15878,7 +15965,7 @@ impl Footplate {
                 div()
                     .debug_selector(|| secret.line.clone())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(secret.line.clone()),
+                    .child(select::text(key, secret.line.clone(), &self.selection)),
             )
             .child(div().text_sm().text_color(palette.faint).child(SECRET_GOES))
     }
@@ -15937,17 +16024,21 @@ impl Footplate {
             );
         let description = model::plain(&run.description);
         if !description.is_empty() {
+            let line = description_line(&description);
+            let key = expanded_text_key(card_key, "description", 0, &line);
             block = block.child(
                 div()
                     .debug_selector(|| format!("run description {bead} {ask}"))
-                    .child(description_line(&description)),
+                    .child(select::text(key, line, &self.selection)),
             );
         }
         for (ix, does) in run.does.iter().enumerate() {
+            let line = format!("the yard says: {}", model::plain(does));
+            let key = expanded_text_key(card_key, "does", ix, &line);
             block = block.child(
                 div()
                     .debug_selector(|| format!("run does {bead} {ask} {ix}"))
-                    .child(format!("the yard says: {}", model::plain(does))),
+                    .child(select::text(key, line, &self.selection)),
             );
         }
         block = block.child(self.block_end(
@@ -16059,11 +16150,13 @@ impl Footplate {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let card_key = select::key((bead, ask));
         let over = match open {
             true => setup_runs(&self.yard),
             false => SETUP_PROPOSED.to_string(),
         };
         let summary = model::setup_summary(setup);
+        let summary_key = expanded_text_key(card_key, "summary", 0, &summary);
         let mut block = div()
             .debug_selector(|| format!("setup {bead} {ask}"))
             .p_3()
@@ -16084,13 +16177,15 @@ impl Footplate {
             .child(
                 div()
                     .debug_selector(|| format!("setup summary {bead} {ask}"))
-                    .child(summary),
+                    .child(select::text(summary_key, summary, &self.selection)),
             );
         for (ix, does) in setup.does.iter().enumerate() {
+            let line = format!("the yard says: {}", model::plain(does));
+            let key = expanded_text_key(card_key, "does", ix, &line);
             block = block.child(
                 div()
                     .debug_selector(|| format!("setup does {bead} {ask} {ix}"))
-                    .child(format!("the yard says: {}", model::plain(does))),
+                    .child(select::text(key, line, &self.selection)),
             );
         }
         block = block.child(self.block_end(
@@ -16231,19 +16326,31 @@ impl Footplate {
             .flex_col()
             .gap_2();
         // The question, and what was decided with who and when.
+        let card_key = select::key((bead, ask));
         let asker_marked = detail.run.is_some() || detail.setup.is_some();
         let question = if asker_marked {
-            Self::marked_question(
+            self.marked_question(
+                card_key,
                 format!("run decided question {bead} {ask}"),
                 &detail.question,
                 &detail.asker,
             )
             .into_any_element()
         } else {
-            div().child(detail.question.clone()).into_any_element()
+            select::text(
+                expanded_text_key(card_key, "question", 0, &detail.question),
+                detail.question.clone(),
+                &self.selection,
+            )
+            .into_any_element()
         };
         body = body
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(question))
+            .child(
+                div()
+                    .debug_selector(|| format!("question {bead} {ask}"))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(question),
+            )
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -16273,13 +16380,24 @@ impl Footplate {
             // The context, the options to pick again, the recommendation.
             for (line, text) in detail.context.iter().enumerate() {
                 if asker_marked {
-                    body = body.child(Self::marked_asker_line(
+                    body = body.child(self.marked_asker_line(
+                        card_key,
+                        "context",
+                        line,
                         format!("run decided context {bead} {ask} {line}"),
                         text,
                         &detail.asker,
                     ));
                 } else {
-                    body = body.child(div().child(text.clone()));
+                    body = body.child(
+                        div()
+                            .debug_selector(|| format!("context {bead} {ask} {line}"))
+                            .child(select::text(
+                                expanded_text_key(card_key, "context", line, text),
+                                text.clone(),
+                                &self.selection,
+                            )),
+                    );
                 }
             }
             // Whether a put-aside run or setup ask can still be approved
@@ -16340,7 +16458,7 @@ impl Footplate {
             }
             // A secret ask says what it asks for in the yard's line.
             if let Some(secret) = &detail.secret {
-                body = body.child(self.secret_lines(secret, palette));
+                body = body.child(self.secret_lines(bead, ask, secret, palette));
             }
             // A run ask has the yard's block, and under it the control
             // that approves while it is only put aside: one approved,
@@ -24255,6 +24373,68 @@ yardr.dev
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn an_ask_card_s_question_and_context_are_selected_with_the_mouse_and_copied(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_buttons());
+        yard.answer("Bead", &bead_buttons());
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+        // A drag over the question selects it, and the key copies it.
+        let question = bounds_of(cx, "question bead-a 3");
+        drag(
+            cx,
+            gpui::point(question.left(), question.top() + px(2.)),
+            gpui::point(question.right() - px(2.), question.bottom() - px(2.)),
+        );
+        assert_eq!(selected(&view, cx).as_deref(), Some("Close sketch PR #3?"));
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        cx.simulate_keystrokes("secondary-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("Close sketch PR #3?"));
+
+        // A drag over a context line selects it instead.
+        let context = bounds_of(cx, "context bead-a 3 0");
+        drag(
+            cx,
+            gpui::point(context.left(), context.top() + px(2.)),
+            gpui::point(context.right() - px(2.), context.bottom() - px(2.)),
+        );
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("The sketch landed yesterday.")
+        );
+        cx.simulate_keystrokes("secondary-c");
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("The sketch landed yesterday.")
+        );
+
+        // Clicking an option still picks it.
+        click_on(cx, "pick bead-a 3 2");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
     }
 
     /// Words alone on an ordinary card have a Send button where Enter sends

@@ -86,6 +86,28 @@ impl Selection {
         }
     }
 
+    /// A posed selection, for the screenshots: `range` of the text `key`
+    /// stands selected, as a drag over it would. A debug build's alone.
+    #[cfg(debug_assertions)]
+    pub fn pose(
+        &mut self,
+        key: u64,
+        text: SharedString,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.at = Some(Selected {
+            key,
+            text,
+            anchor: range.clone(),
+            word: false,
+            range,
+            clicked: None,
+            selecting: false,
+        });
+        cx.notify();
+    }
+
     /// What of the text `key` is selected.
     fn range_in(&self, key: u64, text: &str) -> Option<Range<usize>> {
         let at = self.at.as_ref()?;
