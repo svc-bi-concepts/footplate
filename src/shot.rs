@@ -23,7 +23,8 @@ use crate::yard::Env;
 /// ask, that card with one of jo's beads changed, so Lines carries its
 /// badge, an open card of a run ask,
 /// a yard that is stopped, a yard at an
-/// address, the settings on each of their sections, a running
+/// address, the settings on each of their sections, the yards with a
+/// far yard's rename form open in its card, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page, an image and a file, a
 /// mail with a page and an image, that mail's image open full size over
@@ -55,6 +56,8 @@ use crate::yard::Env;
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
+/// rename shot opens that same far yard, with its rename form open in
+/// its card; the
 /// signed-out yard from settings the state writes itself, against a
 /// throwaway config, with a session the edge no longer knows; the away
 /// yard from settings the state writes itself, against a throwaway
@@ -88,6 +91,7 @@ pub const STATES: &[&str] = &[
     "settings",
     "settings-appearance",
     "settings-yards",
+    "settings-yards-rename",
     "settings-agents",
     "settings-notifications",
     "settings-connection",
@@ -675,6 +679,7 @@ fn populate(yard: &Yard, state: &str) {
         | "settings"
         | "settings-appearance"
         | "settings-yards"
+        | "settings-yards-rename"
         | "settings-agents"
         | "settings-notifications"
         | "settings-connection"
@@ -1753,6 +1758,7 @@ mod tests {
                 | "settings"
                 | "settings-appearance"
                 | "settings-yards"
+                | "settings-yards-rename"
                 | "settings-agents"
                 | "settings-notifications"
                 | "settings-connection"

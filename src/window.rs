@@ -1863,6 +1863,68 @@ fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
         .child(div().text_sm().child(label))
 }
 
+/// A field of a yard that is asked for, with its name beside it: the
+/// focus moves to it on a click. Under the yards with the other
+/// fields, or in the renamed card with its form.
+fn yard_field(
+    name: &'static str,
+    line: &Entity<Line>,
+    palette: Palette,
+    cx: &mut Context<Footplate>,
+) -> Div {
+    let focus = line.focus_handle(cx);
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(rems(5.)).flex_none().child(name))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .max_w(rems(28.))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(palette.line)
+                .bg(palette.side)
+                .debug_selector(move || format!("yard {name}"))
+                .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                    window.focus(&focus);
+                    window.prevent_default();
+                })
+                .child(line.clone()),
+        )
+}
+
+/// The button under a yard's fields: Enter in a field presses it too.
+/// Dimmed while a pairing or a sign-in is away.
+fn yard_submit(
+    text: &str,
+    id: &'static str,
+    busy: bool,
+    palette: Palette,
+    cx: &mut Context<Footplate>,
+) -> Div {
+    div().flex().child(
+        small_button(text.to_string(), palette)
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .when(busy, |el| el.opacity(0.5))
+            .on_click(cx.listener(|this, _, _, cx| this.submit_yard(cx))),
+    )
+}
+
+/// The help under a yard's fields: one faint line.
+fn yard_help(text: String, palette: Palette) -> Div {
+    div()
+        .debug_selector(|| "yard help".to_string())
+        .text_sm()
+        .text_color(palette.faint)
+        .child(text)
+}
+
 /// The directory `dir` as a `file:` URL, for the settings footer's
 /// reveal: what the opener is handed. A space in it (macOS's
 /// "Application Support") is encoded, so it still opens.
@@ -2651,13 +2713,15 @@ pub struct Footplate {
 
 /// The settings' section a screenshot state opens on: this window for
 /// the `settings` shot, the named one for a `settings-<section>` shot,
-/// else none. A debug build's alone.
+/// the yards one for the rename shot too, else none. A debug build's
+/// alone.
 #[cfg(debug_assertions)]
 fn shot_section() -> Option<Section> {
     match std::env::var("FOOTPLATE_SHOT").as_deref() {
         Ok("settings") => Some(Section::ThisWindow),
         Ok("settings-appearance") => Some(Section::Appearance),
         Ok("settings-yards") => Some(Section::Yards),
+        Ok("settings-yards-rename") => Some(Section::Yards),
         Ok("settings-agents") => Some(Section::Agents),
         Ok("settings-notifications") => Some(Section::Notifications),
         Ok("settings-connection") => Some(Section::Connection),
@@ -2796,6 +2860,15 @@ impl Footplate {
                 .update(cx, |line, cx| line.set_text("jo@example.net", cx));
             this.password
                 .update(cx, |line, cx| line.set_text("joes-password", cx));
+        }
+        // The rename shot is the settings' yards with the far yard's
+        // rename form open in its card, with the old name standing. A
+        // debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings-yards-rename") {
+            this.adding = Some(Adding::Rename("far".to_string()));
+            this.yard_name
+                .update(cx, |line, cx| line.set_text("far", cx));
         }
         // The setup shot is step 2 of setting up a yard here, posed: no
         // yard answers, and the first run stands at the yard's form. A
@@ -8139,8 +8212,8 @@ impl Footplate {
     }
 
     /// The yard called `name` is to be renamed: its card's menu shuts,
-    /// and its new name is typed under the cards, with the old one
-    /// standing.
+    /// and its new name is typed in its card, where the menu stood,
+    /// with the old one standing.
     fn rename_start(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.pairing || self.signing_in || self.env.yard.is_some() {
             return;
@@ -9240,8 +9313,9 @@ impl Footplate {
     /// One yard of the list as a card: its name, its kind, its reach and
     /// what waits in it, with Open where it is not the open one and a ⋯
     /// menu holding pair again, rename and remove (and the sign-in again
-    /// of a hosted yard). The open yard's card carries start at login
-    /// where it is a yard of this machine.
+    /// of a hosted yard). Where the yard is renamed, the form stands in
+    /// its card, where its menu stood. The open yard's card carries
+    /// start at login where it is a yard of this machine.
     fn yard_card(&self, listed: &settings::Yard, palette: Palette, cx: &mut Context<Self>) -> Div {
         let name = listed.name.clone();
         let open = name == self.yard;
@@ -9400,10 +9474,51 @@ impl Footplate {
             })));
             card = card.child(menu);
         }
+        if matches!(&self.adding, Some(Adding::Rename(at)) if *at == name) {
+            card = card.children(self.rename_asked(&name, palette, cx));
+        }
         if let Some(login) = self.login_card(&name, palette, cx) {
             card = card.child(login);
         }
         card
+    }
+
+    /// Another name for the yard of this card, typed in it: the form
+    /// stands where its ⋯ menu renamed it, with the old name standing,
+    /// what came of the last try under the button, and the help under
+    /// that.
+    fn rename_asked(
+        &self,
+        name: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let busy = self.pairing || self.signing_in;
+        let mut asked = vec![
+            div()
+                .debug_selector(|| "yard rename for".to_string())
+                .child(format!("another name for {name}"))
+                .into_any_element(),
+            yard_field("name", &self.yard_name, palette, cx).into_any_element(),
+            yard_submit("rename (enter)", "yard rename save", busy, palette, cx).into_any_element(),
+        ];
+        if let Some(said) = &self.yard_said {
+            asked.push(
+                div()
+                    .debug_selector(|| "yard said".to_string())
+                    .child(said.clone())
+                    .into_any_element(),
+            );
+        }
+        asked.push(
+            yard_help(
+                "Its reach and its files stay, and what was written for it stays written. No two yards share a name."
+                    .to_string(),
+                palette,
+            )
+            .into_any_element(),
+        );
+        asked
     }
 
     /// "Start at login" on the open yard's card, where it is a yard of
@@ -9846,56 +9961,15 @@ impl Footplate {
         section
     }
 
-    /// The fields of the yard that is being added, renamed, signed in
-    /// or paired again, with the button under them, what came of the last
+    /// The fields of the yard that is being added, signed in or
+    /// paired again, with the button under them, what came of the last
     /// change to the yards under that, and the help under it: under the
     /// yards in the settings, and under the ways to a yard where there
-    /// is none.
+    /// is none. Renaming stands in the renamed card instead, said beside
+    /// its form.
     fn yard_asked(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let typed = |name: &'static str, line: &Entity<Line>, cx: &mut Context<Self>| {
-            let focus = line.focus_handle(cx);
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().w(rems(5.)).flex_none().child(name))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .max_w(rems(28.))
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(palette.line)
-                        .bg(palette.side)
-                        .debug_selector(move || format!("yard {name}"))
-                        .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                            window.focus(&focus);
-                            window.prevent_default();
-                        })
-                        .child(line.clone()),
-                )
-        };
-        let faint = |text: String| {
-            div()
-                .debug_selector(|| "yard help".to_string())
-                .text_sm()
-                .text_color(palette.faint)
-                .child(text)
-        };
         let mut asked: Vec<AnyElement> = Vec::new();
         let busy = self.pairing || self.signing_in;
-        let submit = |text: &str, id: &'static str, cx: &mut Context<Self>| {
-            div().flex().child(
-                small_button(text.to_string(), palette)
-                    .id(id)
-                    .debug_selector(move || id.to_string())
-                    .when(busy, |el| el.opacity(0.5))
-                    .on_click(cx.listener(|this, _, _, cx| this.submit_yard(cx))),
-            )
-        };
         let pair = match self.pairing {
             true => "asking the yard…",
             false => "pair (enter)",
@@ -9914,29 +9988,30 @@ impl Footplate {
             None => {}
             Some(Adding::Near) => {
                 asked.extend([
-                    typed("name", &self.yard_name, cx).into_any_element(),
-                    typed("socket", &self.socket, cx).into_any_element(),
-                    submit("add (enter)", "yard pair", cx).into_any_element(),
+                    yard_field("name", &self.yard_name, palette, cx).into_any_element(),
+                    yard_field("socket", &self.socket, palette, cx).into_any_element(),
+                    yard_submit("add (enter)", "yard pair", busy, palette, cx).into_any_element(),
                 ]);
                 help = Some(
-                    faint(
+                    yard_help(
                         "A yard of this machine is reached by its socket: no token or pairing. This field starts at this run's socket; change it to another home's yard socket (<its home>/.yardr/yard.sock)."
                             .to_string(),
+                        palette,
                     )
                     .into_any_element(),
                 );
             }
             Some(Adding::Far) => {
                 asked.extend([
-                    typed("name", &self.yard_name, cx).into_any_element(),
-                    typed("address", &self.address, cx).into_any_element(),
-                    typed("code", &self.code, cx).into_any_element(),
-                    submit(pair, "yard pair", cx).into_any_element(),
+                    yard_field("name", &self.yard_name, palette, cx).into_any_element(),
+                    yard_field("address", &self.address, palette, cx).into_any_element(),
+                    yard_field("code", &self.code, palette, cx).into_any_element(),
+                    yard_submit(pair, "yard pair", busy, palette, cx).into_any_element(),
                 ]);
                 help = Some(
-                    faint(format!(
+                    yard_help(format!(
                         "{OPERATOR} With no name it is called by its address's host. The device's token is kept in a file of this yard's own beside the settings, for you alone, and never with the settings."
-                    ))
+                    ), palette)
                     .into_any_element(),
                 );
             }
@@ -9964,23 +10039,24 @@ impl Footplate {
                         .debug_selector(|| "yard again for".to_string())
                         .child(format!("a code for {whose}, at {address}"))
                         .into_any_element(),
-                    typed("code", &self.code, cx).into_any_element(),
-                    submit(pair, "yard pair", cx).into_any_element(),
+                    yard_field("code", &self.code, palette, cx).into_any_element(),
+                    yard_submit(pair, "yard pair", busy, palette, cx).into_any_element(),
                 ]);
-                help = Some(faint(format!("{OPERATOR} {token}")).into_any_element());
+                help = Some(yard_help(format!("{OPERATOR} {token}"), palette).into_any_element());
             }
             Some(Adding::Hosted) => {
                 asked.extend([
-                    typed("name", &self.yard_name, cx).into_any_element(),
-                    typed("address", &self.address, cx).into_any_element(),
-                    typed("email", &self.email, cx).into_any_element(),
-                    typed("password", &self.password, cx).into_any_element(),
-                    submit(sign, "yard sign in", cx).into_any_element(),
+                    yard_field("name", &self.yard_name, palette, cx).into_any_element(),
+                    yard_field("address", &self.address, palette, cx).into_any_element(),
+                    yard_field("email", &self.email, palette, cx).into_any_element(),
+                    yard_field("password", &self.password, palette, cx).into_any_element(),
+                    yard_submit(sign, "yard sign in", busy, palette, cx).into_any_element(),
                 ]);
                 help = Some(
-                    faint(
+                    yard_help(
                         "The edge's one origin, as the ready page shows it, and the Kratos account's email and password. Signing in keeps the session in a file of this yard's own beside the settings, for you alone, and never with the settings; pairing the device comes next, with the code from the ready page."
                             .to_string(),
+                        palette,
                     )
                     .into_any_element(),
                 );
@@ -10004,36 +10080,27 @@ impl Footplate {
                         .debug_selector(|| "yard sign in for".to_string())
                         .child(format!("a sign-in for {name}, at {address}"))
                         .into_any_element(),
-                    typed("email", &self.email, cx).into_any_element(),
-                    typed("password", &self.password, cx).into_any_element(),
-                    submit(sign, "yard sign in", cx).into_any_element(),
+                    yard_field("email", &self.email, palette, cx).into_any_element(),
+                    yard_field("password", &self.password, palette, cx).into_any_element(),
+                    yard_submit(sign, "yard sign in", busy, palette, cx).into_any_element(),
                 ]);
                 help = Some(
-                    faint(format!(
-                        "The Kratos account's email and password. {session}"
-                    ))
-                    .into_any_element(),
-                );
-            }
-            Some(Adding::Rename(name)) => {
-                asked.extend([
-                    div()
-                        .debug_selector(|| "yard rename for".to_string())
-                        .child(format!("another name for {name}"))
-                        .into_any_element(),
-                    typed("name", &self.yard_name, cx).into_any_element(),
-                    submit("rename (enter)", "yard rename save", cx).into_any_element(),
-                ]);
-                help = Some(
-                    faint(
-                        "Its reach and its files stay, and what was written for it stays written. No two yards share a name."
-                            .to_string(),
+                    yard_help(
+                        format!("The Kratos account's email and password. {session}"),
+                        palette,
                     )
                     .into_any_element(),
                 );
             }
+            // Renaming stands in the renamed card, where its menu stood,
+            // not here under the cards: nothing of it is asked for here.
+            Some(Adding::Rename(_)) => {}
         }
-        if let Some(said) = &self.yard_said {
+        // What came of the last change, except while a yard is renamed:
+        // that is said in its card, beside the form.
+        if !matches!(self.adding, Some(Adding::Rename(_)))
+            && let Some(said) = &self.yard_said
+        {
             asked.push(
                 div()
                     .debug_selector(|| "yard said".to_string())
@@ -31573,6 +31640,13 @@ yardr.dev
         click_on(cx, "yard menu this machine");
         click_on(cx, "yard rename this machine");
         assert!(drawn(cx, "yard rename for"));
+        // The form stands in the renamed card, where the click was: not
+        // under the cards with the add buttons, and above the next card.
+        let card = bounds_of(cx, "yard row this machine");
+        let form = bounds_now(cx, "yard rename for");
+        let save = bounds_now(cx, "yard rename save");
+        assert!(form.top() >= card.top() && save.bottom() <= card.bottom());
+        assert!(save.bottom() <= bounds_now(cx, "yard row second").top());
         assert_eq!(
             view.read_with(cx, |v, cx| v.yard_name.read(cx).text().to_string()),
             "this machine"
@@ -31588,6 +31662,11 @@ yardr.dev
             "{}",
             yard_said(&view, cx)
         );
+        assert!(drawn(cx, "yard said"));
+        // The refusal stands in the card too, under the button.
+        let card = bounds_of(cx, "yard row this machine");
+        let said = bounds_now(cx, "yard said");
+        assert!(said.top() >= card.top() && said.bottom() <= card.bottom());
         assert_eq!(open_yard(&view, cx), settings::HERE);
         // Renamed: the list and the file have the new name, the yard that
         // is open is still open, as it stands, and the draft moved with it.

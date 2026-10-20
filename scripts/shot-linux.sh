@@ -21,7 +21,9 @@
 # (a yard at an address, away), `settings` (the settings on each of
 # their sections: `settings` is this window, and `settings-appearance`,
 # `settings-yards`, `settings-agents`, `settings-notifications` and
-# `settings-connection` the rest), `reconnecting` (a running yard whose server
+# `settings-connection` the rest), `settings-yards-rename` (the yards
+# with the far yard's rename form open in its card), `reconnecting` (a
+# running yard whose server
 # is then stopped, with a draft in the composer), `refusal` (the
 # first screen's way to a yard at an address, with a pairing's http
 # address refused under its fields), `undelivered` (the conversation
@@ -75,7 +77,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer"
+states="yardmaster crew thread column plain lines run stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -287,8 +289,9 @@ docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_
     case "'"$state"'" in stopped|setup) up=false ;; *) up=true ;; esac
     printf "%s\n" "{\"home\": \"/tmp/shot-yard\", \"name\": \"shot\", \"operator\": \"Jo\", \"server\": {\"running\": $up, \"cli_build\": \"shot\"}, \"daemon\": {\"running\": $up, \"pid\": 0, \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot\", \"file\": \"/tmp/shot.service\", \"installed\": false, \"loaded\": false}}, \"herdr_login_service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.herdr.shot\", \"file\": \"/tmp/shot-herdr.service\", \"installed\": false, \"loaded\": false}, \"web\": {\"views\": [], \"service\": {\"supported\": true, \"manager\": \"systemd\", \"name\": \"dev.yardr.shot-web\", \"file\": \"/tmp/shot-web.service\", \"installed\": false, \"loaded\": false}}}" > "$bin/status.json"
     # A yard at an address opens from the settings: one far yard, open.
-    # A look or a text size for the shot rides in the same file where
-    # one is asked for.
+    # The rename shot opens that same far yard, with its form open in
+    # its card. A look or a text size for the shot rides in the same
+    # file where one is asked for.
     shot_settings=""
     if [ -n "$SHOT_LOOK" ]; then shot_settings="\"look\": \"$SHOT_LOOK\""; fi
     if [ -n "$SHOT_TEXT" ]; then
@@ -296,8 +299,8 @@ docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_
         shot_settings="$shot_settings\"text\": $SHOT_TEXT"
     fi
     if [ -n "$shot_settings" ]; then shot_json=", $shot_settings"; else shot_json=""; fi
-    if [ "'"$state"'" = far ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"$shot_json}" > "$scratch/config/footplate/settings.json"; fi
-    if [ -n "$shot_settings" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != switcher ]; then printf "%s\n" "{$shot_settings}" > "$scratch/config/footplate/settings.json"; fi
+    if [ "'"$state"'" = far ] || [ "'"$state"'" = settings-yards-rename ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"$shot_json}" > "$scratch/config/footplate/settings.json"; fi
+    if [ -n "$shot_settings" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != settings-yards-rename ] && [ "'"$state"'" != switcher ]; then printf "%s\n" "{$shot_settings}" > "$scratch/config/footplate/settings.json"; fi
     chown -R shot:shot "$scratch"
     su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json SHOT_LOOK='$SHOT_LOOK' FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 

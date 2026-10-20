@@ -179,7 +179,8 @@ yard), `far` (a yard at an address, away), `settings` (the settings
 on each of their sections: `settings` is this window, and
 `settings-appearance`, `settings-yards`, `settings-agents`,
 `settings-notifications` and `settings-connection` the rest),
-`reconnecting` (a running yard whose
+`settings-yards-rename` (the yards with the far yard's rename form open
+in its card), `reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
 first screen's way to a yard at an address, with a pairing's http address
 refused under its fields), `undelivered` (the conversation with one of
