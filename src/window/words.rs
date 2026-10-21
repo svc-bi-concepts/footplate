@@ -10,18 +10,12 @@ use crate::theme::Palette;
 /// What a head says waits in it, the Decisions head's and a backlog
 /// column's: the number with "waiting", or that none does.
 pub(crate) fn waiting_words(waiting: usize) -> String {
-    match waiting {
-        0 => "none waiting".to_string(),
-        waiting => format!("{waiting} waiting"),
-    }
+    plural(waiting, "none waiting", "waiting", "waiting")
 }
 
 /// What a stage's head says stands on it: the number with "bead".
 pub(crate) fn bead_words(beads: usize) -> String {
-    match beads {
-        1 => "1 bead".to_string(),
-        beads => format!("{beads} beads"),
-    }
+    plural(beads, "", "bead", "beads")
 }
 
 /// What a stage column's head says under its name: the routed group's
@@ -84,10 +78,7 @@ pub(crate) fn stage_lamp(stage: &FlowStage) -> &str {
 
 /// What a line's head says it carries: the number with "flow".
 pub(crate) fn flow_words(flows: usize) -> String {
-    match flows {
-        1 => "1 flow".to_string(),
-        flows => format!("{flows} flows"),
-    }
+    plural(flows, "", "flow", "flows")
 }
 
 /// What the bead's quiet back link names: where it was opened from —
@@ -123,10 +114,7 @@ pub(crate) fn bead_sub(detail: &ArrivalDetail, route: Option<&Route>) -> String 
 /// What the folded Decided says was dealt with: the number with
 /// "decided".
 pub(crate) fn decided_words(decided: usize) -> String {
-    match decided {
-        1 => "1 decided".to_string(),
-        decided => format!("{decided} decided"),
-    }
+    plural(decided, "", "decided", "decided")
 }
 
 /// The colour of a timetable remark with the yard's `tone` and
@@ -216,18 +204,30 @@ pub(crate) fn headcode_color(
 /// or that none is. "Waiting" beside Crew would read as crew that
 /// waits, where it is mail that is not read.
 pub(crate) fn unread_words(unread: usize) -> String {
-    match unread {
-        0 => "none unread".to_string(),
-        unread => format!("{unread} unread"),
-    }
+    plural(unread, "none unread", "unread", "unread")
 }
 
 /// What an arrival's asks line says: how many questions the bead has
 /// open, which are the Decisions rows' job.
 pub(crate) fn ask_words(asks: usize) -> String {
-    match asks {
-        1 => "1 question, among your decisions".to_string(),
-        asks => format!("{asks} questions, among your decisions"),
+    plural(
+        asks,
+        "",
+        "question, among your decisions",
+        "questions, among your decisions",
+    )
+}
+
+/// A count in words: the zero words where none stand, else the
+/// number with the one word for one and the many for more. A count
+/// with no custom none passes an empty zero, and none counts with
+/// the many words, as "0 beads"; where none standing says nothing
+/// at all, that is [`count_words`]' job instead.
+pub(crate) fn plural(n: usize, zero: &str, one: &str, many: &str) -> String {
+    match n {
+        0 if !zero.is_empty() => zero.to_string(),
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
     }
 }
 
