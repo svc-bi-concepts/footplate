@@ -847,6 +847,7 @@ mod tests {
             // A name is whatever another yard says it is.
             Selected::Conversation("clerk:of@north".into()),
             Selected::Decision("yardr-n8ta".into()),
+            Selected::Grants,
             Selected::Yard,
             Selected::Arrivals,
             Selected::Bead("yardr-n8ta".into()),

@@ -3105,9 +3105,8 @@ impl Footplate {
         }
         match self.model.as_ref().and_then(|m| m.selected().cloned()) {
             Some(Selected::Conversation(_)) => KeysView::Conversation,
-            Some(Selected::Decision(_) | Selected::Decided(_, _) | Selected::Grants) => {
-                KeysView::Card
-            }
+            Some(Selected::Decision(_) | Selected::Decided(_, _)) => KeysView::Card,
+            Some(Selected::Grants) => KeysView::Grants,
             Some(Selected::Yard) => KeysView::Yard,
             Some(_) => KeysView::Timetable,
             None => match self.mode() {

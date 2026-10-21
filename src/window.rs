@@ -4100,6 +4100,7 @@ mod tests {
         );
         assert_eq!(does(KeysView::Yard, true), ["shuts the bead drawer"]);
         assert_eq!(does(KeysView::Timetable, true), ["shuts the bead drawer"]);
+        assert_eq!(does(KeysView::Grants, true), ["shuts the bead drawer"]);
         assert_eq!(
             does(KeysView::Card, true),
             [
@@ -10071,6 +10072,7 @@ yardr.dev
         click_on(cx, "row grants");
         cx.run_until_parked();
         assert_eq!(open_row(&view, cx), Some(Selected::Grants));
+        assert_eq!(view.read_with(cx, |v, _| v.keys_view()), KeysView::Grants);
         assert!(drawn(cx, "grants head"));
         assert!(drawn(cx, "grants summary"));
         assert!(drawn(cx, "grants source google-mail"));
@@ -10152,6 +10154,7 @@ yardr.dev
         cx.run_until_parked();
         assert_eq!(open_row(&view, cx), Some(Selected::Grants));
         assert!(drawn(cx, "grants too old"));
+        assert_eq!(yard.asked("SourceGrants").len(), 1);
         assert_eq!(notice(&view, cx), "");
         // Back in chat: no notice, and the words stand in the grants pane
         // alone. (What was drawn stays drawn to the tests, so the words
@@ -10984,6 +10987,7 @@ yardr.dev
             KeysView::Settings,
             KeysView::Conversation,
             KeysView::Card,
+            KeysView::Grants,
             KeysView::Yard,
             KeysView::Timetable,
             KeysView::Away,
@@ -10993,6 +10997,9 @@ yardr.dev
         }
         assert!(rows(KeysView::Card).contains(&"d".to_string()));
         assert!(rows(KeysView::Card).contains(&"?".to_string()));
+        assert!(rows(KeysView::Grants).contains(&"?".to_string()));
+        assert!(!rows(KeysView::Grants).contains(&"d".to_string()));
+        assert!(!rows(KeysView::Grants).contains(&"enter".to_string()));
         assert!(rows(KeysView::Switcher).contains(&"?".to_string()));
         assert!(rows(KeysView::Switcher).contains(&"+".to_string()));
         assert!(rows(KeysView::Yard).contains(&"shift+x".to_string()));

@@ -4133,8 +4133,9 @@ impl Model {
                 }
             }
             Some(Selected::Grants) => match self.is_operator() {
-                true => vec![Effect::Grants],
+                true if !self.grants_too_old => vec![Effect::Grants],
                 false => Vec::new(),
+                true => Vec::new(),
             },
             _ => Vec::new(),
         }
@@ -4506,6 +4507,26 @@ impl Model {
             // unlike a direct grant change, this is not a `peer_` event.
             "user_removed" => vec![Effect::Peers],
             kind if kind.starts_with("peer_") => self.link(e),
+            // The operator is the only person whose device may read the
+            // grant graph. Drop the cached rows as soon as that setting
+            // changes, then read them again only if this window is still
+            // the operator's. A remote listener enforces the same rule on
+            // the call itself; this also clears what a former operator's
+            // window already had on screen.
+            "setting_changed" if e.text("key") == "operator" => {
+                self.operator = e.text("value").to_string();
+                self.grants.clear();
+                self.grants_too_old = false;
+                if self.is_operator() {
+                    vec![Effect::Grants]
+                } else if self.selected == Some(Selected::Grants) {
+                    self.selected = self.row_in(Mode::Decisions, None);
+                    self.opened();
+                    self.open()
+                } else {
+                    Vec::new()
+                }
+            }
             // A grant given: the event carries less than what changed, so
             // the grants are read again, where the window is the
             // operator's. A revoke tells no event; opening the grants
@@ -5597,10 +5618,10 @@ pub fn grant_holder(grant: &SourceGrant) -> String {
     }
 }
 
-/// Whether the call reads as an update: every named call does, and `read`
-/// does not. Footplate reads no declarations, so a read call granted by
-/// its own name would read as an update too; grants of read calls go as
-/// `read`, and a single read call by name is all but unheard of.
+/// Whether the call reads as an update. The grants API does not carry call
+/// kinds, so the only distinction available here is `read`, the grant of
+/// every read call. A specifically named read call cannot be distinguished
+/// from an update with this record alone.
 pub fn grant_is_update(call: &str) -> bool {
     call != "read"
 }
@@ -5609,6 +5630,54 @@ pub fn grant_is_update(call: &str) -> bool {
 /// with the source, the call and the holder, with `--as` where the grant
 /// has one.
 pub fn grant_revoke(source: &str, call: &str, grant: &SourceGrant) -> String {
+    // Identifiers from SourceGrants are yard text. Keep ordinary names in
+    // the CLI's familiar form, and quote other values before a person
+    // copies the line into a shell. Put flags before `--` in that case so
+    // a value beginning with `-` cannot become another option.
+    let simple = |word: &str| {
+        word.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+    };
+    let shell_word = |word: &str| {
+        let visible = plain(word).replace('\n', " ").replace('\t', " ");
+        if simple(&visible) {
+            visible
+        } else {
+            format!("'{}'", visible.replace('\'', "'\\''"))
+        }
+    };
+    if ![
+        source,
+        call,
+        grant.group.as_str(),
+        grant.crew.as_str(),
+        grant.as_user.as_str(),
+    ]
+    .into_iter()
+    .all(|word| word.is_empty() || simple(word))
+    {
+        let mut args = vec![
+            "yardr".to_string(),
+            "source".to_string(),
+            "revoke".to_string(),
+        ];
+        if !grant.crew.is_empty() {
+            args.push(format!("--crew={}", shell_word(&grant.crew)));
+        } else if !grant.group.is_empty() {
+            args.push(format!("--group={}", shell_word(&grant.group)));
+        }
+        if !grant.as_user.is_empty() {
+            args.push(format!("--as={}", shell_word(&grant.as_user)));
+        }
+        args.push("--".to_string());
+        args.push(shell_word(source));
+        args.push(shell_word(call));
+        return args.join(" ");
+    }
     let mut line = format!("yardr source revoke {source} {call}");
     if !grant.crew.is_empty() {
         line.push_str(&format!(" --crew {}", grant.crew));
@@ -10741,6 +10810,46 @@ mod tests {
         assert_eq!(m.event(&event("source_granted")), vec![Effect::Grants]);
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert!(m.event(&event("source_granted")).is_empty());
+
+        // Changing the operator clears the grants at once. The old
+        // operator's selected pane closes, and a newly named operator
+        // reads grants only for their own window.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.grants.push(SourceGrant {
+            source: "crm".into(),
+            ..Default::default()
+        });
+        let (mut m, _) = Model::new(state, Mode::Decisions, Some(Selected::Grants));
+        let changed = Event {
+            seq: 22,
+            kind: "setting_changed".into(),
+            data: serde_json::json!({"key": "operator", "value": "ada"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert!(!m.event(&changed).contains(&Effect::Grants));
+        assert!(!m.is_operator());
+        assert!(m.grant_records().is_empty());
+        assert_ne!(m.selected(), Some(&Selected::Grants));
+        assert!(!m.order_in(Mode::Decisions).contains(&Selected::Grants));
+
+        let mut state = yard(&[]);
+        state.operator = "ada".into();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        let changed = Event {
+            seq: 23,
+            kind: "setting_changed".into(),
+            data: serde_json::json!({"key": "operator", "value": "jo"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert!(m.event(&changed).contains(&Effect::Grants));
+        assert!(m.is_operator());
     }
 
     /// The grants view lists what `yardr source grants` prints: who holds
@@ -10820,7 +10929,8 @@ mod tests {
         assert_eq!(grant_holder(&grants[1]), "crew member yardmaster as ada");
         assert_eq!(grant_holder(&grants[2]), "group builders");
 
-        // Every named call reads as an update, and `read` does not.
+        // Named calls are treated conservatively as updates; `read` is
+        // the grant that covers all reads.
         assert!(!grant_is_update("read"));
         assert!(grant_is_update("send"));
         assert!(grant_is_update("reply"));
@@ -10837,6 +10947,20 @@ mod tests {
         assert_eq!(
             grant_revoke("telegram", "reply", &grants[2]),
             "yardr source revoke telegram reply --group builders"
+        );
+        // A copied line keeps hostile yard text in one shell word; option
+        // values cannot become options, and `--` protects positionals.
+        assert_eq!(
+            grant_revoke(
+                "crm; touch /tmp/owned",
+                "send",
+                &SourceGrant {
+                    group: "builders; --help".into(),
+                    as_user: "ada".into(),
+                    ..Default::default()
+                }
+            ),
+            "yardr source revoke --group='builders; --help' --as=ada -- 'crm; touch /tmp/owned' send"
         );
 
         // Each call's own time and approver, with the card where it was

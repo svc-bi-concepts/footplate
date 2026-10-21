@@ -34,6 +34,7 @@ pub(crate) enum KeysView {
     Settings,
     Conversation,
     Card,
+    Grants,
     Yard,
     Timetable,
     Away,
@@ -47,6 +48,7 @@ impl KeysView {
             KeysView::Settings => "the settings",
             KeysView::Conversation => "this conversation",
             KeysView::Card => "this card",
+            KeysView::Grants => "Grants",
             KeysView::Yard => "the yard row",
             KeysView::Timetable => "Lines",
             KeysView::Away => "this screen",
@@ -119,6 +121,14 @@ pub(crate) fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
             ),
             ("?".into(), "this list".into()),
         ],
+        KeysView::Grants => vec![
+            (
+                "tab · shift+tab".into(),
+                "the next, the previous row".into(),
+            ),
+            ("pageup · pagedown".into(), "scroll by a page".into()),
+            ("?".into(), "this list".into()),
+        ],
         KeysView::Yard => vec![
             ("x".into(), "marks one notice read".into()),
             ("shift+x".into(), "marks every notice read".into()),
@@ -156,7 +166,7 @@ pub(crate) fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
     // the away screen stands in place of the reading pane it shuts from.
     if drawer {
         match view {
-            KeysView::Conversation | KeysView::Yard | KeysView::Timetable => {
+            KeysView::Conversation | KeysView::Grants | KeysView::Yard | KeysView::Timetable => {
                 rows.insert(0, ("esc".into(), "shuts the bead drawer".into()));
             }
             KeysView::Card => {

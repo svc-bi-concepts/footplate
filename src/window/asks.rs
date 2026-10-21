@@ -3721,7 +3721,7 @@ impl Footplate {
                         let call = call.to_string();
                         move || format!("grants holder {source} {call}")
                     })
-                    .child(format!("{holder} — {call}")),
+                    .child(format!("{holder} — {}", model::plain(call))),
             );
         for (n, line) in model::grant_weight_lines(&grant.source, call, grant)
             .iter()
