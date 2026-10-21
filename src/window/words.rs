@@ -207,15 +207,13 @@ pub(crate) fn unread_words(unread: usize) -> String {
     plural(unread, "none unread", "unread", "unread")
 }
 
+const ASK_ONE: &str = "question, among your decisions";
+const ASK_MANY: &str = "questions, among your decisions";
+
 /// What an arrival's asks line says: how many questions the bead has
 /// open, which are the Decisions rows' job.
 pub(crate) fn ask_words(asks: usize) -> String {
-    plural(
-        asks,
-        "",
-        "question, among your decisions",
-        "questions, among your decisions",
-    )
+    plural(asks, "", ASK_ONE, ASK_MANY)
 }
 
 /// A count in words: the zero words where none stand, else the
