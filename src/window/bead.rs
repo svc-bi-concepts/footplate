@@ -19,7 +19,7 @@ use super::panel::{day_break, reading_column, reading_row};
 use super::rail::{ImageOpen, OpenTip, Picture, Unsent, post};
 use super::state::Piece;
 use super::ui::{keys_hint, send_held, small_button};
-use super::words::{ask_words, bead_back_name, bead_sub, remark_color};
+use super::words::{ask_words, bead_back_name, bead_sub, remark_color, worker_words};
 use crate::api::{self, Address, BlobRef, Reaction};
 use crate::draft::{self, Attachment, Found};
 use crate::model::{self, ArrivalDetail, AskPreview, Entry, Model, Selected, Target, Top};
@@ -1512,9 +1512,10 @@ impl Footplate {
             )
     }
 
-    /// One travelling bead whole: the title, id, platform and line, the
-    /// expected arrival and remark of the row it came from, the labels,
-    /// the body, then the notes newest last. Its asks are the Decisions
+    /// One travelling bead whole: the title, id, platform and line, who
+    /// works it where a session does, the expected arrival and remark of
+    /// the row it came from, the labels, the body, then the notes newest
+    /// last. Its asks are the Decisions
     /// rows' job: one line counts them and links nothing. A quiet back
     /// link naming where it came from leads there, and Open takes the
     /// bead's page to the browser where the web view answers. Full width
@@ -1555,6 +1556,11 @@ impl Footplate {
         // keeps it, as it did.
         let route = model.route_for(&detail.bead);
         let sub = bead_sub(&detail, route.as_ref());
+        // Who works it, from the bead's flows row, which is where the
+        // yard says so; nothing where no session does.
+        let worked = model
+            .flow_bead(&detail.bead)
+            .and_then(|(found, _)| worker_words(found).map(|(_, line)| line));
         let head = div()
             .p_3()
             .border_b_1()
@@ -1615,6 +1621,16 @@ impl Footplate {
                     })
                     .child(sub),
             )
+            .children(worked.map(|line| {
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let bead = detail.bead.clone();
+                        move || format!("bead worker {bead}")
+                    })
+                    .child(line)
+            }))
             .children(
                 route
                     .as_ref()

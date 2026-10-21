@@ -111,6 +111,34 @@ pub(crate) fn bead_sub(detail: &ArrivalDetail, route: Option<&Route>) -> String 
         .join(" · ")
 }
 
+/// Who works the bead, for the hover over a worked bead and the
+/// one line in its details: the tooltip's words with the details
+/// line's. The first line names the session as the yard names it,
+/// without its runner word where the runner is herdr, since the
+/// second line says the rest; any other worker stays whole. The
+/// second line is the group, kind and model, each where served: an
+/// exec or peer claim shows its group alone. None where no session
+/// works the bead, and the session's name alone where the yard
+/// serves none of the three.
+pub(crate) fn worker_words(bead: &FlowBead) -> Option<(String, String)> {
+    if bead.worker.is_empty() {
+        return None;
+    }
+    let session = bead.worker.strip_prefix("herdr ").unwrap_or(&bead.worker);
+    let rest = [bead.group.as_str(), bead.kind.as_str(), bead.model.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if rest.is_empty() {
+        return Some((session.to_string(), format!("worked by {session}")));
+    }
+    Some((
+        format!("{session}\n{rest}"),
+        format!("worked by {session} · {rest}"),
+    ))
+}
+
 /// What the folded Decided says was dealt with: the number with
 /// "decided".
 pub(crate) fn decided_words(decided: usize) -> String {

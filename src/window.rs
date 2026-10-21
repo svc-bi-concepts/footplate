@@ -1139,6 +1139,7 @@ mod tests {
     use super::words::{
         ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words, headcode_color,
         remark_color, stage_group_words, stage_lamp, unread_words, waiting_words, waits_for_seat,
+        worker_words,
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
@@ -10477,6 +10478,79 @@ yardr.dev
         );
     }
 
+    /// Who works a bead, for its hover and its details line: the
+    /// session without its herdr runner word, then the group, kind
+    /// and model where served. Any other worker stays whole, a claim
+    /// with no kind shows its group alone, a yard serving none of
+    /// the three shows the session's name alone, and no worker says
+    /// nothing.
+    #[test]
+    fn a_worked_bead_s_hover_and_details_name_who_works_it() {
+        let bead = |worker: &str, group: &str, kind: &str, model: &str| FlowBead {
+            worker: worker.to_string(),
+            group: group.to_string(),
+            kind: kind.to_string(),
+            model: model.to_string(),
+            ..FlowBead::default()
+        };
+        assert_eq!(
+            worker_words(&bead(
+                "herdr footplate-pnpx-draft",
+                "opus-builders",
+                "claude",
+                "claude-opus-5-5"
+            )),
+            Some((
+                "footplate-pnpx-draft\nopus-builders · claude · claude-opus-5-5".to_string(),
+                "worked by footplate-pnpx-draft · opus-builders · claude · claude-opus-5-5"
+                    .to_string(),
+            ))
+        );
+        assert_eq!(
+            worker_words(&bead("exec pid 4127", "footplate-assembly", "", "")),
+            Some((
+                "exec pid 4127\nfootplate-assembly".to_string(),
+                "worked by exec pid 4127 · footplate-assembly".to_string(),
+            ))
+        );
+        assert_eq!(
+            worker_words(&bead(
+                "herdr yd-zulu-new",
+                "muse-builders",
+                "",
+                "muse-spark-1.3-contributor"
+            )),
+            Some((
+                "yd-zulu-new\nmuse-builders · muse-spark-1.3-contributor".to_string(),
+                "worked by yd-zulu-new · muse-builders · muse-spark-1.3-contributor".to_string(),
+            ))
+        );
+        assert_eq!(
+            worker_words(&bead("herdr yd-zulu-new", "muse-builders", "muse", "")),
+            Some((
+                "yd-zulu-new\nmuse-builders · muse".to_string(),
+                "worked by yd-zulu-new · muse-builders · muse".to_string(),
+            ))
+        );
+        assert_eq!(
+            worker_words(&bead("herdr yd-zulu-new", "", "", "")),
+            Some((
+                "yd-zulu-new".to_string(),
+                "worked by yd-zulu-new".to_string(),
+            ))
+        );
+        assert_eq!(worker_words(&bead("", "", "", "")), None);
+        assert_eq!(
+            worker_words(&bead(
+                "",
+                "muse-builders",
+                "muse",
+                "muse-spark-1.3-contributor"
+            )),
+            None
+        );
+    }
+
     /// A bead waits for a seat where it is unclaimed, its remark names
     /// no held, blocked or waiting state, and its group's seats are all
     /// taken. A late mark waits too; only a routed group with seats
@@ -10877,6 +10951,8 @@ yardr.dev
         assert!(drawn(cx, "bead remark yd-zulu"));
         assert!(drawn(cx, "bead labels yd-zulu"));
         assert!(drawn(cx, "bead asks yd-zulu"));
+        // No session works it, so no worked-by line stands under the id.
+        assert!(!drawn(cx, "bead worker yd-zulu"));
         // The asks line links nothing: a click leaves the bead open.
         click_on(cx, "bead asks yd-zulu");
         cx.run_until_parked();
@@ -10941,6 +11017,49 @@ yardr.dev
             assert_eq!(v.model.as_ref().unwrap().route_for("yd-shed"), None);
         });
         assert!(!drawn(cx, "bead strip yd-shed"));
+    }
+
+    /// A worked bead's details carry who works it under the id line:
+    /// the session with its group, kind and model, from the bead's
+    /// flows row.
+    #[gpui::test]
+    fn a_worked_bead_s_details_carry_who_works_it(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        let mut flows: Value = serde_json::from_str(&flows_board()).unwrap();
+        flows["result"]["depots"][0]["flows"][0]["stages"][0]["beads"][0] = json!(
+            {"bead": "yd-zulu", "title": "Zulu's late turn",
+             "expected": "5h–8h", "remark": "late", "tone": "amber",
+             "working": true, "worker": "herdr yd-zulu-new",
+             "group": "muse-builders", "kind": "muse",
+             "model": "muse-spark-1.3-contributor"}
+        );
+        yard.answer("Flows", &flows.to_string());
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        to_departures(cx);
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        click_on(cx, "arrival yd-zulu");
+        wait(cx, "the bead", |cx| drawn(cx, "bead back"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let (found, depot) = model.flow_bead("yd-zulu").unwrap();
+            assert_eq!(found.worker, "herdr yd-zulu-new");
+            assert_eq!(found.group, "muse-builders");
+            assert_eq!(found.kind, "muse");
+            assert_eq!(found.model, "muse-spark-1.3-contributor");
+            assert_eq!(depot, Some("yardr"));
+        });
+        assert!(drawn(cx, "bead worker yd-zulu"));
+        let sub = bounds_of(cx, "bead sub yd-zulu");
+        let worked = bounds_of(cx, "bead worker yd-zulu");
+        assert!(
+            worked.top() >= sub.bottom() - px(1.),
+            "the worked-by line stands under the id line: {sub:?} {worked:?}"
+        );
     }
 
     /// An arrival's asks line counts its open questions, among the

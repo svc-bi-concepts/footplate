@@ -2164,7 +2164,9 @@ impl Model {
     /// A travelling bead's row of the flows view with the depot it stands
     /// in, `None` for one travelling with no line. The stages first, in
     /// the served order, then the depot's Elsewhere, then the unassigned.
-    fn flow_bead(&self, bead: &str) -> Option<(&FlowBead, Option<&str>)> {
+    /// The window reads it for what Arrivals does not serve: who works
+    /// the bead, on hover and in its details.
+    pub fn flow_bead(&self, bead: &str) -> Option<(&FlowBead, Option<&str>)> {
         for depot in &self.flows.depots {
             for flow in &depot.flows {
                 for stage in &flow.stages {

@@ -20,7 +20,7 @@ use super::panel::{
 use super::rail::RailTip;
 use super::words::{
     bead_words, flow_words, headcode_color, lamp_dot, remark_color, stage_group_words, stage_lamp,
-    waiting_words, waits_for_seat,
+    waiting_words, waits_for_seat, worker_words,
 };
 use crate::api::{Arrival, Flow, FlowBead, FlowDepot, FlowStage};
 use crate::model::{self, Mode, Model, Selected, backlog_count, short_bead, stage_age, you_first};
@@ -105,6 +105,8 @@ impl Footplate {
     /// platform as a plain word, the line, and the remark last in its
     /// tone. The rows stand flat in the served arrival order, a late
     /// mark as words among the remarks. A click opens the details.
+    /// Hovering a worked row says which session works it, from the
+    /// bead's flows row, which is where the yard says so.
     pub(crate) fn arrival_row(
         &self,
         model: &Model,
@@ -117,6 +119,9 @@ impl Footplate {
         let sel = Selected::Bead(row.bead.clone());
         let remark = you_first(&row.remark, model.me());
         let color = remark_color(&row.remark, &row.tone, &row.held_by, model.me(), palette);
+        let tip = model
+            .flow_bead(&row.bead)
+            .and_then(|(found, _)| worker_words(found).map(|(tip, _)| tip));
         let mut expected = grown(BOARD_EXPECTED)
             .debug_selector({
                 let bead = bead.clone();
@@ -157,6 +162,9 @@ impl Footplate {
             .cursor_pointer()
             .hover(|style| style.bg(palette.hover))
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .when_some(tip, |el, tip| {
+                el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+            })
             .child(expected)
             .child(
                 grown(BOARD_BEAD)
@@ -860,7 +868,8 @@ impl Footplate {
 
     /// One bead's headcode on the panel: the short handle in its
     /// marker drawing, in mono, opening the bead. A bead being worked
-    /// carries the running dot at its left.
+    /// carries the running dot at its left, and hovering it says which
+    /// session works it, with its group, kind and model.
     pub(crate) fn panel_headcode(
         &self,
         bead: &FlowBead,
@@ -870,6 +879,7 @@ impl Footplate {
     ) -> impl IntoElement + use<> {
         let sel = Selected::Bead(bead.bead.clone());
         let name = bead.bead.clone();
+        let tip = worker_words(bead).map(|(tip, _)| tip);
         let me = self.model.as_ref().map(Model::me).unwrap_or_default();
         let color = headcode_color(
             bead.working,
@@ -901,6 +911,9 @@ impl Footplate {
             .gap_1()
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .when_some(tip, |el, tip| {
+                el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+            })
             .children(
                 bead.working
                     .then(|| div().size(px(6.)).rounded_full().bg(palette.ok).flex_none()),
@@ -1454,7 +1467,8 @@ impl Footplate {
     /// the expected arrival in mono, and the remark in its tone.
     /// `stage` names where it stands; Elsewhere's cards stand in none,
     /// and read `elsewhere card` for the tests where a stage's reads
-    /// `card`. A click opens the bead's details.
+    /// `card`. A click opens the bead's details, and hovering a worked
+    /// card says which session works it, with its group, kind and model.
     pub(crate) fn bead_card(
         &self,
         row: &FlowBead,
@@ -1470,6 +1484,7 @@ impl Footplate {
         };
         let bead = row.bead.clone();
         let sel = Selected::Bead(row.bead.clone());
+        let tip = worker_words(row).map(|(tip, _)| tip);
         let me = self.model.as_ref().map(Model::me).unwrap_or_default();
         let color = remark_color(&row.remark, &row.tone, &row.held_by, me, palette);
         let mut meta = Vec::new();
@@ -1501,7 +1516,10 @@ impl Footplate {
             .flex_col()
             .gap_1()
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)));
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .when_some(tip, |el, tip| {
+                el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+            });
         let mut code = div()
             .text_xs()
             .font_weight(FontWeight::SEMIBOLD)

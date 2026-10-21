@@ -403,6 +403,19 @@ pub struct FlowBead {
     /// group's claim.
     #[serde(default)]
     pub worker: String,
+    /// The group whose session works the bead, as `yardr session list`
+    /// shows it. Absent where `worker` is.
+    #[serde(default)]
+    pub group: String,
+    /// The harness kind the session started with (`claude`, `muse`,
+    /// ...). Absent where the session has none: a group whose runner
+    /// is not herdr, or a session from before the yard recorded it.
+    #[serde(default)]
+    pub kind: String,
+    /// The model the session started with, as served. Absent where
+    /// its group's config named none, and the harness's own was used.
+    #[serde(default)]
+    pub model: String,
     /// When the bead entered its stage, as an RFC 3339 time. Absent
     /// where the stay has no clock, whether or not a session claimed it.
     #[serde(default)]
@@ -4808,6 +4821,8 @@ mod tests {
                     {"bead": "yardr-pinned", "title": "A pinned flow's bead",
                      "expected": "—", "remark": "", "tone": "none", "working": true,
                      "worker": "herdr yardr-pinned-new",
+                     "group": "muse-builders", "kind": "muse",
+                     "model": "muse-spark-1.3-contributor",
                      "entered_stage_at": "2026-10-08T09:30:00Z"}
                 ]},
                 {"name": "drafts", "kind": "dir", "travelling": 1, "flows": [],
@@ -4852,6 +4867,9 @@ mod tests {
         assert_eq!(stages[0].beads[0].tone.as_str(), "amber");
         assert!(!stages[0].beads[0].working);
         assert!(stages[0].beads[0].worker.is_empty());
+        assert!(stages[0].beads[0].group.is_empty());
+        assert!(stages[0].beads[0].kind.is_empty());
+        assert!(stages[0].beads[0].model.is_empty());
         assert!(stages[0].beads[0].entered_stage_at.is_empty());
         assert!(stages[0].beads[0].held_by.is_empty());
         assert_eq!(stages[1].lamp.as_str(), "none");
@@ -4865,6 +4883,12 @@ mod tests {
         assert_eq!(depot.elsewhere[0].bead.as_str(), "yardr-pinned");
         assert!(depot.elsewhere[0].working);
         assert_eq!(depot.elsewhere[0].worker.as_str(), "herdr yardr-pinned-new");
+        assert_eq!(depot.elsewhere[0].group.as_str(), "muse-builders");
+        assert_eq!(depot.elsewhere[0].kind.as_str(), "muse");
+        assert_eq!(
+            depot.elsewhere[0].model.as_str(),
+            "muse-spark-1.3-contributor"
+        );
         assert_eq!(
             depot.elsewhere[0].entered_stage_at.as_str(),
             "2026-10-08T09:30:00Z"
