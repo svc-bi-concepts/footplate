@@ -5643,7 +5643,7 @@ pub fn grant_revoke(source: &str, call: &str, grant: &SourceGrant) -> String {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
     };
     let shell_word = |word: &str| {
-        let visible = plain(word).replace('\n', " ").replace('\t', " ");
+        let visible = plain(word).replace(['\n', '\t'], " ");
         if simple(&visible) {
             visible
         } else {
