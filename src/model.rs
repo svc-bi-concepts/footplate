@@ -3416,8 +3416,8 @@ impl Model {
     /// one effect, each id once: the mail is drawn at every frame and the
     /// drawing asks nothing, only mail that comes into view does. An id a
     /// list holds is no question, and stays a bead after it leaves the
-    /// list. A `@` id is none to ask: a question another yard asked is in
-    /// the lists.
+    /// list. The yard can answer for `bead@peer` too: a closed question
+    /// another yard asked falls out of the same lists.
     fn lookups(&mut self) -> Vec<Effect> {
         let Some(sel @ (Selected::Conversation(_) | Selected::Yard)) = self.selected.clone() else {
             return Vec::new();
@@ -3432,8 +3432,7 @@ impl Model {
             for id in named_beads(&plain(&letter.text)) {
                 if let Some(bead) = self.resolve_bead(&known, &id) {
                     held.push(bead);
-                } else if !id.contains('@')
-                    && !self.looked.contains_key(&id)
+                } else if !self.looked.contains_key(&id)
                     && !self.looking.contains(&id)
                     && !wanted.contains(&id)
                 {
@@ -7641,9 +7640,12 @@ mod tests {
             12,
             "footplate-zgtr merged, yd-zulu travels, re-ask 4 and yardr-e9f0@north stand apart, footplate-zgtr again.",
         );
-        // In the order they stand. The travelling bead is a list's, and
-        // the other yard's is an ask's.
-        assert_eq!(effects, [asking(&["footplate-zgtr", "re-ask"])]);
+        // In the order they stand. The travelling bead is a list's; the
+        // yard can answer for a bead another yard asked on too.
+        assert_eq!(
+            effects,
+            [asking(&["footplate-zgtr", "re-ask", "yardr-e9f0@north"])]
+        );
 
         // Mail that names them while they are awaited asks for them no
         // more, and for what is new alone.
@@ -7794,6 +7796,33 @@ mod tests {
             }
         );
         assert_eq!(&said[entries[0].refs[0].range.clone()], "footplate-zgtr");
+    }
+
+    /// A closed bead another yard asked on is still a bead the yard can
+    /// serve whole: its qualified id is asked too, and a reference the
+    /// yard refuses stays plain.
+    #[test]
+    fn a_closed_peer_bead_named_in_mail_chips_and_a_non_bead_peer_ref_stays_plain() {
+        let mut m = lookup_model();
+        let said = "yd-b8g9@north is closed, and yd-nope@north is no bead.";
+        let asked = ["yd-b8g9@north", "yd-nope@north"];
+        assert_eq!(lookup_mail(&mut m, 12, said), [asking(&asked)]);
+        m.beads_looked(
+            &asked.map(String::from),
+            vec![
+                ("yd-b8g9@north".into(), Ok("yd-b8g9@north".into())),
+                no_such_bead("yd-nope@north"),
+            ],
+        );
+        let entries = m.entries();
+        assert_eq!(entries[0].refs.len(), 1);
+        assert_eq!(
+            entries[0].refs[0].target,
+            select::RefTarget::Bead {
+                bead: "yd-b8g9@north".into()
+            }
+        );
+        assert_eq!(&said[entries[0].refs[0].range.clone()], "yd-b8g9@north");
     }
 
     /// The queue read again drops the beads read whole that it holds none
