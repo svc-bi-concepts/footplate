@@ -160,7 +160,7 @@ mod linux {
     //! polkit on the system bus, through zbus. Each call runs on a thread
     //! of its own: the window is never held for the bus, nor for a prompt.
 
-    use super::{ACTION, PROBE_HOLDS, Subject, details, offered, start_time};
+    use super::{ACTION, PROBE_HOLDS, Subject, details, offered, process_subject, start_time};
     use std::collections::HashMap;
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
