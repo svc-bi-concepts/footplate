@@ -5052,7 +5052,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("decisions") | Ok("decisions-filtered") => {
             return Some(Selected::Decision("bead-a".into()));
         }
-        Ok("run") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
+        Ok("run") | Ok("weighty") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
             return Some(Selected::Decision("bead-s".into()));
         }
         Ok("arrivals") | Ok("departures") | Ok("old-lines") => return Some(Selected::Arrivals),

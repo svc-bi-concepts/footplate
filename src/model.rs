@@ -12,9 +12,9 @@ use chrono::{DateTime, Datelike, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    self, AboutBead, Arrival, Arrivals, Asks, Bead, BeadAsk, BeadNote, BlobRef, CrewMember,
-    DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, Letter, Me, Notification, OpenAsk, Peer,
-    Ran, Reaction, Run, Secret, Setup, User,
+    self, AboutBead, Arrival, Arrivals, AskWeight, Asks, Bead, BeadAsk, BeadNote, BlobRef,
+    CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, Letter, Me, Notification,
+    OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, User,
 };
 use crate::markdown;
 use crate::select;
@@ -723,6 +723,10 @@ pub struct DecisionAsk {
     /// that approves the pick with the account together. Its question and
     /// context are marked as the asker's, as a run ask's are.
     pub setup: Option<Setup>,
+    /// The card's weight, one entry a class; empty on a routine card. A
+    /// card with any passes the Mac's unlock before its approval goes, or
+    /// shows where to approve where this window has no gate.
+    pub weight: Vec<AskWeight>,
     /// The candidate taken with a tap, by source name; empty where none
     /// is. A filled secret field types another instead.
     pub account: String,
@@ -779,6 +783,8 @@ pub struct DecidedDetail {
     pub run: Option<Run>,
     /// The setup a setup ask proposes, as on its open card.
     pub setup: Option<Setup>,
+    /// The card's weight, one entry a class, as on its open card.
+    pub weight: Vec<AskWeight>,
     /// The candidate taken with a tap, by source name; empty where none
     /// is. A filled secret field types another instead.
     pub account: String,
@@ -2606,6 +2612,7 @@ impl Model {
                         secret: ask.secret.clone(),
                         run: ask.run.clone(),
                         setup: ask.setup.clone(),
+                        weight: ask.weight.clone(),
                         account: self.account_choice(bead, ask.ask),
                     }
                 })
@@ -2678,6 +2685,7 @@ impl Model {
             secret: a.secret.clone(),
             run: a.run.clone(),
             setup: a.setup.clone(),
+            weight: a.weight.clone(),
             account: self.account_choice(bead, ask),
             ran: a.ran.clone(),
         })
@@ -2911,6 +2919,7 @@ impl Model {
                     given: Vec::new(),
                     run: open.run,
                     setup: open.setup,
+                    weight: open.weight,
                     ran: None,
                 },
             );
@@ -3006,6 +3015,7 @@ impl Model {
                     secret: open.secret,
                     concealed: open.concealed,
                     given: names.to_vec(),
+                    weight: open.weight,
                     ..DecidedAsk::default()
                 },
             );
@@ -3018,6 +3028,21 @@ impl Model {
             bead: bead.to_string(),
         });
         effects
+    }
+
+    /// The card's weight, one entry a class, when the ask is open or
+    /// dealt with: empty on a routine card, and on one a yard from before
+    /// cards were weighed asked.
+    pub fn weight(&self, bead: &str, ask: u64) -> &[AskWeight] {
+        let open = self.open.iter().filter(|a| a.bead == bead && a.ask == ask);
+        let decided = self
+            .decided
+            .iter()
+            .filter(|a| a.bead == bead && a.ask == ask);
+        open.map(|a| a.weight.as_slice())
+            .chain(decided.map(|a| a.weight.as_slice()))
+            .next()
+            .unwrap_or(&[])
     }
 
     /// The command the ask proposes when it is a run ask, open or dealt
@@ -3084,6 +3109,7 @@ impl Model {
                     state: "answered".to_string(),
                     concealed: open.concealed,
                     run: open.run,
+                    weight: open.weight,
                     ran,
                     ..DecidedAsk::default()
                 },
@@ -3210,6 +3236,7 @@ impl Model {
                     given: approved.given.clone(),
                     run: open.run,
                     setup: open.setup,
+                    weight: open.weight,
                     ran,
                 },
             );
@@ -3295,6 +3322,7 @@ impl Model {
                 given: Vec::new(),
                 run: open.run,
                 setup: open.setup,
+                weight: open.weight,
                 ran: None,
             },
         );
@@ -3344,6 +3372,7 @@ impl Model {
                 given: Vec::new(),
                 run: open.run,
                 setup: open.setup,
+                weight: open.weight,
                 ran: None,
             },
         );
@@ -5373,6 +5402,13 @@ pub fn not_given(err: &api::Error, bead: &str, ask: u64) -> String {
         ),
         _ => format!("not given: {err}"),
     }
+}
+
+/// One class of a weighty card's weight as its head shows it: as
+/// `yardr bead ask` prints it, with the class and the yard's line for
+/// what this card does.
+pub fn weight_line(class: &str, line: &str) -> String {
+    format!("WEIGHTY · {}: {}", plain(class), plain(line))
 }
 
 /// The command that approves a run ask in a terminal on the yard's machine:
@@ -10382,6 +10418,7 @@ mod tests {
             concealed: true,
             run: None,
             setup: None,
+            weight: Vec::new(),
         }
     }
 
@@ -10413,6 +10450,7 @@ mod tests {
             given: Vec::new(),
             run: None,
             setup: None,
+            weight: Vec::new(),
             ran: None,
         }
     }
@@ -12278,6 +12316,16 @@ mod tests {
         assert_eq!(m.approving("yd-link", 2710), Some(&more_mail()));
         assert_eq!(m.answer_action("yd-link", 2710, ""), None);
         assert_eq!(m.answer_action("yd-link", 2710, "yes, run it"), None);
+        // The card's weight rides with it, open and decided: empty on a
+        // routine card, the yard's classes on a weighty one.
+        assert!(m.weight("yd-link", 2710).is_empty());
+        m.open[0].weight = vec![AskWeight {
+            class: "trust".into(),
+            line: "widens who the yard listens to: user kim".into(),
+        }];
+        assert_eq!(m.weight("yd-link", 2710).len(), 1);
+        let card = &m.decision_detail("yd-link", &noon()).unwrap().asks[0];
+        assert_eq!(card.weight, m.open[0].weight);
 
         let effects = m.approved("yd-link", 2710, &approved());
         assert!(effects.contains(&Effect::Asks));
@@ -12297,6 +12345,9 @@ mod tests {
         );
         assert_eq!(detail.run, Some(more_mail()));
         assert_eq!(detail.context, ["yardmaster says: airy writes all day."]);
+        assert_eq!(detail.weight.len(), 1);
+        assert_eq!(detail.weight[0].class, "trust");
+        assert_eq!(m.weight("yd-link", 2710).len(), 1);
         // A command runs once for one ask.
         assert_eq!(m.approving("yd-link", 2710), None);
         assert_eq!(m.answer_action("yd-link", 2710, "again"), None);
@@ -12434,6 +12485,23 @@ mod tests {
         assert_eq!(
             approve_command("yd-link", 2710),
             "yardr bead answer yd-link 2710 --approve"
+        );
+    }
+
+    /// One class of a weighty card's weight as its head shows it: as the
+    /// terminal prints it, and as text alone, whatever the yard sent.
+    #[test]
+    fn a_weighty_card_s_head_shows_each_class_as_the_terminal_prints_it() {
+        assert_eq!(
+            weight_line(
+                "outside",
+                "lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"
+            ),
+            "WEIGHTY · outside: lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"
+        );
+        assert_eq!(
+            weight_line("trust\u{7f}", "user kim\u{2028}twice"),
+            "WEIGHTY · trust: user kimtwice"
         );
     }
 

@@ -30,6 +30,7 @@ mod taskbar;
 mod theme;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tray;
+mod unlock;
 mod window;
 mod yard;
 

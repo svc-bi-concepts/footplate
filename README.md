@@ -175,7 +175,8 @@ open card whose note carries a page, an image and a file), `mail` (a mail with
 a page and an image), `image` (that mail's image open full size over
 the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
-question forges the yard's lines), `stopped` (the head with a stopped
+question forges the yard's lines), `weighty` (a weighty run ask's
+card beside a routine one's), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
 on each of their sections: `settings` is this window, and
 `settings-appearance`, `settings-yards`, `settings-agents`,
@@ -994,7 +995,13 @@ through the source. When the call ends with no answer it
 says "the yard did not answer. The value may be written. Give it again.",
 never that it was sent. A yard that does not serve the call to this window
 is said so, with the command that answers in a terminal on the yard's
-machine: `yardr bead answer <bead> <ask> --secret`. One that was given can
+machine: `yardr bead answer <bead> <ask> --secret`. Every secret ask is
+weighty: its card shows the yard's lines for what giving does first, in
+rust. On a Mac giving passes Touch ID, a paired watch or the login
+password first: Enter opens it, and its cancel sends nothing and keeps
+what was typed for another try. On Linux, or where the Mac offers no
+unlock, the card shows where to give instead, with the command that
+answers in a terminal, and draws no field. One that was given can
 be given again from its card under "Decided", which replaces it.
 
 **A run ask** (`yardr bead ask --run`) proposes one yardr command that is
@@ -1028,7 +1035,15 @@ with no answer it says "the yard did not answer; read the card again",
 never that it was approved. A yard that does not have the call, or does not
 serve it to this window, has the card say so in place of the button, with
 the command that approves in a terminal on the yard's machine in a block
-that copies it: `yardr bead answer <bead> <ask> --approve`. `x` puts a run
+that copies it: `yardr bead answer <bead> <ask> --approve`. A run ask the
+yard weighed weighty shows each class's line first on its card, in rust:
+`WEIGHTY · trust: …`. Its approval passes the Mac's unlock first — Touch
+ID, a paired watch or the login password — and the control says so:
+"Approve in plantime after unlocking". ⌘↵ alone approves nothing: it opens
+the unlock, and the approval goes where the person passes it; its cancel
+sends nothing. On Linux, or where the Mac offers no unlock, the card shows
+where to approve instead, with the command that approves in a terminal,
+and offers no control. `x` puts a run
 ask aside and `d` declines it with words, as on any card; one put aside can
 be approved from its card under "Decided". An approved one reads `approved,
 ran:` there, with the command and, under it, what it printed; one the yard
@@ -1057,7 +1072,11 @@ since the ask was written, and a call that ends with no answer is never
 said to be approved or not: the queue is read again for what the yard
 says. Where the yard takes no approval from this window, the card says so
 in place of the button, with the command that approves in a terminal in a
-block that copies it. `x` puts a setup ask
+block that copies it. Every setup ask is weighty: its card shows the
+yard's lines for what approving does first, in rust, and its approval
+passes the Mac's unlock first, as a run ask's does. On Linux, or where
+the Mac offers no unlock, the card shows where to approve instead, and
+draws no account field. `x` puts a setup ask
 aside and `d` declines it with words; one put aside can be approved from
 its card under "Decided".
 
@@ -1081,7 +1100,7 @@ its card under "Decided".
 | `/`, in decisions | opens the history with its filter typed in; `esc` leaves the filter, and what is typed stands |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
 | `i`, on a card | types the words in, or a secret in its field; a setup ask's account too. The window holds the card's keys |
-| `cmd+enter` (`ctrl+enter` on Linux), on a run or setup ask's card | approves it: the yard runs the command the card shows, or applies the setup with the preset pick and the account. No other card answers to it, and Enter alone approves nothing |
+| `cmd+enter` (`ctrl+enter` on Linux), on a run or setup ask's card | approves it: the yard runs the command the card shows, or applies the setup with the preset pick and the account. On a weighty card it opens the Mac's unlock first, and approves where the person passes it. No other card answers to it, and Enter alone approves nothing |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | shift-`x`, on the open `yard` row | marks every notice read, as the button in the row's head does, shown with their count while one is unread |
 | `x`, on an open card | puts the ask aside |

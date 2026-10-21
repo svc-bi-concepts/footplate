@@ -22,7 +22,7 @@ use crate::yard::Env;
 /// short links and a correction, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
-/// card of a run ask,
+/// card of a run ask, a weighty run ask's card beside a routine one's,
 /// a yard that is stopped, a yard at an
 /// address, the settings on each of their sections, the yards with a
 /// far yard's rename form open in its card, a running
@@ -88,6 +88,7 @@ pub const STATES: &[&str] = &[
     "plain-select",
     "lines",
     "run",
+    "weighty",
     "stopped",
     "far",
     "settings",
@@ -1236,6 +1237,61 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.answer("Bead", &bead_links());
         }
+        "weighty" => {
+            // A weighty run ask's card beside a routine one's: the
+            // weighty card shows its classes' lines first, and where
+            // the window has no gate the decline path in place of the
+            // control, against the routine card's approval.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [
+                    {"bead": "bead-s", "bead_title": "The link with airy", "topic": "",
+                     "ask": 7, "question": "Take more mail from airy?",
+                     "asker": "yardmaster", "since": "2026-10-10T10:00:00Z",
+                     "run": weighed_run_of(),
+                     "weight": [{"class": "trust",
+                                 "line": "widens who the yard listens to: the link with airy takes 300 mails and asks an hour from it"}]},
+                    {"bead": "bead-s", "bead_title": "The link with airy", "topic": "",
+                     "ask": 8, "question": "List the yard's peers?",
+                     "asker": "yardmaster", "since": "2026-10-10T10:05:00Z",
+                     "run": {"command": "yardr peer list", "argv": ["peer", "list"],
+                             "does": ["lists the yard's peers, and what each takes and sends"],
+                             "back": ""}},
+                ], "decided": []}})
+                .to_string(),
+            );
+            yard.answer(
+                "Bead",
+                &json!({"result": {"id": "bead-s", "title": "The link with airy",
+                    "body": "The body.", "stage": "new", "labels": [], "notes": [],
+                    "asks": [
+                        {"ask": 7, "to": "jo", "asker": "yardmaster",
+                         "since": "2026-10-10T10:00:00Z",
+                         "question": "Take more mail from airy?",
+                         "context": ["airy's yard was refused 4 mails in the last hour."],
+                         "options": [], "state": "open", "run": weighed_run_of(),
+                         "weight": [{"class": "trust",
+                                     "line": "widens who the yard listens to: the link with airy takes 300 mails and asks an hour from it"}]},
+                        {"ask": 8, "to": "jo", "asker": "yardmaster",
+                         "since": "2026-10-10T10:05:00Z",
+                         "question": "List the yard's peers?",
+                         "context": ["the board wants the count."],
+                         "options": [], "state": "open",
+                         "run": {"command": "yardr peer list", "argv": ["peer", "list"],
+                                 "does": ["lists the yard's peers, and what each takes and sends"],
+                                 "back": ""}},
+                    ]}})
+                .to_string(),
+            );
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -1469,6 +1525,14 @@ fn run_of() -> serde_json::Value {
     let command = long_command();
     let argv: Vec<&str> = command.split(' ').skip(1).collect();
     json!({"argv": argv, "command": command, "does": [RUN_DOES], "back": RUN_BACK})
+}
+
+/// The weighty shot's command: the mail limit the trust class is of,
+/// short enough that both cards stand in one shot.
+fn weighed_run_of() -> serde_json::Value {
+    json!({"command": "yardr peer allow airy --mail-limit 300",
+           "argv": ["peer", "allow", "airy", "--mail-limit", "300"],
+           "does": [RUN_DOES], "back": RUN_BACK})
 }
 
 /// The run ask 7 on bead-s as the queue lists it, asking `question`.
@@ -2041,6 +2105,18 @@ mod tests {
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].question.lines().count(), 3, "{state}");
                     assert!(bead.asks[0].run.is_some(), "{state}");
+                }
+                "weighty" => {
+                    // The weighty run ask beside the routine one: the
+                    // first carries its classes, the second none.
+                    assert_eq!(loaded.asks.open.len(), 2, "{state}");
+                    assert!(loaded.asks.open[0].run.is_some(), "{state}");
+                    assert_eq!(loaded.asks.open[0].weight.len(), 1, "{state}");
+                    assert_eq!(loaded.asks.open[0].weight[0].class, "trust", "{state}");
+                    assert!(loaded.asks.open[1].run.is_some(), "{state}");
+                    assert!(loaded.asks.open[1].weight.is_empty(), "{state}");
+                    let bead = yard.client().bead("bead-s").unwrap();
+                    assert_eq!(bead.asks.len(), 2, "{state}");
                 }
                 "secret" | "secret-shown" | "secret-refused" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

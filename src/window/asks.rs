@@ -12,11 +12,12 @@ use gpui::{
 use super::Expanded;
 use super::Footplate;
 use super::ask::{
-    ANSWER_WORDS, APPROVE_ELSEWHERE, DECLINE_IS_NO_PICK, RUN_PROPOSED, RunText, SECRET_GOES,
-    SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, answer_label, approve_button, asked_age,
-    candidate_choice_line, card_head, carried_texts, decided_keys, decision_head, description_line,
-    fenced, give_label, recommended_line, run_keys, run_runs, run_texts, secret_keys, section_head,
-    send_button, setup_keys, setup_runs, show_button, take_back_label, texts_label, words_send,
+    ANSWER_WORDS, APPROVE_ELSEWHERE, Approval, DECLINE_IS_NO_PICK, RUN_PROPOSED, RunText,
+    SECRET_GOES, SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, WEIGHTY_NO_GATE, answer_label, approval,
+    approve_button, asked_age, candidate_choice_line, card_head, carried_texts, decided_keys,
+    decision_head, description_line, fenced, give_label, give_unlock_label, recommended_line,
+    run_keys, run_runs, run_texts, secret_keys, section_head, send_button, setup_keys, setup_runs,
+    show_button, take_back_label, texts_label, words_send,
 };
 use super::expanded_text_key;
 use super::keys::{APPROVE_KEY, SETUP_SECRET_CONTEXT};
@@ -34,6 +35,7 @@ use crate::model::{
 };
 use crate::select::{self};
 use crate::theme::{Palette, yard_color};
+use crate::unlock;
 
 impl Footplate {
     /// The line says whom it writes to, or what words on a card do.
@@ -385,6 +387,73 @@ impl Footplate {
         }
     }
 
+    /// Whether the Mac's unlock stands in front of a weighty approval:
+    /// where the system offers its gate, or where a test fixed it.
+    pub(crate) fn unlock_available(&self) -> bool {
+        self.test_unlock
+            .map(|(offered, _)| offered)
+            .unwrap_or_else(unlock::available)
+    }
+
+    /// What the Mac's unlock answers where a test fixed it: the gate is
+    /// then answered at once, with no prompt. None asks the system.
+    fn unlock_answer(&self) -> Option<bool> {
+        self.test_unlock.map(|(_, answer)| answer)
+    }
+
+    /// How the ask's card approves: straight to the yard, through the
+    /// Mac's unlock first, or nowhere from this window.
+    pub(crate) fn card_approval(&self, bead: &str, ask: u64) -> Approval {
+        let weighty = self
+            .model
+            .as_ref()
+            .is_some_and(|m| !m.weight(bead, ask).is_empty());
+        let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
+        approval(weighty, self.unlock_available(), elsewhere)
+    }
+
+    /// The approval of the following `session` is no longer with the
+    /// gate: its control sends again.
+    fn clear_approving_in(&mut self, session: u64) {
+        if session == self.session {
+            self.approving = None;
+        } else if let Some(held) = self.held.values_mut().find(|h| h.session == session) {
+            held.approving = None;
+        }
+    }
+
+    /// Opens the Mac's unlock for a weighty approval or giving: `send`
+    /// goes where the person passes it, with `weighed`, and `cancel` puts
+    /// the card back where they do not, sending nothing. The approval is
+    /// the yard's of `session`: what came of it is that yard's, and is
+    /// said there, wherever the window is by then.
+    fn unlock_then(
+        &mut self,
+        session: u64,
+        reason: String,
+        cx: &mut Context<Self>,
+        send: impl FnOnce(&mut Self, u64, &mut Context<Self>) + 'static,
+        cancel: impl FnOnce(&mut Self, u64, &mut Context<Self>) + 'static,
+    ) {
+        // A test fixed the gate: answered at once, with no prompt.
+        if let Some(passed) = self.unlock_answer() {
+            return match passed {
+                true => send(self, session, cx),
+                false => cancel(self, session, cx),
+            };
+        }
+        let asked = unlock::evaluate(&reason);
+        cx.spawn(async move |this, cx| {
+            let passed = asked.recv().await.unwrap_or(false);
+            this.update(cx, |this, cx| match passed {
+                true => send(this, session, cx),
+                false => cancel(this, session, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Enter in the field of a secret ask: the value goes to the yard in
     /// its own call and in nothing else. The field is emptied here, before
     /// the yard is asked and whatever it answers, and what the window says
@@ -433,22 +502,76 @@ impl Footplate {
         if secret.is_none() {
             return self.shown(cx);
         }
+        let secret = secret.unwrap();
+        let reason = unlock::give_reason(&secret.env, &self.yard);
         let values: Vec<(String, String)> = secret
-            .unwrap()
             .env
             .into_iter()
             .zip(std::mem::take(&mut self.secret_typed))
             .collect();
         self.shown(cx);
+        let session = self.session;
+        match self.card_approval(&bead, ask) {
+            // No gate: the card shows where to give instead, and offers
+            // no control. What was typed is kept, as what was typed since.
+            Approval::Nowhere => {
+                self.secret_typed = values.into_iter().map(|(_, value)| value).collect();
+                self.shown(cx);
+            }
+            // The Mac's unlock first: its cancel sends nothing, and what
+            // was typed is kept for another try: the last value back in
+            // the field, the rest typed, so Enter tries again. Where the
+            // window left the yard meanwhile, what was typed is dropped
+            // instead: it is that yard's, and is not restored into
+            // another's field.
+            Approval::Unlock => {
+                let back: Vec<String> = values.iter().map(|(_, value)| value.clone()).collect();
+                self.unlock_then(
+                    session,
+                    reason,
+                    cx,
+                    move |this, session, cx| {
+                        this.send_give_in(session, bead, ask, values, true, cx)
+                    },
+                    move |this, session, cx| {
+                        if session == this.session {
+                            let mut back: Vec<String> = back;
+                            if let Some(last) = back.pop() {
+                                this.secret
+                                    .update(cx, |field, cx| field.set_text(&last, cx));
+                            }
+                            this.secret_typed = back;
+                        }
+                        this.shown(cx);
+                    },
+                );
+            }
+            Approval::Direct => self.send_give_in(session, bead, ask, values, false, cx),
+        }
+    }
+
+    /// Gives the typed values to the yard in its own call and in nothing
+    /// else. What the window says afterwards is the yard's words or
+    /// footplate's, on the card, never the value. `weighed` goes where
+    /// the person passed the Mac's unlock for a weighty card.
+    pub(crate) fn send_give_in(
+        &mut self,
+        session: u64,
+        bead: String,
+        ask: u64,
+        values: Vec<(String, String)>,
+        weighed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let call_bead = bead.clone();
         // What the yard answers is of the yard it was given in, and is
         // said there, wherever the window is by then.
-        let session = self.session;
-        self.ask_through(
+        self.ask_in(
+            session,
             cx,
             move |client, me| {
                 client
-                    .give_secret(&call_bead, ask, &values, me)
+                    .give_secret(&call_bead, ask, &values, me, weighed)
                     .map_err(|err| {
                         let why = model::not_given(&err, &call_bead, ask);
                         // The yard repeats no value in a refusal. Should
@@ -474,7 +597,9 @@ impl Footplate {
     /// Approves the open card's run or setup ask: its key and its button.
     /// A run ask's approval names the ask and nothing of the command,
     /// which the yard runs as it stored it; a setup ask's the preset pick
-    /// with the account together.
+    /// with the account together. A weighty card's approval passes the
+    /// Mac's unlock first, and a card that approves nowhere has no
+    /// control: its card says where to approve instead.
     pub(crate) fn approve(&mut self, cx: &mut Context<Self>) {
         let Some((bead, ask)) = self.card() else {
             return;
@@ -484,11 +609,33 @@ impl Footplate {
             || self.approving.is_some()
             || self.client.is_none()
             || self.reconnecting()
+            || matches!(self.card_approval(&bead, ask), Approval::Nowhere)
         {
             return;
         }
-        if self.approvable().is_some() {
-            self.send_approve(bead, ask, cx);
+        if let Some(run) = self.approvable() {
+            if matches!(self.card_approval(&bead, ask), Approval::Direct) {
+                return self.send_approve(bead, ask, cx);
+            }
+            // The Mac's unlock first: its cancel sends nothing, and the
+            // control sends again.
+            let reason = unlock::approve_reason(&run.line(), &self.yard);
+            let session = self.session;
+            self.declining = None;
+            self.approving = Some(at.clone());
+            self.shown(cx);
+            self.notice(String::new(), cx);
+            self.refused.remove(&at);
+            self.unlock_then(
+                session,
+                reason,
+                cx,
+                move |this, session, cx| this.send_approve_in(session, bead, ask, true, cx),
+                move |this, session, cx| {
+                    this.clear_approving_in(session);
+                    this.shown(cx);
+                },
+            );
         } else if self.setup_approvable().is_some() {
             self.approve_setup(bead, ask, cx);
         }
@@ -500,18 +647,40 @@ impl Footplate {
     /// never said to be approved or not, and a yard without the call for
     /// this window has its card say where to approve.
     pub(crate) fn send_approve(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
+        self.send_approve_in(self.session, bead, ask, false, cx);
+    }
+
+    /// Approves a run ask of the following `session`. `weighed` goes
+    /// where the person passed the Mac's unlock for a weighty card.
+    fn send_approve_in(
+        &mut self,
+        session: u64,
+        bead: String,
+        ask: u64,
+        weighed: bool,
+        cx: &mut Context<Self>,
+    ) {
         let at = (bead.clone(), ask);
-        self.declining = None;
-        self.approving = Some(at.clone());
-        self.shown(cx);
-        self.notice(String::new(), cx);
-        self.refused.remove(&at);
+        if session == self.session {
+            self.declining = None;
+            self.approving = Some(at.clone());
+            self.shown(cx);
+            self.notice(String::new(), cx);
+            self.refused.remove(&at);
+        } else {
+            let Some(held) = self.held.values_mut().find(|h| h.session == session) else {
+                return;
+            };
+            held.approving = Some(at.clone());
+            held.refused.remove(&at);
+            self.notice_in(session, String::new(), cx);
+        }
         // The approval is the yard's it was pressed in: what came of it is
         // that yard's, and is said there, wherever the window is by then.
-        let session = self.session;
-        self.ask_through(
+        self.ask_in(
+            session,
             cx,
-            move |client, me| client.approve_ask(&bead, ask, me),
+            move |client, me| client.approve_ask(&bead, ask, me, weighed),
             move |this, approved, cx| {
                 let held = this.held.values_mut().find(|h| h.session == session);
                 let (approving, elsewhere) = match held {
@@ -619,15 +788,74 @@ impl Footplate {
                 return self.notice(format!("type {next} for the account"), cx);
             }
         }
-        self.declining = None;
-        self.approving = Some(at.clone());
-        self.shown(cx);
-        self.notice(String::new(), cx);
-        self.refused.remove(&at);
+        let session = self.session;
+        if !matches!(self.card_approval(&bead, ask), Approval::Direct) {
+            // The Mac's unlock first: its cancel sends nothing, and the
+            // control sends again. `approve` turns a card that approves
+            // nowhere away before this.
+            let reason = unlock::setup_reason(&setup.pack, &self.yard);
+            self.declining = None;
+            self.approving = Some(at.clone());
+            self.shown(cx);
+            self.notice(String::new(), cx);
+            self.refused.remove(&at);
+            return self.unlock_then(
+                session,
+                reason,
+                cx,
+                move |this, session, cx| {
+                    this.send_approve_setup_in(
+                        session, bead, ask, option, values, account, setup, true, cx,
+                    )
+                },
+                move |this, session, cx| {
+                    this.clear_approving_in(session);
+                    this.shown(cx);
+                },
+            );
+        }
+        self.send_approve_setup_in(
+            session, bead, ask, option, values, account, setup, false, cx,
+        );
+    }
+
+    /// Approves a setup ask of the following `session`: the preset pick
+    /// with the account together. `weighed` goes where the person passed
+    /// the Mac's unlock for a weighty card. What the window says
+    /// afterwards is the yard's: that the server carries the setup out,
+    /// or the refusal whole, on the card.
+    #[allow(clippy::too_many_arguments)]
+    fn send_approve_setup_in(
+        &mut self,
+        session: u64,
+        bead: String,
+        ask: u64,
+        option: u64,
+        values: Option<Vec<(String, String)>>,
+        account: Option<String>,
+        setup: api::Setup,
+        weighed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let at = (bead.clone(), ask);
+        if session == self.session {
+            self.declining = None;
+            self.approving = Some(at.clone());
+            self.shown(cx);
+            self.notice(String::new(), cx);
+            self.refused.remove(&at);
+        } else {
+            let Some(held) = self.held.values_mut().find(|h| h.session == session) else {
+                return;
+            };
+            held.approving = Some(at.clone());
+            held.refused.remove(&at);
+            self.notice_in(session, String::new(), cx);
+        }
         // The approval is the yard's it was pressed in: what came of it is
         // that yard's, and is said there, wherever the window is by then.
-        let session = self.session;
-        self.ask_through(
+        self.ask_in(
+            session,
             cx,
             move |client, me| {
                 let approved = client.approve_setup(
@@ -637,6 +865,7 @@ impl Footplate {
                     values.as_deref(),
                     account.as_deref(),
                     me,
+                    weighed,
                 );
                 (approved, values)
             },
@@ -1140,6 +1369,12 @@ impl Footplate {
         }
         // A run ask's card has a line only for the words of a decline.
         if self.run_card() && self.declining.is_none() {
+            return;
+        }
+        // A weighty card without the gate draws no field to type in: its
+        // approval goes in a terminal, and a decline's words take the
+        // line.
+        if self.declining.is_none() && matches!(self.card_approval(&bead, ask), Approval::Nowhere) {
             return;
         }
         // A setup ask's card has the secret field for its account, as a
@@ -1927,6 +2162,27 @@ impl Footplate {
             ask.chosen
         };
         let mut card = div().flex().flex_col().gap_2();
+        // How the card approves: nowhere where the yard takes no approval
+        // from this window, or where a weighty card has no gate.
+        let elsewhere = self.approve_elsewhere.contains(&(bead_id.clone(), ask_seq));
+        let approval = approval(!ask.weight.is_empty(), self.unlock_available(), elsewhere);
+        let sends = !matches!(approval, Approval::Nowhere);
+        // The yard's weight first, each class's line as the terminal
+        // prints it, in rust: a weighty card reads apart from a routine
+        // one, and never in red.
+        for (n, weight) in ask.weight.iter().enumerate() {
+            let line = model::weight_line(&weight.class, &weight.line);
+            card = card.child(
+                div()
+                    .debug_selector(|| format!("weight {bead_id} {ask_seq} {n}"))
+                    .text_color(palette.text_accent)
+                    .child(select::text(
+                        expanded_text_key(card_key, "weight", n, &line),
+                        line,
+                        &self.selection,
+                    )),
+            );
+        }
         // The question, with how long it waits beside it. The yard and the
         // bead stand once in the head above, not again on every card.
         let asker_marked = ask.run.is_some() || ask.setup.is_some();
@@ -2036,7 +2292,6 @@ impl Footplate {
         // the control that approves directly under it. A setup ask has the
         // yard's block with its account choice first, and its presets to
         // pick from under it, as an ordinary ask's options.
-        let elsewhere = self.approve_elsewhere.contains(&(bead_id.clone(), ask_seq));
         if let Some(secret) = &ask.secret {
             card = card.child(self.secret_lines(&bead_id, ask_seq, secret, palette));
         } else if let Some(run) = &ask.run {
@@ -2111,16 +2366,19 @@ impl Footplate {
             // value.
             let declining = self.declining.as_ref() == Some(&(bead_id.clone(), ask_seq));
             // A line for words, or the field of a secret in its place. A
-            // setup ask's account is typed in the secret field too.
-            let secret_field = (ask.secret.is_some() || ask.setup.is_some()) && !declining;
+            // setup ask's account is typed in the secret field too. A card
+            // that sends nowhere draws no field: its approval goes in a
+            // terminal, and a decline's words take the line.
+            let secret_field = (ask.secret.is_some() || ask.setup.is_some()) && !declining && sends;
             let field = match secret_field {
                 true => self.secret.clone(),
                 false => self.line.clone(),
             };
             let focus = field.focus_handle(cx);
             let kind = if secret_field { "secret" } else { "words" };
-            // Where this yard takes no approval from this window, the card
-            // says where it does, in place of the control.
+            // Where this yard takes no approval from this window, or a
+            // weighty card has no gate, the card says where it does, in
+            // place of the control.
             if (ask.run.is_some() || ask.setup.is_some()) && elsewhere {
                 let command = match &ask.setup {
                     Some(setup) => model::setup_approve_command(&bead_id, ask_seq, setup),
@@ -2128,6 +2386,13 @@ impl Footplate {
                 };
                 card =
                     card.child(self.approve_elsewhere_lines(&bead_id, ask_seq, command, palette));
+            } else if !sends && (ask.run.is_some() || ask.setup.is_some() || ask.secret.is_some()) {
+                let command = match (&ask.secret, &ask.setup) {
+                    (Some(_), _) => format!("yardr bead answer {bead_id} {ask_seq} --secret"),
+                    (_, Some(setup)) => model::setup_approve_command(&bead_id, ask_seq, setup),
+                    _ => model::approve_command(&bead_id, ask_seq),
+                };
+                card = card.child(self.weighty_decline_lines(&bead_id, ask_seq, command));
             }
             // A secret's field stands beside its toggle: Show draws what
             // is typed as typed, for a look, Hide draws marks again.
@@ -2140,7 +2405,7 @@ impl Footplate {
                 )
             });
             card = card.when(
-                ask.run.is_none() || ask.setup.is_some() || declining,
+                (ask.run.is_none() || ask.setup.is_some() || declining) && (sends || declining),
                 |card| {
                     let boxed = div()
                         .debug_selector(|| format!("{kind} {bead_id} {ask_seq}"))
@@ -2212,12 +2477,15 @@ impl Footplate {
             // place of that button.
             let foreign = model::foreign_bead(&detail.bead);
             let send = match (&ask.secret, self.giving()) {
-                (Some(_), Some(secret)) => Some((
+                (Some(_), Some(secret)) if sends => Some((
                     format!("give {bead_id} {ask_seq}"),
-                    give_label(&secret, self.secret_typed.len()),
+                    match approval {
+                        Approval::Unlock => give_unlock_label(&secret, self.secret_typed.len()),
+                        _ => give_label(&secret, self.secret_typed.len()),
+                    },
                     !self.secret.read(cx).text().is_empty(),
                 )),
-                (Some(_), None) => None,
+                (Some(_), _) => None,
                 // A run or setup ask's one button approves, and sends no
                 // words.
                 (None, _) if ask.run.is_some() || ask.setup.is_some() => None,
@@ -2275,18 +2543,16 @@ impl Footplate {
                     .when_some(send, |el, (id, text, enabled)| {
                         el.child(send_button(id, text, enabled && !held, palette, cx))
                     })
-                    .when(
-                        (ask.run.is_some() || ask.setup.is_some()) && !elsewhere,
-                        |el| {
-                            el.child(approve_button(
-                                format!("approve {bead_id} {ask_seq}"),
-                                &self.yard,
-                                self.approving.is_none() && !held,
-                                palette,
-                                cx,
-                            ))
-                        },
-                    )
+                    .when((ask.run.is_some() || ask.setup.is_some()) && sends, |el| {
+                        el.child(approve_button(
+                            format!("approve {bead_id} {ask_seq}"),
+                            &self.yard,
+                            matches!(approval, Approval::Unlock),
+                            self.approving.is_none() && !held,
+                            palette,
+                            cx,
+                        ))
+                    })
                     .when(held, |el| el.child(send_held(palette)))
                     .child(ask_about)
                     .child(
@@ -2316,10 +2582,10 @@ impl Footplate {
             // ordinary card carries each key on its control, and lists
             // none. Every card carries the cheatsheet's hint.
             let keys = match (&ask.secret, &ask.run, &ask.setup) {
-                (Some(_), _, _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
-                (None, Some(_), _) => run_keys(!elsewhere, unwritable.is_none()),
+                (Some(_), _, _) => secret_keys(&bead_id, ask_seq, approval, unwritable.is_none()),
+                (None, Some(_), _) => run_keys(approval, unwritable.is_none()),
                 (None, None, Some(setup)) => {
-                    setup_keys(&bead_id, ask_seq, setup, !elsewhere, unwritable.is_none())
+                    setup_keys(&bead_id, ask_seq, setup, approval, unwritable.is_none())
                 }
                 (None, None, None) => String::new(),
             };
@@ -2735,6 +3001,28 @@ impl Footplate {
             ))
     }
 
+    /// Where a weighty ask is approved when this window has no gate: the
+    /// decline path, with the command in a block that copies it. Plain
+    /// words, never in red: nothing went wrong, and the card stays open.
+    pub(crate) fn weighty_decline_lines(
+        &self,
+        bead: &str,
+        ask: u64,
+        command: String,
+    ) -> impl IntoElement + use<> {
+        div()
+            .debug_selector(|| format!("weighty decline {bead} {ask}"))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().child(WEIGHTY_NO_GATE))
+            .child(select::text(
+                expanded_text_key(select::key((bead, ask)), "approve", 0, &command),
+                fenced(&command),
+                &self.selection,
+            ))
+    }
+
     /// One dealt with: what was decided, in plain words with who and when;
     /// the picked option marked, with its words under it; the same options
     /// to pick again from there; and the same full bead one key away. One
@@ -2815,6 +3103,22 @@ impl Footplate {
             )
             .into_any_element()
         };
+        // The yard's weight first, each class's line as the terminal
+        // prints it, in rust: a weighty card reads apart from a routine
+        // one, and never in red.
+        for (n, weight) in detail.weight.iter().enumerate() {
+            let line = model::weight_line(&weight.class, &weight.line);
+            body = body.child(
+                div()
+                    .debug_selector(|| format!("weight {bead} {ask} {n}"))
+                    .text_color(palette.text_accent)
+                    .child(select::text(
+                        expanded_text_key(card_key, "weight", n, &line),
+                        line,
+                        &self.selection,
+                    )),
+            );
+        }
         body = body
             .child(
                 div()
@@ -2877,6 +3181,13 @@ impl Footplate {
             let approving = model.approving(bead, ask).is_some();
             let setup_approving = model.setup_approving(bead, ask).is_some();
             let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
+            let approval = approval(
+                !detail.weight.is_empty(),
+                self.unlock_available(),
+                elsewhere,
+            );
+            let sends = !matches!(approval, Approval::Nowhere);
+            let giving = model.giving(bead, ask);
             // An ask with no options shows none: the answer's words are in
             // the state line, and nothing is wanted. Nor does one taken
             // back: there is nothing to pick. Nor a setup ask past its
@@ -2930,6 +3241,13 @@ impl Footplate {
             // A secret ask says what it asks for in the yard's line.
             if let Some(secret) = &detail.secret {
                 body = body.child(self.secret_lines(bead, ask, secret, palette));
+                if giving.is_some() && !sends {
+                    body = body.child(self.weighty_decline_lines(
+                        bead,
+                        ask,
+                        format!("yardr bead answer {bead} {ask} --secret"),
+                    ));
+                }
             }
             // A run ask has the yard's block, and under it the control
             // that approves while it is only put aside: one approved,
@@ -2943,10 +3261,17 @@ impl Footplate {
                         model::approve_command(bead, ask),
                         palette,
                     ));
+                } else if approving && !sends {
+                    body = body.child(self.weighty_decline_lines(
+                        bead,
+                        ask,
+                        model::approve_command(bead, ask),
+                    ));
                 } else if approving {
                     body = body.child(div().flex().child(approve_button(
                         format!("approve {bead} {ask}"),
                         &self.yard,
+                        matches!(approval, Approval::Unlock),
                         self.approving.is_none() && !self.reconnecting(),
                         palette,
                         cx,
@@ -2974,10 +3299,17 @@ impl Footplate {
                             model::setup_approve_command(bead, ask, setup),
                             palette,
                         ));
+                    } else if !sends {
+                        body = body.child(self.weighty_decline_lines(
+                            bead,
+                            ask,
+                            model::setup_approve_command(bead, ask, setup),
+                        ));
                     } else {
                         body = body.child(div().flex().child(approve_button(
                             format!("approve {bead} {ask}"),
                             &self.yard,
+                            matches!(approval, Approval::Unlock),
                             self.approving.is_none() && !self.reconnecting(),
                             palette,
                             cx,
@@ -2989,10 +3321,9 @@ impl Footplate {
             // to give it again, or the field of a put-aside setup for its
             // account: a declined one takes none, one taken back has
             // neither, and no line for words stands where a value could be
-            // typed in sight.
-            let giving = model.giving(bead, ask);
-            let setup_field = setup_approving && detail.setup.is_some();
-            let secret_field = detail.secret.is_some() || setup_field;
+            // typed in sight. A card that sends nowhere draws no field.
+            let setup_field = setup_approving && detail.setup.is_some() && sends;
+            let secret_field = (detail.secret.is_some() && sends) || setup_field;
             let field = match secret_field {
                 true => self.secret.clone(),
                 false => self.line.clone(),
@@ -3000,7 +3331,7 @@ impl Footplate {
             let focus = field.focus_handle(cx);
             let kind = if secret_field { "secret" } else { "words" };
             let words = detail.secret.is_none() && detail.run.is_none() && detail.setup.is_none();
-            let fielded = !taken_back && (words || giving.is_some() || setup_field);
+            let fielded = !taken_back && sends && (words || giving.is_some() || setup_field);
             // A secret's field stands beside its toggle, as on an open
             // card.
             let toggle = secret_field
@@ -3050,12 +3381,15 @@ impl Footplate {
             }
             let send = match (&detail.secret, giving) {
                 _ if taken_back => None,
-                (Some(_), Some(secret)) => Some((
+                (Some(_), Some(secret)) if sends => Some((
                     format!("give {bead} {ask}"),
-                    give_label(secret, self.secret_typed.len()),
+                    match approval {
+                        Approval::Unlock => give_unlock_label(secret, self.secret_typed.len()),
+                        _ => give_label(secret, self.secret_typed.len()),
+                    },
                     !self.secret.read(cx).text().is_empty(),
                 )),
-                (Some(_), None) => None,
+                (Some(_), _) => None,
                 (None, _) if detail.run.is_some() || detail.setup.is_some() => None,
                 (None, _) => detail
                     .options
@@ -3082,20 +3416,26 @@ impl Footplate {
             // with the reason beside the button that would send.
             let held = self.reconnecting();
             let sendable = send.is_some()
-                || (detail.run.is_some() && approving && !elsewhere)
-                || (detail.setup.is_some() && setup_approving && !elsewhere);
+                || (detail.run.is_some() && approving && sends)
+                || (detail.setup.is_some() && setup_approving && sends);
             body = body.when_some(send, |body, (id, text, enabled)| {
                 body.child(send_button(id, text, enabled && !held, palette, cx))
             });
             body = body.when(held && sendable, |body| body.child(send_held(palette)));
+            let run_approval = match approving {
+                true => approval,
+                false => Approval::Nowhere,
+            };
+            let setup_approval = match setup_approving {
+                true => approval,
+                false => Approval::Nowhere,
+            };
             let keys = match detail.secret {
-                Some(_) if giving.is_some() => secret_keys(bead, ask, false),
+                Some(_) if giving.is_some() => secret_keys(bead, ask, approval, false),
                 Some(_) => String::new(),
-                None if detail.run.is_some() => run_keys(approving && !elsewhere, false),
+                None if detail.run.is_some() => run_keys(run_approval, false),
                 None => match &detail.setup {
-                    Some(setup) => {
-                        setup_keys(bead, ask, setup, setup_approving && !elsewhere, false)
-                    }
+                    Some(setup) => setup_keys(bead, ask, setup, setup_approval, false),
                     None => decided_keys(&detail),
                 },
             };

@@ -120,11 +120,19 @@ pub(crate) const SECRET_GOES: &str =
     "it goes to a file only the yard's server reads; no agent is shown it";
 
 /// The keys of a secret ask's card, with the way for a person without the
-/// field: the same answer in a terminal on the yard's machine.
-pub(crate) fn secret_keys(bead: &str, ask: u64, writable: bool) -> String {
-    let keys = format!(
-        "i types it · enter sends it to the yard · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
-    );
+/// field: the same answer in a terminal on the yard's machine. Where the
+/// Mac's unlock stands in front, Enter opens it first; where the card has
+/// no gate, the terminal is the only way.
+pub(crate) fn secret_keys(bead: &str, ask: u64, approval: Approval, writable: bool) -> String {
+    let keys = match approval {
+        Approval::Direct => format!(
+            "i types it · enter sends it to the yard · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
+        ),
+        Approval::Unlock => format!(
+            "i types it · enter sends it to the yard after unlocking · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
+        ),
+        Approval::Nowhere => format!("in a terminal: yardr bead answer {bead} {ask} --secret"),
+    };
     if writable {
         format!("{keys} · a ask about this")
     } else {
@@ -152,6 +160,35 @@ pub(crate) fn card_head(yard: &str, bead: &str, rest: &str) -> String {
 /// runs in, and its key.
 pub(crate) fn approve_label(yard: &str) -> String {
     format!("Approve in {yard} ({APPROVE_KEY})")
+}
+
+/// What the control that approves a weighty run or setup ask reads where
+/// the Mac's unlock stands in front of it: the yard, and that unlocking
+/// comes first.
+pub(crate) fn approve_unlock_label(yard: &str) -> String {
+    format!("Approve in {yard} after unlocking")
+}
+
+/// How the card's approval goes: straight to the yard, through the Mac's
+/// unlock first, or nowhere from this window, where the card shows where
+/// to approve instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Approval {
+    Direct,
+    Unlock,
+    Nowhere,
+}
+
+/// How the ask's card approves: nowhere where the yard takes no approval
+/// from this window, or where a weighty card has no gate; through the
+/// Mac's unlock where a weighty card has one; straight to the yard
+/// otherwise.
+pub(crate) fn approval(weighty: bool, gate: bool, elsewhere: bool) -> Approval {
+    match (weighty, gate, elsewhere) {
+        (_, _, true) | (true, false, _) => Approval::Nowhere,
+        (true, true, false) => Approval::Unlock,
+        (false, _, false) => Approval::Direct,
+    }
 }
 
 /// What a run ask's card says over what the command changes: the
@@ -194,12 +231,22 @@ pub(crate) const SETUP_TAKE: &str = "take one with a tap, or type another below:
 pub(crate) const APPROVE_ELSEWHERE: &str =
     "this yard takes no approval from footplate. Approve in a terminal on the yard's machine:";
 
+/// What a weighty card says in place of the control that approves, where
+/// this window has no gate: the decline path, in the yard's words. The
+/// card stays open; nothing is declined for the person.
+pub(crate) const WEIGHTY_NO_GATE: &str = "this card is weighty and this window has no gate. Approve it in footplate on a Mac, or in a terminal on the yard's machine:";
+
 /// The keys of a run ask's card. Later, Decline and expand have their
-/// buttons; Enter is named because it does nothing here.
-pub(crate) fn run_keys(approves: bool, writable: bool) -> String {
+/// buttons; Enter is named because it does nothing here. Where the Mac's
+/// unlock stands in front, the key opens it first.
+pub(crate) fn run_keys(approval: Approval, writable: bool) -> String {
     let mut keys: Vec<String> = Vec::new();
-    if approves {
-        keys.push(format!("{APPROVE_KEY} approves"));
+    match approval {
+        Approval::Direct => keys.push(format!("{APPROVE_KEY} approves")),
+        Approval::Unlock => keys.push(format!("{APPROVE_KEY} approves after unlocking")),
+        Approval::Nowhere => {}
+    }
+    if !matches!(approval, Approval::Nowhere) {
         keys.push("enter alone approves nothing".to_string());
     }
     if writable {
@@ -216,12 +263,16 @@ pub(crate) fn setup_keys(
     bead: &str,
     ask: u64,
     setup: &api::Setup,
-    approves: bool,
+    approval: Approval,
     writable: bool,
 ) -> String {
     let mut keys: Vec<String> = Vec::new();
-    if approves {
-        keys.push(format!("{APPROVE_KEY} approves"));
+    match approval {
+        Approval::Direct => keys.push(format!("{APPROVE_KEY} approves")),
+        Approval::Unlock => keys.push(format!("{APPROVE_KEY} approves after unlocking")),
+        Approval::Nowhere => {}
+    }
+    if !matches!(approval, Approval::Nowhere) {
         keys.push("enter alone approves nothing".to_string());
         keys.push("i types the account".to_string());
         keys.push(format!(
@@ -401,16 +452,23 @@ pub(crate) fn send_button(
 
 /// The button that approves a run ask, exactly as its key does, which it
 /// names with the yard that runs the command: `Approve in plantime (⌘↵)`.
-/// Disabled while an approval is with the yard.
+/// Where the Mac's unlock stands in front, it says so instead:
+/// `Approve in plantime after unlocking`. Disabled while an approval is
+/// with the yard.
 pub(crate) fn approve_button(
     id: String,
     yard: &str,
+    unlock: bool,
     enabled: bool,
     palette: Palette,
     cx: &mut Context<Footplate>,
 ) -> impl IntoElement {
     let click = enabled.then(|| cx.listener(|this, _, _, cx| this.approve(cx)));
-    card_button(id, approve_label(yard), palette, click)
+    let label = match unlock {
+        true => approve_unlock_label(yard),
+        false => approve_label(yard),
+    };
+    card_button(id, label, palette, click)
 }
 
 /// One filled button, standing as the one to take, with what a click on
@@ -451,6 +509,16 @@ pub(crate) fn give_label(secret: &api::Secret, typed: usize) -> String {
     match secret.env.get(typed) {
         Some(name) => format!("Give {name}"),
         None => "Give".to_string(),
+    }
+}
+
+/// What the button on a weighty secret ask's card says where the Mac's
+/// unlock stands in front of it: the name, and that unlocking comes
+/// first.
+pub(crate) fn give_unlock_label(secret: &api::Secret, typed: usize) -> String {
+    match secret.env.get(typed) {
+        Some(name) => format!("Give {name} after unlocking"),
+        None => "Give after unlocking".to_string(),
     }
 }
 

@@ -65,6 +65,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # adds, of the same family as those above.
 block2 = "0.6"
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "bitflags", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+# A weighty approval passes the Mac's unlock first (unlock.rs): Touch ID,
+# a paired watch or the login password, through LocalAuthentication. The
+# context alone, with its policy and the blocks its answers come to: no
+# other framework of the crate's.
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext"] }
 
 # On Linux the icon is also a property of the X11 window, set on a
 # connection of our own: gpui hands out no handle to its X11 window. In

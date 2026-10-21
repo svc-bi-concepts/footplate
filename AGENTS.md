@@ -48,6 +48,9 @@ Platform surface:
   yards menu.
 - `src/dock.rs`: the number on the macOS Dock icon.
 - `src/taskbar.rs`: the Linux desktop entry and window icon.
+- `src/unlock.rs`: the Mac's unlock in front of a weighty approval
+  (LocalAuthentication), with the reasons as plain functions; no gate
+  elsewhere, where the card shows where to approve instead.
 
 Setup, release and tests:
 
@@ -74,9 +77,10 @@ Setup, release and tests:
 - A first-run step: the command in `src/setup.rs`, the screen in
   `src/window/firstrun.rs`.
 - A setting: `src/settings.rs`, then where it takes effect.
-- Platform surface (badge, tray, notifications, Linux icon):
-  `src/dock.rs`, `src/tray.rs`, `src/notify.rs`, `src/taskbar.rs`; rules
-  stay plain functions, system calls stay behind `cfg`.
+- Platform surface (badge, tray, notifications, Linux icon, the Mac's
+  unlock): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
+  `src/taskbar.rs`, `src/unlock.rs`; rules stay plain functions, system
+  calls stay behind `cfg`.
 - Screenshots: states in `src/shot.rs`, taken by `scripts/shot-linux.sh`;
   the states are named in `README.md`.
 - Releases: `scripts/release.sh` builds, `scripts/bundle-mac.sh`

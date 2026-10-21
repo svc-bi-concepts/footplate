@@ -953,6 +953,18 @@ pub struct SetupApproved {
     pub result: String,
 }
 
+/// One class of a card's weight, as the yard weighed it when it wrote
+/// the card: the class, and the yard's line for it with what this card
+/// does. A routine card has none. A client draws a class it does not know
+/// as weighty, with its line.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct AskWeight {
+    #[serde(default)]
+    pub class: String,
+    #[serde(default)]
+    pub line: String,
+}
+
 /// One open question addressed to the user, as the queue lists it: the
 /// question in plain words, without its options or context, which the card
 /// reads with `Bead`.
@@ -989,6 +1001,10 @@ pub struct OpenAsk {
     /// The setup a setup ask proposes; absent on any other ask.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// The card's weight, one entry a class; absent on a routine card, and
+    /// on a yard from before cards were weighed.
+    #[serde(default, deserialize_with = "or_default")]
+    pub weight: Vec<AskWeight>,
 }
 
 /// One that is open no more: answered, put aside or declined by the user,
@@ -1043,6 +1059,10 @@ pub struct DecidedAsk {
     /// The setup a setup ask proposes; absent on any other ask.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// The card's weight, one entry a class; absent on a routine card, and
+    /// on a yard from before cards were weighed.
+    #[serde(default, deserialize_with = "or_default")]
+    pub weight: Vec<AskWeight>,
     /// What the yard ran when a run ask was approved, or what it carries
     /// out for an approved setup ask; none until it is.
     #[serde(default)]
@@ -1132,6 +1152,11 @@ pub struct BeadAsk {
     /// The setup a setup ask proposes; absent on any other ask.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// The card's weight, one entry a class, as the queue's own: the card
+    /// draws the queue's, which is read again with it. Absent on a routine
+    /// card, and on a yard from before cards were weighed.
+    #[serde(default, deserialize_with = "or_default")]
+    pub weight: Vec<AskWeight>,
     /// What the yard ran when a run ask was approved, or what it carries
     /// out for an approved setup ask; none until it is.
     #[serde(default)]
@@ -2434,36 +2459,60 @@ impl Client {
     /// typed. The yard writes the values to the file the source's
     /// credential is read from and answers the names and the file. A value
     /// is the person's secret: it is in this call's body and in nothing
-    /// else of the client, no error and no log.
+    /// else of the client, no error and no log. `weighed` is the client's
+    /// word that its person saw the card's weight and passed its gate:
+    /// every secret ask is weighty, and the yard refuses one without it.
+    /// It goes only where it is said: a yard from before the argument
+    /// takes the call as it always did.
     pub fn give_secret(
         &self,
         bead: &str,
         ask: u64,
         values: &[(String, String)],
         actor: &str,
+        weighed: bool,
     ) -> Result<Given> {
         let values: serde_json::Map<String, Value> = values
             .iter()
             .map(|(name, value)| (name.clone(), json!(value)))
             .collect();
-        self.answer(
-            "GiveSecret",
-            json!({ "bead": bead, "ask": ask, "values": values, "actor": actor }),
-        )
+        let mut args = json!({ "bead": bead, "ask": ask, "values": values, "actor": actor });
+        if weighed {
+            args["weighed"] = json!(true);
+        }
+        self.answer("GiveSecret", args)
     }
 
     /// Approves a run ask: the yard runs the command the ask holds, as its
     /// operator, and answers the command as it ran with what it printed.
     /// The call names the ask and nothing of the command: the yard runs
-    /// what it stored, never what a client sends.
-    pub fn approve_ask(&self, bead: &str, ask: u64, actor: &str) -> Result<Approved> {
+    /// what it stored, never what a client sends. `weighed` is the
+    /// client's word that its person saw the card's weight and passed its
+    /// gate: a weighty card is refused without it. It goes only where it
+    /// is said: a yard from before the argument takes the call as it
+    /// always did.
+    pub fn approve_ask(
+        &self,
+        bead: &str,
+        ask: u64,
+        actor: &str,
+        weighed: bool,
+    ) -> Result<Approved> {
         // The one call whose arguments go in two forms. The yard's listener
         // takes every call's by name and no other way. Its socket takes
         // them by name only for the calls its API page names, and this one
         // is on that page only once the listener serves it: until then the
         // socket takes them in their order, which it takes of every call.
+        // `weighed` is the trailing word in either form, left out where it
+        // is unsaid, as a yard from before the argument takes the call.
         let args = if self.is_remote() {
-            json!({ "bead": bead, "ask": ask, "actor": actor })
+            let mut args = json!({ "bead": bead, "ask": ask, "actor": actor });
+            if weighed {
+                args["weighed"] = json!(true);
+            }
+            args
+        } else if weighed {
+            json!([bead, ask, actor, true])
         } else {
             json!([bead, ask, actor])
         };
@@ -2478,7 +2527,12 @@ impl Client {
     /// `account` where the values are typed. Both are left out where a
     /// drift card's standing account is kept with a bare preset pick. A
     /// value is the person's secret: it is in this call's body and in
-    /// nothing else of the client, no error and no log.
+    /// nothing else of the client, no error and no log. `weighed` is the
+    /// client's word that its person saw the card's weight and passed its
+    /// gate: every setup ask is weighty, and the yard refuses one without
+    /// it. It goes only where it is said: a yard from before the argument
+    /// takes the call as it always did.
+    #[allow(clippy::too_many_arguments)]
     pub fn approve_setup(
         &self,
         bead: &str,
@@ -2487,8 +2541,12 @@ impl Client {
         values: Option<&[(String, String)]>,
         account: Option<&str>,
         actor: &str,
+        weighed: bool,
     ) -> Result<SetupApproved> {
         let mut args = json!({ "bead": bead, "ask": ask, "option": option, "actor": actor });
+        if weighed {
+            args["weighed"] = json!(true);
+        }
         if let Some(values) = values {
             let values: serde_json::Map<String, Value> = values
                 .iter()
@@ -3393,7 +3451,7 @@ mod tests {
             let client = yard.client();
             let way = client.place();
             let values = [("BOOKS_TOKEN".to_string(), VALUE.to_string())];
-            let give = || client.give_secret("yd-crm", 18, &values, "jo");
+            let give = || client.give_secret("yd-crm", 18, &values, "jo", false);
             let without = |err: &Error| {
                 assert!(!err.to_string().contains(VALUE), "{way}: {err}");
                 assert!(!format!("{err:?}").contains(VALUE), "{way}: {err:?}");
@@ -3418,6 +3476,18 @@ mod tests {
                 yard.asked("GiveSecret").last(),
                 Some(&json!({"bead": "yd-crm", "ask": 18,
                              "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"})),
+                "{way}"
+            );
+            // Said, the client's word goes with it: every secret ask is
+            // weighty, and the yard refuses one without it.
+            client
+                .give_secret("yd-crm", 18, &values, "jo", true)
+                .unwrap();
+            assert_eq!(
+                yard.asked("GiveSecret").last(),
+                Some(&json!({"bead": "yd-crm", "ask": 18,
+                             "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo",
+                             "weighed": true})),
                 "{way}"
             );
             // The value is in the body alone: no line of the request's head
@@ -3455,7 +3525,7 @@ mod tests {
         for yard in [Yard::start(), Yard::start_tcp()] {
             let client = yard.client();
             let way = client.place();
-            let approve = || client.approve_ask("yd-link", 2710, "jo");
+            let approve = || client.approve_ask("yd-link", 2710, "jo", false);
             // A yard that does not have the call, or does not serve it to
             // this window, says so as of any method.
             let err = approve().unwrap_err();
@@ -3487,6 +3557,19 @@ mod tests {
                 );
             } else {
                 assert_eq!(sent, Some(json!(["yd-link", 2710, "jo"])), "{way}");
+            }
+            // Said, the client's word goes as the trailing word in either
+            // form: a weighty card is refused without it.
+            client.approve_ask("yd-link", 2710, "jo", true).unwrap();
+            let sent = yard.asked("ApproveAsk").last().cloned();
+            if client.is_remote() {
+                assert_eq!(
+                    sent,
+                    Some(json!({"bead": "yd-link", "ask": 2710, "actor": "jo", "weighed": true})),
+                    "{way}"
+                );
+            } else {
+                assert_eq!(sent, Some(json!(["yd-link", 2710, "jo", true])), "{way}");
             }
             // The yard says no, in its words, whole.
             let refusal = "ask 2710 says the link with airy takes 30 mails an hour now, and it takes 100: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
@@ -3521,7 +3604,7 @@ mod tests {
             // A yard that does not have the call, or does not serve it to
             // this window, says so as of any method.
             let err = client
-                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo")
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
                 .unwrap_err();
             assert_eq!(err.to_string(), "no such method ApproveSetup", "{way}");
             without(&err);
@@ -3534,7 +3617,7 @@ mod tests {
                     "result": "approved, to be carried out"}}"#,
             );
             let approved = client
-                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo")
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
                 .unwrap();
             assert_eq!(approved.pack, "courier", "{way}");
             assert_eq!(approved.preset, "read", "{way}");
@@ -3545,6 +3628,18 @@ mod tests {
                 yard.asked("ApproveSetup").last(),
                 Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
                              "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"})),
+                "{way}"
+            );
+            // Said, the client's word goes with it: every setup ask is
+            // weighty, and the yard refuses one without it.
+            client
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", true)
+                .unwrap();
+            assert_eq!(
+                yard.asked("ApproveSetup").last(),
+                Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
+                             "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo",
+                             "weighed": true})),
                 "{way}"
             );
             // The value is in the body alone: no line of the request's head
@@ -3560,7 +3655,7 @@ mod tests {
                     "result": "approved, to be carried out"}}"#,
             );
             let approved = client
-                .approve_setup("yd-crm", 41, 1, None, Some("courier-existing"), "jo")
+                .approve_setup("yd-crm", 41, 1, None, Some("courier-existing"), "jo", false)
                 .unwrap();
             assert_eq!(approved.account, "courier-existing", "{way}");
             assert!(approved.given.is_empty(), "{way}");
@@ -3579,7 +3674,7 @@ mod tests {
                     "result": "approved, to be carried out"}}"#,
             );
             let approved = client
-                .approve_setup("yd-crm", 41, 1, None, None, "jo")
+                .approve_setup("yd-crm", 41, 1, None, None, "jo", false)
                 .unwrap();
             assert!(approved.keep, "{way}");
             assert!(approved.given.is_empty(), "{way}");
@@ -3596,14 +3691,14 @@ mod tests {
                 &json!({"error": {"code": "error", "message": refusal}}).to_string(),
             );
             let err = client
-                .approve_setup("yd-crm", 41, 1, None, Some("courier-existing"), "jo")
+                .approve_setup("yd-crm", 41, 1, None, Some("courier-existing"), "jo", false)
                 .unwrap_err();
             assert_eq!(err.to_string(), refusal, "{way}");
             // The yard went away over the call: no reply, and no word on
             // whether the approval landed.
             yard.answer_nothing("ApproveSetup");
             let err = client
-                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo")
+                .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
                 .unwrap_err();
             assert!(matches!(err, Error::Down(_)), "{way}: {err:?}");
             without(&err);
@@ -5045,7 +5140,8 @@ mod tests {
             r#"{"result": {"open": [
                 {"bead": "yd-links", "bead_title": "Move the links", "topic": "topic:linear-out",
                  "ask": 3, "question": "Move the links now?", "asker": "yardmaster",
-                 "since": "2026-10-08T09:30:00Z"},
+                 "since": "2026-10-08T09:30:00Z",
+                 "weight": [{"class": "outside", "line": "lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"}]},
                 {"bead": "yd-greet", "bead_title": "The greeting", "topic": "",
                  "ask": 5, "question": "What tone?", "asker": "yardmaster",
                  "since": "2026-10-09T09:30:00Z"}
@@ -5053,7 +5149,8 @@ mod tests {
                 {"bead": "yd-links", "bead_title": "Move the links", "topic": "topic:linear-out",
                  "ask": 6, "question": "Send them to build?", "asker": "yardmaster",
                  "since": "2026-10-07T09:30:00Z", "state": "answered",
-                 "option": 1, "option_label": "Send them", "words": "tonight"},
+                 "option": 1, "option_label": "Send them", "words": "tonight",
+                 "weight": [{"class": "trust", "line": "widens who the yard listens to: user kim"}]},
                 {"bead": "yd-greet", "bead_title": "The greeting", "topic": "",
                  "ask": 12, "question": "Build the cleanup?", "asker": "assembly",
                  "since": "2026-10-06T09:30:00Z", "state": "put aside",
@@ -5079,6 +5176,18 @@ mod tests {
             ("answered", 1, "Send them")
         );
         assert_eq!(asks.decided[1].return_at, "2026-10-10T09:30:00Z");
+        // The card's weight, one entry a class; absent on a routine card.
+        assert_eq!(asks.open[0].weight.len(), 1);
+        assert_eq!(asks.open[0].weight[0].class, "outside");
+        assert!(
+            asks.open[0].weight[0]
+                .line
+                .starts_with("lets the yard change")
+        );
+        assert!(asks.open[1].weight.is_empty());
+        assert_eq!(asks.decided[0].weight.len(), 1);
+        assert_eq!(asks.decided[0].weight[0].class, "trust");
+        assert!(asks.decided[1].weight.is_empty());
     }
 
     #[test]
@@ -5108,7 +5217,8 @@ mod tests {
                      ],
                      "recommend": 1, "why": "the test passed",
                      "about": [{"id": "yd-train", "title": "Release train", "stage": "new"}],
-                     "state": "open"},
+                     "state": "open",
+                     "weight": [{"class": "as-user", "line": "lets calls or words count as a person's: as ada"}]},
                     {"ask": 5, "to": "jo", "asker": "yardmaster",
                      "since": "2026-10-08T09:30:00Z",
                      "question": "What tone?", "context": ["the greeting is new."],
@@ -5145,6 +5255,10 @@ mod tests {
         // An ask with no options wants words.
         assert!(bead.asks[1].options.is_empty());
         assert_eq!(bead.asks[1].recommend, 0);
+        // The card's weight, as the queue's own.
+        assert_eq!(ask.weight.len(), 1);
+        assert_eq!(ask.weight[0].class, "as-user");
+        assert!(bead.asks[1].weight.is_empty());
     }
 
     #[test]
