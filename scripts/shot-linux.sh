@@ -307,7 +307,8 @@ docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_
     su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json SHOT_LOOK='$SHOT_LOOK' FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 
 # The window is waited for, not slept for: sway's tree names it by app_id.
-# Three seconds past that, the first paint has settled and grim shoots.
+# Three seconds past that, the first paint is up, and grim shoots until
+# the frame settles.
 i=0
 while [ "$i" -lt 45 ]; do
     if docker exec "$name" sh -c 'SWAYSOCK=$(ls /run/user/1000/sway-ipc.*.sock | head -n 1); su shot -c "XDG_RUNTIME_DIR=/run/user/1000 SWAYSOCK=$SWAYSOCK swaymsg -t get_tree"' 2>/dev/null | grep -q '"app_id"'; then
@@ -322,7 +323,25 @@ if [ "$i" -ge 45 ]; then
     exit 1
 fi
 sleep 3
-docker exec "$name" sh -c 'su shot -c "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 grim /tmp/shots/footplate.png"' >&2
+# The first paint is not the settled frame: under load the card's bead
+# read answers after grim's first shot, so shoot until two frames in a row
+# agree (grim's bytes are deterministic for identical pixels: two shots of
+# a settled window cmp equal). At most ten rounds; past that the last
+# frame is kept with a warning, since a loaded machine must still get a
+# picture.
+i=0
+while [ "$i" -lt 10 ]; do
+    docker exec "$name" sh -c 'su shot -c "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 grim /tmp/shots/footplate.png"' >&2
+    if [ "$i" -gt 0 ] && docker exec "$name" cmp -s /tmp/shots/prev.png /tmp/shots/footplate.png; then
+        break
+    fi
+    docker exec "$name" sh -c 'cp /tmp/shots/footplate.png /tmp/shots/prev.png' >&2
+    i=$((i + 1))
+    sleep 1
+done
+if [ "$i" -ge 10 ]; then
+    echo "shot-linux.sh: frame never settled after 10 tries; look at the picture" >&2
+fi
 docker cp "$name:/tmp/shots/footplate.png" "$out"
 
 echo "$out"

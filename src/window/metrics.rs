@@ -51,9 +51,9 @@ pub(crate) const PANEL_MIN: f32 = 6.;
 /// at the usual 16-pixel rem: the line, 340 pixels, between 12 of padding
 /// each side with a 1-pixel border. The widest, 480, holds it on one line
 /// at the usual size with every row's ctrl+N whole; the narrowest, 320,
-/// leaves room to shrink, wrapping at the `·` separators, at a larger text
-/// size or a narrow window. Where the window's width less the rail is
-/// narrower still, the list is capped at that.
+/// leaves room to shrink, the hint line eliding, at a larger text size or
+/// a narrow window. Where the window's width less the rail is narrower
+/// still, the list is capped at that.
 ///
 /// The test beside the switcher's rows holds the hint and every key
 /// inside at the usual size and the largest.

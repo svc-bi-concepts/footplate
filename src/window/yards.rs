@@ -1847,14 +1847,17 @@ impl Footplate {
                     .child(second),
             );
         }
-        // The footer's hint, one segment per `·`, so the line wraps
-        // between them where the list is narrower than it: at a larger
-        // text size or a narrow window. On one line it reads as ever.
+        // The footer's hint on one line: the hints elide where the list
+        // is narrower than them, and the actions stand last, unshrunk,
+        // so "+ add a yard" and "? all keys" are always on it. One
+        // line, since a wrapping footer inside a content-sized list
+        // mis-measures: on Linux at the largest text size the footer
+        // stood one line tall with its last child laid out on a
+        // second, past the list's edge.
         list = list.child(
             div()
                 .flex()
                 .flex_row()
-                .flex_wrap()
                 .items_center()
                 .gap_1()
                 .px_3()
@@ -1862,13 +1865,19 @@ impl Footplate {
                 .text_xs()
                 .text_color(palette.faint)
                 .debug_selector(|| "switch hint".to_string())
-                .child("↑↓ move ·")
-                .child("↵ open ·")
-                .child("esc close ·")
+                .child(
+                    // No grow: the hints stand left, as ever, and only
+                    // give way where the list is narrower than them.
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child("↑↓ move · ↵ open · esc close ·"),
+                )
                 .child(
                     div()
                         .id("switch add")
                         .debug_selector(|| "switch add".to_string())
+                        .flex_none()
                         .cursor_pointer()
                         .hover(|style| style.text_color(palette.text))
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -1876,8 +1885,16 @@ impl Footplate {
                         }))
                         .child("+ add a yard"),
                 )
-                .child("·")
-                .child(keys_hint("keys hint switch", palette, cx)),
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .child("·")
+                        .child(keys_hint("keys hint switch", palette, cx).flex_none()),
+                ),
         );
         // The list between its narrowest and its widest, capped at the
         // window's width less the rail and 8 pixels' margin each side, so

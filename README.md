@@ -157,6 +157,24 @@ checkout's first shot builds for minutes and its later ones only rebuild
 what changed. One shared build tree would shoot another checkout's
 binary: cargo takes a package as fresh from its sources' mtimes.
 
+A look the Linux container cannot draw — on macOS the content reaches
+into the title bar and the traffic lights stand over the rail — is shot
+on the Mac itself instead, with `scripts/shot-mac.sh`, from the
+worktree, after the last commit:
+
+    scripts/shot-mac.sh <state> <light|dark> "$shot"
+
+It opens the real window on this Mac against a fake yard serving the
+state, isolated from the session it is run from (its own home and temp,
+the canned yardr), takes the picture with `screencapture` and quits it;
+the states are the same ones below. `hold` in place of the file leaves
+the window up to try by hand (quit it with cmd+q). Three pitfalls: the
+screen must be unlocked (locked reads occluded and the picture is the
+window's first frame); a window started from a shell is not the key
+window, so its traffic lights are grey; and a builder session cannot
+post input (no Accessibility permission), so no click or drag tries —
+hold mode is for a hand at the Mac.
+
 A state opens the window against a fake yard serving it, instead of the
 first screen, or with no yard where the state says none:
 
@@ -228,7 +246,8 @@ that variable.
 
 To add one, serve it in `src/shot.rs` (`STATES` and `populate`, or a
 canned answer where no yard listens), cover it
-in that file's test, add its name to the script's list beside this one,
+in that file's test, add its name to each shot script's list beside
+this one (`shot-linux.sh` and `shot-mac.sh` keep the same list),
 and shoot it: the picture is the proof.
 
 Attach it to a note that names the short SHA of the commit it was shot from,
