@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{Context, FocusHandle, Image, ImageFormat, Window, div, prelude::*};
 
-use super::YardIdentity;
+use super::state::YardIdentity;
 use crate::api::{self, BlobFile, BlobRef, Client};
 use crate::draft::{self, Attachment};
 use crate::model::{self, Target};
