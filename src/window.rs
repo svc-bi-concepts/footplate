@@ -1302,7 +1302,7 @@ fn run_keys(approves: bool, writable: bool) -> String {
 /// that types the account, and the same answer in a terminal on the
 /// yard's machine. Where the yard takes no approval from this window, the
 /// card says where it does in place of the control, and lists no keys.
-fn setup_keys(bead: &str, ask: u64, candidates: bool, approves: bool, writable: bool) -> String {
+fn setup_keys(bead: &str, ask: u64, setup: &api::Setup, approves: bool, writable: bool) -> String {
     let mut keys: Vec<String> = Vec::new();
     if approves {
         keys.push(format!("{APPROVE_KEY} approves"));
@@ -1310,7 +1310,7 @@ fn setup_keys(bead: &str, ask: u64, candidates: bool, approves: bool, writable: 
         keys.push("i types the account".to_string());
         keys.push(format!(
             "or in a terminal: {}",
-            model::setup_approve_command(bead, ask, candidates)
+            model::setup_approve_command(bead, ask, setup)
         ));
     }
     if writable {
@@ -5306,11 +5306,12 @@ impl Footplate {
     }
 
     /// What the open card's field takes beside the preset pick, when its
-    /// ask is a setup ask that can be approved: the account names with
-    /// the pack they set up.
+    /// ask is a setup ask that can be approved: the account names the
+    /// answer types — the missing ones where the update newly needs
+    /// them — with the pack they set up.
     fn setup_account(&self) -> Option<(Vec<String>, String)> {
         let setup = self.setup_approvable()?;
-        Some((setup.account, setup.pack))
+        Some((model::setup_typed_names(&setup).to_vec(), setup.pack))
     }
 
     /// Nothing typed of a secret stays in the window: not in the field, and
@@ -6270,11 +6271,13 @@ impl Footplate {
 
     /// Approves the open card's setup ask: the preset pick, the option
     /// chosen or the recommended one, with the account together. A filled
-    /// secret field types another; else the tap takes its file. What the
-    /// window says afterwards is the yard's: that the server carries the
-    /// setup out, or the refusal whole, on the card. A call that ended
-    /// without an answer is never said to be approved or not, and a yard
-    /// without the call for this window has its card say where to approve.
+    /// secret field types another; else the tap takes its file; else a
+    /// drift card whose standing file holds every name is kept with the
+    /// bare preset pick. What the window says afterwards is the yard's:
+    /// that the server carries the setup out, or the refusal whole, on
+    /// the card. A call that ended without an answer is never said to be
+    /// approved or not, and a yard without the call for this window has
+    /// its card say where to approve.
     fn approve_setup(&mut self, bead: String, ask: u64, cx: &mut Context<Self>) {
         let at = (bead.clone(), ask);
         let Some(option) = self.model.as_ref().and_then(|m| m.setup_pick(&bead, ask)) else {
@@ -6298,7 +6301,7 @@ impl Footplate {
         if !field.is_empty() {
             typed.push(field);
         }
-        let names = &setup.account;
+        let names = model::setup_typed_names(&setup);
         if names.is_empty() {
             return self.notice(
                 "the yard asked for no account names: read the card again".to_string(),
@@ -6324,17 +6327,24 @@ impl Footplate {
             _ => None,
         };
         if values.is_none() && account.is_none() {
-            if have == 0 {
-                return self.notice(
-                    match setup.candidates.is_empty() {
-                        true => "type the account".to_string(),
-                        false => "take a candidate, or type the account".to_string(),
-                    },
-                    cx,
-                );
+            // A drift card whose standing file holds every account name
+            // is kept with the bare preset pick: with nothing typed and
+            // no candidate taken the approval goes as it stands. What is
+            // typed instead changes the account, and is wanted whole.
+            let keep = have == 0 && model::setup_keepable(&setup);
+            if !keep {
+                if have == 0 {
+                    return self.notice(
+                        match setup.candidates.is_empty() {
+                            true => "type the account".to_string(),
+                            false => "take a candidate, or type the account".to_string(),
+                        },
+                        cx,
+                    );
+                }
+                let next = &names[have];
+                return self.notice(format!("type {next} for the account"), cx);
             }
-            let next = &names[have];
-            return self.notice(format!("type {next} for the account"), cx);
         }
         self.declining = None;
         self.approving = Some(at.clone());
@@ -15836,11 +15846,7 @@ impl Footplate {
             // says where it does, in place of the control.
             if (ask.run.is_some() || ask.setup.is_some()) && elsewhere {
                 let command = match &ask.setup {
-                    Some(setup) => model::setup_approve_command(
-                        &bead_id,
-                        ask_seq,
-                        !setup.candidates.is_empty(),
-                    ),
+                    Some(setup) => model::setup_approve_command(&bead_id, ask_seq, setup),
                     None => model::approve_command(&bead_id, ask_seq),
                 };
                 card =
@@ -16035,13 +16041,9 @@ impl Footplate {
             let keys = match (&ask.secret, &ask.run, &ask.setup) {
                 (Some(_), _, _) => secret_keys(&bead_id, ask_seq, unwritable.is_none()),
                 (None, Some(_), _) => run_keys(!elsewhere, unwritable.is_none()),
-                (None, None, Some(setup)) => setup_keys(
-                    &bead_id,
-                    ask_seq,
-                    !setup.candidates.is_empty(),
-                    !elsewhere,
-                    unwritable.is_none(),
-                ),
+                (None, None, Some(setup)) => {
+                    setup_keys(&bead_id, ask_seq, setup, !elsewhere, unwritable.is_none())
+                }
                 (None, None, None) => String::new(),
             };
             let prose = !keys.is_empty();
@@ -16692,7 +16694,7 @@ impl Footplate {
                         body = body.child(self.approve_elsewhere_lines(
                             bead,
                             ask,
-                            model::setup_approve_command(bead, ask, !setup.candidates.is_empty()),
+                            model::setup_approve_command(bead, ask, setup),
                             palette,
                         ));
                     } else {
@@ -16814,13 +16816,9 @@ impl Footplate {
                 Some(_) => String::new(),
                 None if detail.run.is_some() => run_keys(approving && !elsewhere, false),
                 None => match &detail.setup {
-                    Some(setup) => setup_keys(
-                        bead,
-                        ask,
-                        !setup.candidates.is_empty(),
-                        setup_approving && !elsewhere,
-                        false,
-                    ),
+                    Some(setup) => {
+                        setup_keys(bead, ask, setup, setup_approving && !elsewhere, false)
+                    }
                     None => decided_keys(&detail),
                 },
             };
@@ -37504,6 +37502,78 @@ yardr.dev
         opened_on_the_ask(at, file, cx)
     }
 
+    /// The setup the courier ask proposes on a pack already applied: the
+    /// yard's account line for what stands, with `given` and `missing`.
+    /// No candidate matches a sibling: the standing file is the account.
+    fn setup_drift(account: &[&str], given: bool, missing: &[&str]) -> Value {
+        let mut setup = setup_of(account, false);
+        setup["given"] = json!(given);
+        setup["missing"] = json!(missing);
+        if given || !missing.is_empty() {
+            let names = account.join(" and ");
+            let file = "/home/jo/.yardr/sources/courier.env";
+            let need = missing.join(" and ");
+            let line = if !missing.is_empty() && missing.len() < account.len() {
+                format!(
+                    "the account {names}: given, in {file}, but missing {need}: type {need} unseen (written to {file}, named in the answer, never the value)."
+                )
+            } else if !missing.is_empty() {
+                format!(
+                    "the account {names}: the file {file} holds none of it: type {need} unseen (written to {file}, named in the answer, never the value)."
+                )
+            } else {
+                format!(
+                    "the account {names}: given, in {file}. Type another unseen to change it, or approve keeping it with a bare preset pick (written to {file}, named in the answer, never the value)."
+                )
+            };
+            setup["does"][4] = json!(line);
+        }
+        setup
+    }
+
+    /// The setup ask 7 on bead-s on a pack already applied, as the queue
+    /// lists it, open.
+    fn queued_drift(account: &[&str], given: bool, missing: &[&str]) -> Value {
+        let mut queued = queued_setup(account, false);
+        queued["setup"] = setup_drift(account, given, missing);
+        queued
+    }
+
+    /// The bead of that ask, with two presets and `you decide`,
+    /// `recommend` recommended.
+    fn bead_drift(account: &[&str], given: bool, missing: &[&str], recommend: u64) -> String {
+        let mut bead: Value = serde_json::from_str(&bead_setup(account, false, recommend)).unwrap();
+        bead["result"]["asks"][0]["setup"] = setup_drift(account, given, missing);
+        bead.to_string()
+    }
+
+    /// The window on a yard whose one open ask is that setup ask, its
+    /// card open and read.
+    fn opened_on_a_drift_ask<'a>(
+        yard: &Yard,
+        account: &[&str],
+        given: bool,
+        missing: &[&str],
+        recommend: u64,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_drift(account, given, missing)], "decided": []}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_drift(account, given, missing, recommend));
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
     /// A setup ask's card: the yard's block with what approving does, each
     /// sentence whole — the credential's placement, the call's path, the
     /// mint's digest, the account and the grants — the account choice with
@@ -37953,6 +38023,147 @@ yardr.dev
                      "actor": "jo"})]
         );
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A setup ask on a pack already applied, whose standing file holds
+    /// every account name: the approval with nothing typed and no
+    /// candidate taken keeps it with the bare preset pick, and neither
+    /// values nor a candidate go. What is typed instead changes the
+    /// account, and is wanted whole.
+    #[gpui::test]
+    fn a_setup_ask_that_stands_is_kept_with_a_bare_preset_pick(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_drift_ask(
+            &yard,
+            &["COURIER_ACCOUNT", "COURIER_REGION"],
+            true,
+            &[],
+            1,
+            &file,
+            cx,
+        );
+        assert_eq!(
+            secret_field(&view, cx).2,
+            "COURIER_ACCOUNT for the setup of courier (1 of 2)"
+        );
+
+        // One of the two typed, the approval wants the other: what is
+        // typed changes the account, and goes whole or not at all.
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("ops@example.com");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "type COURIER_REGION for the account");
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+
+        // Nothing typed, the bare preset pick keeps the standing
+        // account: neither values nor a candidate go.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
+                "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
+                "setup": setup_drift(&["COURIER_ACCOUNT", "COURIER_REGION"], true, &[]),
+                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
+            .to_string(),
+        );
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "read", "keep": true,
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; kept"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1, "actor": "jo"})]
+        );
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster"
+        );
+    }
+
+    /// A setup ask whose update newly needs a name: the field asks for
+    /// just the missing names, and the approval sends exactly those with
+    /// the preset pick. A bare pick keeps nothing here: the account is
+    /// wanted.
+    #[gpui::test]
+    fn a_setup_ask_missing_a_name_types_just_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_drift_ask(
+            &yard,
+            &["COURIER_ACCOUNT", "COURIER_REGION"],
+            false,
+            &["COURIER_REGION"],
+            1,
+            &file,
+            cx,
+        );
+        assert_eq!(
+            secret_field(&view, cx).2,
+            "COURIER_REGION for the setup of courier"
+        );
+
+        // A bare pick keeps nothing: the missing name is wanted.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "type the account");
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+
+        // The missing name typed, the approval sends exactly it.
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
+                "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
+                "setup": setup_drift(&["COURIER_ACCOUNT", "COURIER_REGION"], false, &["COURIER_REGION"]),
+                "given": ["COURIER_REGION"],
+                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
+            .to_string(),
+        );
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "read", "given": ["COURIER_REGION"],
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("eu-west");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave COURIER_REGION"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1,
+                     "values": {"COURIER_REGION": "eu-west"}, "actor": "jo"})]
+        );
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        let detail = decided_detail_of(&view, cx, "bead-s", 7);
+        assert_eq!(
+            detail.state_line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster; gave COURIER_REGION"
+        );
     }
 
     /// A setup ask put aside is approved from its card among the decided,

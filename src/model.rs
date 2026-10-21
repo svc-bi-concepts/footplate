@@ -5082,6 +5082,23 @@ pub fn setup_grantees(to: &[api::SetupGrantee]) -> String {
     }
 }
 
+/// The account names a setup ask's answer types: the names the update
+/// newly needs where its standing file misses them, else the whole
+/// account, as the yard's approval holds it (`approveSetup` in
+/// internal/store/runask_setup.go of the yardr repository).
+pub fn setup_typed_names(setup: &Setup) -> &[String] {
+    match setup.missing.is_empty() {
+        true => &setup.account,
+        false => &setup.missing,
+    }
+}
+
+/// Whether a setup ask's standing account is kept with a bare preset
+/// pick: a drift card whose file holds every account name.
+pub fn setup_keepable(setup: &Setup) -> bool {
+    setup.given && setup.missing.is_empty()
+}
+
 /// What approving a setup ask does, in one line: the apply, the account
 /// and the grants, as the yard's card has it (`Summary` in
 /// internal/store/runask_setup.go of the yardr repository).
@@ -5198,9 +5215,10 @@ pub const LINES_TOO_OLD: &str =
     "this yard's yardr is older than the Lines view (it needs yardr from 16 Oct 2026 or later)";
 
 /// What the yard answered to a setup approval, in one line: the pack with
-/// the preset picked and who the grants are for, with the names given or
-/// the candidate taken, and that the server carries the setup out after
-/// the call. The card that proposed it leaves with the approval.
+/// the preset picked and who the grants are for, with the names given,
+/// the candidate taken or the standing account kept, and that the server
+/// carries the setup out after the call. The card that proposed it leaves
+/// with the approval.
 pub fn setup_approved_line(setup: &Setup, approved: &api::SetupApproved) -> String {
     let mut what = format!(
         "setup of pack {}, preset {} to {}",
@@ -5212,17 +5230,23 @@ pub fn setup_approved_line(setup: &Setup, approved: &api::SetupApproved) -> Stri
         what.push_str(&format!("; took {}", plain(&approved.account)));
     } else if !approved.given.is_empty() {
         what.push_str(&format!("; gave {}", approved.given.join(", ")));
+    } else if approved.keep {
+        what.push_str("; kept");
     }
     format!("approved, being carried out: {what}")
 }
 
 /// The command that approves a setup ask in a terminal on the yard's
 /// machine: the way for a window the yard takes no approval from. Where
-/// the card lists candidates, the account goes by name or typed.
-pub fn setup_approve_command(bead: &str, ask: u64, candidates: bool) -> String {
-    match candidates {
-        true => format!("yardr bead answer {bead} {ask} <n> --secret, or <n> --account <source>"),
-        false => format!("yardr bead answer {bead} {ask} <n> --secret"),
+/// the card lists candidates, the account goes by name or typed; a drift
+/// card whose file holds every name is kept with a bare preset pick.
+pub fn setup_approve_command(bead: &str, ask: u64, setup: &Setup) -> String {
+    let head = format!("yardr bead answer {bead} {ask}");
+    match (setup_keepable(setup), setup.candidates.is_empty()) {
+        (true, true) => format!("{head} <n> or <n> --secret"),
+        (true, false) => format!("{head} <n>, <n> --secret, or <n> --account <source>"),
+        (false, true) => format!("{head} <n> --secret"),
+        (false, false) => format!("{head} <n> --secret, or <n> --account <source>"),
     }
 }
 
@@ -11833,6 +11857,7 @@ mod tests {
             preset: "read".into(),
             given: names.to_vec(),
             account: String::new(),
+            keep: false,
             result: CARRY_PENDING.into(),
         }
     }
@@ -12029,9 +12054,9 @@ mod tests {
     }
 
     /// What the yard answered to a setup approval, in one line: the pack
-    /// with the preset picked, and the names given or the candidate taken.
-    /// And the command that approves in a terminal where the window takes
-    /// no approval.
+    /// with the preset picked, and the names given, the candidate taken or
+    /// the standing account kept. And the command that approves in a
+    /// terminal where the window takes no approval.
     #[test]
     fn a_setup_approval_s_line_names_what_it_took() {
         let line = setup_approved_line(
@@ -12049,14 +12074,59 @@ mod tests {
             line,
             "approved, being carried out: setup of pack courier, preset read to crew yardmaster; took courier-existing"
         );
+        let mut kept = setup_approved_with(&[]);
+        kept.keep = true;
+        let line = setup_approved_line(&courier(), &kept);
         assert_eq!(
-            setup_approve_command("yd-crm", 41, false),
+            line,
+            "approved, being carried out: setup of pack courier, preset read to crew yardmaster; kept"
+        );
+        let mut bare = courier();
+        bare.candidates.clear();
+        assert_eq!(
+            setup_approve_command("yd-crm", 41, &bare),
             "yardr bead answer yd-crm 41 <n> --secret"
         );
         assert_eq!(
-            setup_approve_command("yd-crm", 41, true),
+            setup_approve_command("yd-crm", 41, &courier()),
             "yardr bead answer yd-crm 41 <n> --secret, or <n> --account <source>"
         );
+        let mut given = courier();
+        given.given = true;
+        given.candidates.clear();
+        assert_eq!(
+            setup_approve_command("yd-crm", 41, &given),
+            "yardr bead answer yd-crm 41 <n> or <n> --secret"
+        );
+        given.candidates = courier().candidates;
+        assert_eq!(
+            setup_approve_command("yd-crm", 41, &given),
+            "yardr bead answer yd-crm 41 <n>, <n> --secret, or <n> --account <source>"
+        );
+    }
+
+    /// A setup ask's answer types the names the update newly needs where
+    /// its standing file misses them, else the whole account; a drift card
+    /// whose file holds every name is kept with a bare preset pick.
+    #[test]
+    fn a_setup_answer_types_the_missing_names_and_keeps_what_stands() {
+        let first = courier();
+        assert_eq!(setup_typed_names(&first), &first.account);
+        assert!(!setup_keepable(&first));
+        let mut given = courier();
+        given.given = true;
+        assert_eq!(setup_typed_names(&given), &given.account);
+        assert!(setup_keepable(&given));
+        let mut missing = courier();
+        missing.account = vec!["COURIER_ACCOUNT".into(), "COURIER_REGION".into()];
+        missing.missing = vec!["COURIER_REGION".into()];
+        assert_eq!(setup_typed_names(&missing), &missing.missing);
+        assert!(!setup_keepable(&missing));
+        // A file that holds none of the account wants it all typed.
+        let mut none = courier();
+        none.missing.clone_from(&none.account);
+        assert_eq!(setup_typed_names(&none), &none.account);
+        assert!(!setup_keepable(&none));
     }
 
     #[test]

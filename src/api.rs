@@ -802,6 +802,17 @@ pub struct Setup {
     /// The file a typed value goes to, on the yard's machine.
     #[serde(default)]
     pub account_file: String,
+    /// A drift card whose standing file holds every account name: kept
+    /// with a bare preset pick, typed another to change it, or a
+    /// candidate's file taken. Absent on a first setup, which has no
+    /// standing file.
+    #[serde(default)]
+    pub given: bool,
+    /// The account names the standing file does not set where the
+    /// update newly needs them: the answer types them, or takes a
+    /// candidate. Absent on a first setup.
+    #[serde(default, deserialize_with = "or_default")]
+    pub missing: Vec<String>,
     /// The yard sources whose account the card offers to reuse; none
     /// where none matches.
     #[serde(default, deserialize_with = "or_default")]
@@ -907,6 +918,11 @@ pub struct SetupApproved {
     /// were typed.
     #[serde(default)]
     pub account: String,
+    /// The standing account kept with a bare preset pick, on a drift
+    /// card whose file holds every name. Exactly one of `given`,
+    /// `account` and `keep` is set.
+    #[serde(default)]
+    pub keep: bool,
     /// `approved, to be carried out`: the server carries the setup out
     /// after the call.
     #[serde(default)]
@@ -2435,9 +2451,10 @@ impl Client {
     /// names the ask with the preset pick counting the ask's options, and
     /// exactly one of the typed values and the picked candidate settles
     /// the account: `values` is left out where a candidate is taken, and
-    /// `account` where the values are typed. A value is the person's
-    /// secret: it is in this call's body and in nothing else of the
-    /// client, no error and no log.
+    /// `account` where the values are typed. Both are left out where a
+    /// drift card's standing account is kept with a bare preset pick. A
+    /// value is the person's secret: it is in this call's body and in
+    /// nothing else of the client, no error and no log.
     pub fn approve_setup(
         &self,
         bead: &str,
@@ -3529,6 +3546,25 @@ mod tests {
                              "account": "courier-existing", "actor": "jo"})),
                 "{way}"
             );
+            // A drift card's standing account is kept with a bare preset
+            // pick: neither values nor a candidate goes.
+            yard.answer(
+                "ApproveSetup",
+                r#"{"result": {"bead": "yd-crm", "ask": 41, "asker": "yardmaster",
+                    "pack": "courier", "preset": "read", "keep": true,
+                    "result": "approved, to be carried out"}}"#,
+            );
+            let approved = client
+                .approve_setup("yd-crm", 41, 1, None, None, "jo")
+                .unwrap();
+            assert!(approved.keep, "{way}");
+            assert!(approved.given.is_empty(), "{way}");
+            assert_eq!(approved.account, "", "{way}");
+            assert_eq!(
+                yard.asked("ApproveSetup").last(),
+                Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1, "actor": "jo"})),
+                "{way}"
+            );
             // The yard says no, in its words, whole.
             let refusal = "ask 41 on yd-crm: the candidate courier-existing holds COURIER_ACCOUNT=ops@example.com no more: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
             yard.answer(
@@ -3622,6 +3658,39 @@ mod tests {
         assert_eq!(bead.asks[0].setup.as_ref(), Some(asked));
         assert_eq!(bead.asks[0].options.len(), 2);
         assert_eq!(bead.asks[0].recommend, 1);
+    }
+
+    /// A setup ask on a pack already applied: its standing file holds
+    /// every account name, or the card names the ones it misses.
+    #[test]
+    fn a_setup_ask_on_a_pack_already_applied_names_what_stands() {
+        let yard = Yard::start();
+        let drift = |given: bool, missing: &[&str]| {
+            json!({"pack": "courier", "account": ["COURIER_ACCOUNT", "COURIER_REGION"],
+                "account_file": "/home/jo/.yardr/sources/courier.env",
+                "given": given, "missing": missing,
+                "does": ["the account COURIER_ACCOUNT and COURIER_REGION: given, in /home/jo/.yardr/sources/courier.env."],
+                "back": "yardr source rm courier",
+                "presets": [{"name": "read", "grants": [{"source": "courier", "calls": ["read"]}]}],
+                "to": [{"crew": "yardmaster"}]})
+        };
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {
+                "open": [{"bead": "yd-crm", "ask": 42, "question": "Update courier?",
+                            "asker": "yardmaster", "setup": drift(true, &[])},
+                         {"bead": "yd-crm", "ask": 43, "question": "Update courier?",
+                            "asker": "yardmaster", "setup": drift(false, &["COURIER_REGION"])}],
+                "decided": []}})
+            .to_string(),
+        );
+        let asks = yard.client().user_asks("jo").unwrap();
+        let kept = asks.open[0].setup.as_ref().unwrap();
+        assert!(kept.given);
+        assert!(kept.missing.is_empty());
+        let missing = asks.open[1].setup.as_ref().unwrap();
+        assert!(!missing.given);
+        assert_eq!(missing.missing, ["COURIER_REGION"]);
     }
 
     #[test]
