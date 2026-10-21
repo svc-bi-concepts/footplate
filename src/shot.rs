@@ -23,7 +23,8 @@ use crate::yard::Env;
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
 /// card of a run ask, a weighty run ask's card beside a routine one's,
-/// a yard that is stopped, a yard at an
+/// a weighty mapping ask's card beside a routine one's, a yard that is
+/// stopped, a yard at an
 /// address, the settings on each of their sections, the yards with a
 /// far yard's rename form open in its card, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
@@ -91,6 +92,7 @@ pub const STATES: &[&str] = &[
     "lines",
     "run",
     "weighty",
+    "weighty-mapping",
     "stopped",
     "far",
     "settings",
@@ -1335,6 +1337,65 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
+        "weighty-mapping" => {
+            // A weighty mapping ask's card beside a routine one's: the
+            // mapping card shows its class's line first, and where the
+            // window has no gate the typed-back number above its pick,
+            // against the routine card's answer.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [
+                    {"bead": "bead-s", "bead_title": "Who is U999?", "topic": "",
+                     "ask": 7, "question": "Who is U999 in talk?",
+                     "asker": "yardmaster", "since": "2026-10-10T10:00:00Z",
+                     "identity": {"source": "talk", "sender": "U999"},
+                     "weight": [{"class": "as-user",
+                                 "line": "a pick says which user U999 in talk is, and a delivery from them is then heard as that user's"}]},
+                    {"bead": "bead-s", "bead_title": "Who is U999?", "topic": "",
+                     "ask": 8, "question": "Move the links now?",
+                     "asker": "yardmaster", "since": "2026-10-10T10:05:00Z"},
+                ], "decided": []}})
+                .to_string(),
+            );
+            yard.answer(
+                "Bead",
+                &json!({"result": {"id": "bead-s", "title": "Who is U999?",
+                    "body": "The body.", "stage": "new", "labels": [], "notes": [],
+                    "asks": [
+                        {"ask": 7, "to": "jo", "asker": "yardmaster",
+                         "since": "2026-10-10T10:00:00Z",
+                         "question": "Who is U999 in talk?",
+                         "context": ["a delivery arrived from U999, who maps to nobody."],
+                         "options": [
+                            {"label": "ada", "consequence": "messages from U999 count as ada's"},
+                            {"label": "Someone new", "consequence": "pick this and write the new user's name with your answer"},
+                            {"label": "Nobody — ignore this sender", "consequence": "ignores U999 in talk: their messages are dropped, and no further card is offered"},
+                            {"label": "You decide", "consequence": "leave it to yardmaster"}],
+                         "state": "open",
+                         "identity": {"source": "talk", "sender": "U999"},
+                         "weight": [{"class": "as-user",
+                                     "line": "a pick says which user U999 in talk is, and a delivery from them is then heard as that user's"}]},
+                        {"ask": 8, "to": "jo", "asker": "yardmaster",
+                         "since": "2026-10-10T10:05:00Z",
+                         "question": "Move the links now?",
+                         "context": ["the links file declares the new source."],
+                         "options": [
+                            {"label": "Move them now", "consequence": "all 64 links point tonight"},
+                            {"label": "You decide", "consequence": "leave it to yardmaster"}],
+                         "recommend": 1, "why": "the test passed",
+                         "state": "open"},
+                    ]}})
+                .to_string(),
+            );
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -2160,6 +2221,22 @@ mod tests {
                     assert!(loaded.asks.open[1].weight.is_empty(), "{state}");
                     let bead = yard.client().bead("bead-s").unwrap();
                     assert_eq!(bead.asks.len(), 2, "{state}");
+                }
+                "weighty-mapping" => {
+                    // The weighty mapping ask beside the routine one: the
+                    // first maps a sender and carries its class, the second
+                    // neither.
+                    assert_eq!(loaded.asks.open.len(), 2, "{state}");
+                    assert!(loaded.asks.open[0].identity.is_some(), "{state}");
+                    assert_eq!(loaded.asks.open[0].weight.len(), 1, "{state}");
+                    assert_eq!(loaded.asks.open[0].weight[0].class, "as-user", "{state}");
+                    assert!(loaded.asks.open[1].identity.is_none(), "{state}");
+                    assert!(loaded.asks.open[1].weight.is_empty(), "{state}");
+                    let bead = yard.client().bead("bead-s").unwrap();
+                    assert_eq!(bead.asks.len(), 2, "{state}");
+                    assert!(bead.asks[0].identity.is_some(), "{state}");
+                    assert_eq!(bead.asks[0].options.len(), 4, "{state}");
+                    assert!(bead.asks[1].identity.is_none(), "{state}");
                 }
                 "secret" | "secret-shown" | "secret-refused" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");

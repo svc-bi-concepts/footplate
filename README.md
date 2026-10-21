@@ -176,6 +176,7 @@ a page and an image), `image` (that mail's image open full size over
 the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `weighty` (a weighty run ask's
+card beside a routine one's), `weighty-mapping` (a weighty mapping ask's
 card beside a routine one's), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
 on each of their sections: `settings` is this window, and
@@ -273,7 +274,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `PutBlob` for each file, then `Mail` with their hashes and names | Enter, when files are attached to the draft |
 | `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
 | `React` | a tap on one of the bar of reactions floating over the hovered mail: the emoji, or nothing on the user's own current one, which takes it away |
-| `AnswerAsk` | Enter, or the Answer button, on a card: the option chosen — the recommendation until another is picked — with the line's words in the one answer; an ask with no options is answered with words |
+| `AnswerAsk` | Enter, or the Answer button, on a card: the option chosen — the recommendation until another is picked — with the line's words in the one answer; an ask with no options is answered with words. A mapping pick sends `weighed` after the weighty gate |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
 | `PutBlob` for each file, then `AddNote` with their hashes and names | Enter, on a card whose note has files attached |
 | `DeferAsk` | `x`, on an open card: the ask put aside, to come back as the yard says |
@@ -983,6 +984,14 @@ once, and a later pick on it from there replaces the earlier one. The window
 holds the card's keys, `i` types the words in, `esc` holds the keys again.
 What is typed stays with its ask, as a draft stays with its conversation.
 
+A mapping ask (who an unmapped sender is) is weighty: its card shows the
+yard's line first, in rust, and each pick passes the Mac's unlock first —
+Touch ID, a paired watch or the login password — with `weighed` sent where
+the person passes it; its cancel sends nothing and keeps the words for
+another try. Where no system unlock is offered, the card asks for the ask's
+number in a separate field and picks only when it matches. Words alone,
+later and decline stay ungated.
+
 **A secret ask** (`yardr bead ask --secret`) asks for a credential of a
 source, and its card has no options and no line for words. In their place
 it shows the yard's own line of what is asked for, made from the source's
@@ -1117,7 +1126,7 @@ its card under "Decided".
 | a click on a folded history row | opens it to show its rows, shut |
 | `/`, in decisions | opens the history with its filter typed in; `esc` leaves the filter, and what is typed stands |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
-| `i`, on a card | on a weighty card without a system unlock, types the ask's number first, then a secret or setup account; otherwise types words or the secret or account in its field. The window holds the card's keys |
+| `i`, on a card | on a weighty card without a system unlock, types the ask's number first, then a secret, a setup account or words; otherwise types words or the secret or account in its field. The window holds the card's keys |
 | `cmd+enter` (`ctrl+enter` on Linux), on a run or setup ask's card | approves it: the yard runs the command the card shows, or applies the setup with the preset pick and the account. On a weighty card it opens the offered system unlock first; where none is offered, the typed number must match the ask. No other card answers to it, and Enter alone approves nothing |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | shift-`x`, on the open `yard` row | marks every notice read, as the button in the row's head does, shown with their count while one is unread |

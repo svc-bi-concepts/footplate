@@ -1314,6 +1314,10 @@ mod tests {
             "type the ask's number, 7, to give this weighty card"
         );
         assert_eq!(
+            typeback_line(7, "pick"),
+            "type the ask's number, 7, to pick this weighty card"
+        );
+        assert_eq!(
             typeback_mismatch(7),
             "ask 7's number was not typed back, so nothing was done"
         );
@@ -1418,6 +1422,7 @@ mod tests {
             secret: None,
             run: None,
             setup: None,
+            identity: None,
             weight: Vec::new(),
             account: String::new(),
         }
@@ -22436,6 +22441,218 @@ yardr.dev
             ..Env::default()
         };
         opened_on_the_ask(at, file, cx)
+    }
+
+    /// A mapping ask's weight line, as the yard weighs it: a pick says
+    /// which user the sender is, and deliveries from them are then heard
+    /// as that user's.
+    const MAPPING_WEIGHT_LINE: &str = "a pick says which user U999 in talk is, and a delivery from them is then heard as that user's";
+
+    /// The mapping ask `ask` on bead-s as the queue lists it, open and
+    /// weighty: who U999 in talk is.
+    fn queued_mapping(ask: u64) -> Value {
+        json!({
+            "bead": "bead-s", "bead_title": "Who is U999?", "topic": "", "ask": ask,
+            "question": "Who is U999 in talk?", "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z",
+            "identity": {"source": "talk", "sender": "U999"},
+            "weight": [{"class": "as-user", "line": MAPPING_WEIGHT_LINE}],
+        })
+    }
+
+    /// The bead of three mapping asks, 7 to 9, each with one user to
+    /// pick, someone new, nobody and you decide, and no recommendation:
+    /// words alone go as a note.
+    fn bead_mapping() -> String {
+        let ask = |ask: u64| {
+            json!({
+                "ask": ask, "to": "jo", "asker": "yardmaster",
+                "since": "2026-10-10T10:00:00Z",
+                "question": "Who is U999 in talk?",
+                "context": ["a delivery arrived from U999, who maps to nobody."],
+                "options": [
+                    {"label": "ada", "consequence": "messages from U999 count as ada's"},
+                    {"label": "Someone new", "consequence": "pick this and write the new user's name with your answer"},
+                    {"label": "Nobody — ignore this sender", "consequence": "ignores U999 in talk: their messages are dropped, and no further card is offered"},
+                    {"label": "You decide", "consequence": "leave it to yardmaster"}
+                ],
+                "state": "open",
+                "identity": {"source": "talk", "sender": "U999"},
+                "weight": [{"class": "as-user", "line": MAPPING_WEIGHT_LINE}],
+            })
+        };
+        json!({"result": {"id": "bead-s", "title": "Who is U999?",
+            "body": "The body.", "stage": "new", "labels": [], "notes": [],
+            "asks": [ask(7), ask(8), ask(9)]}})
+        .to_string()
+    }
+
+    /// The window on a yard whose open asks are the three mapping asks 7
+    /// to 9 on bead-s, weighty, the first one's card open and read.
+    fn opened_on_a_weighty_mapping_ask<'a>(
+        yard: &Yard,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_mapping(7), queued_mapping(8), queued_mapping(9)], "decided": []}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_mapping());
+        yard.answer("AnswerAsk", "{}");
+        yard.answer("AddNote", "{}");
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        };
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// A mapping pick writes a user's identity, so it passes the weighty
+    /// gate like any other weighty approval: the Mac's unlock where one is
+    /// offered, the ask's number typed back where none is, and `weighed`
+    /// with the pick. Anything else keeps the card and sends nothing.
+    /// Words alone, later and decline stay ungated.
+    #[gpui::test]
+    fn a_mapping_pick_passes_the_weighty_gate_and_sends_weighed(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_weighty_mapping_ask(&yard, &file, cx);
+
+        // The card shows its weight first, in rust, with the options, the
+        // line for words and the number field where no gate is offered.
+        assert!(drawn(cx, "weight bead-s 7 0"));
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "pick bead-s 7 1"));
+        assert!(drawn(cx, "words bead-s 7"));
+        assert!(drawn(cx, "send bead-s 7"));
+        // `i` types the number first.
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+        let in_typeback = view.update_in(cx, |v, window, cx| {
+            v.typeback.focus_handle(cx).is_focused(window)
+        });
+        assert!(in_typeback);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        // A pick with anything but the ask's number sends nothing and
+        // leaves the card, saying so.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("1");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        assert_eq!(
+            notice(&view, cx),
+            "ask 7's number was not typed back, so nothing was done"
+        );
+        assert!(drawn(cx, "typeback bead-s 7"));
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("8", cx))
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
+        assert_eq!(
+            notice(&view, cx),
+            "ask 7's number was not typed back, so nothing was done"
+        );
+
+        // The number typed back sends the pick with weighed, and the
+        // number is used up.
+        let mut answered = queued_mapping(7);
+        answered["state"] = json!("answered");
+        answered["option"] = json!(1);
+        answered["option_label"] = json!("ada");
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_mapping(8), queued_mapping(9)], "decided": [answered]}})
+                .to_string(),
+        );
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the weighed pick", |_| {
+            yard.asked("AnswerAsk")
+                == [
+                    json!({"bead": "bead-s", "ask": 7, "option": 1, "actor": "jo", "weighed": true}),
+                ]
+        });
+        assert_eq!(typeback_text(&view, cx), "");
+        cx.run_until_parked();
+
+        // A later pick from Decided passes the gate too: a cancelled
+        // unlock sends nothing, and the words stay for another try.
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the decided card", |cx| drawn(cx, "typeback bead-s 7"));
+        unlock_as(&view, cx, true, false);
+        view.update(cx, |v, cx| v.pick(2, cx));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("hal");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("AnswerAsk").len(), 1);
+        assert_eq!(typed(&view, cx), "hal");
+
+        // Passing the unlock sends the new pick with weighed.
+        unlock_as(&view, cx, true, true);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the unlocked pick", |_| {
+            yard.asked("AnswerAsk").last()
+                == Some(
+                    &json!({"bead": "bead-s", "ask": 7, "option": 2, "words": "hal", "actor": "jo", "weighed": true}),
+                )
+        });
+        assert_eq!(typed(&view, cx), "");
+        cx.run_until_parked();
+
+        // Words alone, later and decline stay ungated: no number needed.
+        // The number field stands empty throughout.
+        unlock_as(&view, cx, false, false);
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| m.select(Selected::Decision("bead-s".into())));
+            v.select_ask("bead-s".into(), 8, cx);
+        });
+        wait(cx, "the second card", |cx| drawn(cx, "typeback bead-s 8"));
+        assert_eq!(typeback_text(&view, cx), "");
+        // Words alone go as a note with no option chosen: the line is set
+        // straight, since `i` takes the empty number field first.
+        view.update(cx, |v, cx| {
+            v.line
+                .update(cx, |line, cx| line.set_text("is this the same sender?", cx))
+        });
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the note", |_| {
+            yard.asked("AddNote")
+                == [json!({"bead": "bead-s", "text": "is this the same sender?", "actor": "jo"})]
+        });
+        assert_eq!(typeback_text(&view, cx), "");
+        // Decline takes words and no number.
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("d");
+        cx.simulate_input("not now");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "declined", |_| {
+            yard.asked("DeclineAsk")
+                == [json!({"bead": "bead-s", "ask": 8, "words": "not now", "actor": "jo"})]
+        });
+        // Later takes no words and no number.
+        view.update(cx, |v, cx| v.select_ask("bead-s".into(), 9, cx));
+        wait(cx, "the third card", |cx| drawn(cx, "typeback bead-s 9"));
+        assert_eq!(typeback_text(&view, cx), "");
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("x");
+        wait(cx, "put aside", |_| {
+            yard.asked("DeferAsk") == [json!({"bead": "bead-s", "ask": 9, "actor": "jo"})]
+        });
     }
 
     /// A setup ask's card: the yard's block with what approving does, each

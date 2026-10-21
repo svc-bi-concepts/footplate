@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, AskWeight, Asks, Bead, BeadAsk, BeadNote, BlobRef,
-    CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven, Letter, Me,
-    Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant, User,
+    CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven, Identity, Letter,
+    Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant, User,
 };
 use crate::markdown;
 use crate::select;
@@ -741,6 +741,9 @@ pub struct DecisionAsk {
     /// that approves the pick with the account together. Its question and
     /// context are marked as the asker's, as a run ask's are.
     pub setup: Option<Setup>,
+    /// What a mapping ask maps: its picks write a user's identity, so each
+    /// passes the weighty gate; absent on any other ask.
+    pub identity: Option<Identity>,
     /// The card's weight, one entry a class; empty on a routine card. A
     /// card with any passes the Mac's unlock before its approval goes, or
     /// takes the ask's number typed back where this window has no gate.
@@ -801,6 +804,8 @@ pub struct DecidedDetail {
     pub run: Option<Run>,
     /// The setup a setup ask proposes, as on its open card.
     pub setup: Option<Setup>,
+    /// What a mapping ask maps, as on its open card.
+    pub identity: Option<Identity>,
     /// The card's weight, one entry a class, as on its open card.
     pub weight: Vec<AskWeight>,
     /// The candidate taken with a tap, by source name; empty where none
@@ -2694,6 +2699,7 @@ impl Model {
                         secret: ask.secret.clone(),
                         run: ask.run.clone(),
                         setup: ask.setup.clone(),
+                        identity: ask.identity.clone(),
                         weight: ask.weight.clone(),
                         account: self.account_choice(bead, ask.ask),
                     }
@@ -2767,6 +2773,7 @@ impl Model {
             secret: a.secret.clone(),
             run: a.run.clone(),
             setup: a.setup.clone(),
+            identity: a.identity.clone(),
             weight: a.weight.clone(),
             account: self.account_choice(bead, ask),
             ran: a.ran.clone(),
@@ -3001,6 +3008,7 @@ impl Model {
                     given: Vec::new(),
                     run: open.run,
                     setup: open.setup,
+                    identity: open.identity,
                     weight: open.weight,
                     ran: None,
                 },
@@ -3027,6 +3035,19 @@ impl Model {
             .filter(|a| a.bead == bead && a.ask == ask);
         open.map(|a| &a.secret)
             .chain(decided.map(|a| &a.secret))
+            .next()?
+            .as_ref()
+    }
+
+    /// What the ask maps when it is a mapping ask, open or dealt with.
+    pub fn identity(&self, bead: &str, ask: u64) -> Option<&Identity> {
+        let open = self.open.iter().filter(|a| a.bead == bead && a.ask == ask);
+        let decided = self
+            .decided
+            .iter()
+            .filter(|a| a.bead == bead && a.ask == ask);
+        open.map(|a| &a.identity)
+            .chain(decided.map(|a| &a.identity))
             .next()?
             .as_ref()
     }
@@ -3097,6 +3118,7 @@ impl Model {
                     secret: open.secret,
                     concealed: open.concealed,
                     given: names.to_vec(),
+                    identity: open.identity,
                     weight: open.weight,
                     ..DecidedAsk::default()
                 },
@@ -3191,6 +3213,7 @@ impl Model {
                     state: "answered".to_string(),
                     concealed: open.concealed,
                     run: open.run,
+                    identity: open.identity,
                     weight: open.weight,
                     ran,
                     ..DecidedAsk::default()
@@ -3318,6 +3341,7 @@ impl Model {
                     given: approved.given.clone(),
                     run: open.run,
                     setup: open.setup,
+                    identity: open.identity,
                     weight: open.weight,
                     ran,
                 },
@@ -3404,6 +3428,7 @@ impl Model {
                 given: Vec::new(),
                 run: open.run,
                 setup: open.setup,
+                identity: open.identity,
                 weight: open.weight,
                 ran: None,
             },
@@ -3454,6 +3479,7 @@ impl Model {
                 given: Vec::new(),
                 run: open.run,
                 setup: open.setup,
+                identity: open.identity,
                 weight: open.weight,
                 ran: None,
             },
@@ -11120,6 +11146,7 @@ mod tests {
             concealed: true,
             run: None,
             setup: None,
+            identity: None,
             weight: Vec::new(),
         }
     }
@@ -11152,6 +11179,7 @@ mod tests {
             given: Vec::new(),
             run: None,
             setup: None,
+            identity: None,
             weight: Vec::new(),
             ran: None,
         }

@@ -1011,6 +1011,21 @@ pub struct SetupApproved {
     pub result: String,
 }
 
+/// What a mapping ask maps: the source hearing by identity, the
+/// sender's id in it as the delivery carried it, and the channel it
+/// arrived in ("" where the envelope named none). Such an ask's picks
+/// write a user's identity, so each goes through the weighty gate with
+/// `weighed`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Identity {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub sender: String,
+    #[serde(default)]
+    pub channel: String,
+}
+
 /// One class of a card's weight, as the yard weighed it when it wrote
 /// the card: the class, and the yard's line for it with what this card
 /// does. A routine card has none. A client draws a class it does not know
@@ -1059,6 +1074,9 @@ pub struct OpenAsk {
     /// The setup a setup ask proposes; absent on any other ask.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// What a mapping ask maps; absent on any other ask.
+    #[serde(default)]
+    pub identity: Option<Identity>,
     /// The card's weight, one entry a class; absent on a routine card, and
     /// on a yard from before cards were weighed.
     #[serde(default, deserialize_with = "or_default")]
@@ -1117,6 +1135,9 @@ pub struct DecidedAsk {
     /// The setup a setup ask proposes; absent on any other ask.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// What a mapping ask maps; absent on any other ask.
+    #[serde(default)]
+    pub identity: Option<Identity>,
     /// The card's weight, one entry a class; absent on a routine card, and
     /// on a yard from before cards were weighed.
     #[serde(default, deserialize_with = "or_default")]
@@ -1210,6 +1231,9 @@ pub struct BeadAsk {
     /// The setup a setup ask proposes; absent on any other ask.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// What a mapping ask maps; absent on any other ask.
+    #[serde(default)]
+    pub identity: Option<Identity>,
     /// The card's weight, one entry a class, as the queue's own: the card
     /// draws the queue's, which is read again with it. Absent on a routine
     /// card, and on a yard from before cards were weighed.
@@ -2506,7 +2530,11 @@ impl Client {
 
     /// Picks an option with words alongside, or answers an ask with no
     /// options with words (`option` 0). Words alone on an ask with options
-    /// are refused, and go as a plain note instead.
+    /// are refused, and go as a plain note instead. `weighed` is the
+    /// client's word that its person saw the card's weight and passed its
+    /// gate: a mapping pick writes a user's identity and is refused
+    /// without it. It goes only where it is said: a yard from before the
+    /// argument takes the call as it always did.
     pub fn answer_ask(
         &self,
         bead: &str,
@@ -2514,10 +2542,14 @@ impl Client {
         option: u64,
         words: &str,
         actor: &str,
+        weighed: bool,
     ) -> Result<()> {
         let mut args = json!({ "bead": bead, "ask": ask, "option": option, "actor": actor });
         if !words.is_empty() {
             args["words"] = json!(words);
+        }
+        if weighed {
+            args["weighed"] = json!(true);
         }
         self.call("AnswerAsk", args).map(drop)
     }
@@ -5260,6 +5292,7 @@ mod tests {
                 {"bead": "yd-links", "bead_title": "Move the links", "topic": "topic:linear-out",
                  "ask": 3, "question": "Move the links now?", "asker": "yardmaster",
                  "since": "2026-10-08T09:30:00Z",
+                 "identity": {"source": "talk", "sender": "U999"},
                  "weight": [{"class": "outside", "line": "lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"}]},
                 {"bead": "yd-greet", "bead_title": "The greeting", "topic": "",
                  "ask": 5, "question": "What tone?", "asker": "yardmaster",
@@ -5307,6 +5340,13 @@ mod tests {
         assert_eq!(asks.decided[0].weight.len(), 1);
         assert_eq!(asks.decided[0].weight[0].class, "trust");
         assert!(asks.decided[1].weight.is_empty());
+        // What a mapping ask maps; absent on any other ask.
+        let identity = asks.open[0].identity.as_ref().unwrap();
+        assert_eq!(
+            (identity.source.as_str(), identity.sender.as_str()),
+            ("talk", "U999")
+        );
+        assert!(asks.open[1].identity.is_none());
     }
 
     #[test]
@@ -5337,6 +5377,7 @@ mod tests {
                      "recommend": 1, "why": "the test passed",
                      "about": [{"id": "yd-train", "title": "Release train", "stage": "new"}],
                      "state": "open",
+                     "identity": {"source": "talk", "sender": "U999", "channel": "general"},
                      "weight": [{"class": "as-user", "line": "lets calls or words count as a person's: as ada"}]},
                     {"ask": 5, "to": "jo", "asker": "yardmaster",
                      "since": "2026-10-08T09:30:00Z",
@@ -5378,6 +5419,17 @@ mod tests {
         assert_eq!(ask.weight.len(), 1);
         assert_eq!(ask.weight[0].class, "as-user");
         assert!(bead.asks[1].weight.is_empty());
+        // What a mapping ask maps; absent on any other ask.
+        let identity = ask.identity.as_ref().unwrap();
+        assert_eq!(
+            (
+                identity.source.as_str(),
+                identity.sender.as_str(),
+                identity.channel.as_str()
+            ),
+            ("talk", "U999", "general")
+        );
+        assert!(bead.asks[1].identity.is_none());
     }
 
     #[test]
@@ -5404,18 +5456,27 @@ mod tests {
         let client = yard.client();
         // A pick with words in the one answer.
         client
-            .answer_ask("yd-links", 3, 1, "move them tonight", "jo")
+            .answer_ask("yd-links", 3, 1, "move them tonight", "jo", false)
             .unwrap();
         // A pick alone sends no words.
-        client.answer_ask("yd-links", 3, 2, "", "jo").unwrap();
+        client
+            .answer_ask("yd-links", 3, 2, "", "jo", false)
+            .unwrap();
         // Words answer an ask with no options.
-        client.answer_ask("yd-greet", 5, 0, "warmly", "jo").unwrap();
+        client
+            .answer_ask("yd-greet", 5, 0, "warmly", "jo", false)
+            .unwrap();
+        // A mapping pick sends weighed, the client's word its person saw
+        // the weight and passed the gate; a yard from before takes the
+        // call without it as it always did.
+        client.answer_ask("yd-links", 3, 1, "", "jo", true).unwrap();
         assert_eq!(
             yard.asked("AnswerAsk"),
             vec![
                 json!({"bead": "yd-links", "ask": 3, "option": 1, "words": "move them tonight", "actor": "jo"}),
                 json!({"bead": "yd-links", "ask": 3, "option": 2, "actor": "jo"}),
                 json!({"bead": "yd-greet", "ask": 5, "option": 0, "words": "warmly", "actor": "jo"}),
+                json!({"bead": "yd-links", "ask": 3, "option": 1, "actor": "jo", "weighed": true}),
             ]
         );
         client.defer_ask("yd-links", 4, "jo").unwrap();

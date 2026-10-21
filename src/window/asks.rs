@@ -1105,7 +1105,11 @@ impl Footplate {
     /// Picks an option with words alongside: the ask moves to "Decided" at
     /// once, and the queue and the bead are read again for what the yard
     /// says. What the yard refuses is back in the line, with its words,
-    /// and why is on the card.
+    /// and why is on the card. A mapping pick writes a user's identity, so
+    /// it passes the weighty gate like any other weighty approval: the
+    /// Mac's unlock where one is offered, the ask's number typed back
+    /// where none is, and `weighed` with the pick. Words alone, later and
+    /// decline stay ungated.
     pub(crate) fn send_answer(
         &mut self,
         bead: String,
@@ -1114,16 +1118,105 @@ impl Footplate {
         words: String,
         cx: &mut Context<Self>,
     ) {
-        self.line.update(cx, |line, cx| line.set_text("", cx));
-        self.ask_words.remove(&(bead.clone(), ask));
-        self.notice(String::new(), cx);
-        self.refused.remove(&(bead.clone(), ask));
-        let (call_bead, call_words) = (bead.clone(), words.clone());
+        // A pick on a mapping ask writes by definition; words alone write
+        // nothing and go straight.
+        let mapping = option != 0
+            && self
+                .model
+                .as_ref()
+                .is_some_and(|m| m.identity(&bead, ask).is_some());
+        // The yard the pick was pressed in: what came of it is that
+        // yard's, and is said there, wherever the window is by then.
         let (yard, opening, session) = (self.yard.clone(), self.opening, self.session);
+        if !mapping {
+            return self
+                .send_answer_in(session, bead, ask, option, words, false, yard, opening, cx);
+        }
+        match self.card_approval(&bead, ask) {
+            Approval::Direct => {
+                self.send_answer_in(session, bead, ask, option, words, false, yard, opening, cx)
+            }
+            // The number field holds the ask's number or the pick sends
+            // nothing: the card stays as it is, and says so.
+            Approval::TypeBack => {
+                if !self.typeback_ok(ask, cx) {
+                    return self.notice(typeback_mismatch(ask), cx);
+                }
+                self.clear_typeback(cx);
+                self.send_answer_in(session, bead, ask, option, words, true, yard, opening, cx);
+            }
+            // The Mac's unlock first: its cancel sends nothing, and the
+            // words stay in the line for another try. Nowhere is no card
+            // an answer sends from: `AnswerAsk` serves every window.
+            Approval::Unlock => {
+                let reason = self.mapping_reason(&bead, ask);
+                self.unlock_then(
+                    session,
+                    reason,
+                    cx,
+                    move |this, session, cx| {
+                        this.send_answer_in(
+                            session, bead, ask, option, words, true, yard, opening, cx,
+                        )
+                    },
+                    move |_, _, _| {},
+                );
+            }
+            Approval::Nowhere => {}
+        }
+    }
+
+    /// What the Mac's unlock shows with its prompt for a mapping pick: who
+    /// the pick says the sender is, and in which yard. Never empty: the
+    /// call throws on an empty reason.
+    fn mapping_reason(&self, bead: &str, ask: u64) -> String {
+        let who = self
+            .model
+            .as_ref()
+            .and_then(|m| m.identity(bead, ask))
+            .map(|id| format!("who {} in {} is", id.sender, id.source))
+            .unwrap_or_default();
+        unlock::approve_reason(&who, &self.yard)
+    }
+
+    /// Picks an option of the following `session` with words alongside.
+    /// `weighed` goes where the person passed the Mac's unlock for a
+    /// weighty mapping pick, or typed its number back where no unlock is
+    /// offered. `yard` with `opening` is where the pick was pressed: what
+    /// the yard refuses is back there.
+    #[allow(clippy::too_many_arguments)]
+    fn send_answer_in(
+        &mut self,
+        session: u64,
+        bead: String,
+        ask: u64,
+        option: u64,
+        words: String,
+        weighed: bool,
+        yard: String,
+        opening: u64,
+        cx: &mut Context<Self>,
+    ) {
+        // The line is cleared only where this yard is still open: a pick
+        // sent after the window moved on leaves another yard's line alone.
+        if session == self.session {
+            self.line.update(cx, |line, cx| line.set_text("", cx));
+            self.ask_words.remove(&(bead.clone(), ask));
+            self.notice(String::new(), cx);
+            self.refused.remove(&(bead.clone(), ask));
+        } else {
+            let Some(held) = self.held.values_mut().find(|h| h.session == session) else {
+                return;
+            };
+            held.refused.remove(&(bead.clone(), ask));
+            self.notice_in(session, String::new(), cx);
+        }
+        let (call_bead, call_words) = (bead.clone(), words.clone());
         let identity = self.yard_identity(&yard);
-        self.ask_through(
+        self.ask_in(
+            session,
             cx,
-            move |client, me| client.answer_ask(&call_bead, ask, option, &call_words, me),
+            move |client, me| client.answer_ask(&call_bead, ask, option, &call_words, me, weighed),
             move |this, answered, cx| match answered {
                 // The yard it was answered in has it, wherever the window
                 // is by now.
@@ -2554,9 +2647,10 @@ impl Footplate {
                 card =
                     card.child(self.approve_elsewhere_lines(&bead_id, ask_seq, command, palette));
             } else if matches!(approval, Approval::TypeBack) {
-                let verb = match ask.secret.is_some() {
-                    true => "give",
-                    false => "approve",
+                let verb = match (&ask.secret, &ask.identity) {
+                    (Some(_), _) => "give",
+                    (None, Some(_)) => "pick",
+                    (None, None) => "approve",
                 };
                 card = card.child(self.typeback_lines(&bead_id, ask_seq, verb, palette, cx));
             } else if !sends && ask.secret.is_some() {
@@ -3427,6 +3521,11 @@ impl Footplate {
                             .child(format!("recommended: {}, {}", detail.recommend, detail.why)),
                     );
                 }
+            }
+            // A mapping pick writes, so a weighty one with no gate takes
+            // its number back before the later pick, as on an open card.
+            if detail.identity.is_some() && !taken_back && matches!(approval, Approval::TypeBack) {
+                body = body.child(self.typeback_lines(bead, ask, "pick", palette, cx));
             }
             // A secret ask says what it asks for in the yard's line. A
             // weighty one with no gate takes its number back before its
