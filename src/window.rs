@@ -13087,11 +13087,12 @@ impl Footplate {
     /// hairline keep the text under it from showing through, the kit's
     /// popover shadow lifts it, and it blocks the mouse, so that a tap on
     /// it is no press on that text. The yard's fixed set, each in a square
-    /// of the kit's 32-pixel control size, with 8 pixels around and
-    /// between them; the one the pointer stands on draws 1.2 times larger
-    /// in its square, so neither its neighbours nor the bar move. The
-    /// user's own current one stands on the open ground. A tap on that one
-    /// takes it away, and a tap on another puts it instead.
+    /// of 26 pixels with 4 pixels around and between them: closer than the
+    /// kit's 32-pixel control, since the bar floats over a letter and the
+    /// emoji are all it holds. The one the pointer stands on draws 1.2
+    /// times larger in its square, so neither its neighbours nor the bar
+    /// move. The user's own current one stands on the open ground. A tap
+    /// on that one takes it away, and a tap on another puts it instead.
     fn react_row(
         &self,
         seq: u64,
@@ -13117,8 +13118,8 @@ impl Footplate {
                 .right_0()
                 .flex()
                 .flex_row()
-                .gap_2()
-                .p_2()
+                .gap_1()
+                .p_1()
                 .rounded_md()
                 .border_1()
                 .border_color(palette.line)
@@ -13149,15 +13150,15 @@ impl Footplate {
                         let tapped = tapped.clone();
                         move || tapped.clone()
                     })
-                    .size(px(32.))
+                    .size(px(26.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(rems(match zoomed {
-                        true => 1.2,
-                        false => 1.0,
+                        true => 1.05,
+                        false => 0.875,
                     }))
                     .when(zoomed, |el| el.bg(palette.hover))
                     .when(!zoomed && mine == Some(emoji), |el| el.bg(palette.open))
@@ -18949,8 +18950,8 @@ mod tests {
             .collect();
         for (emoji, bounds) in model::REACTIONS.iter().zip(&buttons_rest) {
             assert!(
-                near(bounds.size.width, px(32.)) && near(bounds.size.height, px(32.)),
-                "{emoji} is no 32-pixel square: {bounds:?}"
+                near(bounds.size.width, px(26.)) && near(bounds.size.height, px(26.)),
+                "{emoji} is no 26-pixel square: {bounds:?}"
             );
         }
 
