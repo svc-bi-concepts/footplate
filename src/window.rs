@@ -24,8 +24,8 @@ use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, AskPreview, DecidedDetail, DecidedEntry, DecidedFold,
     DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode, Model, News,
-    Outcome, Read, Route, Row, Selected, Target, Top, backlog_count, held_by_you, is_held,
-    short_bead, stage_age, waits_on_you, you_first,
+    Outcome, Read, Route, Row, Selected, Target, Top, backlog_count, short_bead, stage_age,
+    you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -36,8 +36,25 @@ use crate::theme::{Look, Palette, crew_dot, yard_color, yard_ink};
 use crate::yard::{self, Env};
 
 mod firstrun;
+mod keys;
+mod metrics;
+mod words;
 
 use firstrun::{Ended, FirstRun, Means};
+use keys::{
+    APPROVE_KEY, CONTEXT, KeysView, NO_LINE_CONTEXT, SECONDARY, SETUP_SECRET_CONTEXT,
+    SWITCH_CONTEXT, keys_for,
+};
+use metrics::{
+    ATTACHMENT, BACKLOG_TITLES, BOARD_BEAD, BOARD_EXPECTED, BOARD_LINE, BOARD_PLATFORM,
+    BOARD_REMARK, DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, LINE_COLUMN, LINE_HEAD, PANEL_MIN,
+    RAIL, RAIL_LABEL, RAIL_TILE, READING_WIDTH, SWITCHER_MAX, SWITCHER_MIN, drawer_fits, grown,
+};
+use words::{
+    ask_words, bead_back_name, bead_sub, bead_words, count_words, decided_words, flow_words,
+    headcode_color, lamp_dot, remark_color, stage_group_words, stage_lamp, unread_words,
+    waiting_words, waits_for_seat,
+};
 
 /// The application's icon, from the 1024px master in assets/icon.png.
 pub const ICON: &[u8] = include_bytes!("../assets/icon.png");
@@ -94,142 +111,6 @@ actions!(
         ShowKeys
     ]
 );
-
-const CONTEXT: &str = "Footplate";
-/// Where no line is typed in: the yard row, and a decision with the window
-/// focused, where a number key picks and `x` puts aside. With a
-/// conversation open, with the line focused to type words in, or with the
-/// history's filter focused, those keys are the line's text.
-const NO_LINE_CONTEXT: &str = "FootplateNoLine";
-/// Where the account of a setup ask is typed in: its approval's key
-/// approves from the field too, with what the field holds. Only that key
-/// is bound here: a decline's words must not approve, and no other card's
-/// field approves anything.
-const SETUP_SECRET_CONTEXT: &str = "FootplateSetupSecret";
-/// Where the switcher's list is open: the arrows move in it, Enter opens
-/// the yard they are on, esc leaves it, + adds a yard, and no key is a
-/// card's.
-const SWITCH_CONTEXT: &str = "FootplateSwitch";
-
-/// How high an image of a mail stands in the conversation, whatever its own
-/// size: the room is there before the image is, so nothing moves under the
-/// reader when it comes.
-const IMAGE_HEIGHT: f32 = 240.;
-
-/// The margin an image open over the window leaves out, each side, in
-/// rems: what its fit is short of the window by.
-const IMAGE_MARGIN: f32 = 2.;
-
-/// The side of an attachment of the draft, above the line, in rems: its
-/// name stands in it where it is no image, so it goes with the text size.
-const ATTACHMENT: f32 = 3.5;
-
-/// The rail's width in pixels, fixed: room for a label under each
-/// icon, as the review has it.
-const RAIL: f32 = 64.;
-
-/// A rail tile's width in pixels: the glyph with its label under it, in
-/// the rail with its padding on both sides, 6 + 52 + 6.
-const RAIL_TILE: f32 = 52.;
-
-/// A rail label's size in pixels, fixed with its tile.
-const RAIL_LABEL: f32 = 10.;
-
-/// A stage cell's narrowest width in rems: a headcode with its lamp
-/// dot and the cell's padding, and the longest stage word whole.
-/// Measured as DejaVu Sans draws `● 7mcg` (the widest sans of the
-/// desktops here, and the font the Linux shots draw in), 47 pixels at
-/// the meta size, with the cell's 16 pixels of padding and the running
-/// dot's 10 (6 with its 4-pixel gap), rounded up to 96 pixels to hold
-/// the longest stage word `contributor` (67 pixels) with its lamp and
-/// padding without cutting, at the usual 16-pixel rem. In rems because
-/// the words in it are: a cell in pixels cut its words at the larger
-/// text sizes. Stage heads longer than the cell wrap whole onto a
-/// second line; headcodes longer than this truncate, as they did on the
-/// fixed grid.
-const PANEL_MIN: f32 = 6.;
-
-/// The switcher's list in rems, drawn once: its narrowest and its widest.
-/// They are in rems because the hint line in it is: a list in pixels cut
-/// its words at the larger text sizes. Sized for the footer's hint line
-/// `↑↓ move · ↵ open · esc close · + add a yard · ? all keys`, as DejaVu
-/// Sans draws it (the widest sans of the desktops here, and the font the
-/// Linux shots draw in), plus the footer's padding and the list's border,
-/// at the usual 16-pixel rem: the line, 340 pixels, between 12 of padding
-/// each side with a 1-pixel border. The widest, 480, holds it on one line
-/// at the usual size with every row's ctrl+N whole; the narrowest, 320,
-/// leaves room to shrink, wrapping at the `·` separators, at a larger text
-/// size or a narrow window. Where the window's width less the rail is
-/// narrower still, the list is capped at that.
-///
-/// The test beside the switcher's rows holds the hint and every key
-/// inside at the usual size and the largest.
-const SWITCHER_MIN: f32 = 20.;
-const SWITCHER_MAX: f32 = 30.;
-
-/// A line view's stage column in pixels at the usual text size, and no
-/// narrower: the panel's track straightened, one column per stage in
-/// travel order. Drawn through [`grown`], so it stands 176 wide at the
-/// usual size and grows with the text above it.
-const LINE_COLUMN: f32 = 176.;
-
-/// A line view's column head in rems: its name with three lines of group
-/// words under it, bottom-aligned, so a column whose group wraps onto a
-/// second or third line puts its rule level with a shorter group. The
-/// row's rules make one straight track, as the panel's heads have it.
-/// A name line with three group lines at gpui's line height,
-/// 1.42 with 3 × 1.21, rounded up. A group that wants a fourth line
-/// makes its own column taller, as a panel head does.
-const LINE_HEAD: f32 = 5.2;
-
-/// The departures board's columns in pixels at the usual text size,
-/// drawn once: the expected arrival in mono, the bead's title with its
-/// headcode, the platform, the line, and the remark. Drawn through
-/// [`grown`], so each stands its width at the usual size and grows with
-/// the text above it. Past the pane's edge the board scrolls sideways;
-/// the panel fits instead. The line holds this yard's longest depot
-/// names: 88 cut `yardr-hosted` even at the usual size, so 92.
-const BOARD_EXPECTED: f32 = 80.;
-const BOARD_BEAD: f32 = 280.;
-const BOARD_PLATFORM: f32 = 120.;
-const BOARD_LINE: f32 = 92.;
-const BOARD_REMARK: f32 = 220.;
-
-/// A column `usual` pixels wide at the usual text size: that wide at
-/// smaller sizes too, and growing with the text above it, since the
-/// words in it stand in rems. A column in pixels alone cut its words at
-/// the larger text sizes; in rems alone it would narrow past what the
-/// design draws. `usual` over the usual 16-pixel rem is its width.
-fn grown(usual: f32) -> Div {
-    div().w(rems(usual / 16.)).min_w(px(usual))
-}
-
-/// The bead drawer's width in pixels at the usual text size, drawn
-/// through [`grown`]: fixed, and growing with the text above it, as a
-/// line view's columns do.
-const DRAWER_WIDTH: f32 = 320.;
-
-/// Whether the window `window` pixels wide holds the bead drawer beside
-/// the reading pane: the pane keeps at least the drawer's own width. The
-/// rail is [`RAIL`] pixels, the list 270 at the usual text size and never
-/// over 48 hundredths of the window, as [`Footplate::column`] draws them,
-/// and the drawer its grown width; `rem` is the window's rem in pixels.
-fn drawer_fits(window: Pixels, rem: f32) -> bool {
-    let drawer = DRAWER_WIDTH.max(DRAWER_WIDTH / 16. * rem);
-    let list = (270. * rem / 16.).min(0.48 * f32::from(window));
-    f32::from(window) - RAIL - list - drawer >= drawer
-}
-
-/// How many backlog titles a line view's backlog column lists before
-/// "+N more".
-const BACKLOG_TITLES: usize = 6;
-
-/// The key that is cmd on macOS and ctrl elsewhere, as the hints name it.
-const SECONDARY: &str = if cfg!(target_os = "macos") {
-    "cmd"
-} else {
-    "ctrl"
-};
 
 /// A yard's number key, as the switcher's rows show it: ⌘1 opens the
 /// first yard on macOS, ctrl+1 elsewhere. Only the first nine yards have
@@ -492,10 +373,6 @@ fn post_note(
     Ok(())
 }
 
-/// The conversation's reading width: the mail, the notice and the
-/// composer stand full width up to 880 pixels, centred in the pane.
-const READING_WIDTH: f32 = 880.;
-
 /// A row of the reading column: full width, its content centred in
 /// the reading width.
 ///
@@ -541,15 +418,6 @@ fn reading_row(row: AnyElement, apart: bool) -> AnyElement {
         row.mt_2().into_any_element()
     } else {
         row.into_any_element()
-    }
-}
-
-/// What a head says waits in it, the Decisions head's and a backlog
-/// column's: the number with "waiting", or that none does.
-fn waiting_words(waiting: usize) -> String {
-    match waiting {
-        0 => "none waiting".to_string(),
-        waiting => format!("{waiting} waiting"),
     }
 }
 
@@ -721,381 +589,6 @@ fn column_rule(lamp: &str, human: bool, palette: Palette) -> Div {
     }
 }
 
-/// What a stage's head says stands on it: the number with "bead".
-fn bead_words(beads: usize) -> String {
-    match beads {
-        1 => "1 bead".to_string(),
-        beads => format!("{beads} beads"),
-    }
-}
-
-/// What a stage column's head says under its name: the routed group's
-/// name, that it waits on a person where the group is manual, and its
-/// seats where the yard serves them. A group with no route says why,
-/// as does a paused one: a stage nothing can move through is the one a
-/// person most needs named.
-fn stage_group_words(stage: &FlowStage) -> String {
-    if stage.group.is_empty() {
-        return "no route matches".to_string();
-    }
-    let mut words = stage.group.clone();
-    if stage.human {
-        words.push_str(" · waiting on a person");
-    }
-    match (stage.limit, stage.taken) {
-        (Some(0), _) => words.push_str(" · paused"),
-        (Some(limit), Some(taken)) => {
-            words.push_str(&format!(" · {taken} of {limit} seats"));
-        }
-        _ => {}
-    }
-    words
-}
-
-/// Whether the bead waits for a seat at its stage: unclaimed, its
-/// remark naming no held, blocked or waiting state, and its group's
-/// seats all taken across the yard. Only a routed group with a limit
-/// above 0 can be full; a late mark names no state that explains the
-/// bead standing still, so it waits for a seat too.
-fn waits_for_seat(bead: &FlowBead, stage: &FlowStage) -> bool {
-    if bead.working {
-        return false;
-    }
-    if bead.tone == "red"
-        || is_held(&bead.remark)
-        || bead.remark.starts_with("blocked by ")
-        || bead.remark.starts_with("waits for ")
-    {
-        return false;
-    }
-    matches!(
-        (stage.limit, stage.taken),
-        (Some(limit), Some(taken)) if limit > 0 && taken >= limit
-    )
-}
-
-/// A stage's lamp as drawn: the served fault or turn, and nothing where
-/// no bead stands on the stage. An empty stage stands unlit whatever it
-/// serves; the panel's cells and the line view's columns share the rule.
-fn stage_lamp(stage: &FlowStage) -> &str {
-    if stage.beads.is_empty() {
-        return "none";
-    }
-    match stage.lamp.as_str() {
-        "fault" | "turn" => stage.lamp.as_str(),
-        _ => "none",
-    }
-}
-
-/// What a line's head says it carries: the number with "flow".
-fn flow_words(flows: usize) -> String {
-    match flows {
-        1 => "1 flow".to_string(),
-        flows => format!("{flows} flows"),
-    }
-}
-
-/// What the bead's quiet back link names: where it was opened from —
-/// the panel or the departures board, the line, or No line.
-fn bead_back_name(back: &Selected, departures: bool) -> String {
-    match back {
-        Selected::Arrivals => match departures {
-            true => "departures".to_string(),
-            false => "panel".to_string(),
-        },
-        Selected::Line(line) => line.clone(),
-        Selected::NoLine => "no line".to_string(),
-        _ => model::ARRIVALS.to_string(),
-    }
-}
-
-/// What a bead's details head says under its title: the id with the
-/// line, and the stage too where no route strip under it says where
-/// the bead stands.
-fn bead_sub(detail: &ArrivalDetail, route: Option<&Route>) -> String {
-    let mut parts = vec![detail.bead.as_str()];
-    if route.is_none() {
-        parts.push(detail.stage.as_str());
-    }
-    parts.push(detail.line.as_str());
-    parts
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
-/// What the folded Decided says was dealt with: the number with
-/// "decided".
-fn decided_words(decided: usize) -> String {
-    match decided {
-        1 => "1 decided".to_string(),
-        decided => format!("{decided} decided"),
-    }
-}
-
-/// The colour of a timetable remark with the yard's `tone` and
-/// holder, for the person `me` reads as: a stalled bead reads the
-/// error red, and a held bead only where they hold it; a wait that
-/// names them reads the waiting text rust, and the rest dim — a hold
-/// by anyone else or no one known, a blocked bead, a late mark and a
-/// wait for someone else. Lateness is words, never red; a hold or a
-/// wait for someone else is not theirs to answer, so it never takes
-/// the accent.
-fn remark_color(remark: &str, tone: &str, held_by: &str, me: &str, palette: Palette) -> Rgba {
-    if is_held(remark) {
-        if held_by_you(held_by, me) {
-            palette.warn
-        } else {
-            palette.faint
-        }
-    } else if tone == "red" {
-        palette.warn
-    } else if waits_on_you(remark, me) {
-        palette.text_accent
-    } else {
-        palette.faint
-    }
-}
-
-/// A stage's wait light as a dot: red for fault, rust for turn, and no
-/// dot where neither burns. Drawn from [`stage_lamp`], so an empty
-/// stage stands unlit.
-fn lamp_dot(lamp: &str, selector: String, palette: Palette) -> Option<Div> {
-    let color = match lamp {
-        "fault" => palette.warn,
-        "turn" => palette.accent,
-        _ => return None,
-    };
-    Some(
-        div()
-            .debug_selector(move || selector.clone())
-            .size(rems(0.5))
-            .rounded_full()
-            .bg(color)
-            .flex_none(),
-    )
-}
-
-/// A headcode's colour on the panel, for the person `me` reads as: a
-/// bead being worked reads in the text colour (with the running dot
-/// beside it), a stalled bead in the error red, a held bead in red
-/// only where they hold it, and a wait on the reader in the waiting
-/// rust. Working stands first, whatever the stage's lamp says; a hold
-/// by anyone else or no one known stands plain in the text colour as
-/// a blocked or late bead does, its reason in words one zoom in. A
-/// hold or a wait for someone else is not theirs to answer, so it
-/// never takes the accent.
-fn headcode_color(
-    working: bool,
-    remark: &str,
-    tone: &str,
-    held_by: &str,
-    me: &str,
-    palette: Palette,
-) -> Rgba {
-    if working {
-        palette.text
-    } else if is_held(remark) {
-        if held_by_you(held_by, me) {
-            palette.warn
-        } else {
-            palette.text
-        }
-    } else if tone == "red" {
-        palette.warn
-    } else if waits_on_you(remark, me) {
-        palette.text_accent
-    } else {
-        palette.text
-    }
-}
-
-/// What the Crew head says is unread in it: the number with "unread",
-/// or that none is. "Waiting" beside Crew would read as crew that
-/// waits, where it is mail that is not read.
-fn unread_words(unread: usize) -> String {
-    match unread {
-        0 => "none unread".to_string(),
-        unread => format!("{unread} unread"),
-    }
-}
-
-/// The open view, as the cheatsheet names its keys.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum KeysView {
-    Switcher,
-    Settings,
-    Conversation,
-    Card,
-    Yard,
-    Timetable,
-    Away,
-}
-
-impl KeysView {
-    /// The view in the cheatsheet's title.
-    fn name(self) -> &'static str {
-        match self {
-            KeysView::Switcher => "the switcher",
-            KeysView::Settings => "the settings",
-            KeysView::Conversation => "this conversation",
-            KeysView::Card => "this card",
-            KeysView::Yard => "the yard row",
-            KeysView::Timetable => "Lines",
-            KeysView::Away => "this screen",
-        }
-    }
-}
-
-/// Every key the open `view` answers to, each with what it does: the
-/// view's own keys first, then the window's, which answer everywhere.
-/// Named as the footers and the README name them. With the bead drawer
-/// open, the views it stands beside name esc shutting it.
-fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
-    let mut rows: Vec<(String, String)> = match view {
-        KeysView::Switcher => vec![
-            ("↑↓".into(), "move in the list".into()),
-            ("enter".into(), "opens the yard they are on".into()),
-            ("esc".into(), "leaves the list".into()),
-            ("+".into(), "adds a yard".into()),
-            ("?".into(), "this list".into()),
-        ],
-        KeysView::Settings => vec![("esc".into(), "back to what was open".into())],
-        KeysView::Conversation => vec![
-            ("enter".into(), "sends the draft as one mail".into()),
-            ("shift+enter".into(), "breaks the line".into()),
-            (
-                "tab · shift+tab".into(),
-                "the next, the previous row".into(),
-            ),
-            ("pageup · pagedown".into(), "scroll by a page".into()),
-            (
-                format!("{SECONDARY}+home · {SECONDARY}+end"),
-                "the oldest loaded, the newest".into(),
-            ),
-            (format!("{SECONDARY}+c"), "copies what is selected".into()),
-        ],
-        KeysView::Card => vec![
-            ("1–9".into(), "choose an option".into()),
-            ("↑↓".into(), "choose, even while words are typed".into()),
-            (
-                "enter".into(),
-                "sends the pick with the line's words".into(),
-            ),
-            ("shift+enter".into(), "breaks the line".into()),
-            ("i".into(), "types the words in".into()),
-            ("x".into(), "puts the ask aside".into()),
-            ("d".into(), "declines with words".into()),
-            ("a".into(), "asks about this".into()),
-            ("e".into(), "expands to the bead whole, or folds it".into()),
-            (
-                "/".into(),
-                "in decisions, the history with its filter typed in".into(),
-            ),
-            (
-                format!("{SECONDARY}+enter"),
-                "on a run or setup ask's card, approves it".into(),
-            ),
-            (
-                "esc".into(),
-                "leaves the decline, the words, the pick, then the words".into(),
-            ),
-            (
-                "tab · shift+tab".into(),
-                "the next, the previous row".into(),
-            ),
-            ("pageup · pagedown".into(), "scroll by a page".into()),
-            (
-                format!("{SECONDARY}+home · {SECONDARY}+end"),
-                "the oldest loaded, the newest".into(),
-            ),
-            ("?".into(), "this list".into()),
-        ],
-        KeysView::Yard => vec![
-            ("x".into(), "marks one notice read".into()),
-            ("shift+x".into(), "marks every notice read".into()),
-            (
-                "tab · shift+tab".into(),
-                "the next, the previous row".into(),
-            ),
-            ("pageup · pagedown".into(), "scroll by a page".into()),
-            (
-                format!("{SECONDARY}+home · {SECONDARY}+end"),
-                "the first notice, the newest".into(),
-            ),
-            ("?".into(), "this list".into()),
-        ],
-        KeysView::Timetable => vec![
-            (
-                "tab · shift+tab".into(),
-                "the next, the previous row".into(),
-            ),
-            ("pageup · pagedown".into(), "scroll by a page".into()),
-            ("?".into(), "this list".into()),
-        ],
-        KeysView::Away => vec![
-            (
-                "enter".into(),
-                "opens the details, where no fields stand open".into(),
-            ),
-            ("esc".into(), "leaves the way's fields".into()),
-        ],
-    };
-    // With the bead drawer open, esc shuts it: the views whose reading
-    // pane it stands beside name that key. A card's esc row says it with
-    // the decline, ahead of the card's own leavings; the switcher's esc
-    // leaves the list, the settings shut the drawer as they open, and
-    // the away screen stands in place of the reading pane it shuts from.
-    if drawer {
-        match view {
-            KeysView::Conversation | KeysView::Yard | KeysView::Timetable => {
-                rows.insert(0, ("esc".into(), "shuts the bead drawer".into()));
-            }
-            KeysView::Card => {
-                if let Some(esc) = rows.iter_mut().find(|(key, _)| key == "esc") {
-                    esc.1 = "leaves the decline and shuts the bead drawer, then the words, the pick, then the words".into();
-                }
-            }
-            KeysView::Switcher | KeysView::Settings | KeysView::Away => {}
-        }
-    }
-    // The window's keys, which answer in every view.
-    rows.extend([
-        (
-            format!("{SECONDARY}+[ · {SECONDARY}+]"),
-            "the modes back, forth".into(),
-        ),
-        (format!("{SECONDARY}+y"), "lists the yards".into()),
-        (
-            format!("{SECONDARY}+1–9"),
-            "opens the yard at that place".into(),
-        ),
-        (
-            format!("{SECONDARY}+,"),
-            "the settings, and what was open again".into(),
-        ),
-        (
-            format!("{SECONDARY}+= · {SECONDARY}+- · {SECONDARY}+0"),
-            "the text larger, smaller, the usual size".into(),
-        ),
-        (
-            format!("{SECONDARY}+shift+l"),
-            "the next of auto, light, dark".into(),
-        ),
-    ]);
-    rows
-}
-
-/// What an arrival's asks line says: how many questions the bead has
-/// open, which are the Decisions rows' job.
-fn ask_words(asks: usize) -> String {
-    match asks {
-        1 => "1 question, among your decisions".to_string(),
-        asks => format!("{asks} questions, among your decisions"),
-    }
-}
-
 /// A section's head in the left list: its title on the left, its count
 /// on the right, quiet. "Decisions" counts the open ones, "Crew" the
 /// mail that is not read.
@@ -1214,13 +707,6 @@ fn secret_keys(bead: &str, ask: u64, writable: bool) -> String {
         keys
     }
 }
-
-/// The key that approves a run ask, as its button and its keys name it.
-const APPROVE_KEY: &str = if cfg!(target_os = "macos") {
-    "\u{2318}\u{21b5}"
-} else {
-    "ctrl+enter"
-};
 
 /// What a run ask's card says over the command, while it can be approved:
 /// the words `yardr chat` has for it, led by the yard the command runs in
@@ -2281,17 +1767,6 @@ impl PartialEq for YardIdentity {
             }
             _ => false,
         }
-    }
-}
-
-/// How many things wait, in words: none where none do, one numbered
-/// with its single word, more with their many. What [`Counts::line`]
-/// and the rail's tooltips say.
-fn count_words(n: usize, one: &str, more: &str) -> Option<String> {
-    match n {
-        0 => None,
-        1 => Some(format!("1 {one}")),
-        n => Some(format!("{n} {more}")),
     }
 }
 
