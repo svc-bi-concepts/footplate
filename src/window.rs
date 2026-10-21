@@ -5826,14 +5826,16 @@ yardr.dev
         assert_eq!(yard.blobs_asked().len(), 2);
     }
 
-    #[gpui::test]
-    fn a_note_s_page_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
-        let yard = Yard::start();
-        a_yard_of_jo(&yard);
+    /// The window on `yard`, whose bead-a asks three, its note naming
+    /// the page `page`: the decision open, the bead read.
+    fn note_page_view<'a>(
+        yard: &Yard,
+        page: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
         yard.answer("UserAsks", &asks_three());
-        // The note names a page, which the yard is never asked for.
-        let page = "ab".repeat(32);
-        yard.answer("Bead", &bead_note_page(&page));
+        yard.answer("Bead", &bead_note_page(page));
         cx.update(|cx| {
             input::bind_keys(cx);
             bind_keys(cx);
@@ -5852,6 +5854,15 @@ yardr.dev
             })
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        (view, cx)
+    }
+
+    #[gpui::test]
+    fn a_note_s_page_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        // The note names a page, which the yard is never asked for.
+        let page = "ab".repeat(32);
+        let (view, cx) = note_page_view(&yard, &page, cx);
         // The view answers at its address: the row carries Open.
         let base = view_up();
         set_view(&view, cx, &base);
@@ -5878,28 +5889,8 @@ yardr.dev
     #[gpui::test]
     fn a_note_s_page_says_how_to_start_the_view_where_it_does_not_answer(cx: &mut TestAppContext) {
         let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        yard.answer("UserAsks", &asks_three());
         let page = "ab".repeat(32);
-        yard.answer("Bead", &bead_note_page(&page));
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
-        });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the decision", |cx| {
-            to_decisions(&view, cx);
-            view.read_with(cx, |v, _| {
-                v.model
-                    .as_ref()
-                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
-            })
-        });
-        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        let (view, cx) = note_page_view(&yard, &page, cx);
         // Nothing answers at the view's address: the row says how to
         // start it, instead of opening nowhere.
         set_view(&view, cx, &view_down());
@@ -7132,28 +7123,8 @@ yardr.dev
     #[gpui::test]
     fn a_note_s_page_carries_run_beside_open(cx: &mut TestAppContext) {
         let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        yard.answer("UserAsks", &asks_three());
         let page = "ab".repeat(32);
-        yard.answer("Bead", &bead_note_page(&page));
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
-        });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the decision", |cx| {
-            to_decisions(&view, cx);
-            view.read_with(cx, |v, _| {
-                v.model
-                    .as_ref()
-                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
-            })
-        });
-        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        let (view, cx) = note_page_view(&yard, &page, cx);
         // The view and the run base answer: the row carries Open and
         // run, and the yard is asked for none of the page's bytes.
         let base = view_up();
@@ -7185,28 +7156,8 @@ yardr.dev
     #[gpui::test]
     fn a_note_s_page_says_why_run_is_not_reached(cx: &mut TestAppContext) {
         let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        yard.answer("UserAsks", &asks_three());
         let page = "ab".repeat(32);
-        yard.answer("Bead", &bead_note_page(&page));
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
-        });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the decision", |cx| {
-            to_decisions(&view, cx);
-            view.read_with(cx, |v, _| {
-                v.model
-                    .as_ref()
-                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
-            })
-        });
-        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        let (view, cx) = note_page_view(&yard, &page, cx);
         // The view answers and the run base does not: the row carries
         // Open, with why run is not reached beside it.
         set_view(&view, cx, &view_up());
@@ -7702,13 +7653,12 @@ yardr.dev
         cx.run_until_parked();
     }
 
-    /// `/` opens the folded history with its filter typed in: what is typed
-    /// narrows its rows, and esc leaves the filter with what is typed
-    /// standing.
-    #[gpui::test]
-    fn slash_types_in_the_history_s_filter_and_narrows_its_rows(cx: &mut TestAppContext) {
-        let yard = Yard::start();
-        a_yard_of_jo(&yard);
+    /// The window on `yard`, with six decided on bead-d, once they show.
+    fn history_view<'a>(
+        yard: &Yard,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
         yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
         yard.answer("Bead", &bead_decided());
         cx.update(|cx| {
@@ -7725,6 +7675,16 @@ yardr.dev
                 v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
             })
         });
+        (view, cx)
+    }
+
+    /// `/` opens the folded history with its filter typed in: what is typed
+    /// narrows its rows, and esc leaves the filter with what is typed
+    /// standing.
+    #[gpui::test]
+    fn slash_types_in_the_history_s_filter_and_narrows_its_rows(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        let (view, cx) = history_view(&yard, cx);
         to_decisions(&view, cx);
         open_decided(&view, cx, "bead-d", 11);
         // Folded again, the card still open; esc leaves the line for the
@@ -7846,23 +7806,7 @@ yardr.dev
     #[gpui::test]
     fn a_chip_narrows_the_history_to_its_outcome(cx: &mut TestAppContext) {
         let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
-        yard.answer("Bead", &bead_decided());
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
-        });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the decided", |cx| {
-            view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
-            })
-        });
+        let (view, cx) = history_view(&yard, cx);
         to_decisions(&view, cx);
         open_decided(&view, cx, "bead-d", 11);
         assert!(drawn(cx, "decided head bead-d 11"));
@@ -7962,23 +7906,7 @@ yardr.dev
     #[gpui::test]
     fn a_long_decided_head_ends_before_the_bead_id_with_a_gap(cx: &mut TestAppContext) {
         let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        yard.answer("UserAsks", &asks_decided(1, "Switch to attention"));
-        yard.answer("Bead", &bead_decided());
-        cx.update(|cx| {
-            input::bind_keys(cx);
-            bind_keys(cx);
-        });
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
-            window.focus(&view.line.focus_handle(cx));
-            view
-        });
-        wait(cx, "the decided", |cx| {
-            view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| m.decided_count() == 6)
-            })
-        });
+        let (view, cx) = history_view(&yard, cx);
         // Ask 11's head is longer than the row; ask 15's is short. Both
         // rows end with the same id.
         open_decided(&view, cx, "bead-d", 11);
