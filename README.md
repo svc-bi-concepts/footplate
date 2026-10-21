@@ -291,6 +291,11 @@ queue on every `noted` event and once more at each put-aside ask's
 return, and a bead shown on every event whose bead it is. Mail and
 notices arriving never cover or move the open card.
 
+Those reads may answer out of the order they were made in: an answer older
+than one already applied of its kind is dropped. One that fails is made
+again 3 seconds later while the yard answers, until it does; a yard that is
+not reached is read whole when it is back.
+
 A stream says nothing while nothing happens, and so does one that a proxy
 or a tunnel holds open after the yard behind it went away. After a minute
 of silence the yard's head is asked beside the stream, on a connection of

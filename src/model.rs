@@ -799,6 +799,102 @@ pub enum Effect {
     Bead { bead: String },
 }
 
+/// A read of the yard made again and again, whose answer replaces what
+/// the model holds of it: the effect of that name. Reads of one kind may
+/// answer out of the order they were made in, since each is a connection
+/// of its own and `UserAsks` takes seconds on a large yard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Read {
+    Crew,
+    Peers,
+    Users,
+    Notifications,
+    Asks,
+    Arrivals,
+    Flows,
+}
+
+impl Read {
+    /// The effect that makes the read.
+    pub fn effect(self) -> Effect {
+        match self {
+            Read::Crew => Effect::Crew,
+            Read::Peers => Effect::Peers,
+            Read::Users => Effect::Users,
+            Read::Notifications => Effect::Notifications,
+            Read::Asks => Effect::Asks,
+            Read::Arrivals => Effect::Arrivals,
+            Read::Flows => Effect::Flows,
+        }
+    }
+}
+
+/// The reads of one following, each stamped when it is made: an answer is
+/// applied only when it is newer than the last of its kind applied, and
+/// than the state the model was read from. A read that failed is made
+/// again once, after a while, unless a newer one answered meanwhile.
+#[derive(Debug, Clone, Default)]
+pub struct Reads {
+    /// The last stamp given.
+    made: u64,
+    /// What was made up to this stamp is older than the state read last.
+    floor: u64,
+    /// The newest stamp applied, by kind.
+    applied: HashMap<Read, u64>,
+    /// The reads to make again, by kind, with the stamp of the one that
+    /// failed.
+    again: HashMap<Read, u64>,
+}
+
+impl Reads {
+    /// The stamp of a read made now.
+    pub fn make(&mut self) -> u64 {
+        self.made += 1;
+        self.made
+    }
+
+    /// Whether the answer of the read of `read` stamped `stamp` is to be
+    /// applied, which it is from here on.
+    pub fn fresh(&mut self, read: Read, stamp: u64) -> bool {
+        let applied = self.applied.entry(read).or_default();
+        if stamp <= self.floor || stamp <= *applied {
+            return false;
+        }
+        *applied = stamp;
+        true
+    }
+
+    /// The read of `read` stamped `stamp` failed: whether it is to be made
+    /// again after a while. Not where one is to be already, nor where a
+    /// newer one answered.
+    pub fn failed(&mut self, read: Read, stamp: u64) -> bool {
+        if stamp <= self.floor || self.applied.get(&read).is_some_and(|&a| a > stamp) {
+            return false;
+        }
+        if self.again.contains_key(&read) {
+            return false;
+        }
+        self.again.insert(read, stamp);
+        true
+    }
+
+    /// The while is up: whether the read that failed is still to be made
+    /// again, with nothing newer of its kind applied since.
+    pub fn again(&mut self, read: Read) -> bool {
+        let Some(stamp) = self.again.remove(&read) else {
+            return false;
+        };
+        stamp > self.floor && self.applied.get(&read).is_none_or(|&a| a < stamp)
+    }
+
+    /// The state was read again: every read made before is older than it,
+    /// and none that failed is made again.
+    fn restarted(&mut self) {
+        self.floor = self.made;
+        self.again.clear();
+    }
+}
+
 /// How many mails of a conversation the yard is asked for at once: the
 /// newest when it opens, and as many older each time its top is reached.
 pub const PAGE: u64 = 50;
@@ -983,6 +1079,8 @@ pub struct Model {
     /// is opened by what arrives, so nothing of it is seen or marked read
     /// until the window is back ([`Model::back_to`]).
     aside: bool,
+    /// The stamps of the reads made of the yard, and what they answered.
+    reads: Reads,
     /// What went wrong last, in words; empty when nothing.
     pub notice: String,
 }
@@ -1151,6 +1249,9 @@ impl Model {
         if m.bead_from.is_none() {
             m.bead_from = self.bead_from.clone();
         }
+        // A read made before the state was read again is older than it.
+        m.reads = self.reads.clone();
+        m.reads.restarted();
         // The timetable's news and when it was last looked at carry
         // over, and what changed meanwhile is caught up with.
         m.timetable_news = self.timetable_news.clone();
@@ -1177,6 +1278,11 @@ impl Model {
         m.notice_news(&self.notifications);
         effects.extend(m.ack());
         (m, effects)
+    }
+
+    /// The stamps of the reads made of the yard.
+    pub fn reads(&mut self) -> &mut Reads {
+        &mut self.reads
     }
 
     /// What arrived since the window last took it, oldest first.
@@ -10231,6 +10337,72 @@ mod tests {
         assert!(m.set_decided_filter(""));
         assert!(m.has_row(&Selected::Decided("yd-cal".into(), 2)));
         assert!(m.has_row(&Selected::Decided("yd-cal".into(), 3)));
+    }
+
+    /// Two reads of the queue answer out of the order they were made in:
+    /// the older answer, coming last, changes nothing, and so does one
+    /// made before the yard was read again. Each kind is its own.
+    #[test]
+    fn an_answer_older_than_one_applied_changes_nothing() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Decisions, None);
+        let ask = |bead: &str| Asks {
+            open: vec![open_ask(
+                bead,
+                "T",
+                "",
+                1,
+                "Q?",
+                "yardmaster",
+                "2026-10-08T09:30:00Z",
+            )],
+            decided: vec![],
+        };
+        let (older, newer) = (m.reads().make(), m.reads().make());
+        assert!(m.reads().fresh(Read::Asks, newer));
+        m.asks(ask("bead-new"));
+        assert!(!m.reads().fresh(Read::Asks, older));
+        assert_eq!(m.decisions_count(), 1);
+        assert_eq!(m.open[0].bead, "bead-new");
+        // A newer one still is applied; another kind keeps its own order.
+        let crew = m.reads().make();
+        assert!(m.reads().fresh(Read::Crew, crew));
+        let newest = m.reads().make();
+        assert!(m.reads().fresh(Read::Asks, newest));
+        assert!(!m.reads().fresh(Read::Crew, crew));
+
+        // Made before the yard was read again, answered after: older than
+        // the state read.
+        let before = m.reads().make();
+        let (mut m, _) = m.resumed(yard(&[]), Mode::Decisions);
+        assert!(!m.reads().fresh(Read::Flows, before));
+        let after = m.reads().make();
+        assert!(m.reads().fresh(Read::Flows, after));
+    }
+
+    /// A read that failed is made again once after a while: not twice for
+    /// two that failed, nor where a newer one answered meanwhile, nor
+    /// past the yard read again.
+    #[test]
+    fn a_failed_read_is_made_again_unless_a_newer_one_answered() {
+        let mut reads = Reads::default();
+        let (first, second) = (reads.make(), reads.make());
+        assert!(reads.failed(Read::Asks, first));
+        assert!(!reads.failed(Read::Asks, second), "one waits already");
+        assert!(reads.again(Read::Asks));
+        assert!(!reads.again(Read::Asks), "made again once");
+
+        let failed = reads.make();
+        assert!(reads.failed(Read::Asks, failed));
+        let newer = reads.make();
+        assert!(reads.fresh(Read::Asks, newer));
+        assert!(!reads.again(Read::Asks), "a newer one answered");
+        // One that fails after a newer answered is not made again either.
+        assert!(!reads.failed(Read::Asks, failed));
+
+        let failed = reads.make();
+        assert!(reads.failed(Read::Users, failed));
+        reads.restarted();
+        assert!(!reads.again(Read::Users), "the yard was read again");
     }
 
     #[test]

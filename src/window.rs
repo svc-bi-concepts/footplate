@@ -24,8 +24,8 @@ use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{
     self, AnswerAction, ArrivalDetail, AskPreview, DecidedDetail, DecidedEntry, DecidedFold,
     DecidedRow, DecisionAsk, DecisionDetail, DecisionRow, Effect, Entry, Kind, Mode, Model, News,
-    Outcome, Route, Row, Selected, Target, Top, backlog_count, held_by_you, is_held, short_bead,
-    stage_age, waits_on_you, you_first,
+    Outcome, Read, Route, Row, Selected, Target, Top, backlog_count, held_by_you, is_held,
+    short_bead, stage_age, waits_on_you, you_first,
 };
 use crate::notify::{self, Burst, Permission};
 use crate::select::{self, Selection};
@@ -5486,6 +5486,73 @@ impl Footplate {
         .detach();
     }
 
+    /// The stamp of a read made now of the yard of the following
+    /// `session`.
+    fn stamp_in(&mut self, session: u64) -> u64 {
+        self.model_in(session).map_or(0, |m| m.reads().make())
+    }
+
+    /// Changes the model of the following `session` as `f` does with the
+    /// answer of the read of `read` stamped `stamp`, where that answer is
+    /// newer than what the model holds of it: whether it was. An older one
+    /// that answered later says nothing the model does not have.
+    fn fresh_in(
+        &mut self,
+        session: u64,
+        read: Read,
+        stamp: u64,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Model) -> Vec<Effect>,
+    ) -> bool {
+        let fresh = self
+            .model_in(session)
+            .is_some_and(|m| m.reads().fresh(read, stamp));
+        if fresh {
+            self.change_in(session, cx, f);
+        }
+        fresh
+    }
+
+    /// The read of `read` stamped `stamp` failed, in the yard of the
+    /// following `session`: it is made again after [`session::RETRY`],
+    /// while the yard is up, unless a newer one answered by then. A yard
+    /// that is down is its follower's: what it reads when it is up again
+    /// has all of it.
+    fn read_failed_in(&mut self, session: u64, read: Read, stamp: u64, cx: &mut Context<Self>) {
+        if !self
+            .model_in(session)
+            .is_some_and(|m| m.reads().failed(read, stamp))
+        {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(session::RETRY).await;
+            this.update(cx, |this, cx| {
+                let up = this.up_in(session);
+                let again = this
+                    .model_in(session)
+                    .is_some_and(|m| m.reads().again(read));
+                if again && up {
+                    this.run_in(session, vec![read.effect()], cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the yard of the following `session` answers, as its
+    /// follower last said.
+    fn up_in(&self, session: u64) -> bool {
+        if session == self.session {
+            return self.down.is_none();
+        }
+        self.held
+            .values()
+            .find(|h| h.session == session)
+            .is_some_and(|h| h.down.is_none())
+    }
+
     /// Says `notice` in the yard of the following `session`: at once in
     /// the open one, and in one that is held when the window shows it.
     fn notice_in(&mut self, session: u64, notice: String, cx: &mut Context<Self>) {
@@ -5583,61 +5650,97 @@ impl Footplate {
                         })
                     },
                 ),
-                Effect::Crew => self.ask_in(
-                    session,
-                    cx,
-                    |client, _| Ok::<_, api::Error>((client.head()?, client.crew()?)),
-                    move |this, crew, cx| match crew {
-                        Ok((head, crew)) => this.change_in(session, cx, |m| m.listed(head, crew)),
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the crew could not be read: {err}"),
-                            cx,
-                        ),
-                    },
-                ),
-                Effect::Peers => self.ask_in(
-                    session,
-                    cx,
-                    |client, _| client.peers(),
-                    move |this, peers, cx| match peers {
-                        Ok(peers) => this.change_in(session, cx, |m| m.linked(&peers)),
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the linked yards could not be read: {err}"),
-                            cx,
-                        ),
-                    },
-                ),
-                Effect::Users => self.ask_in(
-                    session,
-                    cx,
-                    |client, _| client.users(),
-                    move |this, users, cx| match users {
-                        Ok(users) => this.change_in(session, cx, |m| m.users(users)),
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the users could not be read: {err}"),
-                            cx,
-                        ),
-                    },
-                ),
-                Effect::Notifications => self.ask_in(
-                    session,
-                    cx,
-                    |client, me| client.user_notifications(me, 0),
-                    move |this, notifications, cx| match notifications {
-                        Ok(notifications) => this.change_in(session, cx, |m| {
-                            m.notifications(notifications.notifications);
-                            Vec::new()
-                        }),
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the notices could not be read: {err}"),
-                            cx,
-                        ),
-                    },
-                ),
+                Effect::Crew => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| Ok::<_, api::Error>((client.head()?, client.crew()?)),
+                        move |this, crew, cx| match crew {
+                            Ok((head, crew)) => {
+                                this.fresh_in(session, Read::Crew, stamp, cx, |m| {
+                                    m.listed(head, crew)
+                                });
+                            }
+                            Err(err) => {
+                                this.notice_in(
+                                    session,
+                                    format!("the crew could not be read: {err}"),
+                                    cx,
+                                );
+                                this.read_failed_in(session, Read::Crew, stamp, cx);
+                            }
+                        },
+                    )
+                }
+                Effect::Peers => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.peers(),
+                        move |this, peers, cx| match peers {
+                            Ok(peers) => {
+                                this.fresh_in(session, Read::Peers, stamp, cx, |m| {
+                                    m.linked(&peers)
+                                });
+                            }
+                            Err(err) => {
+                                this.notice_in(
+                                    session,
+                                    format!("the linked yards could not be read: {err}"),
+                                    cx,
+                                );
+                                this.read_failed_in(session, Read::Peers, stamp, cx);
+                            }
+                        },
+                    )
+                }
+                Effect::Users => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.users(),
+                        move |this, users, cx| match users {
+                            Ok(users) => {
+                                this.fresh_in(session, Read::Users, stamp, cx, |m| m.users(users));
+                            }
+                            Err(err) => {
+                                this.notice_in(
+                                    session,
+                                    format!("the users could not be read: {err}"),
+                                    cx,
+                                );
+                                this.read_failed_in(session, Read::Users, stamp, cx);
+                            }
+                        },
+                    )
+                }
+                Effect::Notifications => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, me| client.user_notifications(me, 0),
+                        move |this, notifications, cx| match notifications {
+                            Ok(notifications) => {
+                                this.fresh_in(session, Read::Notifications, stamp, cx, |m| {
+                                    m.notifications(notifications.notifications);
+                                    Vec::new()
+                                });
+                            }
+                            Err(err) => {
+                                this.notice_in(
+                                    session,
+                                    format!("the notices could not be read: {err}"),
+                                    cx,
+                                );
+                                this.read_failed_in(session, Read::Notifications, stamp, cx);
+                            }
+                        },
+                    )
+                }
                 Effect::AckNotifications { through } => self.ask_in(
                     session,
                     cx,
@@ -5652,30 +5755,51 @@ impl Footplate {
                         })
                     },
                 ),
-                Effect::Arrivals => self.ask_in(
-                    session,
-                    cx,
-                    |client, _| client.arrivals(),
-                    move |this, arrivals, cx| match arrivals {
-                        Ok(board) => this.change_in(session, cx, |m| {
-                            m.arrivals(board);
-                            Vec::new()
-                        }),
-                        Err(err) => this.change_in(session, cx, |m| {
-                            m.arrivals_failed(&err);
-                            Vec::new()
-                        }),
-                    },
-                ),
-                Effect::Flows => self.ask_in(
-                    session,
-                    cx,
-                    |client, _| client.flows(),
-                    move |this, flows, cx| match flows {
-                        Ok(board) => this.change_in(session, cx, |m| m.flows(board)),
-                        Err(err) => this.change_in(session, cx, |m| m.flows_failed(&err)),
-                    },
-                ),
+                // A yard too old for the Lines has no call to make again.
+                Effect::Arrivals => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.arrivals(),
+                        move |this, arrivals, cx| match arrivals {
+                            Ok(board) => {
+                                this.fresh_in(session, Read::Arrivals, stamp, cx, |m| {
+                                    m.arrivals(board);
+                                    Vec::new()
+                                });
+                            }
+                            Err(err) => {
+                                this.change_in(session, cx, |m| {
+                                    m.arrivals_failed(&err);
+                                    Vec::new()
+                                });
+                                if !model::lines_too_old(&err) {
+                                    this.read_failed_in(session, Read::Arrivals, stamp, cx);
+                                }
+                            }
+                        },
+                    )
+                }
+                Effect::Flows => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.flows(),
+                        move |this, flows, cx| match flows {
+                            Ok(board) => {
+                                this.fresh_in(session, Read::Flows, stamp, cx, |m| m.flows(board));
+                            }
+                            Err(err) => {
+                                this.change_in(session, cx, |m| m.flows_failed(&err));
+                                if !model::lines_too_old(&err) {
+                                    this.read_failed_in(session, Read::Flows, stamp, cx);
+                                }
+                            }
+                        },
+                    )
+                }
                 Effect::Timetable { from, until } => self.ask_in(
                     session,
                     cx,
@@ -5692,22 +5816,29 @@ impl Footplate {
                         ),
                     },
                 ),
-                Effect::Asks => self.ask_in(
-                    session,
-                    cx,
-                    |client, me| client.user_asks(me),
-                    move |this, asks, cx| match asks {
-                        Ok(asks) => {
-                            this.change_in(session, cx, |m| m.asks(asks));
-                            this.schedule_return_in(session, cx);
-                        }
-                        Err(err) => this.notice_in(
-                            session,
-                            format!("the decisions could not be read: {err}"),
-                            cx,
-                        ),
-                    },
-                ),
+                Effect::Asks => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, me| client.user_asks(me),
+                        move |this, asks, cx| match asks {
+                            Ok(asks) => {
+                                if this.fresh_in(session, Read::Asks, stamp, cx, |m| m.asks(asks)) {
+                                    this.schedule_return_in(session, cx);
+                                }
+                            }
+                            Err(err) => {
+                                this.notice_in(
+                                    session,
+                                    format!("the decisions could not be read: {err}"),
+                                    cx,
+                                );
+                                this.read_failed_in(session, Read::Asks, stamp, cx);
+                            }
+                        },
+                    )
+                }
                 Effect::Bead { bead } => self.ask_in(
                     session,
                     cx,
@@ -30503,6 +30634,62 @@ yardr.dev
         assert_eq!(open_yard(&view, cx), "this machine");
         // This machine's stream, quiet with its yard, was read on.
         assert_eq!(near.streams_asked(), vec![20]);
+    }
+
+    /// The reload of the decisions a noted event makes in a yard that is
+    /// not open fails: it is made again after a while, and the switcher
+    /// counts the ask then, with no restart and no event more.
+    #[gpui::test]
+    fn a_reload_of_the_decisions_that_fails_is_made_again(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        second.answer("Bead", &bead_run());
+        let file = two_yards(dir.path(), &second);
+        let (view, cx) = watched(&near, &file, session::WATCH, cx);
+        wait(cx, "what waits in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        wait(cx, "the second home's stream", |_| {
+            second.streams_asked().len() == 1
+        });
+
+        // The ask is raised, and the read its event makes fails.
+        let asked = second.asked("UserAsks").len();
+        second.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+        );
+        second.answer_once_status("UserAsks", 500, "{}");
+        second.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "bead-s", "data": {"note": 7}, "at": "2026-10-08T09:31:00Z"}"#);
+        let notice = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                v.held["second home"]
+                    .model
+                    .as_ref()
+                    .map(|m| m.notice.clone())
+                    .unwrap_or_default()
+            })
+        };
+        wait(cx, "the read that failed", |cx| {
+            notice(cx).starts_with("the decisions could not be read")
+        });
+        assert_eq!(second.asked("UserAsks").len(), asked + 1);
+        assert_eq!(state_of(&view, cx, "second home"), "2 mail");
+
+        // After a while it is made again, and answers.
+        cx.executor().advance_clock(session::RETRY);
+        wait(cx, "the run ask counted in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail, 1 decision"
+        });
+        assert_eq!(second.asked("UserAsks").len(), asked + 2);
+        // Once: a read that answered is not made again.
+        cx.executor().advance_clock(session::RETRY + session::RETRY);
+        cx.run_until_parked();
+        assert_eq!(second.asked("UserAsks").len(), asked + 2);
+        assert_eq!(second.streams_asked().len(), 1);
     }
 
     fn a_far_yard_of_jo(yard: &Yard) {
