@@ -5903,6 +5903,36 @@ impl Footplate {
                         }),
                     },
                 ),
+                // The ids go one after another on one thread, a connection
+                // at a time: a long mail names many. The first the yard
+                // does not answer ends the batch, since a yard that fails
+                // one fails the rest, each after its own wait.
+                Effect::Beads { beads } => {
+                    let asked = beads.clone();
+                    self.ask_in(
+                        session,
+                        cx,
+                        move |client, _| {
+                            let mut answers = Vec::new();
+                            for bead in beads {
+                                let answer = client.bead(&bead).map(|found| found.id);
+                                let answered =
+                                    matches!(answer, Ok(_) | Err(api::Error::Refused { .. }));
+                                answers.push((bead, answer));
+                                if !answered {
+                                    break;
+                                }
+                            }
+                            answers
+                        },
+                        move |this, answers, cx| {
+                            this.change_in(session, cx, |m| {
+                                m.beads_looked(&asked, answers);
+                                Vec::new()
+                            })
+                        },
+                    )
+                }
             }
         }
     }
@@ -19613,6 +19643,119 @@ mod tests {
         assert!(drawn(cx, "bead title bead-a"));
     }
 
+    /// A bead that closed is in no list the window reads. Mail that names
+    /// it chips all the same, from what the yard says when asked for its
+    /// id: once, whatever is drawn after. The chip opens the bead in the
+    /// drawer, which the queue read again leaves open. A dash word that is
+    /// no bead stays plain.
+    #[gpui::test]
+    fn a_closed_bead_named_in_mail_chips_and_opens_and_a_plain_word_does_not(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer_for("Bead", "bead", "footplate-zgtr", &bead_closed());
+        yard.answer_for(
+            "Bead",
+            "bead",
+            "re-ask",
+            r#"{"error": {"code": "not-found", "message": "bead re-ask: not found"}}"#,
+        );
+        let mail = "footplate-zgtr merged, and a re-ask stands plain";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        // The window asks for both ids, in one go, and the closed bead
+        // alone chips.
+        wait(cx, "the closed bead's chip", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().entries()[0].refs.len() == 1
+            })
+        });
+        let asked = [json!({"bead": "footplate-zgtr"}), json!({"bead": "re-ask"})];
+        assert_eq!(yard.asked("Bead"), asked);
+
+        // Nothing drawn asks again: the frames, the pointer on the mail,
+        // a resize.
+        frames(cx);
+        hover_on(cx, "text 12");
+        cx.simulate_resize(gpui::size(px(1100.), px(700.)));
+        frames(cx);
+        assert_eq!(yard.asked("Bead"), asked);
+
+        // A click on the plain word opens nothing.
+        let plain = mail.find("re-ask").unwrap() + 2;
+        click(cx, 12, mail, plain, 1.);
+        assert_eq!(drawer_of(&view, cx), None);
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+
+        // A click on the chip opens the bead, which is read for the drawer.
+        click(cx, 12, mail, 5, 1.);
+        assert_eq!(drawer_of(&view, cx), Some("footplate-zgtr".to_string()));
+        wait(cx, "footplate-zgtr read whole", |cx| {
+            has_bead(&view, cx, "footplate-zgtr")
+        });
+        assert!(drawn(cx, "bead title footplate-zgtr"));
+        assert_eq!(
+            yard.asked("Bead").last(),
+            Some(&json!({"bead": "footplate-zgtr"}))
+        );
+        assert_eq!(yard.asked("Bead").len(), 3);
+
+        // The queue read again holds none of it, and the drawer keeps it.
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| m.asks(crate::api::Asks::default()))
+        });
+        frames(cx);
+        assert!(has_bead(&view, cx, "footplate-zgtr"));
+        assert_eq!(drawer_of(&view, cx), Some("footplate-zgtr".to_string()));
+    }
+
+    /// A yard that does not answer is asked no more of the batch: each call
+    /// would wait its own while the yard is away. What got no answer says
+    /// nothing of its id, which mail that comes into view asks again, and
+    /// the chip is there once the yard answers.
+    #[gpui::test]
+    fn a_batch_the_yard_does_not_answer_ends_at_its_first_id_and_is_asked_again_with_mail(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer_nothing("Bead");
+        let mail = "footplate-zgtr merged, and footplate-b8g9 too";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+
+        // The first id is asked and gets nothing; the second is not asked.
+        wait(cx, "the first id asked", |_| !yard.asked("Bead").is_empty());
+        thread::sleep(Duration::from_millis(100));
+        frames(cx);
+        assert_eq!(yard.asked("Bead"), [json!({"bead": "footplate-zgtr"})]);
+        let chips = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries()[0].refs.len())
+        };
+        assert_eq!(chips(&view, cx), 0);
+
+        // The yard answers again, and mail that comes into view asks for
+        // both. It has footplate-zgtr and no other.
+        yard.answer("Bead", &bead_closed());
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "to_user": true, "text": "footplate-zgtr again"}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "the closed bead's chip", |cx| chips(&view, cx) == 1);
+        assert_eq!(
+            yard.asked("Bead"),
+            [
+                json!({"bead": "footplate-zgtr"}),
+                json!({"bead": "footplate-zgtr"}),
+                json!({"bead": "footplate-b8g9"}),
+            ]
+        );
+    }
+
     /// The bead the drawer shows, if one is open there.
     fn drawer_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
         view.read_with(cx, |v, _| v.drawer.clone())
@@ -21095,6 +21238,20 @@ yardr.dev
     /// One arrival's bead whole, as the Bead call answers it: the body,
     /// the stage, two labels, two notes, and three asks, two of them
     /// open.
+    /// A bead that merged: the yard serves it whole, and no list of the
+    /// window has it.
+    fn bead_closed() -> String {
+        json!({"result": {
+            "id": "footplate-zgtr", "title": "What is typed goes to the crew member",
+            "body": "Landed on main.",
+            "stage": "merged", "labels": [],
+            "notes": [{"seq": 4, "kind": "note", "author": "yardmaster",
+                       "text": "merged", "at": "2026-10-10T09:30:00Z"}],
+            "asks": []
+        }})
+        .to_string()
+    }
+
     fn bead_zulu() -> String {
         json!({"result": {
             "id": "yd-zulu", "title": "Zulu's late turn",

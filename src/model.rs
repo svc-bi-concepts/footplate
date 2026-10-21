@@ -797,6 +797,10 @@ pub enum Effect {
     /// `Bead` with `bead`; answered to [`Model::bead_loaded`] or
     /// [`Model::bead_failed`].
     Bead { bead: String },
+    /// `Bead` with each of `beads`, one after another, to learn which are
+    /// beads of the yard: ids mail names that no list the window reads
+    /// holds, as a closed bead's is; answered to [`Model::beads_looked`].
+    Beads { beads: Vec<String> },
 }
 
 /// A read of the yard made again and again, whose answer replaces what
@@ -1053,6 +1057,17 @@ pub struct Model {
     /// One bead whole, by id, as the cards show it: read when a decision
     /// row opens, and again on every event whose bead is one shown.
     beads: HashMap<String, Bead>,
+    /// The ids mail names that look like a bead's, and whether each is one:
+    /// as the yard said when asked, or because a list the window reads
+    /// held it when mail named it. A bead that closed falls out of every
+    /// list, and its id in mail chips by this; no id is asked twice.
+    looked: HashMap<String, bool>,
+    /// The ids asked about and not answered yet.
+    looking: HashSet<String>,
+    /// The bead the drawer was opened on last. The queue read again keeps
+    /// it read, as it keeps the open travelling bead: it is none of the
+    /// queue's, and a closed bead never is.
+    drawn: Option<String>,
     /// The option chosen with a number key or the arrows, by bead and ask.
     chosen: HashMap<(String, u64), u64>,
     /// The asks whose card stands expanded, by bead and ask.
@@ -1258,6 +1273,9 @@ impl Model {
         // A read made before the state was read again is older than it.
         m.reads = self.reads.clone();
         m.reads.restarted();
+        // What the yard said of the ids mail names stays true: asking
+        // them again for every reconnection would make a call each.
+        m.looked = self.looked.clone();
         // The timetable's news and when it was last looked at carry
         // over, and what changed meanwhile is caught up with.
         m.timetable_news = self.timetable_news.clone();
@@ -3359,8 +3377,10 @@ impl Model {
     }
 
     /// The beads an id named in mail opens as: the open and dealt-with
-    /// asks' beads, the travelling beads, and the beads read whole. Only
-    /// these chip: any other id stays plain text, as `re-ask` does.
+    /// asks' beads, the travelling beads, the beads read whole, and those
+    /// the yard said it has when mail named them ([`Model::lookups`]), a
+    /// closed bead among them. Only these chip: any other id stays plain
+    /// text, as `re-ask` does.
     fn known_beads(&self) -> HashSet<String> {
         let mut known = HashSet::new();
         known.extend(self.open.iter().map(|a| a.bead.clone()));
@@ -3376,7 +3396,78 @@ impl Model {
         }
         known.extend(self.flows.unassigned.iter().map(|b| b.bead.clone()));
         known.extend(self.beads.keys().cloned());
+        known.extend(
+            self.looked
+                .iter()
+                .filter(|(_, bead)| **bead)
+                .map(|(id, _)| id.clone()),
+        );
         known
+    }
+
+    /// Asks the yard which of the ids the open row's mail names are beads,
+    /// of those no list the window reads holds: a bead that closed falls
+    /// out of every list, and its id in old mail would stand plain. All in
+    /// one effect, each id once: the mail is drawn at every frame and the
+    /// drawing asks nothing, only mail that comes into view does. An id a
+    /// list holds is no question, and stays a bead after it leaves the
+    /// list. A `@` id is none to ask: a question another yard asked is in
+    /// the lists.
+    fn lookups(&mut self) -> Vec<Effect> {
+        let Some(sel @ (Selected::Conversation(_) | Selected::Yard)) = self.selected.clone() else {
+            return Vec::new();
+        };
+        if self.aside {
+            return Vec::new();
+        }
+        let known = self.known_beads();
+        let mut held = Vec::new();
+        let mut wanted: Vec<String> = Vec::new();
+        for letter in self.letters(&sel) {
+            for id in named_beads(&plain(&letter.text)) {
+                if let Some(bead) = self.resolve_bead(&known, &id) {
+                    held.push(bead);
+                } else if !id.contains('@')
+                    && !self.looked.contains_key(&id)
+                    && !self.looking.contains(&id)
+                    && !wanted.contains(&id)
+                {
+                    wanted.push(id);
+                }
+            }
+        }
+        self.looked
+            .extend(held.into_iter().map(|bead| (bead, true)));
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        self.looking.extend(wanted.iter().cloned());
+        vec![Effect::Beads { beads: wanted }]
+    }
+
+    /// What the yard said of the ids [`Effect::Beads`] asked about: those
+    /// it has, under the very id, are beads; those it refused, and those
+    /// it took for a longer id or a UUID, are none. What it did not answer
+    /// is asked again when mail next comes into view.
+    pub fn beads_looked(
+        &mut self,
+        asked: &[String],
+        answers: Vec<(String, Result<String, api::Error>)>,
+    ) {
+        for id in asked {
+            self.looking.remove(id);
+        }
+        for (id, answer) in answers {
+            match answer {
+                Ok(found) => {
+                    self.looked.insert(id.clone(), found == id);
+                }
+                Err(api::Error::Refused { .. }) => {
+                    self.looked.insert(id, false);
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     /// The bead `id` opens as, when footplate knows it: itself, or the
@@ -3815,6 +3906,7 @@ impl Model {
                     .map(|from| self.read(from))
                     .collect();
                 effects.extend(self.ack());
+                effects.extend(self.lookups());
                 effects
             }
             // The yard row has no top to reach among its notices: the mail
@@ -3827,6 +3919,7 @@ impl Model {
                     .map(|name| Effect::Read { name, after: 0 })
                     .collect();
                 effects.extend(self.ack());
+                effects.extend(self.lookups());
                 effects
             }
             Some(Selected::Decision(bead))
@@ -3861,6 +3954,7 @@ impl Model {
     /// Reads the bead whole when it was not read before: what the
     /// drawer opens with, without selecting it, as opening the row does.
     pub fn read_bead(&mut self, bead: &str) -> Vec<Effect> {
+        self.drawn = Some(bead.to_string());
         if self.beads.contains_key(bead) {
             Vec::new()
         } else {
@@ -3939,6 +4033,11 @@ impl Model {
         }
     }
 
+    /// How many mails the window holds, of every conversation.
+    fn letters_held(&self) -> usize {
+        self.convo.values().map(Vec::len).sum()
+    }
+
     /// Puts `l` into the conversation with `name`, in order. A mail it has
     /// already (the stream and the yard both tell of each) only gains what
     /// `l` knows more: that it was read, its reactions, or where it stands.
@@ -3970,7 +4069,9 @@ impl Model {
             self.add(name, l, true);
         }
         self.see();
-        self.ack()
+        let mut effects = self.ack();
+        effects.extend(self.lookups());
+        effects
     }
 
     /// A page of the conversation with `name` as the yard answered it, and
@@ -4138,7 +4239,16 @@ impl Model {
             effects.push(Effect::Notifications);
         }
         effects.extend(match e.kind.as_str() {
-            "mail" => self.mail(e),
+            "mail" => {
+                let held = self.letters_held();
+                let mut arrived = self.mail(e);
+                // The stream tells of the yard's other mail too, and of
+                // what it told before: those add nothing to ask about.
+                if self.letters_held() > held {
+                    arrived.extend(self.lookups());
+                }
+                arrived
+            }
             "mail_read" => {
                 let (reader, through) = (e.text("reader"), e.number("through"));
                 if reader == self.me {
@@ -4520,10 +4630,12 @@ impl Model {
             keep.insert(bead.clone());
         }
         // The open travelling bead is none of the queue's, and stays
-        // what the details show.
+        // what the details show. So does the drawer's, a closed bead
+        // among them.
         if let Some(Selected::Bead(bead)) = self.selected.as_ref() {
             keep.insert(bead.clone());
         }
+        keep.extend(self.drawn.iter().cloned());
         self.beads.retain(|bead, _| keep.contains(bead));
         self.chosen.retain(|(bead, _), _| keep.contains(bead));
         self.expanded.retain(|(bead, _)| keep.contains(bead));
@@ -4631,6 +4743,19 @@ pub fn plain(text: &str) -> String {
             '\u{2028}' | '\u{2029}' => None,
             c if c.is_control() => None,
             c => Some(c),
+        })
+        .collect()
+}
+
+/// The bead ids a text names, as its chips find them: an id alone, or the
+/// bead an ask is named on. Each as often as it stands.
+fn named_beads(text: &str) -> Vec<String> {
+    markdown::blocks(text)
+        .iter()
+        .flat_map(|block| select::refs(&block.text))
+        .filter_map(|found| match found.kind {
+            select::RefKind::Bead(bead) | select::RefKind::AskOn { bead, .. } => Some(bead),
+            select::RefKind::Ask(_) => None,
         })
         .collect()
 }
@@ -7335,6 +7460,259 @@ mod tests {
             )],
         );
         assert!(m.entries()[0].refs.is_empty());
+    }
+
+    /// A yard with yd-zulu travelling and the yardmaster's conversation
+    /// open and read, to which mail is added with [`lookup_mail`].
+    fn lookup_model() -> Model {
+        let mut state = yard(&[]);
+        state.arrivals = board(vec![arrival(
+            "yd-zulu", "new", "yardr", "5h–8h", "late", "amber",
+        )]);
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        m.select(Selected::Conversation("yardmaster".into()));
+        m.conversation("yardmaster", vec![]);
+        m
+    }
+
+    /// The yardmaster's mail `seq` to jo, which comes into view, and what
+    /// the yard is asked for by it.
+    fn lookup_mail(m: &mut Model, seq: u64, text: &str) -> Vec<Effect> {
+        m.conversation(
+            "yardmaster",
+            vec![letter_at(
+                seq,
+                "yardmaster",
+                "jo",
+                "2026-10-08T09:30:00Z",
+                text,
+            )],
+        )
+    }
+
+    fn asking(beads: &[&str]) -> Effect {
+        Effect::Beads {
+            beads: beads.iter().map(|id| id.to_string()).collect(),
+        }
+    }
+
+    /// What the yard answers to a `Bead` call for an id it has none of.
+    fn no_such_bead(id: &str) -> (String, Result<String, api::Error>) {
+        let refused = api::Error::Refused {
+            code: api::NOT_FOUND.into(),
+            message: format!("bead {id}: not found"),
+        };
+        (id.to_string(), Err(refused))
+    }
+
+    /// The ids mail names that no list holds are asked of the yard in one
+    /// effect, each once: not the ones a list holds, nor those of another
+    /// yard, and not again while the answer is awaited.
+    #[test]
+    fn the_ids_no_list_holds_are_asked_of_the_yard_once_in_one_effect() {
+        let mut m = lookup_model();
+        let effects = lookup_mail(
+            &mut m,
+            12,
+            "footplate-zgtr merged, yd-zulu travels, re-ask 4 and yardr-e9f0@north stand apart, footplate-zgtr again.",
+        );
+        // In the order they stand. The travelling bead is a list's, and
+        // the other yard's is an ask's.
+        assert_eq!(effects, [asking(&["footplate-zgtr", "re-ask"])]);
+
+        // Mail that names them while they are awaited asks for them no
+        // more, and for what is new alone.
+        let effects = lookup_mail(&mut m, 13, "footplate-zgtr and re-ask, and built-in too");
+        assert_eq!(effects, [asking(&["built-in"])]);
+        assert_eq!(lookup_mail(&mut m, 14, "built-in"), []);
+    }
+
+    #[test]
+    fn a_closed_bead_chips_once_the_yard_has_it_and_the_words_it_refused_stay_plain() {
+        let mut m = lookup_model();
+        let said = "footplate-zgtr merged, a re-ask stands plain, and footplate-zg is no id.";
+        let effects = lookup_mail(&mut m, 12, said);
+        let asked = ["footplate-zgtr", "re-ask", "footplate-zg"];
+        assert_eq!(effects, [asking(&asked)]);
+        // Before the yard answers, none of them chips.
+        assert!(m.entries()[0].refs.is_empty());
+
+        // The yard has footplate-zgtr under that very id, none of re-ask,
+        // and takes footplate-zg for the longer id it is the start of.
+        m.beads_looked(
+            &asked.map(String::from),
+            vec![
+                ("footplate-zgtr".into(), Ok("footplate-zgtr".into())),
+                no_such_bead("re-ask"),
+                ("footplate-zg".into(), Ok("footplate-zgtr".into())),
+            ],
+        );
+        let entries = m.entries();
+        assert_eq!(entries[0].refs.len(), 1);
+        assert_eq!(
+            entries[0].refs[0].target,
+            select::RefTarget::Bead {
+                bead: "footplate-zgtr".into()
+            }
+        );
+        assert_eq!(&said[entries[0].refs[0].range.clone()], "footplate-zgtr");
+
+        // What the yard said stands: neither mail that names the ids
+        // again nor a row opened again asks it a second time.
+        assert_eq!(lookup_mail(&mut m, 13, said), []);
+        m.select(Selected::Yard);
+        assert_eq!(m.select(Selected::Conversation("yardmaster".into())), []);
+    }
+
+    /// A refusal is the yard's word on the id, whatever its code. A call
+    /// that got no answer says nothing of it, so mail that comes into view
+    /// asks again: the stream's, or a row opened.
+    #[test]
+    fn an_id_the_yard_did_not_answer_is_asked_again_with_the_next_mail() {
+        let mut m = lookup_model();
+        let effects = lookup_mail(&mut m, 12, "the ids x-yz12 and built-in");
+        assert_eq!(effects, [asking(&["x-yz12", "built-in"])]);
+        let down = api::Error::Down(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        let refused = api::Error::Refused {
+            code: "error".into(),
+            message: "bead built-in: give at least 4 characters after \"built-\"".into(),
+        };
+        m.beads_looked(
+            &["x-yz12".to_string(), "built-in".to_string()],
+            vec![
+                ("x-yz12".into(), Err(down)),
+                ("built-in".into(), Err(refused)),
+            ],
+        );
+        let effects = m.event(&event(
+            21,
+            "mail",
+            "yardmaster",
+            json!({"to": "jo", "to_user": true, "text": "x-yz12 again"}),
+        ));
+        assert!(effects.contains(&asking(&["x-yz12"])), "{effects:?}");
+        // Opening the row asks as well.
+        m.beads_looked(&["x-yz12".to_string()], vec![]);
+        m.select(Selected::Yard);
+        assert_eq!(
+            m.select(Selected::Conversation("yardmaster".into())),
+            [asking(&["x-yz12"])]
+        );
+    }
+
+    /// A bead a list held when mail named it stays a chip once it closes
+    /// and falls out of the list, and no call asks for it.
+    #[test]
+    fn a_bead_a_list_held_when_mail_named_it_chips_after_it_closes() {
+        let mut m = lookup_model();
+        assert_eq!(lookup_mail(&mut m, 12, "yd-zulu waits"), []);
+        let chip = |m: &Model| {
+            m.entries()[0]
+                .refs
+                .iter()
+                .map(|found| found.target.clone())
+                .collect::<Vec<_>>()
+        };
+        let zulu = select::RefTarget::Bead {
+            bead: "yd-zulu".into(),
+        };
+        assert_eq!(chip(&m), std::slice::from_ref(&zulu));
+
+        // It closes, and the board has it no more.
+        m.arrivals(board(vec![]));
+        assert_eq!(chip(&m), [zulu]);
+        assert_eq!(lookup_mail(&mut m, 13, "and yd-zulu again"), []);
+    }
+
+    /// The same of the yard row's mail, which draws chips as a
+    /// conversation's does: asked when the row opens, and with the mail
+    /// that comes into view on it. Mail of the yard's while another row is
+    /// open is not in view, and asks nothing.
+    #[test]
+    fn the_yard_row_s_mail_is_asked_for_its_ids_too() {
+        let mut m = lookup_model();
+        let from_the_yard = |seq, text| letter_at(seq, "yard", "jo", "2026-10-08T09:30:00Z", text);
+        assert_eq!(
+            m.conversation("yard", vec![from_the_yard(30, "footplate-zgtr merged")]),
+            []
+        );
+
+        let effects = m.select(Selected::Yard);
+        assert!(
+            effects.contains(&asking(&["footplate-zgtr"])),
+            "{effects:?}"
+        );
+        let effects = m.conversation("yard", vec![from_the_yard(31, "and footplate-b8g9")]);
+        assert!(
+            effects.contains(&asking(&["footplate-b8g9"])),
+            "{effects:?}"
+        );
+    }
+
+    /// An ask named on a bead that closed falls back to the bead, as it
+    /// does on one a list holds.
+    #[test]
+    fn an_ask_named_on_a_closed_bead_falls_back_to_the_bead() {
+        let mut m = lookup_model();
+        let said = "ask 9 on footplate-zgtr, long since answered.";
+        assert_eq!(lookup_mail(&mut m, 12, said), [asking(&["footplate-zgtr"])]);
+        m.beads_looked(
+            &["footplate-zgtr".to_string()],
+            vec![("footplate-zgtr".into(), Ok("footplate-zgtr".into()))],
+        );
+        let entries = m.entries();
+        assert_eq!(entries[0].refs.len(), 1);
+        assert_eq!(
+            entries[0].refs[0].target,
+            select::RefTarget::Bead {
+                bead: "footplate-zgtr".into()
+            }
+        );
+        assert_eq!(&said[entries[0].refs[0].range.clone()], "footplate-zgtr");
+    }
+
+    /// The queue read again drops the beads read whole that it holds none
+    /// of, but not the bead the drawer shows: a closed bead, which a chip
+    /// in mail opens, is never in the queue.
+    #[test]
+    fn the_queue_read_again_keeps_the_bead_the_drawer_was_opened_on() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert_eq!(
+            m.read_bead("footplate-zgtr"),
+            [Effect::Bead {
+                bead: "footplate-zgtr".into()
+            }]
+        );
+        for id in ["footplate-zgtr", "yd-other"] {
+            m.bead_loaded(Bead {
+                id: id.into(),
+                ..Bead::default()
+            });
+        }
+        m.asks(Asks::default());
+        assert!(m.has_bead("footplate-zgtr"));
+        assert!(!m.has_bead("yd-other"));
+        // Open again, it is not read again.
+        assert_eq!(m.read_bead("footplate-zgtr"), []);
+    }
+
+    /// The yard read again, as after it was lost, makes a new model: what
+    /// the yard said of the ids mail names carries over to it.
+    #[test]
+    fn what_the_yard_said_of_the_ids_stays_when_the_yard_is_read_again() {
+        let mut m = lookup_model();
+        let said = "footplate-zgtr merged, and a re-ask stands plain";
+        lookup_mail(&mut m, 12, said);
+        m.beads_looked(
+            &["footplate-zgtr".to_string(), "re-ask".to_string()],
+            vec![
+                ("footplate-zgtr".into(), Ok("footplate-zgtr".into())),
+                no_such_bead("re-ask"),
+            ],
+        );
+        let (mut again, _) = m.resumed(yard(&[]), Mode::Chat);
+        assert_eq!(lookup_mail(&mut again, 12, said), []);
+        assert_eq!(again.entries()[0].refs.len(), 1);
     }
 
     #[test]
