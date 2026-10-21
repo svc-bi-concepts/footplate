@@ -200,7 +200,8 @@ and quiet lines), `departures` (the departures board open under the
 toggle, with its banner), `arrival` (one
 arrival's bead open from the panel), `flow` (yardr's line open on
 its flow), `old-lines` (the Lines pane against a yard too old to
-serve it, saying so in plain words), `secret` (an open card of a
+serve it, saying so in plain words), `grants` (the grants view open on
+its row, with a read, an update and an `--as` grant), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
@@ -921,7 +922,13 @@ declined and put-aside asks and the ones taken back, newest first. Open,
 the history stands grouped by the day it was asked, with the outcome's
 icon first on every row, and look-alikes folded into one row with their
 count; `/` types in its filter, over question, asker and outcome, with the
-chips All, Approved, Words, Taken back and Put aside above the days. Then
+chips All, Approved, Words, Taken back and Put aside above the days. Last
+of them, where the window runs as the yard's operator, the Grants row:
+every source × holder × call, by source, with each call's own time and
+approver, the weighty words for update and `--as` rows in rust as on a
+card, and each row's `yardr source revoke` line to copy. It reads through
+`SourceGrants` and changes nothing itself; a yard too old for the call
+says so in its pane. Then
 the crew with what each one's session does (`working`,
 `idle`, `blocked`, `not logged in`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a

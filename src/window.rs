@@ -1471,6 +1471,7 @@ mod tests {
             "Flows",
             r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
         );
+        yard.answer("SourceGrants", r#"{"result": []}"#);
         yard.answer("Mail", "{}");
         yard.answer(
             "MailPeer",
@@ -10012,6 +10013,152 @@ yardr.dev
                 "none in transit"
             );
         });
+    }
+
+    /// The grants view lists every source × holder × call, by source, for
+    /// the operator's window alone: each call's own time and approver,
+    /// the weighty words for update and `--as` rows, and each row's
+    /// revoke line. Anywhere else the row stands nowhere.
+    #[gpui::test]
+    fn the_grants_view_lists_every_call_with_its_revoke_for_the_operator_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let grants = || {
+            json!({"result": [
+                {"source": "google-mail", "crew": "yardmaster",
+                 "calls": ["read"],
+                 "at": "2026-10-17T19:02:00Z", "by": "mckean",
+                 "given": {"read": {
+                    "at": "2026-10-17T19:02:00Z", "by": "mckean",
+                    "bead": "yd-c546", "ask": 409, "asker": "yardmaster"}}},
+                {"source": "google-mail", "crew": "yardmaster", "as": "ada",
+                 "calls": ["send"],
+                 "at": "2026-10-17T19:04:00Z", "by": "mckean",
+                 "given": {"send": {
+                    "at": "2026-10-17T19:04:00Z", "by": "mckean",
+                    "bead": "yd-c546", "ask": 412, "asker": "yardmaster"}}},
+                {"source": "telegram", "group": "builders",
+                 "calls": ["read"],
+                 "at": "2026-10-12T10:15:00Z", "by": "mckean"},
+            ]})
+            .to_string()
+        };
+        let asks = || {
+            json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"}
+            ], "decided": []}})
+            .to_string()
+        };
+        // The operator's: the row stands last of decisions, and opens the
+        // grants by source.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks());
+        yard.answer("Bead", &bead_three());
+        yard.answer("SourceGrants", &grants());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "decision row bead-a"));
+        assert!(drawn(cx, "row grants"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert_eq!(model.grant_records().len(), 3);
+        });
+        click_on(cx, "row grants");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Grants));
+        assert!(drawn(cx, "grants head"));
+        assert!(drawn(cx, "grants summary"));
+        assert!(drawn(cx, "grants source google-mail"));
+        assert!(drawn(cx, "grants source telegram"));
+        assert!(drawn(cx, "grants row google-mail read"));
+        assert!(drawn(cx, "grants row google-mail send"));
+        assert!(drawn(cx, "grants row telegram read"));
+        // A plain read carries no weight; an update as a user carries
+        // both lines; the unkept record says when it last changed.
+        assert!(!drawn(cx, "grants weight google-mail read 0"));
+        assert!(drawn(cx, "grants weight google-mail send 0"));
+        assert!(drawn(cx, "grants weight google-mail send 1"));
+        assert!(drawn(cx, "grants unkept"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let records = model.grant_records();
+            assert_eq!(
+                crate::model::grant_summary(records),
+                "3 calls granted of 2 sources to 2 holders: 1 may change something outside the yard, 1 call as a user."
+            );
+            assert_eq!(
+                crate::model::grant_revoke("google-mail", "send", &records[1]),
+                "yardr source revoke google-mail send --crew yardmaster --as ada"
+            );
+        });
+        // A grant given reads the grants again.
+        yard.answer("SourceGrants", &json!({"result": []}).to_string());
+        yard.emit(r#"{"seq": 21, "kind": "source_granted", "actor": "mckean", "data": {}}"#);
+        wait(cx, "the grants read again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.grant_records().is_empty())
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "grants empty"));
+        // Anywhere else: no row. The yard's operator is mckean, and the
+        // window runs as jo.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Settings", r#"{"result": {"operator": "mckean"}}"#);
+        yard.answer("UserAsks", &asks());
+        yard.answer("Bead", &bead_three());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "decision row bead-a"));
+        assert!(!drawn(cx, "row grants"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(!model.is_operator());
+            assert!(model.grant_records().is_empty());
+        });
+        assert!(yard.asked("SourceGrants").is_empty());
+    }
+
+    /// A yard from before the grants view has no SourceGrants call: no
+    /// notice is raised in any mode, and the grants pane says the yard is
+    /// too old instead, and nowhere else.
+    #[gpui::test]
+    fn an_old_yard_says_so_in_the_grants_pane_and_nowhere_else(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "SourceGrants",
+            r#"{"error": {"code": "error", "message": "no such method SourceGrants"}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().grants_too_old());
+        });
+        assert_eq!(notice(&view, cx), "");
+        assert!(!drawn(cx, "grants too old"));
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row grants"));
+        click_on(cx, "row grants");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Grants));
+        assert!(drawn(cx, "grants too old"));
+        assert_eq!(notice(&view, cx), "");
+        // Back in chat: no notice, and the words stand in the grants pane
+        // alone. (What was drawn stays drawn to the tests, so the words
+        // gone from the pane are not said here.)
+        to_chat(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "");
     }
 
     /// Chat's groups hold their rows in order, each under its head: the

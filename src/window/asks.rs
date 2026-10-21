@@ -1726,6 +1726,9 @@ impl Footplate {
                 }
             }
         }
+        if model.is_operator() {
+            body = body.child(self.grants_row(model, palette, cx));
+        }
         self.column(body, palette, cx)
     }
 
@@ -1889,6 +1892,63 @@ impl Footplate {
                     .text_color(palette.faint)
                     .debug_selector(|| format!("decision id {}", row.bead))
                     .child(row.short),
+            )
+    }
+
+    /// The grants row, last of decisions where the window is the
+    /// operator's: what is granted, in so many calls, or that none is,
+    /// or that the yard is too old to say.
+    pub(crate) fn grants_row(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let selected = model.selected() == Some(&Selected::Grants);
+        let sub = match model.grants_too_old() {
+            true => "yard too old".to_string(),
+            false => {
+                let calls: usize = model.grant_records().iter().map(|g| g.calls.len()).sum();
+                match calls {
+                    0 => "none granted".to_string(),
+                    1 => "1 call granted".to_string(),
+                    n => format!("{n} calls granted"),
+                }
+            }
+        };
+        div()
+            .id("row grants")
+            .debug_selector(|| "row grants".to_string())
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .flex_col()
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
+            .when(selected, |el| el.bg(palette.open))
+            .when(!selected, |el| {
+                el.hover(|style| style.border_color(palette.line))
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.select(Selected::Grants, window, cx)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .debug_selector(|| "grants head".to_string())
+                    .child(div().flex_1().truncate().child("Grants")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .truncate()
+                    .debug_selector(|| "grants sub".to_string())
+                    .child(sub),
             )
     }
 
@@ -3493,6 +3553,212 @@ impl Footplate {
                         .child(format!("! {}", model.notice)),
                 )
             })
+    }
+
+    /// The grants pane: every source × holder × call the yard serves,
+    /// by source, with each call's own time and approver, the weighty
+    /// words for update and `--as` rows in rust as on a card, and each
+    /// row's revoke line to copy. It changes nothing itself. A yard too
+    /// old for the call says so, in plain words.
+    pub(crate) fn talk_grants(
+        &self,
+        model: &Model,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        if model.grants_too_old() {
+            return pane
+                .children(self.reconnect_strip(palette))
+                .child(
+                    div()
+                        .p_3()
+                        .border_b_1()
+                        .border_color(palette.line)
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Grants")),
+                )
+                .child(
+                    div().flex_1().min_h_0().p_4().child(
+                        div()
+                            .debug_selector(|| "grants too old".to_string())
+                            .text_color(palette.faint)
+                            .child(model::GRANTS_TOO_OLD),
+                    ),
+                );
+        }
+        let grants = model.grant_records();
+        if grants.is_empty() {
+            return pane
+                .children(self.reconnect_strip(palette))
+                .child(
+                    div()
+                        .p_3()
+                        .border_b_1()
+                        .border_color(palette.line)
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Grants")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(palette.faint)
+                        .debug_selector(|| "grants empty".to_string())
+                        .child("no call of a source is granted"),
+                );
+        }
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .debug_selector(|| "grants head".to_string())
+                    .child("Grants"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "grants summary".to_string())
+                    .child(model::grant_summary(grants)),
+            );
+        let mut body = div()
+            .id("grants")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_4();
+        let mut last_source = "";
+        for grant in model::ordered_grants(grants) {
+            if grant.source.as_str() != last_source {
+                last_source = grant.source.as_str();
+                body = body.child(
+                    div()
+                        .debug_selector({
+                            let source = grant.source.clone();
+                            move || format!("grants source {source}")
+                        })
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(palette.faint)
+                        .child(model::plain(&grant.source)),
+                );
+            }
+            for call in &grant.calls {
+                body = body.child(self.grant_row(grant, call, palette));
+            }
+        }
+        for line in model::grant_unkept(grants) {
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "grants unkept".to_string())
+                    .child(line),
+            );
+        }
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(body)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One grant row: who holds what call, the weighty lines where the
+    /// call is an update or the grant is as a user, when it was granted
+    /// and by whom, and the line that takes it back, to copy.
+    fn grant_row(
+        &self,
+        grant: &api::SourceGrant,
+        call: &str,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let holder = model::grant_holder(grant);
+        let (granted, by) = model::grant_given(grant.given.get(call));
+        let granted_words = match granted.as_str() {
+            "not kept" => "granted not kept".to_string(),
+            granted => format!("granted {granted} by {by}"),
+        };
+        let revoke = model::grant_revoke(&grant.source, call, grant);
+        let key = select::key((
+            &grant.source,
+            &grant.group,
+            &grant.crew,
+            &grant.as_user,
+            call,
+        ));
+        let mut row = div()
+            .debug_selector({
+                let source = grant.source.clone();
+                let call = call.to_string();
+                move || format!("grants row {source} {call}")
+            })
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .debug_selector({
+                        let source = grant.source.clone();
+                        let call = call.to_string();
+                        move || format!("grants holder {source} {call}")
+                    })
+                    .child(format!("{holder} — {call}")),
+            );
+        for (n, line) in model::grant_weight_lines(&grant.source, call, grant)
+            .iter()
+            .enumerate()
+        {
+            let line = line.clone();
+            row = row.child(
+                div()
+                    .debug_selector({
+                        let source = grant.source.clone();
+                        let call = call.to_string();
+                        move || format!("grants weight {source} {call} {n}")
+                    })
+                    .text_color(palette.text_accent)
+                    .child(select::text(
+                        expanded_text_key(key, "weight", n, &line),
+                        line,
+                        &self.selection,
+                    )),
+            );
+        }
+        row = row.child(
+            div()
+                .text_sm()
+                .text_color(palette.faint)
+                .debug_selector({
+                    let source = grant.source.clone();
+                    let call = call.to_string();
+                    move || format!("grants given {source} {call}")
+                })
+                .child(granted_words),
+        );
+        row.child(select::text(
+            expanded_text_key(key, "revoke", 0, &revoke),
+            fenced(&revoke),
+            &self.selection,
+        ))
     }
 }
 

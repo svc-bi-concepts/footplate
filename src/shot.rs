@@ -44,7 +44,9 @@ use crate::yard::Env;
 /// departures board open under the toggle, one
 /// arrival's bead open from the panel, one
 /// line's flow open on its row, the Lines pane against a yard too old
-/// to serve it, saying so in plain words, an open card of a secret ask posed
+/// to serve it, saying so in plain words, the grants view open on its
+/// row with a read, an update and an `--as` grant, an open card of a
+/// secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, the yardmaster's conversation naming an ask and two
@@ -114,6 +116,7 @@ pub const STATES: &[&str] = &[
     "arrival",
     "flow",
     "old-lines",
+    "grants",
     "secret",
     "secret-shown",
     "secret-refused",
@@ -665,6 +668,13 @@ fn populate(yard: &Yard, state: &str) {
             }})
             .to_string(),
         );
+        // The grants every state but old-lines loads: none, but for the
+        // grants state, which holds a read, an update and an `--as` grant.
+        // Old-lines serves none of the three calls, as a yardr from before
+        // them all.
+        if state != "grants" {
+            yard.answer("SourceGrants", r#"{"result": []}"#);
+        }
     }
     match state {
         // The yard at an address is opened from the settings, not from
@@ -740,6 +750,39 @@ fn populate(yard: &Yard, state: &str) {
             if state == "notice" {
                 yard.answer_nothing("Flows");
             }
+        }
+        "grants" => {
+            // The grants view open on its row: a read grant and an update
+            // grant to the yardmaster, the update as ada, and a telegram
+            // read whose history was not kept. No asks, so decisions opens
+            // on the grants.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.answer("Conversation", r#"{"result": []}"#);
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            yard.answer(
+                "SourceGrants",
+                &json!({"result": [
+                    {"source": "google-mail", "crew": "yardmaster",
+                     "calls": ["read"],
+                     "at": "2026-10-17T19:02:00Z", "by": "mckean",
+                     "given": {"read": {
+                        "at": "2026-10-17T19:02:00Z", "by": "mckean",
+                        "bead": "yd-c546", "ask": 409, "asker": "yardmaster"}}},
+                    {"source": "google-mail", "crew": "yardmaster", "as": "ada",
+                     "calls": ["send"],
+                     "at": "2026-10-17T19:04:00Z", "by": "mckean",
+                     "given": {"send": {
+                        "at": "2026-10-17T19:04:00Z", "by": "mckean",
+                        "bead": "yd-c546", "ask": 412, "asker": "yardmaster"}}},
+                    {"source": "telegram", "group": "builders",
+                     "calls": ["read"],
+                     "at": "2026-10-12T10:15:00Z", "by": "mckean"},
+                ]})
+                .to_string(),
+            );
         }
         "crew" => {
             // Chat with the sidebar's groups full: the yardmaster
@@ -2298,7 +2341,8 @@ mod tests {
                 "old-lines" => {
                     // The yard serves neither Lines call, as one from
                     // before the Lines view: both halves read as empty,
-                    // with no notice, and too old instead.
+                    // with no notice, and too old instead. Nor the grants
+                    // call, as one from before that view too.
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 6, "{state}");
@@ -2309,6 +2353,23 @@ mod tests {
                     assert!(loaded.flows.depots.is_empty(), "{state}");
                     assert_eq!(loaded.flows_notice, None, "{state}");
                     assert!(loaded.flows_too_old, "{state}");
+                    assert!(loaded.grants.is_empty(), "{state}");
+                    assert!(loaded.grants_too_old, "{state}");
+                }
+                "grants" => {
+                    // The grants the view opens on: a read, an update as a
+                    // user, and one whose history was not kept. No asks, so
+                    // decisions opens on the grants.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    assert_eq!(loaded.operator, "jo", "{state}");
+                    assert_eq!(loaded.grants.len(), 3, "{state}");
+                    assert_eq!(loaded.grants[0].source, "google-mail", "{state}");
+                    assert_eq!(loaded.grants[0].calls, ["read"], "{state}");
+                    assert_eq!(loaded.grants[1].as_user, "ada", "{state}");
+                    assert_eq!(loaded.grants[1].calls, ["send"], "{state}");
+                    assert!(loaded.grants[2].given.is_empty(), "{state}");
+                    assert_eq!(loaded.grants_notice, None, "{state}");
+                    assert!(!loaded.grants_too_old, "{state}");
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }

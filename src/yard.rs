@@ -769,6 +769,8 @@ mod tests {
             "Flows",
             r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
         );
+        yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
+        yard.answer("SourceGrants", r#"{"result": []}"#);
     }
 
     #[test]
@@ -799,7 +801,12 @@ mod tests {
             far.asked("GetUser"),
             vec![serde_json::json!({"name": "jo"})]
         );
-        assert_eq!(far.asked("Settings"), Vec::<serde_json::Value>::new());
+        // Whose window it is is read, with the grants where it is the
+        // operator's.
+        assert_eq!(far.asked("Settings"), vec![serde_json::json!({})]);
+        assert_eq!(state.operator, "jo");
+        assert!(state.grants.is_empty());
+        assert_eq!(far.asked("SourceGrants"), vec![serde_json::json!({})]);
     }
 
     #[test]

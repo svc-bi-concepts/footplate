@@ -422,6 +422,64 @@ pub struct FlowBead {
     pub entered_stage_at: String,
 }
 
+/// One source's grant to one holder: what of it they may call, and as
+/// whom, with when, by whom and on which card each call was given. What
+/// `yardr source grants` prints, and footplate's grants view lists. A
+/// holder's plain grant and its grant as a user are two records.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SourceGrant {
+    pub source: String,
+    /// The group that holds it, each session it starts; absent for a crew
+    /// member's.
+    #[serde(default)]
+    pub group: String,
+    /// The crew member that holds it; absent for a group's.
+    #[serde(default)]
+    pub crew: String,
+    /// The user whose credential a call under it is made with; absent for
+    /// a plain grant.
+    #[serde(default, rename = "as")]
+    pub as_user: String,
+    /// `read` and the names of calls granted, sorted.
+    #[serde(default, deserialize_with = "or_default")]
+    pub calls: Vec<String>,
+    /// When the record last gained a call: the record's, for no call in
+    /// particular.
+    #[serde(default)]
+    pub at: String,
+    /// Who gave the last call added to the record; the record's, for no
+    /// call in particular.
+    #[serde(default)]
+    pub by: String,
+    /// Each entry of `calls` to its own grant, keyed by the entry; a call
+    /// with no key was granted before its history was kept, and a record
+    /// with none has no `given`.
+    #[serde(default, deserialize_with = "or_default")]
+    pub given: HashMap<String, GrantGiven>,
+}
+
+/// When one call of a grant was given and by whom, and the card it was
+/// approved on where it was: the bead, the ask and who asked it. Asker is
+/// empty where the ask's note is gone; it is never guessed.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct GrantGiven {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub by: String,
+    /// The bead of the card it was approved on; absent for a grant given
+    /// at a terminal.
+    #[serde(default)]
+    pub bead: String,
+    /// The ask it was approved on; absent for a grant at a terminal.
+    #[serde(default)]
+    pub ask: u64,
+    /// Who asked it; absent for a grant at a terminal, and where the ask's
+    /// note is gone.
+    #[serde(default)]
+    pub asker: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Peer {
     pub name: String,
@@ -2429,6 +2487,15 @@ impl Client {
             board => serde_json::from_value(board)
                 .map_err(|err| Error::Protocol(format!("Flows: {err}"))),
         }
+    }
+
+    /// Every grant of the yard's sources: who may make which calls of
+    /// each, and as whom, with when, by whom and on which card each call
+    /// was given. What `yardr source grants` prints. The operator's to
+    /// read: on the listener to a device of theirs alone, on the socket
+    /// to a caller on the yard's machine. No answer at all reads as none.
+    pub fn source_grants(&self) -> Result<Vec<SourceGrant>> {
+        self.list("SourceGrants", json!({}))
     }
 
     /// One bead whole: body, stage, labels, notes, its asks with their
@@ -5002,6 +5069,58 @@ mod tests {
         // No answer at all is an empty view.
         yard.answer("Flows", r#"{"result": null}"#);
         assert_eq!(yard.client().flows().unwrap(), Flows::default());
+    }
+
+    #[test]
+    fn source_grants_come_with_each_call_s_own_grant() {
+        let yard = Yard::start();
+        yard.answer(
+            "SourceGrants",
+            r#"{"result": [
+                {"source": "crm", "crew": "yardmaster", "as": "jo",
+                 "calls": ["read"], "at": "2026-10-08T09:30:00Z", "by": "jo",
+                 "given": {"read": {"at": "2026-10-08T09:30:00Z", "by": "jo"}}},
+                {"source": "crm", "group": "builders",
+                 "calls": ["put", "read"], "at": "2026-10-08T09:30:00Z", "by": "jo",
+                 "given": {
+                    "put": {"at": "2026-10-08T09:30:00Z", "by": "jo",
+                            "bead": "yd-crm", "ask": 57, "asker": "yardmaster"},
+                    "read": {"at": "2026-10-08T09:30:00Z", "by": "jo"}}},
+                {"source": "mail", "group": "builders",
+                 "calls": ["read"], "at": "2026-10-12T10:15:00Z", "by": "mckean"}
+            ]}"#,
+        );
+        let grants = yard.client().source_grants().unwrap();
+        assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
+        assert_eq!(grants.len(), 3);
+        assert_eq!(grants[0].source.as_str(), "crm");
+        assert_eq!(grants[0].crew.as_str(), "yardmaster");
+        assert!(grants[0].group.is_empty());
+        assert_eq!(grants[0].as_user.as_str(), "jo");
+        assert_eq!(grants[0].calls, ["read"]);
+        assert_eq!(grants[0].given["read"].by.as_str(), "jo");
+        assert!(grants[0].given["read"].bead.is_empty());
+        assert_eq!(grants[1].group.as_str(), "builders");
+        assert!(grants[1].crew.is_empty());
+        assert!(grants[1].as_user.is_empty());
+        assert_eq!(grants[1].calls, ["put", "read"]);
+        let put = &grants[1].given["put"];
+        assert_eq!(
+            (
+                put.by.as_str(),
+                put.bead.as_str(),
+                put.ask,
+                put.asker.as_str()
+            ),
+            ("jo", "yd-crm", 57, "yardmaster")
+        );
+        // A record with no given has none: its calls were granted before
+        // their history was kept.
+        assert!(grants[2].given.is_empty());
+        assert_eq!(grants[2].at.as_str(), "2026-10-12T10:15:00Z");
+        // No answer at all is none.
+        yard.answer("SourceGrants", r#"{"result": null}"#);
+        assert!(yard.client().source_grants().unwrap().is_empty());
     }
 
     #[test]

@@ -818,11 +818,12 @@ impl Footplate {
                 held.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
                 let flows_notice = state.flows_notice.take();
+                let grants_notice = state.grants_notice.take();
                 let (mut model, mut effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state, self.settings.mode_of(&yard)),
                     None => (Model::new_aside(state), Vec::new()),
                 };
-                let notices: Vec<String> = [arrivals_notice, flows_notice]
+                let notices: Vec<String> = [arrivals_notice, flows_notice, grants_notice]
                     .into_iter()
                     .flatten()
                     .collect();
@@ -888,6 +889,7 @@ impl Footplate {
                 self.said = state.yard.take();
                 let arrivals_notice = state.arrivals_notice.take();
                 let flows_notice = state.flows_notice.take();
+                let grants_notice = state.grants_notice.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
                 // The yard was opened: in its remembered mode, on the row
@@ -941,7 +943,7 @@ impl Footplate {
                 if fresh && shot_departures() {
                     model.set_departures(true);
                 }
-                let notices: Vec<String> = [arrivals_notice, flows_notice]
+                let notices: Vec<String> = [arrivals_notice, flows_notice, grants_notice]
                     .into_iter()
                     .flatten()
                     .collect();
@@ -1226,6 +1228,7 @@ impl Footplate {
             match &after_sel {
                 Some(Selected::Decision(_))
                 | Some(Selected::Decided(_, _))
+                | Some(Selected::Grants)
                 | Some(Selected::Arrivals)
                 | Some(Selected::Bead(_)) => {
                     self.decision.scroll_to_item(0);
@@ -1473,10 +1476,11 @@ impl Footplate {
             Selected::Conversation(_) | Selected::Yard => {
                 self.conversation.max_offset().height + self.conversation.offset().y
             }
-            // The board, the lines, No line and the bead read from the
-            // top, as a card does.
+            // The board, the lines, No line, the grants and the bead
+            // read from the top, as a card does.
             Selected::Decision(_)
             | Selected::Decided(_, _)
+            | Selected::Grants
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -1514,9 +1518,9 @@ impl Footplate {
             Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead) => {
                 model.has_bead(bead)
             }
-            // The board's, a line's and No line's rows came with the
-            // state: they are whole at once.
-            Selected::Arrivals | Selected::Line(_) | Selected::NoLine => true,
+            // The board's, a line's, No line's and the grants' rows came
+            // with the state: they are whole at once.
+            Selected::Arrivals | Selected::Line(_) | Selected::NoLine | Selected::Grants => true,
         };
         // Under the settings nothing of the row is laid out.
         if !here || self.settings_open {
@@ -1552,6 +1556,7 @@ impl Footplate {
             // Where the card is shorter now, the layout stops at its end.
             Selected::Decision(_)
             | Selected::Decided(_, _)
+            | Selected::Grants
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -1634,6 +1639,7 @@ impl Footplate {
             Some(
                 Selected::Decision(_)
                 | Selected::Decided(_, _)
+                | Selected::Grants
                 | Selected::Arrivals
                 | Selected::Line(_)
                 | Selected::NoLine
@@ -1971,9 +1977,10 @@ impl Footplate {
             Selected::Decided(bead, ask) => {
                 self.ask_words.insert((bead.clone(), *ask), typed);
             }
-            // Nothing is typed on the yard row, the board, a line, No
-            // line or the bead.
+            // Nothing is typed on the yard row, the grants, the board,
+            // a line, No line or the bead.
             Selected::Yard
+            | Selected::Grants
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -2399,6 +2406,37 @@ impl Footplate {
                                     cx,
                                 ) {
                                     this.change_in(session, cx, |m| m.flows_failed(&err));
+                                }
+                            }
+                        },
+                    )
+                }
+                // A yard too old for the grants view has no call to make again.
+                Effect::Grants => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.source_grants(),
+                        move |this, grants, cx| match grants {
+                            Ok(grants) => {
+                                this.fresh_in(session, Read::Grants, stamp, cx, |m| {
+                                    m.grants(grants);
+                                    Vec::new()
+                                });
+                            }
+                            Err(err) => {
+                                if this.read_failed_in(
+                                    session,
+                                    Read::Grants,
+                                    stamp,
+                                    !model::grants_too_old(&err),
+                                    cx,
+                                ) {
+                                    this.change_in(session, cx, |m| {
+                                        m.grants_failed(&err);
+                                        Vec::new()
+                                    });
                                 }
                             }
                         },
@@ -3067,7 +3105,9 @@ impl Footplate {
         }
         match self.model.as_ref().and_then(|m| m.selected().cloned()) {
             Some(Selected::Conversation(_)) => KeysView::Conversation,
-            Some(Selected::Decision(_)) | Some(Selected::Decided(_, _)) => KeysView::Card,
+            Some(Selected::Decision(_) | Selected::Decided(_, _) | Selected::Grants) => {
+                KeysView::Card
+            }
             Some(Selected::Yard) => KeysView::Yard,
             Some(_) => KeysView::Timetable,
             None => match self.mode() {
@@ -4868,6 +4908,7 @@ impl Footplate {
             Some(Selected::Decided(bead, ask)) => self
                 .talk_decided(model, bead, *ask, palette, cx)
                 .into_any_element(),
+            Some(Selected::Grants) => self.talk_grants(model, palette, cx).into_any_element(),
             // A mode with no row open: decisions with nothing to decide.
             // Chat always has the yard row, and timetable the arrivals.
             None => div()
@@ -5058,6 +5099,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("arrivals") | Ok("departures") | Ok("old-lines") => return Some(Selected::Arrivals),
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
         Ok("flow") => return Some(Selected::Line("yardr".into())),
+        Ok("grants") => return Some(Selected::Grants),
         _ => {}
     }
     None

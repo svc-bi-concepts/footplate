@@ -285,6 +285,23 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
             false,
         ),
     };
+    // Who the grants view is offered to: the yard's operator, and no one
+    // else. Its settings unreadable, the window still opens, with no
+    // grants row; a yard from before the call has no grants to serve.
+    let operator = client.settings().map(|s| s.operator).unwrap_or_default();
+    let is_operator = !operator.is_empty() && operator == user.name;
+    let (grants, grants_notice, grants_too_old) = match is_operator {
+        false => (Vec::new(), None, false),
+        true => match client.source_grants() {
+            Ok(grants) => (grants, None, false),
+            Err(err) if model::grants_too_old(&err) => (Vec::new(), None, true),
+            Err(err) => (
+                Vec::new(),
+                Some(format!("the grants could not be read: {err}")),
+                false,
+            ),
+        },
+    };
     Ok(State {
         me: user.name.clone(),
         head,
@@ -302,6 +319,10 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         flows,
         flows_notice,
         flows_too_old,
+        operator,
+        grants,
+        grants_notice,
+        grants_too_old,
         yard,
     })
 }
@@ -447,6 +468,7 @@ mod tests {
             "Flows",
             r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
         );
+        yard.answer("SourceGrants", r#"{"result": []}"#);
     }
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;
@@ -649,6 +671,93 @@ mod tests {
         let state = load(&yard.client(), "jo").unwrap();
         assert!(!state.arrivals_too_old);
         assert!(!state.flows_too_old);
+    }
+
+    /// The grants are read where the window is the operator's, with the
+    /// yard's operator as read: a yard from before the call reads as
+    /// empty with its pane saying so, and an unreadable one with why.
+    /// Anywhere else no grants call is made.
+    #[test]
+    fn load_reads_the_grants_for_the_operator_alone() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The operator's: the grants are read.
+        yard.answer(
+            "SourceGrants",
+            r#"{"result": [{"source": "crm", "crew": "yardmaster",
+                 "calls": ["read"], "at": "2026-10-08T09:30:00Z", "by": "jo"}]}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.me, "jo");
+        assert_eq!(state.operator, "jo");
+        assert_eq!(state.grants.len(), 1);
+        assert_eq!(state.grants[0].source, "crm");
+        assert_eq!(state.grants_notice, None);
+        assert!(!state.grants_too_old);
+        assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
+
+        // A yard from before the call: empty, with no notice, and too old.
+        yard.answer(
+            "SourceGrants",
+            r#"{"error": {"code": "error", "message": "no such method SourceGrants"}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.grants.is_empty());
+        assert_eq!(state.grants_notice, None);
+        assert!(state.grants_too_old);
+
+        // An unreadable one: empty, with why, and not too old.
+        yard.answer_nothing("SourceGrants");
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.grants.is_empty());
+        assert!(
+            state
+                .grants_notice
+                .as_deref()
+                .unwrap()
+                .starts_with("the grants could not be read: ")
+        );
+        assert!(!state.grants_too_old);
+    }
+
+    /// Anywhere but the operator's, the window reads no grants: not for
+    /// another user, not where the yard names no operator, and not where
+    /// its settings could not be read. The window still opens.
+    #[test]
+    fn load_reads_no_grants_where_the_window_is_not_the_operator_s() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // Another user: the operator's call is never made.
+        yard.answer(
+            "GetUser",
+            r#"{"result": {"name": "ada", "cursor": 9, "notification_cursor": 4}}"#,
+        );
+        yard.answer(
+            "Users",
+            r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0},
+                           {"name": "ada", "cursor": 9, "notification_cursor": 4}]}"#,
+        );
+        let state = load(&yard.client(), "ada").unwrap();
+        assert_eq!(state.me, "ada");
+        assert_eq!(state.operator, "jo");
+        assert!(state.grants.is_empty());
+        assert_eq!(state.grants_notice, None);
+        assert!(!state.grants_too_old);
+        assert!(yard.asked("SourceGrants").is_empty());
+
+        // No operator: nobody's window is the operator's.
+        yard.answer("Settings", r#"{"result": {}}"#);
+        let state = load(&yard.client(), "ada").unwrap();
+        assert_eq!(state.me, "ada");
+        assert!(state.operator.is_empty());
+        assert!(state.grants.is_empty());
+        assert!(yard.asked("SourceGrants").is_empty());
+
+        // Unreadable settings: the window still opens, with no grants.
+        yard.answer_nothing("Settings");
+        let state = load(&yard.client(), "ada").unwrap();
+        assert!(state.operator.is_empty());
+        assert!(state.grants.is_empty());
     }
 
     /// A yard at an address: the window is for the user its token is of,

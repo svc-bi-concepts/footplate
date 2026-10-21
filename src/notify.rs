@@ -226,6 +226,7 @@ pub fn name(yard: &str, target: &Selected) -> String {
     let row = match target {
         Selected::Conversation(with) => format!("conversation:{with}"),
         Selected::Decision(bead) | Selected::Decided(bead, _) => format!("decision:{bead}"),
+        Selected::Grants => "grants".to_string(),
         Selected::Yard => "yard".to_string(),
         Selected::Arrivals => "arrivals".to_string(),
         Selected::Line(line) => format!("line:{line}"),
@@ -250,6 +251,9 @@ pub fn row(name: &str) -> Option<(String, Selected)> {
 fn row_in_yard(name: &str) -> Option<Selected> {
     if name == "yard" {
         return Some(Selected::Yard);
+    }
+    if name == "grants" {
+        return Some(Selected::Grants);
     }
     if name == "arrivals" {
         return Some(Selected::Arrivals);

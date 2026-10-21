@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, AskWeight, Asks, Bead, BeadAsk, BeadNote, BlobRef,
-    CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, Letter, Me, Notification,
-    OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, User,
+    CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven, Letter, Me,
+    Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant, User,
 };
 use crate::markdown;
 use crate::select;
@@ -80,6 +80,19 @@ pub struct State {
     /// The yard has no Flows call: as above, for the flows half of the
     /// Lines view.
     pub flows_too_old: bool,
+    /// The yard's operator, as its settings name them: who the grants
+    /// view is offered to, and no one else. Empty where the yard names
+    /// none, or its settings could not be read.
+    pub operator: String,
+    /// Every grant of the yard's sources, as read: empty where the
+    /// window is not the operator's, which reads none.
+    pub grants: Vec<SourceGrant>,
+    /// Why the grants are empty, in the window's words; `None` where
+    /// they were read.
+    pub grants_notice: Option<String>,
+    /// The yard has no SourceGrants call: one from before the grants
+    /// view. The grants pane says so, and no notice is raised.
+    pub grants_too_old: bool,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -343,15 +356,19 @@ pub enum Target {
     Peer { name: String, peer: String },
 }
 
-/// What the left list has open: a bead with open asks, one dealt with, a
-/// conversation, what the yard reports, the arrivals board, a line's
-/// flows, the beads with no line, or one travelling bead whole.
+/// What the left list has open: a bead with open asks, one dealt with,
+/// the grants, a conversation, what the yard reports, the arrivals
+/// board, a line's flows, the beads with no line, or one travelling bead
+/// whole.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selected {
     /// A bead with open asks, by its id. A bead with several is one row.
     Decision(String),
     /// One dealt with, by bead and ask note seq.
     Decided(String, u64),
+    /// The grants: every source × holder × call, for the operator's
+    /// window alone. It has a row where the window is the operator's.
+    Grants,
     /// A conversation, by crew name, user name or `<name>@<peer>`.
     Conversation(String),
     Yard,
@@ -371,12 +388,13 @@ pub enum Selected {
 
 impl Selected {
     /// The mode whose list holds the row: the conversations and the yard
-    /// row are chat's, the beads with open asks and the dealt with are
-    /// decisions', the timetable's rows and a travelling bead timetable's.
+    /// row are chat's, the beads with open asks, the dealt with and the
+    /// grants are decisions', the timetable's rows and a travelling bead
+    /// timetable's.
     pub fn mode(&self) -> Mode {
         match self {
             Selected::Conversation(_) | Selected::Yard => Mode::Chat,
-            Selected::Decision(_) | Selected::Decided(_, _) => Mode::Decisions,
+            Selected::Decision(_) | Selected::Decided(_, _) | Selected::Grants => Mode::Decisions,
             Selected::Arrivals | Selected::Line(_) | Selected::NoLine | Selected::Bead(_) => {
                 Mode::Timetable
             }
@@ -822,6 +840,8 @@ pub enum Effect {
     Arrivals,
     /// `Flows`; answered to [`Model::flows`].
     Flows,
+    /// `SourceGrants`; answered to [`Model::grants`].
+    Grants,
     /// Which of the person's beads were added or closed after `from`
     /// through `until`, by bead; answered to [`Model::timetable_seeded`].
     Timetable { from: u64, until: u64 },
@@ -847,6 +867,7 @@ pub enum Read {
     Asks,
     Arrivals,
     Flows,
+    Grants,
 }
 
 impl Read {
@@ -860,6 +881,7 @@ impl Read {
             Read::Asks => Effect::Asks,
             Read::Arrivals => Effect::Arrivals,
             Read::Flows => Effect::Flows,
+            Read::Grants => Effect::Grants,
         }
     }
 }
@@ -1022,6 +1044,16 @@ pub struct Model {
     /// The yard has no Flows call: as above, for the flows half of the
     /// Lines view.
     flows_too_old: bool,
+    /// The yard's operator, as its settings name them: who the grants
+    /// view is offered to, and no one else.
+    operator: String,
+    /// Every grant of the yard's sources, as read: empty where the
+    /// window is not the operator's, which reads none.
+    grants: Vec<SourceGrant>,
+    /// The yard has no SourceGrants call: one from before the grants
+    /// view. The grants pane says so, and no notice is raised. Grants
+    /// read again clear it, as ones read at the start never set it.
+    grants_too_old: bool,
     /// The yard has no React call: one from before reactions. The row
     /// the reactions are tapped on is hidden, and no notice is raised.
     /// A reaction answered clears it.
@@ -1185,6 +1217,9 @@ impl Model {
             flows: state.flows,
             arrivals_too_old: state.arrivals_too_old,
             flows_too_old: state.flows_too_old,
+            operator: state.operator,
+            grants: state.grants,
+            grants_too_old: state.grants_too_old,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -1233,7 +1268,9 @@ impl Model {
                     .or_else(|| order.into_iter().next()),
                 // A kept expansion makes dealt-with rows visible, but a
                 // saved row that disappeared falls back as it did before
-                // that list was kept: to an open decision, or none.
+                // that list was kept: to an open decision, or none. The
+                // grants stand in the list, but never take a card's place:
+                // an answer must come back to its card, not jump aside.
                 Mode::Decisions => order
                     .iter()
                     .find(|s| matches!(s, Selected::Decision(_)))
@@ -1409,6 +1446,13 @@ impl Model {
         &self.me
     }
 
+    /// Whether the window is the operator's: it runs as the yard's
+    /// operator, who alone is offered the grants view. A yard that names
+    /// no operator offers it to no one.
+    pub fn is_operator(&self) -> bool {
+        !self.operator.is_empty() && self.me == self.operator
+    }
+
     pub fn selected(&self) -> Option<&Selected> {
         self.selected.as_ref()
     }
@@ -1573,10 +1617,11 @@ impl Model {
 
     /// Every row of one mode's list from the top: the conversations and
     /// the yard row in chat, the beads with open asks with the dealt with
-    /// when "Decided" stands open in decisions, the arrivals row, the
-    /// lines in the served order and No line last in timetable, while
-    /// unassigned beads travel. A travelling bead is open from the board,
-    /// a flow, Elsewhere or No line, and has no row here.
+    /// when "Decided" stands open and the grants last where the window is
+    /// the operator's in decisions, the arrivals row, the lines in the
+    /// served order and No line last in timetable, while unassigned beads
+    /// travel. A travelling bead is open from the board, a flow,
+    /// Elsewhere or No line, and has no row here.
     fn order_in(&self, mode: Mode) -> Vec<Selected> {
         let mut out: Vec<Selected> = Vec::new();
         match mode {
@@ -1596,6 +1641,9 @@ impl Model {
                     for ask in self.visible_decided() {
                         out.push(Selected::Decided(ask.bead.clone(), ask.ask));
                     }
+                }
+                if self.is_operator() {
+                    out.push(Selected::Grants);
                 }
             }
             Mode::Timetable => {
@@ -2077,6 +2125,40 @@ impl Model {
             false => {
                 self.notice = format!("the flows could not be read: {err}");
                 Vec::new()
+            }
+        }
+    }
+
+    /// Every grant of the yard's sources, as read: who may call what of
+    /// each, and as whom.
+    pub fn grant_records(&self) -> &[SourceGrant] {
+        &self.grants
+    }
+
+    /// The grants as read again. The yard has the call, so it is not too
+    /// old for it.
+    pub fn grants(&mut self, grants: Vec<SourceGrant>) {
+        self.grants = grants;
+        self.grants_too_old = false;
+    }
+
+    /// Whether the yard has no SourceGrants call: one from before the
+    /// grants view, which the grants pane says.
+    pub fn grants_too_old(&self) -> bool {
+        self.grants_too_old
+    }
+
+    /// The grants could not be read again. A yard without the call has
+    /// none to show: the grants pane says it is too old, and no notice
+    /// is raised. Anything else is said as a notice, as ever.
+    pub fn grants_failed(&mut self, err: &api::Error) {
+        match grants_too_old(err) {
+            true => {
+                self.grants.clear();
+                self.grants_too_old = true;
+            }
+            false => {
+                self.notice = format!("the grants could not be read: {err}");
             }
         }
     }
@@ -3933,10 +4015,10 @@ impl Model {
         matches!(sel, Selected::Bead(_)) || self.order().contains(sel)
     }
 
-    /// Opens a row of a list: a bead, one dealt with, a conversation,
-    /// the yard row, a timetable row, or one travelling bead from the
-    /// board, a flow, Elsewhere or No line, which has no row of the list.
-    /// A row that is not there changes nothing.
+    /// Opens a row of a list: a bead, one dealt with, the grants, a
+    /// conversation, the yard row, a timetable row, or one travelling bead
+    /// from the board, a flow, Elsewhere or No line, which has no row of
+    /// the list. A row that is not there changes nothing.
     pub fn select(&mut self, sel: Selected) -> Vec<Effect> {
         if !self.has_row(&sel) {
             return Vec::new();
@@ -4010,9 +4092,11 @@ impl Model {
     /// page, with each whose mail it shows, and acknowledges what opening
     /// it showed; the yard row does so with its mail, whole, and its
     /// notices need no call. A bead, one dealt with and one travelling
-    /// bead read the bead whole when it was not read before. The board,
-    /// a line and No line need no call: their rows came with the state,
-    /// and events re-read them.
+    /// bead read the bead whole when it was not read before. The grants
+    /// are read again whenever their row opens, so a revoke, which the
+    /// yard tells no event of, is seen. The board, a line and No line
+    /// need no call: their rows came with the state, and events re-read
+    /// them.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
             Some(sel @ Selected::Conversation(_)) => {
@@ -4048,6 +4132,10 @@ impl Model {
                     vec![Effect::Bead { bead }]
                 }
             }
+            Some(Selected::Grants) => match self.is_operator() {
+                true => vec![Effect::Grants],
+                false => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }
@@ -4418,6 +4506,14 @@ impl Model {
             // unlike a direct grant change, this is not a `peer_` event.
             "user_removed" => vec![Effect::Peers],
             kind if kind.starts_with("peer_") => self.link(e),
+            // A grant given: the event carries less than what changed, so
+            // the grants are read again, where the window is the
+            // operator's. A revoke tells no event; opening the grants
+            // reads them again.
+            "source_granted" => match self.is_operator() {
+                true => vec![Effect::Grants],
+                false => Vec::new(),
+            },
             _ => Vec::new(),
         });
         // A bead shown is read again on every event whose bead it is: the
@@ -5472,6 +5568,206 @@ pub fn lines_too_old(err: &api::Error) -> bool {
 /// the wire's method names, and never in red.
 pub const LINES_TOO_OLD: &str =
     "this yard's yardr is older than the Lines view (it needs yardr from 16 Oct 2026 or later)";
+
+/// Whether the yard has no SourceGrants call: one from before the grants
+/// view, which says it has no such method. That is no error: the grants
+/// pane says the yard is too old, in plain words, and no notice is
+/// raised. Its words are read here, as above, and when they change this
+/// is shown as any refusal.
+pub fn grants_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
+/// What the grants pane says of a yard from before the grants view, in
+/// place of the grants it would list: plain words, never the wire's
+/// method name, and never in red.
+pub const GRANTS_TOO_OLD: &str =
+    "this yard's yardr is older than the grants view (it needs yardr from 21 Oct 2026 or later)";
+
+/// Who holds a grant, with the user called as where there is one:
+/// `crew member yardmaster`, `group builders as ada`.
+pub fn grant_holder(grant: &SourceGrant) -> String {
+    let holder = match grant.crew.is_empty() {
+        false => format!("crew member {}", plain(&grant.crew)),
+        true => format!("group {}", plain(&grant.group)),
+    };
+    match grant.as_user.is_empty() {
+        true => holder,
+        false => format!("{holder} as {}", plain(&grant.as_user)),
+    }
+}
+
+/// Whether the call reads as an update: every named call does, and `read`
+/// does not. Footplate reads no declarations, so a read call granted by
+/// its own name would read as an update too; grants of read calls go as
+/// `read`, and a single read call by name is all but unheard of.
+pub fn grant_is_update(call: &str) -> bool {
+    call != "read"
+}
+
+/// The line that takes one grant back, to copy: `yardr source revoke`
+/// with the source, the call and the holder, with `--as` where the grant
+/// has one.
+pub fn grant_revoke(source: &str, call: &str, grant: &SourceGrant) -> String {
+    let mut line = format!("yardr source revoke {source} {call}");
+    if !grant.crew.is_empty() {
+        line.push_str(&format!(" --crew {}", grant.crew));
+    } else if !grant.group.is_empty() {
+        line.push_str(&format!(" --group {}", grant.group));
+    }
+    if !grant.as_user.is_empty() {
+        line.push_str(&format!(" --as {}", grant.as_user));
+    }
+    line
+}
+
+/// How the grants view says a time: `17 Oct 19:02`, in the zone of the
+/// person reading, as `yardr source grants` says it. Empty for a time
+/// that cannot be read.
+pub fn grant_time(at: &str) -> String {
+    match DateTime::parse_from_rfc3339(at) {
+        Ok(t) => t
+            .with_timezone(&chrono::Local)
+            .format("%-d %b %H:%M")
+            .to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// One call's own grant, as its row shows it: when it was granted and by
+/// whom, with the bead, the ask and who asked it where it was approved
+/// on a card. A call with no entry reads `not kept` and `-`: it was
+/// granted before the yard kept each call's own.
+pub fn grant_given(given: Option<&GrantGiven>) -> (String, String) {
+    let Some(given) = given else {
+        return ("not kept".to_string(), "-".to_string());
+    };
+    let granted = grant_time(&given.at);
+    let mut by = plain(&given.by);
+    if !given.bead.is_empty() {
+        let asker = match given.asker.is_empty() {
+            true => "unknown".to_string(),
+            false => plain(&given.asker),
+        };
+        by.push_str(&format!(
+            ", on {} ask {} asked by {asker}",
+            plain(&given.bead),
+            given.ask
+        ));
+    }
+    (granted, by)
+}
+
+/// What the grants view says is granted, as `yardr source grants` prints
+/// it: how many calls of how many sources to how many holders, with how
+/// many may change something outside the yard and how many call as a
+/// user. A holder's plain grant and its grant as a user are one holder.
+pub fn grant_summary(grants: &[SourceGrant]) -> String {
+    use std::collections::HashSet;
+    let mut sources = HashSet::new();
+    let mut holders = HashSet::new();
+    let mut rows = 0;
+    let mut updates = 0;
+    let mut as_user = 0;
+    for grant in grants {
+        sources.insert(grant.source.as_str());
+        holders.insert((grant.group.as_str(), grant.crew.as_str()));
+        for call in &grant.calls {
+            rows += 1;
+            if grant_is_update(call) {
+                updates += 1;
+            }
+            if !grant.as_user.is_empty() {
+                as_user += 1;
+            }
+        }
+    }
+    let calls = count_phrase(rows, "call", "calls");
+    let sources = count_phrase(sources.len(), "source", "sources");
+    let holders = count_phrase(holders.len(), "holder", "holders");
+    // The command says `1 calls` and `2 call`, its verb swapped; the view
+    // says what reads.
+    let as_words = count_phrase(as_user, "call", "calls");
+    format!(
+        "{calls} granted of {sources} to {holders}: {updates} may change something outside the yard, {as_words} as a user."
+    )
+}
+
+/// `n` things in words: `1 call`, `2 calls`, as the command says them.
+fn count_phrase(n: usize, one: &str, many: &str) -> String {
+    match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    }
+}
+
+/// One line for each record holding a call whose grant was not kept, as
+/// the command prints them below its summary: when the record last gained
+/// a call and by whom, for no call in particular.
+pub fn grant_unkept(grants: &[SourceGrant]) -> Vec<String> {
+    grants
+        .iter()
+        .filter(|grant| grant.calls.iter().any(|call| !grant.given.contains_key(call)))
+        .map(|grant| {
+            format!(
+                "{} to {}: granted before its history was kept; the record last gained a call {} by {}.",
+                plain(&grant.source),
+                grant_holder(grant),
+                grant_time(&grant.at),
+                plain(&grant.by)
+            )
+        })
+        .collect()
+}
+
+/// The weighty lines of one grant row, as a card shows them: one for an
+/// update call, one where the grant is as a user, both where both hold,
+/// none for a plain read. Drawn in rust as text, never red.
+pub fn grant_weight_lines(source: &str, call: &str, grant: &SourceGrant) -> Vec<String> {
+    let mut lines = Vec::new();
+    if grant_is_update(call) {
+        lines.push(weight_line(
+            "outside",
+            &format!(
+                "lets the yard change something outside it: {} may call {} of {} (an update)",
+                grant_holder(grant),
+                plain(call),
+                plain(source)
+            ),
+        ));
+    }
+    if !grant.as_user.is_empty() {
+        lines.push(weight_line(
+            "as-user",
+            &format!(
+                "lets calls or words count as a person's: as {}",
+                plain(&grant.as_user)
+            ),
+        ));
+    }
+    lines
+}
+
+/// The grants in the order the view lists them: by source, then holder,
+/// then the user called as, as served within each record's calls.
+pub fn ordered_grants(grants: &[SourceGrant]) -> Vec<&SourceGrant> {
+    let mut ordered: Vec<&SourceGrant> = grants.iter().collect();
+    ordered.sort_by(|a, b| {
+        (
+            a.source.as_str(),
+            a.crew.as_str(),
+            a.group.as_str(),
+            a.as_user.as_str(),
+        )
+            .cmp(&(
+                b.source.as_str(),
+                b.crew.as_str(),
+                b.group.as_str(),
+                b.as_user.as_str(),
+            ))
+    });
+    ordered
+}
 
 /// What the yard answered to a setup approval, in one line: the pack with
 /// the preset picked and who the grants are for, with the names given,
@@ -10343,6 +10639,288 @@ mod tests {
             assert_eq!(m.notice, format!("the flows could not be read: {err}"));
             m.notice.clear();
         }
+    }
+
+    /// A yard from before the grants view has no SourceGrants call: its
+    /// answer is no error, so no notice is raised, and the grants pane
+    /// says the yard is too old instead. Anything else the call fails
+    /// with is said as a notice, as ever. Grants read again clear it.
+    #[test]
+    fn an_old_yard_s_grants_are_said_in_the_grants_pane_not_as_a_notice() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        assert!(grants_too_old(&refused("no such method SourceGrants")));
+        assert!(!grants_too_old(&refused("the grants are closed")));
+        assert!(!grants_too_old(&api::Error::Protocol(
+            "SourceGrants: status 200, and no JSON object".into()
+        )));
+        // Plain words, and never the wire's method name.
+        assert!(GRANTS_TOO_OLD.contains("older than the grants view"));
+        assert!(!GRANTS_TOO_OLD.contains("no such method"));
+        assert!(!GRANTS_TOO_OLD.contains("SourceGrants"));
+
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.grants(vec![SourceGrant {
+            source: "crm".into(),
+            ..Default::default()
+        }]);
+        assert!(!m.grants_too_old());
+        assert_eq!(m.grant_records().len(), 1);
+        m.grants_failed(&refused("no such method SourceGrants"));
+        assert!(m.grants_too_old());
+        assert!(m.grant_records().is_empty());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+
+        // Grants read again clear it.
+        m.grants(Vec::new());
+        assert!(!m.grants_too_old());
+
+        // Any other failure is a notice, as ever, and not the pane's.
+        for err in [
+            refused("the grants are closed"),
+            api::Error::Protocol("SourceGrants: status 200, and no JSON object".into()),
+            api::Error::Down(std::io::Error::other("the yard went away")),
+        ] {
+            m.grants_failed(&err);
+            assert!(!m.grants_too_old());
+            assert_eq!(m.notice, format!("the grants could not be read: {err}"));
+            m.notice.clear();
+        }
+    }
+
+    /// The grants view is the operator's alone: its row stands in
+    /// decisions where the window runs as the yard's operator, and
+    /// nowhere else. Opening it reads the grants again, so a revoke,
+    /// which tells no event, is seen; a grant given reads them again
+    /// through its event.
+    #[test]
+    fn the_grants_row_stands_for_the_operator_alone_and_reads_again() {
+        // Not the operator's: no row, no read.
+        let (mut m, _) = Model::new(yard(&[]), Mode::Decisions, None);
+        assert!(!m.is_operator());
+        assert!(!m.order_in(Mode::Decisions).contains(&Selected::Grants));
+        assert_eq!(m.select(Selected::Grants), Vec::new());
+        assert_ne!(m.selected(), Some(&Selected::Grants));
+
+        // The operator's: the row stands first, and selecting it reads.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(m.is_operator());
+        let order = m.order_in(Mode::Decisions);
+        assert_eq!(order.last(), Some(&Selected::Grants));
+        assert_eq!(m.select(Selected::Grants), vec![Effect::Grants]);
+
+        // With nothing asking, decisions opens on none, with the
+        // grants in the list to open; with an ask, on the ask. The grants
+        // never take a card's place.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (m, _) = Model::new(state.clone(), Mode::Decisions, None);
+        assert_eq!(m.selected(), None);
+        assert!(m.order_in(Mode::Decisions).contains(&Selected::Grants));
+        state.asks.open.push(OpenAsk {
+            bead: "bead-a".into(),
+            ..Default::default()
+        });
+        let (m, _) = Model::new(state, Mode::Decisions, None);
+        assert_eq!(m.selected(), Some(&Selected::Decision("bead-a".into())));
+
+        // A grant given reads the grants again for the operator, and
+        // nothing for anyone else.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        let event = |kind: &str| Event {
+            seq: 21,
+            kind: kind.into(),
+            ..Default::default()
+        };
+        assert_eq!(m.event(&event("source_granted")), vec![Effect::Grants]);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert!(m.event(&event("source_granted")).is_empty());
+    }
+
+    /// The grants view lists what `yardr source grants` prints: who holds
+    /// what of each source, each call's own time and approver, the weighty
+    /// words for update and `--as` rows, and each row's revoke line.
+    #[test]
+    fn the_grants_view_lists_each_call_with_its_own_grant_and_its_revoke() {
+        use std::collections::HashMap;
+        let grant = |source: &str,
+                     group: &str,
+                     crew: &str,
+                     as_user: &str,
+                     calls: &[&str],
+                     given: &[(&str, &str, &str, &str, u64, &str)]|
+         -> SourceGrant {
+            SourceGrant {
+                source: source.into(),
+                group: group.into(),
+                crew: crew.into(),
+                as_user: as_user.into(),
+                calls: calls.iter().map(|c| c.to_string()).collect(),
+                at: "2026-10-12T10:15:00Z".into(),
+                by: "mckean".into(),
+                given: given
+                    .iter()
+                    .map(|(call, at, by, bead, ask, asker)| {
+                        (
+                            call.to_string(),
+                            GrantGiven {
+                                at: at.to_string(),
+                                by: by.to_string(),
+                                bead: bead.to_string(),
+                                ask: *ask,
+                                asker: asker.to_string(),
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>(),
+            }
+        };
+        let grants = vec![
+            grant(
+                "google-mail",
+                "",
+                "yardmaster",
+                "",
+                &["read"],
+                &[(
+                    "read",
+                    "2026-10-17T19:02:00Z",
+                    "mckean",
+                    "yd-c546",
+                    409,
+                    "yardmaster",
+                )],
+            ),
+            grant(
+                "google-mail",
+                "",
+                "yardmaster",
+                "ada",
+                &["send"],
+                &[(
+                    "send",
+                    "2026-10-17T19:04:00Z",
+                    "mckean",
+                    "yd-c546",
+                    412,
+                    "yardmaster",
+                )],
+            ),
+            grant("telegram", "builders", "", "", &["read", "reply"], &[]),
+        ];
+
+        // Who holds what, with the user called as where there is one.
+        assert_eq!(grant_holder(&grants[0]), "crew member yardmaster");
+        assert_eq!(grant_holder(&grants[1]), "crew member yardmaster as ada");
+        assert_eq!(grant_holder(&grants[2]), "group builders");
+
+        // Every named call reads as an update, and `read` does not.
+        assert!(!grant_is_update("read"));
+        assert!(grant_is_update("send"));
+        assert!(grant_is_update("reply"));
+
+        // Each row's revoke line, to copy.
+        assert_eq!(
+            grant_revoke("google-mail", "read", &grants[0]),
+            "yardr source revoke google-mail read --crew yardmaster"
+        );
+        assert_eq!(
+            grant_revoke("google-mail", "send", &grants[1]),
+            "yardr source revoke google-mail send --crew yardmaster --as ada"
+        );
+        assert_eq!(
+            grant_revoke("telegram", "reply", &grants[2]),
+            "yardr source revoke telegram reply --group builders"
+        );
+
+        // Each call's own time and approver, with the card where it was
+        // approved on one; a call with no entry reads not kept.
+        let (granted, by) = grant_given(grants[0].given.get("read"));
+        assert!(!granted.is_empty(), "a kept time says when");
+        assert_eq!(by, "mckean, on yd-c546 ask 409 asked by yardmaster");
+        let (granted, by) = grant_given(grants[1].given.get("send"));
+        assert!(!granted.is_empty());
+        assert_eq!(by, "mckean, on yd-c546 ask 412 asked by yardmaster");
+        assert_eq!(
+            grant_given(grants[2].given.get("read")),
+            ("not kept".to_string(), "-".to_string())
+        );
+        // A terminal grant names no card; a pruned asker reads unknown.
+        let terminal = GrantGiven {
+            at: "2026-10-08T09:30:00Z".into(),
+            by: "jo".into(),
+            ..Default::default()
+        };
+        assert_eq!(grant_given(Some(&terminal)).1, "jo");
+        let pruned = GrantGiven {
+            at: "2026-10-08T09:30:00Z".into(),
+            by: "jo".into(),
+            bead: "yd-crm".into(),
+            ask: 57,
+            ..Default::default()
+        };
+        assert_eq!(
+            grant_given(Some(&pruned)).1,
+            "jo, on yd-crm ask 57 asked by unknown"
+        );
+        assert!(grant_time("not a time").is_empty());
+
+        // The weighty words: an update row carries outside's, an `--as`
+        // row as-user's, both where both hold, none for a plain read.
+        assert!(grant_weight_lines("google-mail", "read", &grants[0]).is_empty());
+        let lines = grant_weight_lines("google-mail", "send", &grants[1]);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with("WEIGHTY · outside: lets the yard change something outside it: ")
+        );
+        assert!(
+            lines[0]
+                .contains("crew member yardmaster as ada may call send of google-mail (an update)")
+        );
+        assert_eq!(
+            lines[1],
+            "WEIGHTY · as-user: lets calls or words count as a person's: as ada"
+        );
+        let lines = grant_weight_lines("telegram", "reply", &grants[2]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("WEIGHTY · outside: "));
+
+        // The summary counts rows, sources and holders, with the weighty
+        // ones among them; a holder's plain grant and its grant as a user
+        // are one holder.
+        assert_eq!(
+            grant_summary(&grants),
+            "4 calls granted of 2 sources to 2 holders: 2 may change something outside the yard, 1 call as a user."
+        );
+
+        // Below it, each record holding an unkept call says when it last
+        // changed and by whom, for no call in particular.
+        let unkept = grant_unkept(&grants);
+        assert_eq!(unkept.len(), 1);
+        assert!(unkept[0].starts_with(
+            "telegram to group builders: granted before its history was kept; the record last gained a call "
+        ));
+        assert!(unkept[0].ends_with(" by mckean."));
+
+        // Listed by source, then holder, then the user called as.
+        let ordered = ordered_grants(&grants);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|g| (g.source.as_str(), g.as_user.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("google-mail", ""),
+                ("google-mail", "ada"),
+                ("telegram", "")
+            ]
+        );
     }
 
     #[test]

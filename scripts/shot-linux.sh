@@ -42,8 +42,9 @@
 # `departures` (the departures board open under the toggle, with its
 # banner), `arrival` (one arrival's bead open from the panel), `flow`
 # (yardr's line open on its flow), `old-lines` (the Lines pane against
-# a yard too old to serve it, saying so in plain words), `secret` (an
-# open card of a secret
+# a yard too old to serve it, saying so in plain words), `grants` (the
+# grants view open on its row, with a read, an update and an `--as`
+# grant), `secret` (an open card of a secret
 # ask, posed with a value typed and hidden), `secret-shown` (that
 # card where the yard marks the value no secret: typed and shown),
 # `secret-refused` (that card with the yard's refusal of its answer),
@@ -78,7 +79,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain plain-select lines run weighty stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer"
+states="yardmaster crew thread column plain plain-select lines run weighty stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
