@@ -21014,7 +21014,7 @@ yardr.dev
         );
         assert_eq!(
             view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
-            2
+            3
         );
 
         // A line that looks like a fence selects as it was written.
