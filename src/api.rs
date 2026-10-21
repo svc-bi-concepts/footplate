@@ -456,6 +456,14 @@ pub struct SourceGrant {
     /// with none has no `given`.
     #[serde(default, deserialize_with = "or_default")]
     pub given: HashMap<String, GrantGiven>,
+    /// Each entry of `calls` to its kind, `read` or `update`, as the yard
+    /// reads it from the source's declaration, keyed by the entry as `given`
+    /// is. A call with no key has no kind served: its source is gone or
+    /// unreadable, or no longer declares it. So has every call of a yard
+    /// from before it served kinds. Absent is unknown, and the window takes
+    /// it for an update (`model::grant_is_update`).
+    #[serde(default, deserialize_with = "or_default")]
+    pub kinds: HashMap<String, String>,
 }
 
 /// When one call of a grant was given and by whom, and the card it was
@@ -5119,12 +5127,17 @@ mod tests {
                             "bead": "yd-crm", "ask": 57, "asker": "yardmaster"},
                     "read": {"at": "2026-10-08T09:30:00Z", "by": "jo"}}},
                 {"source": "mail", "group": "builders",
-                 "calls": ["read"], "at": "2026-10-12T10:15:00Z", "by": "mckean"}
+                 "calls": ["read"], "at": "2026-10-12T10:15:00Z", "by": "mckean",
+                 "kinds": null},
+                {"source": "crm", "crew": "yardmaster",
+                 "calls": ["customer", "note", "old"],
+                 "at": "2026-10-12T10:15:00Z", "by": "mckean",
+                 "kinds": {"customer": "read", "note": "update"}}
             ]}"#,
         );
         let grants = yard.client().source_grants().unwrap();
         assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
-        assert_eq!(grants.len(), 3);
+        assert_eq!(grants.len(), 4);
         assert_eq!(grants[0].source.as_str(), "crm");
         assert_eq!(grants[0].crew.as_str(), "yardmaster");
         assert!(grants[0].group.is_empty());
@@ -5150,6 +5163,14 @@ mod tests {
         // their history was kept.
         assert!(grants[2].given.is_empty());
         assert_eq!(grants[2].at.as_str(), "2026-10-12T10:15:00Z");
+        // The kinds the yard served, one to each call it could read; a call
+        // with none is left out, and a record from a yard before it served
+        // kinds has no `kinds`, nor has one with a null.
+        assert_eq!(grants[3].calls, ["customer", "note", "old"]);
+        assert_eq!(grants[3].kinds["customer"], "read");
+        assert_eq!(grants[3].kinds["note"], "update");
+        assert!(!grants[3].kinds.contains_key("old"));
+        assert!(grants[..3].iter().all(|grant| grant.kinds.is_empty()));
         // No answer at all is none.
         yard.answer("SourceGrants", r#"{"result": null}"#);
         assert!(yard.client().source_grants().unwrap().is_empty());

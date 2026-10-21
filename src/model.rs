@@ -5644,12 +5644,18 @@ pub fn grant_holder(grant: &SourceGrant) -> String {
     }
 }
 
-/// Whether the call reads as an update. The grants API does not carry call
-/// kinds, so the only distinction available here is `read`, the grant of
-/// every read call. A specifically named read call cannot be distinguished
-/// from an update with this record alone.
-pub fn grant_is_update(call: &str) -> bool {
-    call != "read"
+/// Whether the call reads as an update, by the kind the yard served for it
+/// (`SourceGrant::kinds`): `read` is a read and `update` an update. A call
+/// with no kind served (its source is gone or unreadable, it is no longer
+/// declared, or the yard is from before it served kinds) is taken for an
+/// update, the weightier reading, but for the word `read`: the grant of
+/// every read call is a read whatever the yard could read of its source.
+pub fn grant_is_update(call: &str, grant: &SourceGrant) -> bool {
+    match grant.kinds.get(call).map(String::as_str) {
+        Some("read") => false,
+        Some("update") => true,
+        _ => call != "read",
+    }
 }
 
 /// The line that takes one grant back, to copy: `yardr source revoke`
@@ -5769,7 +5775,7 @@ pub fn grant_summary(grants: &[SourceGrant]) -> String {
         holders.insert((grant.group.as_str(), grant.crew.as_str()));
         for call in &grant.calls {
             rows += 1;
-            if grant_is_update(call) {
+            if grant_is_update(call, grant) {
                 updates += 1;
             }
             if !grant.as_user.is_empty() {
@@ -5817,10 +5823,10 @@ pub fn grant_unkept(grants: &[SourceGrant]) -> Vec<String> {
 
 /// The weighty lines of one grant row, as a card shows them: one for an
 /// update call, one where the grant is as a user, both where both hold,
-/// none for a plain read. Drawn in rust as text, never red.
+/// none for a read, named or plain. Drawn in rust as text, never red.
 pub fn grant_weight_lines(source: &str, call: &str, grant: &SourceGrant) -> Vec<String> {
     let mut lines = Vec::new();
-    if grant_is_update(call) {
+    if grant_is_update(call, grant) {
         lines.push(weight_line(
             "outside",
             &format!(
@@ -10914,6 +10920,7 @@ mod tests {
                         )
                     })
                     .collect::<HashMap<_, _>>(),
+                ..Default::default()
             }
         };
         let grants = vec![
@@ -10955,11 +10962,68 @@ mod tests {
         assert_eq!(grant_holder(&grants[1]), "crew member yardmaster as ada");
         assert_eq!(grant_holder(&grants[2]), "group builders");
 
-        // Named calls are treated conservatively as updates; `read` is
-        // the grant that covers all reads.
-        assert!(!grant_is_update("read"));
-        assert!(grant_is_update("send"));
-        assert!(grant_is_update("reply"));
+        // These records come with no kinds, as from a yard before it
+        // served them: a named call is taken for an update, and `read`,
+        // the grant that covers all reads, stays a read.
+        assert!(!grant_is_update("read", &grants[0]));
+        assert!(grant_is_update("send", &grants[1]));
+        assert!(grant_is_update("reply", &grants[2]));
+
+        // A call is an update by the kind the yard served for it: a grant
+        // naming a read call and an update call has one read row, with no
+        // weighty words, and one weighty row, and the summary counts one.
+        let kinds = |kinds: &[(&str, &str)]| -> SourceGrant {
+            SourceGrant {
+                kinds: kinds
+                    .iter()
+                    .map(|(call, kind)| (call.to_string(), kind.to_string()))
+                    .collect(),
+                ..grant("crm", "", "yardmaster", "", &["customer", "note"], &[])
+            }
+        };
+        let crm = kinds(&[("customer", "read"), ("note", "update")]);
+        assert!(!grant_is_update("customer", &crm));
+        assert!(grant_is_update("note", &crm));
+        assert!(grant_weight_lines("crm", "customer", &crm).is_empty());
+        assert_eq!(grant_weight_lines("crm", "note", &crm).len(), 1);
+        assert_eq!(
+            grant_summary(std::slice::from_ref(&crm)),
+            "2 calls granted of 1 source to 1 holder: 1 may change something outside the yard, 0 calls as a user."
+        );
+        // As a user, a named read carries the user's line alone.
+        let as_ada = SourceGrant {
+            as_user: "ada".into(),
+            ..crm.clone()
+        };
+        assert_eq!(
+            grant_weight_lines("crm", "customer", &as_ada),
+            ["WEIGHTY · as-user: lets calls or words count as a person's: as ada"]
+        );
+        // The same grant from a yard that serves no kinds: both calls are
+        // weighty, as they were before, and `read` still is not.
+        let older = kinds(&[]);
+        assert!(grant_is_update("customer", &older));
+        assert!(grant_is_update("note", &older));
+        assert_eq!(grant_weight_lines("crm", "customer", &older).len(), 1);
+        assert!(!grant_is_update("read", &older));
+        assert_eq!(
+            grant_summary(std::slice::from_ref(&older)),
+            "2 calls granted of 1 source to 1 holder: 2 may change something outside the yard, 0 calls as a user."
+        );
+        // A call with no kind among the others, and a kind this window
+        // has no word for, are unknown: updates, never reads.
+        let partly = kinds(&[("customer", "read")]);
+        assert!(grant_is_update("note", &partly));
+        let strange = kinds(&[("customer", "relay"), ("note", "")]);
+        assert!(grant_is_update("customer", &strange));
+        assert!(grant_is_update("note", &strange));
+        // The yard's word for the read grant is a read all the same.
+        let read = SourceGrant {
+            calls: vec!["read".into()],
+            kinds: [("read".to_string(), "read".to_string())].into(),
+            ..crm.clone()
+        };
+        assert!(!grant_is_update("read", &read));
 
         // Each row's revoke line, to copy.
         assert_eq!(

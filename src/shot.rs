@@ -46,7 +46,8 @@ use crate::yard::Env;
 /// arrival's bead open from the panel, one
 /// line's flow open on its row, the Lines pane against a yard too old
 /// to serve it, saying so in plain words, the grants view open on its
-/// row with a read, an update and an `--as` grant, an open card of a
+/// row with a read, an update and an `--as` grant, and a source's named
+/// read call and update call, an open card of a
 /// secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
@@ -671,7 +672,8 @@ fn populate(yard: &Yard, state: &str) {
             .to_string(),
         );
         // The grants every state but old-lines loads: none, but for the
-        // grants state, which holds a read, an update and an `--as` grant.
+        // grants state, which holds a read, an update and an `--as` grant,
+        // and a source's named read call and update call.
         // Old-lines serves none of the three calls, as a yardr from before
         // them all.
         if state != "grants" {
@@ -755,9 +757,11 @@ fn populate(yard: &Yard, state: &str) {
         }
         "grants" => {
             // The grants view open on its row: a read grant and an update
-            // grant to the yardmaster, the update as ada, and a telegram
-            // read whose history was not kept. No asks, so decisions opens
-            // on the grants.
+            // grant to the yardmaster, the update as ada, a telegram
+            // read whose history was not kept, and the yardmaster's grants
+            // of two named calls of crm, which the yard serves the kinds
+            // of: customer a read, note an update. No asks, so decisions
+            // opens on the grants.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -782,6 +786,17 @@ fn populate(yard: &Yard, state: &str) {
                     {"source": "telegram", "group": "builders",
                      "calls": ["read"],
                      "at": "2026-10-12T10:15:00Z", "by": "mckean"},
+                    {"source": "crm", "crew": "yardmaster",
+                     "calls": ["customer", "note"],
+                     "at": "2026-10-17T19:06:00Z", "by": "mckean",
+                     "given": {
+                        "customer": {
+                            "at": "2026-10-17T19:06:00Z", "by": "mckean",
+                            "bead": "yd-c546", "ask": 415, "asker": "yardmaster"},
+                        "note": {
+                            "at": "2026-10-17T19:06:00Z", "by": "mckean",
+                            "bead": "yd-c546", "ask": 415, "asker": "yardmaster"}},
+                     "kinds": {"customer": "read", "note": "update"}},
                 ]})
                 .to_string(),
             );
@@ -2435,16 +2450,20 @@ mod tests {
                 }
                 "grants" => {
                     // The grants the view opens on: a read, an update as a
-                    // user, and one whose history was not kept. No asks, so
-                    // decisions opens on the grants.
+                    // user, one whose history was not kept, and two named
+                    // calls with their kinds. No asks, so decisions opens
+                    // on the grants.
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     assert_eq!(loaded.operator, "jo", "{state}");
-                    assert_eq!(loaded.grants.len(), 3, "{state}");
+                    assert_eq!(loaded.grants.len(), 4, "{state}");
                     assert_eq!(loaded.grants[0].source, "google-mail", "{state}");
                     assert_eq!(loaded.grants[0].calls, ["read"], "{state}");
                     assert_eq!(loaded.grants[1].as_user, "ada", "{state}");
                     assert_eq!(loaded.grants[1].calls, ["send"], "{state}");
                     assert!(loaded.grants[2].given.is_empty(), "{state}");
+                    assert_eq!(loaded.grants[3].source, "crm", "{state}");
+                    assert_eq!(loaded.grants[3].kinds["customer"], "read", "{state}");
+                    assert_eq!(loaded.grants[3].kinds["note"], "update", "{state}");
                     assert_eq!(loaded.grants_notice, None, "{state}");
                     assert!(!loaded.grants_too_old, "{state}");
                 }

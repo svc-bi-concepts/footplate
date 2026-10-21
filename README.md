@@ -220,7 +220,8 @@ toggle, with its banner), `arrival` (one
 arrival's bead open from the panel), `flow` (yardr's line open on
 its flow), `old-lines` (the Lines pane against a yard too old to
 serve it, saying so in plain words), `grants` (the grants view open on
-its row, with a read, an update and an `--as` grant), `secret` (an open card of a
+its row, with a read, an update and an `--as` grant, and a source's named
+read call and update call), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
@@ -946,7 +947,10 @@ chips All, Approved, Words, Taken back and Put aside above the days. Last
 of them, where the window runs as the yard's operator, the Grants row:
 every source × holder × call, by source, with each call's own time and
 approver, the weighty words for update and `--as` rows in rust as on a
-card, and each row's `yardr source revoke` line to copy. It reads through
+card, and each row's `yardr source revoke` line to copy. A named call is
+weighty by the kind the yard serves for it: a read has no weighty words
+and an update has them; a call with no kind served, as every call of a yard
+from before it served kinds, counts as an update. It reads through
 `SourceGrants` and changes nothing itself; a yard too old for the call
 says so in its pane. Then
 the crew with what each one's session does (`working`,

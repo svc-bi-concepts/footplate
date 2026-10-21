@@ -44,7 +44,8 @@
 # (yardr's line open on its flow), `old-lines` (the Lines pane against
 # a yard too old to serve it, saying so in plain words), `grants` (the
 # grants view open on its row, with a read, an update and an `--as`
-# grant), `secret` (an open card of a secret
+# grant, and a source's named read call and update call), `secret` (an
+# open card of a secret
 # ask, posed with a value typed and hidden), `secret-shown` (that
 # card where the yard marks the value no secret: typed and shown),
 # `secret-refused` (that card with the yard's refusal of its answer),

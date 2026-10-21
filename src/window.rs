@@ -10092,8 +10092,23 @@ yardr.dev
                 {"source": "telegram", "group": "builders",
                  "calls": ["read"],
                  "at": "2026-10-12T10:15:00Z", "by": "mckean"},
+                {"source": "crm", "crew": "yardmaster",
+                 "calls": ["customer", "note"],
+                 "at": "2026-10-17T19:06:00Z", "by": "mckean",
+                 "given": {
+                    "customer": {"at": "2026-10-17T19:06:00Z", "by": "mckean"},
+                    "note": {"at": "2026-10-17T19:06:00Z", "by": "mckean"}},
+                 "kinds": {"customer": "read", "note": "update"}},
             ]})
             .to_string()
+        };
+        // The same grants from a yard before it served kinds.
+        let older = || {
+            let mut all: serde_json::Value = serde_json::from_str(&grants()).unwrap();
+            for grant in all["result"].as_array_mut().unwrap() {
+                grant.as_object_mut().unwrap().remove("kinds");
+            }
+            all.to_string()
         };
         let asks = || {
             json!({"result": {"open": [
@@ -10118,7 +10133,7 @@ yardr.dev
         view.read_with(cx, |v, _| {
             let model = v.model.as_ref().unwrap();
             assert!(model.is_operator());
-            assert_eq!(model.grant_records().len(), 3);
+            assert_eq!(model.grant_records().len(), 4);
         });
         click_on(cx, "row grants");
         cx.run_until_parked();
@@ -10131,9 +10146,17 @@ yardr.dev
         assert!(drawn(cx, "grants row google-mail read"));
         assert!(drawn(cx, "grants row google-mail send"));
         assert!(drawn(cx, "grants row telegram read"));
-        // A plain read carries no weight; an update as a user carries
-        // both lines; the unkept record says when it last changed.
+        assert!(drawn(cx, "grants source crm"));
+        assert!(drawn(cx, "grants row crm customer"));
+        assert!(drawn(cx, "grants row crm note"));
+        // A plain read carries no weight, nor does a named one by the kind
+        // the yard served; an update as a user carries both lines, and a
+        // named update the one; the unkept record says when it last
+        // changed.
         assert!(!drawn(cx, "grants weight google-mail read 0"));
+        assert!(!drawn(cx, "grants weight crm customer 0"));
+        assert!(drawn(cx, "grants weight crm note 0"));
+        assert!(!drawn(cx, "grants weight crm note 1"));
         assert!(drawn(cx, "grants weight google-mail send 0"));
         assert!(drawn(cx, "grants weight google-mail send 1"));
         assert!(drawn(cx, "grants unkept"));
@@ -10142,16 +10165,36 @@ yardr.dev
             let records = model.grant_records();
             assert_eq!(
                 crate::model::grant_summary(records),
-                "3 calls granted of 2 sources to 2 holders: 1 may change something outside the yard, 1 call as a user."
+                "5 calls granted of 3 sources to 2 holders: 2 may change something outside the yard, 1 call as a user."
             );
             assert_eq!(
                 crate::model::grant_revoke("google-mail", "send", &records[1]),
                 "yardr source revoke google-mail send --crew yardmaster --as ada"
             );
         });
-        // A grant given reads the grants again.
-        yard.answer("SourceGrants", &json!({"result": []}).to_string());
+        // A grant given reads the grants again, here from a yard before it
+        // served kinds: the named read is weighty as it was, and the
+        // summary counts it.
+        yard.answer("SourceGrants", &older());
         yard.emit(r#"{"seq": 21, "kind": "source_granted", "actor": "mckean", "data": {}}"#);
+        wait(cx, "the grants read again, without kinds", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.grant_records().len() == 4
+                        && m.grant_records().iter().all(|g| g.kinds.is_empty())
+                })
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "grants weight crm customer 0"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                crate::model::grant_summary(v.model.as_ref().unwrap().grant_records()),
+                "5 calls granted of 3 sources to 2 holders: 3 may change something outside the yard, 1 call as a user."
+            );
+        });
+        yard.answer("SourceGrants", &json!({"result": []}).to_string());
+        yard.emit(r#"{"seq": 22, "kind": "source_granted", "actor": "mckean", "data": {}}"#);
         wait(cx, "the grants read again", |cx| {
             view.read_with(cx, |v, _| {
                 v.model
