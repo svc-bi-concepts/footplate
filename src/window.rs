@@ -19771,7 +19771,9 @@ mod tests {
 
         // The closed bead chips and opens in the drawer, read whole.
         wait(cx, "the closed bead's chip", |cx| {
-            view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries()[0].refs.len() == 1)
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().entries()[0].refs.len() == 1
+            })
         });
         click(cx, 12, mail, 5, 1.);
         wait(cx, "footplate-zgtr read whole", |cx| {
