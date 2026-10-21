@@ -1274,8 +1274,7 @@ you do not want: footplate's in its settings, the yard's with
 `yardr user set <user> notify=`.
 
 Not in this slice, and in `yardr chat`: a crew member's pane. Nor here:
-saving an image to disk, resizing one that is over the cap, or sending
-files that are no image.
+saving an image to disk, or resizing one that is over the cap.
 
 ## The icon
 

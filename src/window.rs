@@ -4038,7 +4038,16 @@ impl Footplate {
                     .cloned()
                     .unwrap_or_default();
                 let (mut model, mut effects) = match self.model.as_ref() {
-                    Some(before) => before.resumed(state, mode),
+                    Some(before) => {
+                        let (mut model, mut effects) = before.resumed(state, mode);
+                        // The drawer's bead was read into the model that is
+                        // gone: read it into this one, while the drawer
+                        // stands open on it. A shut drawer reads nothing.
+                        if let Some(bead) = self.drawer.clone() {
+                            effects.extend(model.read_bead(&bead));
+                        }
+                        (model, effects)
+                    }
                     None => Model::new_returning(
                         state,
                         mode,
@@ -19719,6 +19728,72 @@ mod tests {
         assert!(drawn(cx, "bead title bead-a"));
     }
 
+    /// The yard read again keeps the drawer's bead: the window reads
+    /// it into the new model, and the drawer shows it again once the
+    /// call answers, not "Reading the bead."
+    #[gpui::test]
+    fn the_drawer_reads_its_bead_again_when_the_yard_is_read_again(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_two_beads(&yard);
+        let mail = "over in bead-a now";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        assert!(drawn(cx, "text 12"));
+
+        click(cx, 12, mail, 8, 1.);
+        wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
+        assert!(drawn(cx, "bead title bead-a"));
+
+        // The yard is lost and comes back: the drawer stands open, but
+        // the new model holds no bead, so it reads "Reading the bead."
+        let state = session::load(&yard.client(), "jo").unwrap();
+        view.update(cx, |v, cx| v.told(Update::Up(Box::new(state)), cx));
+        assert_eq!(drawer_of(&view, cx), Some("bead-a".to_string()));
+        assert!(!has_bead(&view, cx, "bead-a"));
+
+        // Until the bead is read again, and the drawer shows it again.
+        wait(cx, "bead-a read again", |cx| has_bead(&view, cx, "bead-a"));
+        assert!(drawn(cx, "bead title bead-a"));
+    }
+
+    /// A shut drawer reads no bead when the yard is read again: the bead
+    /// it showed is asked for no more.
+    #[gpui::test]
+    fn a_shut_drawer_reads_no_bead_when_the_yard_is_read_again(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer_for("Bead", "bead", "footplate-zgtr", &bead_closed());
+        let mail = "footplate-zgtr merged";
+        mails(&yard, &[mail]);
+        let (view, cx) = opened(&yard, &[mail], cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+
+        // The closed bead chips and opens in the drawer, read whole.
+        wait(cx, "the closed bead's chip", |cx| {
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries()[0].refs.len() == 1)
+        });
+        click(cx, 12, mail, 5, 1.);
+        wait(cx, "footplate-zgtr read whole", |cx| {
+            has_bead(&view, cx, "footplate-zgtr")
+        });
+
+        // The drawer is shut, and the yard is read again: the conversation
+        // comes back, and the bead is asked for no more.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(drawer_of(&view, cx), None);
+        let asked = yard.asked("Bead");
+        let state = session::load(&yard.client(), "jo").unwrap();
+        view.update(cx, |v, cx| v.told(Update::Up(Box::new(state)), cx));
+        wait(cx, "the conversation read again", |cx| {
+            texts(&view, cx) == [mail]
+        });
+        thread::sleep(Duration::from_millis(100));
+        frames(cx);
+        assert_eq!(yard.asked("Bead"), asked);
+    }
+
     /// A bead that closed is in no list the window reads. Mail that names
     /// it chips all the same, from what the yard says when asked for its
     /// id: once, whatever is drawn after. The chip opens the bead in the
@@ -25799,10 +25874,15 @@ yardr.dev
             window.focus(&view.line.focus_handle(cx));
             view
         });
+        // The row's selection, not the yard's answer: the yard may
+        // answer between the keystroke and the check, and the wait would
+        // leave the mode unswitched with the bead never read.
         wait(cx, "the decisions", |cx| {
             to_decisions(&view, cx);
             view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| m.decisions_count() == 2)
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
             })
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
