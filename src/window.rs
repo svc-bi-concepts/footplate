@@ -1274,13 +1274,6 @@ mod tests {
             secret_keys("bead-s", 7, Approval::Nowhere, true),
             "in a terminal: yardr bead answer bead-s 7 --secret · a ask about this"
         );
-    }
-
-    /// A weighty card approves through the Mac's unlock where there is a
-    /// gate, and nowhere where there is none; a routine card approves
-    /// straight to the yard. The control and the keys say which.
-    #[test]
-    fn a_weighty_card_approves_after_unlocking_or_nowhere() {
         assert_eq!(approval(false, true, false), Approval::Direct);
         assert_eq!(approval(false, false, false), Approval::Direct);
         assert_eq!(approval(true, true, false), Approval::Unlock);
@@ -20557,11 +20550,29 @@ yardr.dev
     const RUN_DOES: &str = "the link with airy (it calls itself yardr, key 6lHks9_z…) takes 300 mails and asks an hour from it. It takes 30 now.";
     const RUN_BACK: &str = "yardr peer allow airy --mail-limit 30";
     const RUN_RESULT: &str = "peer airy: takes 300 mails and asks an hour, and 2400 files";
+    const WEIGHTY_RUN_LINE: &str = "lets the yard change something outside it: crew members builder-1 through builder-40 may call send of crm (an update)";
+    const WEIGHTY_RUN_RESULT: &str = "source crm: send granted to builder-1 through builder-40";
 
     fn run_of() -> Value {
         let command = long_command();
         let argv: Vec<&str> = command.split(' ').skip(1).collect();
         json!({"argv": argv, "command": command, "does": [RUN_DOES], "back": RUN_BACK})
+    }
+
+    /// A long update grant for the weighty run card, to keep its proposal
+    /// and the yard's outside line about the same change.
+    fn weighty_long_command() -> String {
+        let crew: Vec<String> = (1..=40).map(|n| format!("--crew builder-{n}")).collect();
+        format!("yardr source grant crm send {}", crew.join(" "))
+    }
+
+    fn weighty_run_of() -> Value {
+        let command = weighty_long_command();
+        let argv: Vec<&str> = command.split(' ').skip(1).collect();
+        let does = WEIGHTY_RUN_LINE;
+        let crew: Vec<String> = (1..=40).map(|n| format!("--crew builder-{n}")).collect();
+        let back = format!("yardr source revoke crm send {}", crew.join(" "));
+        json!({"argv": argv, "command": command, "does": [does], "back": back})
     }
 
     /// The run ask 7 on bead-s as the queue lists it, open or in `state`,
@@ -20960,7 +20971,8 @@ yardr.dev
 
     /// A run ask's card: under the asker's lines the yard's one block, with
     /// the command whole and wrapped, the yard's sentence and the command
-    /// that takes it back, and directly under it the button that approves.
+    /// that takes it back. A weighty card has no control without a gate;
+    /// its button opens the gate before approving.
     /// Enter approves nothing, with words or without; the card's own key
     /// calls `ApproveAsk` with the ask and nothing of the command. A call
     /// with no answer never says approved; a refusal is shown whole; an
@@ -20972,8 +20984,8 @@ yardr.dev
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let yard = Yard::start();
-        let (view, cx) = opened_on_a_run_ask(&yard, &file, cx);
-        let command = long_command();
+        let (view, cx) = opened_on_a_weighty_run_ask(&yard, &file, cx);
+        let command = weighty_long_command();
 
         // The card draws no line for words, and the window has the keys.
         let in_line = view.update_in(cx, |v, window, cx| {
@@ -20981,6 +20993,9 @@ yardr.dev
         });
         assert!(!in_line);
         assert!(drawn(cx, "run bead-s 7"));
+        assert!(drawn(cx, "weight bead-s 7 0"));
+        assert!(drawn(cx, "weighty decline bead-s 7"));
+        assert!(!drawn(cx, "approve bead-s 7"));
         assert!(!drawn(cx, "words bead-s 7"));
         assert!(!drawn(cx, "send bead-s 7"));
 
@@ -21011,15 +21026,14 @@ yardr.dev
         );
         assert_eq!(selected(&view, cx).as_deref(), Some("```"));
 
-        // The command is whole and wraps: its block stands many lines
-        // high, where the one-line command under it stands one, and both
-        // are inside the yard's block. Its control copies it to the letter.
+        // The command is whole and wraps, as does its take-back; both
+        // stand inside the yard's block and are selectable as text.
         let block = bounds_of(cx, "run bead-s 7");
         let (whole, back) = (
             bounds_of(cx, "run command bead-s 7"),
             bounds_of(cx, "run back bead-s 7"),
         );
-        assert!(whole.size.height > back.size.height * 2., "{whole:?}");
+        assert!(whole.size.height > px(40.), "{whole:?}");
         assert!(whole.right() <= block.right(), "{whole:?} in {block:?}");
         assert!(block.top() <= whole.top() && back.bottom() <= block.bottom());
         assert!(whole.bottom() <= back.top());
@@ -21027,13 +21041,12 @@ yardr.dev
         cx.simulate_click(chip, gpui::Modifiers::default());
         assert_eq!(clipboard(cx).as_deref(), Some(command.as_str()));
 
-        // The control that approves is directly under the yard's block.
-        let approve = bounds_of(cx, "approve bead-s 7");
-        assert!(
-            approve.top() >= block.bottom(),
-            "{approve:?} under {block:?}"
-        );
-        assert!(approve.top() - block.bottom() < px(24.), "{approve:?}");
+        // With no gate, the card gives the terminal path instead of a
+        // control. Its block copies the approval command.
+        let terminal = "yardr bead answer bead-s 7 --approve";
+        let chip = run_chip(&view, cx, run_text("approve", terminal)).unwrap();
+        cx.simulate_click(chip, gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(terminal));
 
         // Enter alone approves nothing, and nothing typed goes with it:
         // the card has no line to type in, and the picking keys no option.
@@ -21046,7 +21059,20 @@ yardr.dev
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
 
-        // Its own key. The yard goes away over the call: never "approved".
+        // ⌘↵ on the no-gate card does nothing. A cancelled unlock does
+        // nothing too; the control is available to try again.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        unlock_as(&view, cx, true, false);
+        assert!(drawn(cx, "approve bead-s 7"));
+        click_on(cx, "approve bead-s 7");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+
+        // Passing the gate starts the call. The yard goes away over it:
+        // never "approved".
+        unlock_as(&view, cx, true, true);
         yard.answer_nothing("ApproveAsk");
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "no answer", |cx| {
@@ -21054,12 +21080,12 @@ yardr.dev
         });
         assert!(drawn(cx, "refused bead-s 7"));
         assert_eq!(notice(&view, cx), "");
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo"])]);
+        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
         assert!(drawn(cx, "approve bead-s 7"));
 
         // The yard refuses, since it changed after the ask was written:
         // its words, whole.
-        let stale = "ask 7 says the link with airy takes 30 mails an hour now, and it takes 100: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
+        let stale = "ask 7 on bead-s: the source grant changed after this card was written. Nothing ran. Decline it; it is asked again if it is still wanted.";
         yard.answer(
             "ApproveAsk",
             &json!({"error": {"code": "error", "message": stale}}).to_string(),
@@ -21074,19 +21100,23 @@ yardr.dev
 
         // Approved: the command as it ran and what it printed, and the
         // ask among the decided, which reads the same.
+        let mut answered = queued_run("answered", true);
+        answered["run"] = weighty_run_of();
+        answered["weight"] = weighed("outside", WEIGHTY_RUN_LINE);
+        answered["ran"] = json!({"argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT});
         yard.answer(
             "UserAsks",
-            &json!({"result": {"open": [], "decided": [queued_run("answered", true)]}}).to_string(),
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
         );
         yard.answer(
             "ApproveAsk",
             &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                "argv": run_of()["argv"], "does": [RUN_DOES], "result": RUN_RESULT}})
+                "argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT}})
             .to_string(),
         );
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "approved", |cx| {
-            notice(&view, cx) == format!("approved, ran: {command} · {RUN_RESULT}")
+            notice(&view, cx) == format!("approved, ran: {command} · {WEIGHTY_RUN_RESULT}")
         });
         assert_eq!(yard.asked("ApproveAsk").len(), 3);
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
@@ -21706,7 +21736,7 @@ yardr.dev
     /// A run ask is declined with words as any ask is: `d` asks for them
     /// in a line the card has for nothing else, and Enter there sends the
     /// decline and approves nothing. One put aside is approved from its
-    /// card among the decided.
+    /// card among the decided, after the Mac's unlock.
     #[gpui::test]
     fn a_run_ask_is_declined_with_words_and_approved_after_it_was_put_aside(
         cx: &mut TestAppContext,
@@ -21714,10 +21744,11 @@ yardr.dev
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let yard = Yard::start();
-        let (view, cx) = opened_on_a_run_ask(&yard, &file, cx);
+        let (view, cx) = opened_on_a_weighty_run_ask(&yard, &file, cx);
         yard.answer(
             "ApproveAsk",
-            &json!({"result": {"argv": run_of()["argv"], "result": RUN_RESULT}}).to_string(),
+            &json!({"result": {"argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT}})
+                .to_string(),
         );
 
         cx.simulate_keystrokes("d");
@@ -21747,30 +21778,50 @@ yardr.dev
 
         // Put aside, it is among the decided with its block and the
         // control, and is approved from there.
+        let mut put_aside = queued_run("put aside", false);
+        put_aside["run"] = weighty_run_of();
+        put_aside["weight"] = weighed("outside", WEIGHTY_RUN_LINE);
         yard.answer(
             "UserAsks",
-            &json!({"result": {"open": [], "decided": [queued_run("put aside", false)]}})
-                .to_string(),
+            &json!({"result": {"open": [], "decided": [put_aside]}}).to_string(),
         );
         cx.simulate_keystrokes("x");
         wait(cx, "put aside", |_| yard.asked("DeferAsk").len() == 1);
         open_decided(&view, cx, "bead-s", 7);
         wait(cx, "the card among the decided", |cx| {
-            drawn(cx, "approve bead-s 7")
+            drawn(cx, "weight bead-s 7 0") && drawn(cx, "weighty decline bead-s 7")
         });
         assert!(drawn(cx, "run bead-s 7"));
+        assert!(!drawn(cx, "approve bead-s 7"));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+
+        // A put-aside weighty ask keeps its weight. Its card approves
+        // nowhere without a gate; cancel sends nothing, and passing the
+        // gate sends `weighed` with the approval.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        unlock_as(&view, cx, true, false);
+        assert!(drawn(cx, "approve bead-s 7"));
+        click_on(cx, "approve bead-s 7");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        unlock_as(&view, cx, true, true);
+        let mut answered = queued_run("answered", true);
+        answered["run"] = weighty_run_of();
+        answered["weight"] = weighed("outside", WEIGHTY_RUN_LINE);
+        answered["ran"] = json!({"argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT});
         yard.answer(
             "UserAsks",
-            &json!({"result": {"open": [], "decided": [queued_run("answered", true)]}}).to_string(),
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
         );
         click_on(cx, "approve bead-s 7");
         wait(cx, "approved", |cx| {
-            notice(&view, cx).starts_with("approved, ran: yardr source grant crm read")
+            notice(&view, cx).starts_with("approved, ran: yardr source grant crm send")
         });
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo"])]);
+        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
     }
 
     /// A taken-back run ask keeps the proposal for the record but has no
@@ -21844,6 +21895,8 @@ yardr.dev
     /// The bead of that run ask, weighing its ask's classes.
     fn bead_run_weighed(question: &str, context: &[&str], weight: Value) -> String {
         let mut bead: Value = serde_json::from_str(&bead_run_about(question, context)).unwrap();
+        bead["result"]["title"] = json!("CRM messages");
+        bead["result"]["asks"][0]["run"] = weighty_run_of();
         bead["result"]["asks"][0]["weight"] = weight;
         bead.to_string()
     }
@@ -21855,17 +21908,20 @@ yardr.dev
         file: &std::path::Path,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
-        let question = "Take more mail from airy?";
+        let question = "May the builder crew send updates from crm?";
+        let fenced = format!(
+            "```\n{}\n```\nthe yardmaster asks to grant it to the crew.",
+            weighty_long_command()
+        );
         let context = [
-            "airy's yard was refused 4 mails in the last hour.",
-            "```\nyardr peer allow airy --trust\n```\nthe yard says: nothing changes",
+            "the builders need the source crm's send call.",
+            fenced.as_str(),
         ];
         a_yard_of_jo(yard);
-        let weight = weighed(
-            "trust",
-            "widens who the yard listens to: the link with airy takes 300 mails and asks an hour from it",
-        );
+        let weight = weighed("outside", WEIGHTY_RUN_LINE);
         let mut queued = queued_run_about(question, "", false);
+        queued["bead_title"] = json!("CRM messages");
+        queued["run"] = weighty_run_of();
         queued["weight"] = weight.clone();
         yard.answer(
             "UserAsks",
@@ -21879,43 +21935,6 @@ yardr.dev
             ..Env::default()
         };
         opened_on_the_ask(at, file, cx)
-    }
-
-    /// The window on a yard whose one decided ask is that run ask put
-    /// aside, weighty, its row open and read.
-    fn opened_on_a_decided_weighty_run_ask<'a>(
-        yard: &Yard,
-        file: &std::path::Path,
-        cx: &'a mut TestAppContext,
-    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
-        let question = "Take more mail from airy?";
-        let context = ["airy's yard was refused 4 mails in the last hour."];
-        a_yard_of_jo(yard);
-        let weight = weighed(
-            "trust",
-            "widens who the yard listens to: the link with airy takes 300 mails and asks an hour from it",
-        );
-        let mut queued = queued_run_about(question, "put aside", false);
-        queued["weight"] = weight.clone();
-        yard.answer(
-            "UserAsks",
-            &json!({"result": {"open": [], "decided": [queued]}}).to_string(),
-        );
-        yard.answer("Bead", &bead_run_weighed(question, &context, weight));
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
-        let (view, cx) = opened_at(at, file, cx);
-        wait(cx, "the decided", |cx| {
-            view.read_with(cx, |v, _| {
-                v.model.as_ref().is_some_and(|m| m.decided_count() == 1)
-            })
-        });
-        open_decided(&view, cx, "bead-s", 7);
-        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
-        cx.run_until_parked();
-        (view, cx)
     }
 
     /// The window on a yard whose one open ask is the secret ask 7 on
@@ -21975,214 +21994,6 @@ yardr.dev
             ..Env::default()
         };
         opened_on_the_ask(at, file, cx)
-    }
-
-    /// A weighty run ask's card shows its classes' lines first, and its
-    /// control opens the Mac's unlock: ⌘↵ alone approves nothing, and the
-    /// gate's success sends `weighed` with the approval.
-    #[gpui::test]
-    fn a_weighty_run_ask_s_card_shows_its_weight_and_approves_after_unlocking(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_run_ask(&yard, &file, cx);
-        assert!(drawn(cx, "weight bead-s 7 0"));
-        // With no gate the card shows where to approve instead, and
-        // offers no control: its key sends nothing. The window declines
-        // nothing for the person: the card stays open.
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "approve bead-s 7"));
-        let terminal = "yardr bead answer bead-s 7 --approve";
-        let chip = run_chip(&view, cx, run_text("approve", terminal)).unwrap();
-        cx.simulate_click(chip, gpui::Modifiers::default());
-        assert_eq!(clipboard(cx).as_deref(), Some(terminal));
-        cx.simulate_keystrokes("secondary-enter");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
-        // With the gate the control opens it, and its success sends
-        // `weighed` with the approval.
-        unlock_as(&view, cx, true, true);
-        assert_eq!(
-            view.read_with(cx, |v, _| v.card_approval("bead-s", 7)),
-            Approval::Unlock
-        );
-        assert!(drawn(cx, "approve bead-s 7"));
-        yard.answer(
-            "ApproveAsk",
-            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                              "argv": run_of()["argv"], "result": RUN_RESULT}})
-            .to_string(),
-        );
-        cx.simulate_keystrokes("secondary-enter");
-        wait(cx, "approved", |cx| {
-            notice(&view, cx).starts_with("approved, ran: ")
-        });
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
-        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
-    }
-
-    /// Where the Mac's unlock is cancelled, a weighty approval sends
-    /// nothing, and the control sends again.
-    #[gpui::test]
-    fn a_weighty_approval_cancelled_at_the_gate_sends_nothing(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_run_ask(&yard, &file, cx);
-        unlock_as(&view, cx, true, false);
-        assert!(drawn(cx, "approve bead-s 7"));
-        click_on(cx, "approve bead-s 7");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
-        // The control sends again: passing the gate sends the approval.
-        assert!(drawn(cx, "approve bead-s 7"));
-        unlock_as(&view, cx, true, true);
-        yard.answer(
-            "ApproveAsk",
-            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                              "argv": run_of()["argv"], "result": RUN_RESULT}})
-            .to_string(),
-        );
-        click_on(cx, "approve bead-s 7");
-        wait(cx, "approved", |cx| {
-            notice(&view, cx).starts_with("approved, ran: ")
-        });
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
-    }
-
-    /// A weighty secret is given after unlocking: the gate's success sends
-    /// `weighed` with the values, and its cancel sends nothing and keeps
-    /// what was typed for another try. With no gate the card shows where
-    /// to give instead, and draws no field.
-    #[gpui::test]
-    fn a_weighty_secret_is_given_after_unlocking_or_in_a_terminal(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_secret_ask(&yard, &file, cx);
-        assert!(drawn(cx, "weight bead-s 7 0"));
-        // No gate: the decline path, and no field to type in.
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "give bead-s 7"));
-        assert!(!drawn(cx, "secret bead-s 7"));
-        cx.simulate_keystrokes("i");
-        cx.run_until_parked();
-        let in_secret = view.update_in(cx, |v, window, cx| {
-            v.secret.focus_handle(cx).is_focused(window)
-        });
-        assert!(!in_secret);
-        let terminal = "yardr bead answer bead-s 7 --secret";
-        let chip = run_chip(&view, cx, run_text("approve", terminal)).unwrap();
-        cx.simulate_click(chip, gpui::Modifiers::default());
-        assert_eq!(clipboard(cx).as_deref(), Some(terminal));
-        // With the gate: typed, Enter opens it. Its cancel sends nothing,
-        // and what was typed is back in the field for another try.
-        unlock_as(&view, cx, true, false);
-        assert!(drawn(cx, "give bead-s 7"));
-        assert!(drawn(cx, "secret bead-s 7"));
-        cx.simulate_keystrokes("i");
-        cx.simulate_input(VALUE);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
-        assert_eq!(secret_field(&view, cx).0, VALUE);
-        // Its success sends `weighed` with the values.
-        unlock_as(&view, cx, true, true);
-        yard.answer(
-            "GiveSecret",
-            &json!({"result": {"given": ["BOOKS_TOKEN"],
-                              "file": "/home/jo/.yardr/sources/books.env",
-                              "credential": "https://books.example.com"}})
-            .to_string(),
-        );
-        cx.simulate_keystrokes("enter");
-        wait(cx, "given", |cx| {
-            notice(&view, cx).starts_with("gave BOOKS_TOKEN")
-        });
-        assert_eq!(
-            yard.asked("GiveSecret"),
-            [
-                json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE},
-                    "actor": "jo", "weighed": true})
-            ]
-        );
-        assert_eq!(yard.asked("AnswerAsk"), Vec::<Value>::new());
-    }
-
-    /// A weighty setup ask's card approves after unlocking: the gate's
-    /// success sends `weighed` with the preset pick and the account. With
-    /// no gate the card shows where to approve instead, and draws no
-    /// account field.
-    #[gpui::test]
-    fn a_weighty_setup_ask_s_card_approves_after_unlocking_or_in_a_terminal(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_setup_ask(&yard, &file, cx);
-        assert!(drawn(cx, "weight bead-s 7 0"));
-        // No gate: the decline path in place of the control, and no
-        // account field to type in. Its key sends nothing.
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "approve bead-s 7"));
-        assert!(!drawn(cx, "secret bead-s 7"));
-        cx.simulate_keystrokes("secondary-enter");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
-        // With the gate: a tap takes the candidate, and the approval
-        // sends the recommended preset with it and `weighed`.
-        unlock_as(&view, cx, true, true);
-        yard.answer(
-            "ApproveSetup",
-            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                              "pack": "courier", "preset": "read", "account": "courier-existing",
-                              "result": "approved, to be carried out"}})
-            .to_string(),
-        );
-        click_on(cx, "account bead-s 7 courier-existing");
-        cx.run_until_parked();
-        cx.simulate_keystrokes("secondary-enter");
-        wait(cx, "approved", |cx| {
-            notice(&view, cx).starts_with("approved, being carried out: ")
-        });
-        assert_eq!(
-            yard.asked("ApproveSetup"),
-            [json!({"bead": "bead-s", "ask": 7, "option": 1,
-                    "account": "courier-existing", "actor": "jo", "weighed": true})]
-        );
-        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
-    }
-
-    /// A weighty run ask put aside shows its weight where it is decided,
-    /// and approves from there after unlocking, or in a terminal with no
-    /// gate.
-    #[gpui::test]
-    fn a_weighty_run_ask_put_aside_shows_its_weight_where_it_is_decided(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_decided_weighty_run_ask(&yard, &file, cx);
-        assert!(drawn(cx, "weight bead-s 7 0"));
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "approve bead-s 7"));
-        // With the gate the control opens it, and its success sends
-        // `weighed` with the approval.
-        unlock_as(&view, cx, true, true);
-        assert!(drawn(cx, "approve bead-s 7"));
-        yard.answer(
-            "ApproveAsk",
-            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                              "argv": run_of()["argv"], "result": RUN_RESULT}})
-            .to_string(),
-        );
-        click_on(cx, "approve bead-s 7");
-        wait(cx, "approved", |cx| {
-            notice(&view, cx).starts_with("approved, ran: ")
-        });
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
     }
 
     /// The courier pack's sentences as the yard cards them: the pack
@@ -22410,14 +22221,25 @@ yardr.dev
     /// mint's digest, the account and the grants — the account choice with
     /// each candidate's address, the presets to pick from, and the
     /// take-backs. A tap takes the candidate, and the approval sends the
-    /// preset pick with it; the ask reads as being carried out until the
-    /// yard says it ran.
+    /// preset pick with it after the Mac's unlock; the ask reads as being
+    /// carried out until the yard says it ran.
     #[gpui::test]
     fn a_setup_ask_s_card_shows_its_setup_and_is_approved_with_a_tap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let yard = Yard::start();
-        let (view, cx) = opened_on_a_setup_ask(&yard, &["COURIER_ACCOUNT"], true, 1, &file, cx);
+        let (view, cx) = opened_on_a_weighty_setup_ask(&yard, &file, cx);
+
+        // With no gate, a weighty setup has its terminal path instead of
+        // an approval control or account field.
+        assert!(drawn(cx, "weight bead-s 7 0"));
+        assert!(drawn(cx, "weighty decline bead-s 7"));
+        assert!(!drawn(cx, "approve bead-s 7"));
+        assert!(!drawn(cx, "secret bead-s 7"));
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        unlock_as(&view, cx, true, false);
 
         // The yard's block, with what approving does and each sentence.
         assert!(drawn(cx, "setup bead-s 7"));
@@ -22494,6 +22316,8 @@ yardr.dev
                 "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
                 "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
                 "setup": setup_of(&["COURIER_ACCOUNT"], true),
+                "weight": [{"class": "credential",
+                            "line": "gives a credential or an address to the yard: the account COURIER_ACCOUNT"}],
                 "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
             .to_string(),
         );
@@ -22510,6 +22334,12 @@ yardr.dev
             v.model.as_ref().unwrap().account_choice("bead-s", 7)
         });
         assert_eq!(taken, "courier-existing");
+        // Cancel sends nothing and leaves the selected account for another
+        // try.
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        unlock_as(&view, cx, true, true);
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "approved", |cx| {
             notice(&view, cx)
@@ -22518,7 +22348,7 @@ yardr.dev
         assert_eq!(
             yard.asked("ApproveSetup"),
             [json!({"bead": "bead-s", "ask": 7, "option": 1,
-                     "account": "courier-existing", "actor": "jo"})]
+                     "account": "courier-existing", "actor": "jo", "weighed": true})]
         );
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
         // Among the decided it reads as being carried out, with the
@@ -22530,6 +22360,7 @@ yardr.dev
         );
         open_decided(&view, cx, "bead-s", 7);
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        assert!(drawn(cx, "weight bead-s 7 0"));
         // A setup runs once for one ask: the model takes no approval for
         // it again, and no key calls the yard again.
         assert!(!view.read_with(cx, |v, _| {
@@ -23680,7 +23511,8 @@ yardr.dev
 
     /// The Give button beside a secret's field gives the typed value by the
     /// same path as Enter: `GiveSecret`, the field empty whatever is
-    /// answered, the yard's line shown. It is disabled while the field is
+    /// answered, the yard's line shown. A weighty card passes the Mac's
+    /// unlock first. It is disabled while the field is
     /// empty: a click then sends nothing. The value is in no label, no
     /// notice and nothing kept; the footer still names Enter. The look is
     /// untried.
@@ -23689,30 +23521,42 @@ yardr.dev
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("footplate/settings.json");
         let yard = Yard::start();
-        let (view, cx) = opened_on_a_secret_ask(&yard, &["BOOKS_TOKEN"], &file, cx);
-        yard.answer(
-            "GiveSecret",
-            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
-                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        let (view, cx) = opened_on_a_weighty_secret_ask(&yard, &file, cx);
+        let mut answered = queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"]);
+        answered["weight"] = weighed(
+            "credential",
+            "gives a credential or an address to the yard: BOOKS_TOKEN, for the source books",
         );
         yard.answer(
             "UserAsks",
-            &json!({"result": {"open": [], "decided": [
-                queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"])
-            ]}})
-            .to_string(),
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
         );
         let nowhere = |view: &Entity<Footplate>, cx: &mut VisualTestContext, when: &str| {
             let kept = kept_outside_the_field(view, cx, dir.path());
             assert!(!kept.contains(VALUE), "{when}: {kept}");
         };
 
+        // With no gate, the weighty secret has its terminal path and no
+        // field to type into.
+        assert!(drawn(cx, "weight bead-s 7 0"));
+        assert!(drawn(cx, "weighty decline bead-s 7"));
+        assert!(!drawn(cx, "give bead-s 7"));
+        assert!(!drawn(cx, "secret bead-s 7"));
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+        let in_secret = view.update_in(cx, |v, window, cx| {
+            v.secret.focus_handle(cx).is_focused(window)
+        });
+        assert!(!in_secret);
+        unlock_as(&view, cx, true, false);
+
         // The button stands by the field, and the footer still names Enter.
         assert!(drawn(cx, "give bead-s 7"));
         assert!(drawn(cx, "secret bead-s 7"));
         assert!(!drawn(cx, "send bead-s 7"));
         assert!(
-            secret_keys("bead-s", 7, Approval::Direct, true).contains("enter sends it to the yard")
+            secret_keys("bead-s", 7, Approval::Unlock, true)
+                .contains("enter sends it to the yard after unlocking")
         );
 
         // Disabled on an empty field: a click sends nothing and says
@@ -23729,11 +23573,21 @@ yardr.dev
         cx.simulate_input(VALUE);
         assert_eq!(secret_field(&view, cx).0, VALUE);
         click_on(cx, "give bead-s 7");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        unlock_as(&view, cx, true, true);
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        );
+        click_on(cx, "give bead-s 7");
         assert_eq!(secret_field(&view, cx).0, "");
         wait(cx, "given by the button", |_| {
             yard.asked("GiveSecret")
                 == [
-                    json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo"}),
+                    json!({"bead": "bead-s", "ask": 7, "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo", "weighed": true}),
                 ]
         });
         wait(cx, "the yard's line", |cx| {
@@ -23752,9 +23606,9 @@ yardr.dev
                 .secret("bead-s", 7)
                 .unwrap()
                 .clone();
-            give_label(&secret, 0)
+            give_unlock_label(&secret, 0)
         });
-        assert_eq!(label, "Give BOOKS_TOKEN");
+        assert_eq!(label, "Give BOOKS_TOKEN after unlocking");
         assert!(!label.contains(VALUE));
 
         // Given, the decided card gives again from the same button.

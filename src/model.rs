@@ -12426,6 +12426,19 @@ mod tests {
     /// can still be approved; one declined or taken back cannot.
     #[test]
     fn a_run_ask_is_put_aside_and_declined_as_any_ask() {
+        // The head uses the terminal's weight line as text, after
+        // removing control characters from the yard's data.
+        assert_eq!(
+            weight_line(
+                "outside",
+                "lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"
+            ),
+            "WEIGHTY · outside: lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"
+        );
+        assert_eq!(
+            weight_line("trust\u{7f}", "user kim\u{2028}twice"),
+            "WEIGHTY · trust: user kimtwice"
+        );
         let mut m = with_a_run_ask(&[]);
         assert!(m.deferred("yd-link", 2710).contains(&Effect::Asks));
         assert_eq!(decided_all(&m)[0].outcome, "‖put aside");
@@ -12485,23 +12498,6 @@ mod tests {
         assert_eq!(
             approve_command("yd-link", 2710),
             "yardr bead answer yd-link 2710 --approve"
-        );
-    }
-
-    /// One class of a weighty card's weight as its head shows it: as the
-    /// terminal prints it, and as text alone, whatever the yard sent.
-    #[test]
-    fn a_weighty_card_s_head_shows_each_class_as_the_terminal_prints_it() {
-        assert_eq!(
-            weight_line(
-                "outside",
-                "lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"
-            ),
-            "WEIGHTY · outside: lets the yard change something outside it: crew member yardmaster may call send of google-mail (an update)"
-        );
-        assert_eq!(
-            weight_line("trust\u{7f}", "user kim\u{2028}twice"),
-            "WEIGHTY · trust: user kimtwice"
         );
     }
 
