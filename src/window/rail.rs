@@ -69,8 +69,8 @@ impl Render for OpenTip {
     }
 }
 
-/// One line under the pointer: a rail icon's name and what answers
-/// it, or what a word of the timetable says.
+/// Text under the pointer: a rail icon's name and what answers it, a
+/// word of the timetable, or several lines of working groups.
 pub(crate) struct RailTip(pub(crate) String);
 
 impl Render for RailTip {
