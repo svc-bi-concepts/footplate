@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- footplate's unlock in front of a weighty approval (src/unlock.rs).
+     Installed at /usr/share/polkit-1/actions/; without it a weighty card
+     asks for the ask's number instead. The person's own password, asked
+     each time, in an active session only. -->
+<policyconfig>
+  <vendor>yardr</vendor>
+  <vendor_url>https://yardr.dev</vendor_url>
+  <action id="dev.yardr.footplate.approve">
+    <description>Approve a weighty ask or give a secret in footplate</description>
+    <message>Authentication is needed to approve a weighty ask, or give a secret, in footplate: what it does is on its card</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

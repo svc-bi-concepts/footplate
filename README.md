@@ -1050,7 +1050,14 @@ yard weighed weighty shows each class's line first on its card, in rust:
 ID, a paired watch or the login password — and the control says so:
 "Approve in plantime after unlocking". ⌘↵ alone approves nothing: it opens
 the unlock, and the approval goes where the person passes it; its cancel
-sends nothing. Where no system unlock is offered, the card asks for the
+sends nothing. On Linux the unlock is polkit's: the desktop's own
+prompt, for the person's own password or fingerprint, each time. It is
+offered where polkit runs with an agent, as a desktop session has one, and
+footplate's action is installed, which a root copy does:
+`sudo cp assets/linux/dev.yardr.footplate.policy /usr/share/polkit-1/actions/`.
+The prompt says the action's own words, not the command: polkit takes
+none from a program that is not root's, so the card is what to read.
+Where no system unlock is offered, the card asks for the
 ask's number in a separate field and approves only when it matches;
 anything else leaves the card and sends nothing. The number is used up
 after each approval. `x` puts a run

@@ -9,8 +9,8 @@ builders.
 ## Layout
 
 Top level: `src/` the program, `scripts/` release, screenshot and
-shell-test helpers, `assets/` icons, `docs/design/` decision notes,
-`.yardr/` the yard's gate.
+shell-test helpers, `assets/` icons and the Linux polkit action,
+`docs/design/` decision notes, `.yardr/` the yard's gate.
 
 The window, its state and the yard:
 
@@ -48,8 +48,9 @@ Platform surface:
   yards menu.
 - `src/dock.rs`: the number on the macOS Dock icon.
 - `src/taskbar.rs`: the Linux desktop entry and window icon.
-- `src/unlock.rs`: the Mac's unlock in front of a weighty approval
-  (LocalAuthentication), with the reasons as plain functions; where no
+- `src/unlock.rs`: the system's unlock in front of a weighty approval
+  (the Mac's LocalAuthentication, Linux's polkit with the action in
+  `assets/linux/`), with the reasons as plain functions; where no
   unlock is offered, the card takes the ask's number typed back instead
   (`Approval::TypeBack`).
 
