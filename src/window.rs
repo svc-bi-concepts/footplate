@@ -19569,6 +19569,81 @@ mod tests {
         assert!(drawn(cx, "conversation state"));
     }
 
+    /// A crew member whose session sits at its harness's login screen is
+    /// not logged in, whatever its runtime reads the screen as: its row and
+    /// the header say so, its dot waits, and the line under the user's mail
+    /// to it says it cannot read it. The yard marks the handle with no
+    /// event of its own, so the events that tell of it read the crew again,
+    /// and the words go when the mark does.
+    #[gpui::test]
+    fn a_crew_member_at_its_login_screen_is_not_logged_in_and_the_mail_to_it_says_so(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let crew = |handle: &str| {
+            format!(
+                r#"{{"result": [{{"name": "assembly", "enabled": true, "state": "stopped"}},
+                    {{"name": "yardmaster", "enabled": true, "state": "running", "status": "idle", "handle": {handle}}}]}}"#
+            )
+        };
+        let screen = r#"{"pane": "p1", "harness_login": "Select login method:"}"#;
+        let led = r#"{"pane": "p1", "harness_login": "Select login method:",
+            "harness_login_ask": {"journal": "yardr-x1y2", "ask": 12, "step": "pick", "kind": "claude"}}"#;
+        yard.answer("Crew", &crew(screen));
+        yard.converse(
+            "yardmaster",
+            vec![
+                json!({"seq": 12, "at": mailed(0), "from": "jo", "to": "yardmaster",
+                "text": "hi", "read": false}),
+            ],
+        );
+        let (view, cx) = opened(&yard, &["hi"], cx);
+        // The state, the line under the mail and the dot of the row.
+        let stands = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                let model = v.model.as_ref().unwrap();
+                (
+                    model.crew_state("yardmaster"),
+                    model.entries()[0].standing.clone(),
+                    model.crew_rows()[1].dot,
+                )
+            })
+        };
+        assert_eq!(
+            stands(&view, cx),
+            (
+                Some("not logged in"),
+                Some("yardmaster is not logged in and cannot read mail".to_string()),
+                Some(model::Dot::Blocked)
+            )
+        );
+
+        // The yard leads the login: its event says so, the crew is read
+        // again, and the words are the yard's.
+        yard.answer("Crew", &crew(led));
+        yard.emit(r#"{"seq": 21, "kind": "login_led", "actor": "yard", "at": "2026-10-08T09:31:00Z", "data": {"crew": "yardmaster", "kind": "claude", "step": "asked", "ask": 12}}"#);
+        wait(cx, "the yard's words for the login", |cx| {
+            stands(&view, cx).1.is_some_and(|line| {
+                line.ends_with(
+                    "the yard leads its login, and waits for the operator at its asks (yardr asks)",
+                )
+            })
+        });
+
+        // Logged in: the session starts again with no mark, idle as before.
+        yard.answer("Crew", &crew("{}"));
+        yard.emit(r#"{"seq": 22, "kind": "crew_started", "actor": "yard", "at": "2026-10-08T09:32:00Z", "data": {"crew": "yardmaster"}}"#);
+        wait(cx, "the crew member idle again", |cx| {
+            stands(&view, cx)
+                == (
+                    Some("idle"),
+                    Some("sent; yardmaster is idle".to_string()),
+                    Some(model::Dot::Idle),
+                )
+        });
+    }
+
     /// A text that is the word alone draws the label and no body: the label
     /// says all of it.
     #[gpui::test]

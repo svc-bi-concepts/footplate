@@ -7,9 +7,11 @@
 //! as that page's "Over the network" has it: the same requests under
 //! `/user/`, over TCP with TLS, each with the device's token.
 //!
-//! Only the calls and fields that page lists are read here. The few lines of
-//! HTTP are written out, since a call is one request on one connection and
-//! neither needs a runtime nor a client library with a unix connector.
+//! Only the calls and fields that page lists are read here, but for the
+//! login mark on a crew member's handle ([`CrewMember::login`]). The few
+//! lines of HTTP are written out, since a call is one request on one
+//! connection and neither needs a runtime nor a client library with a unix
+//! connector.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -229,6 +231,39 @@ pub struct CrewMember {
     /// or nothing when none runs or the daemon has not looked yet.
     #[serde(default)]
     pub status: String,
+    /// Whether the session sits at its harness's login screen, which its
+    /// runtime often reads as idle. The yard keeps that on the session's
+    /// `handle`, which docs/api.md leaves to yardr: the one field of a crew
+    /// member read here that it lists no key of.
+    #[serde(default, rename = "handle", deserialize_with = "login_of")]
+    pub login: Login,
+}
+
+/// Where a crew member's session stands at its harness's login screen, as
+/// its handle keeps it (yardr-302g).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Login {
+    /// The session sits at the screen: `harness_login` is on its handle,
+    /// with the screen's line.
+    pub screen: bool,
+    /// The yard leads that login through asks of the operator:
+    /// `harness_login_ask` is on its handle.
+    pub led: bool,
+}
+
+/// The login a crew member's handle says its session stands at. A handle
+/// of any other shape than an object with those keys says none, so a yard
+/// that changes it leaves the crew reading as it did, and no call fails.
+fn login_of<'de, D>(d: D) -> std::result::Result<Login, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let handle = Value::deserialize(d)?;
+    let kept = |key: &str| handle.get(key).is_some_and(|mark| !mark.is_null());
+    Ok(Login {
+        screen: kept("harness_login"),
+        led: kept("harness_login_ask"),
+    })
 }
 
 /// The arrivals board as the yard serves it: the rows in arrival order.
@@ -4659,6 +4694,51 @@ mod tests {
                 crew[1].status.as_str()
             ),
             (false, "stopped", "")
+        );
+    }
+
+    /// A session at its harness's login screen carries the mark on its
+    /// handle, of which docs/api.md names no key: the login is read from a
+    /// handle that is an object with the keys, and any other shape says
+    /// none.
+    #[test]
+    fn crew_at_a_login_screen_carry_it_on_their_handles() {
+        let yard = Yard::start();
+        yard.answer(
+            "Crew",
+            r#"{"result": [
+                {"name": "led", "enabled": true, "state": "running", "status": "idle",
+                 "handle": {"pane": "p1", "harness_login": "Select login method:",
+                            "harness_login_ask": {"journal": "yardr-x1y2", "ask": 12, "step": "pick", "kind": "claude"}}},
+                {"name": "screen", "enabled": true, "state": "running", "status": "idle",
+                 "handle": {"harness_login": "Select login method:"}},
+                {"name": "past", "enabled": true, "state": "running", "status": "idle",
+                 "handle": {"pane": "p1", "harness_login": null}},
+                {"name": "plain", "enabled": true, "state": "running", "status": "working",
+                 "handle": {"pane": "p1"}},
+                {"name": "bare", "enabled": true, "state": "running"},
+                {"name": "null", "enabled": true, "state": "running", "handle": null},
+                {"name": "string", "enabled": true, "state": "running", "handle": "harness_login"},
+                {"name": "list", "enabled": true, "state": "running", "handle": ["harness_login"]}
+            ]}"#,
+        );
+        let crew = yard.client().crew().unwrap();
+        let logins: Vec<(&str, bool, bool)> = crew
+            .iter()
+            .map(|r| (r.name.as_str(), r.login.screen, r.login.led))
+            .collect();
+        assert_eq!(
+            logins,
+            [
+                ("led", true, true),
+                ("screen", true, false),
+                ("past", false, false),
+                ("plain", false, false),
+                ("bare", false, false),
+                ("null", false, false),
+                ("string", false, false),
+                ("list", false, false),
+            ]
         );
     }
 

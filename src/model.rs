@@ -222,10 +222,13 @@ fn waits_names(remark: &str) -> Option<Vec<&str>> {
     })
 }
 
-/// What a crew member's session does, in the words of `yardr chat`.
+/// What a crew member's session does, in the words of `yardr chat`. One at
+/// its harness's login screen reads no mail, however its runtime reads it
+/// (often idle): the yard's words for it, whatever its status.
 pub fn state_of(member: &CrewMember) -> &'static str {
     match (member.state.as_str(), member.status.as_str()) {
         ("failed", _) => "failed to start",
+        ("running", _) if member.login.screen => "not logged in",
         ("running", "working") => "working",
         ("running", "idle") => "idle",
         ("running", "blocked") => "blocked",
@@ -235,7 +238,8 @@ pub fn state_of(member: &CrewMember) -> &'static str {
 }
 
 /// A crew member's state for the dot beside their name in the list: what
-/// runs, what rests, what waits, what stopped, what failed.
+/// runs, what rests, what waits, what stopped, what failed. A session at
+/// its harness's login screen waits, for a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dot {
     Working,
@@ -251,6 +255,7 @@ pub enum Dot {
 pub fn dot_of(member: &CrewMember) -> Dot {
     match (member.state.as_str(), member.status.as_str()) {
         ("failed", _) => Dot::Failed,
+        ("running", _) if member.login.screen => Dot::Blocked,
         ("running", "idle") => Dot::Idle,
         ("running", "blocked") => Dot::Blocked,
         ("running", _) => Dot::Working,
@@ -3744,10 +3749,17 @@ impl Model {
             return "read".to_string();
         }
         let name = &l.to;
-        match self.member(name).map(state_of) {
+        let member = self.member(name);
+        match member.map(state_of) {
             Some("idle") => format!("sent; {name} is idle"),
             Some("working") => format!("sent; {name} is working and reads mail when idle"),
             Some("blocked") => format!("{name} waits at a prompt in its pane and cannot read mail"),
+            // Where the yard leads the login, the person answers it at the
+            // asks: footplate's Decisions.
+            Some("not logged in") if member.is_some_and(|r| r.login.led) => format!(
+                "{name} is not logged in and cannot read mail: the yard leads its login, and waits for the operator at its asks (yardr asks)"
+            ),
+            Some("not logged in") => format!("{name} is not logged in and cannot read mail"),
             Some("not running") => format!("{name} is not running: yardr crew start {name}"),
             Some("failed to start") => format!("{name} failed to start: yardr crew show {name}"),
             _ => "sent".to_string(),
@@ -4289,6 +4301,12 @@ impl Model {
                 }
                 Vec::new()
             }
+            // A session sat down at its harness's login screen, or the yard
+            // began to lead its login. The yard marks the session's handle
+            // for it and raises no `crew_` event, so these tell of it: the
+            // crew is read again, where the mark is.
+            "nudge_held" if e.text("reason") == "not_logged_in" => vec![Effect::Crew],
+            "login_led" => vec![Effect::Crew],
             // A session started, stopped or failed, the list itself
             // changed, or a crew member's first prompt arrived: the event
             // carries less than what changed.
@@ -5698,6 +5716,16 @@ mod tests {
             enabled: true,
             state: state.into(),
             status: status.into(),
+            login: api::Login::default(),
+        }
+    }
+
+    /// `member` sitting at its harness's login screen, which the yard
+    /// leads where `led` says.
+    fn at_login(member: CrewMember, led: bool) -> CrewMember {
+        CrewMember {
+            login: api::Login { screen: true, led },
+            ..member
         }
     }
 
@@ -6018,6 +6046,103 @@ mod tests {
         assert_eq!(state_of(&member("a", "running", "blocked")), "blocked");
         // A status left from a session that ended says nothing.
         assert_eq!(state_of(&member("a", "stopped", "working")), "not running");
+    }
+
+    /// A session at its harness's login screen reads no mail, whatever its
+    /// runtime says it does, and often it says idle: the state is the
+    /// yard's word, and the dot waits for a person. A mark left on the
+    /// handle of a session that ended says nothing.
+    #[test]
+    fn a_session_at_its_harness_s_login_screen_is_not_logged_in_whatever_its_status() {
+        for status in ["idle", "working", "blocked", "unknown", ""] {
+            let at = at_login(member("a", "running", status), false);
+            assert_eq!(state_of(&at), "not logged in", "{status:?}");
+            assert_eq!(dot_of(&at), Dot::Blocked, "{status:?}");
+        }
+        let stopped = at_login(member("a", "stopped", ""), true);
+        assert_eq!(state_of(&stopped), "not running");
+        assert_eq!(dot_of(&stopped), Dot::Stopped);
+        let failed = at_login(member("a", "failed", ""), true);
+        assert_eq!(state_of(&failed), "failed to start");
+        assert_eq!(dot_of(&failed), Dot::Failed);
+
+        // The row and the header say it, and the dot is not the idle one.
+        let mut state = yard(&[]);
+        state.crew = vec![
+            at_login(member("yardmaster", "running", "idle"), true),
+            member("assembly", "running", "idle"),
+        ];
+        let (m, _) = Model::new(state, Mode::Chat, None);
+        assert_eq!(m.crew_state("yardmaster"), Some("not logged in"));
+        assert_eq!(m.crew_state("assembly"), Some("idle"));
+        let rows = m.crew_rows();
+        assert_eq!(rows[0].line, "not logged in");
+        assert_eq!(rows[0].dot, Some(Dot::Blocked));
+        assert_eq!(rows[1].dot, Some(Dot::Idle));
+    }
+
+    /// Under the user's mail to it, the yard's words: where the yard leads
+    /// the login the person answers it at the asks, and where it does not
+    /// the mail still cannot be read. Mail it read stays read.
+    #[test]
+    fn mail_to_a_session_at_its_login_screen_says_it_cannot_be_read() {
+        let mut state = yard(&[]);
+        state.crew = vec![
+            at_login(member("yardmaster", "running", "idle"), true),
+            at_login(member("assembly", "running", "idle"), false),
+        ];
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        m.conversation(
+            "yardmaster",
+            vec![
+                Letter {
+                    read: true,
+                    ..letter(12, "jo", "yardmaster", "one")
+                },
+                letter(13, "jo", "yardmaster", "two"),
+            ],
+        );
+        let standing: Vec<Option<String>> = m.entries().into_iter().map(|e| e.standing).collect();
+        assert_eq!(
+            standing,
+            [
+                Some("read".to_string()),
+                Some("yardmaster is not logged in and cannot read mail: the yard leads its login, and waits for the operator at its asks (yardr asks)".to_string())
+            ]
+        );
+
+        m.select(Selected::Conversation("assembly".into()));
+        m.conversation("assembly", vec![letter(14, "jo", "assembly", "hi")]);
+        assert_eq!(
+            m.entries()[0].standing.as_deref(),
+            Some("assembly is not logged in and cannot read mail")
+        );
+    }
+
+    /// The yard marks the session's handle for a login screen and raises no
+    /// `crew_` event, so the two events that tell of it read the crew again.
+    /// A held nudge for another reason says nothing of it.
+    #[test]
+    fn the_crew_is_read_again_when_a_session_sits_at_a_login_screen_or_the_yard_leads_it() {
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        let held = |seq, reason| {
+            event(
+                seq,
+                "nudge_held",
+                "yard",
+                json!({"crew": "yardmaster", "reason": reason}),
+            )
+        };
+        assert!(m.event(&held(21, "not_logged_in")).contains(&Effect::Crew));
+        assert!(!m.event(&held(22, "dialog")).contains(&Effect::Crew));
+        assert!(!m.event(&held(23, "")).contains(&Effect::Crew));
+        let led = event(
+            24,
+            "login_led",
+            "yard",
+            json!({"crew": "yardmaster", "kind": "claude", "step": "asked", "ask": 12}),
+        );
+        assert!(m.event(&led).contains(&Effect::Crew));
     }
 
     #[test]

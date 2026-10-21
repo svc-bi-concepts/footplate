@@ -256,7 +256,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | It reads | For |
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
-| `Crew`, `Peers`, `Users` | whom there is to talk with: the crew, `<name>@<peer>` for each one a linked yard exposes, and the users of this yard, yourself among them. A peer's `trust` says which of its names are a user of this yard speaking |
+| `Crew`, `Peers`, `Users` | whom there is to talk with: the crew, `<name>@<peer>` for each one a linked yard exposes, and the users of this yard, yourself among them. A peer's `trust` says which of its names are a user of this yard speaking. `Crew` is also read for the one key of a session's `handle` that says it sits at its harness's login screen, and for the one that says the yard leads that login: docs/api.md names no key of the handle, and the crew is read again on the events that tell of it (`nudge_held`, `login_led`) |
 | `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on a file and how many a letter carries, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
@@ -922,7 +922,7 @@ icon first on every row, and look-alikes folded into one row with their
 count; `/` types in its filter, over question, asker and outcome, with the
 chips All, Approved, Words, Taken back and Put aside above the days. Then
 the crew with what each one's session does (`working`,
-`idle`, `blocked`, `running`, `not running`, `failed to start`), then those
+`idle`, `blocked`, `not logged in`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a
 person) and their role line, then the users of this yard, your own row
 among them (`you, notes to self`), and on every row the number of mails
@@ -943,7 +943,9 @@ it shows: the yard's own, and that of a sender who has no row. Right, what is op
 the top and the newest in view, an arrow at its bottom right back to the
 newest when scrolled up, with a line under your own mail that says
 where it stands (`read`, `sent; yardmaster is idle`, `queued for north:
-…`) and the line to write in; the notices, oldest first; or a bead's open
+…`, or the yard's words for a crew member at its harness's login screen: it
+cannot read mail, and where the yard leads the login it waits for the
+operator at the asks) and the line to write in; the notices, oldest first; or a bead's open
 asks, each as its card.
 
 A conversation opens on its newest fifty mails. Towards its top the fifty
