@@ -291,6 +291,14 @@ queue on every `noted` event and once more at each put-aside ask's
 return, and a bead shown on every event whose bead it is. Mail and
 notices arriving never cover or move the open card.
 
+A stream says nothing while nothing happens, and so does one that a proxy
+or a tunnel holds open after the yard behind it went away. After a minute
+of silence the yard's head is asked beside the stream, on a connection of
+its own, and once a minute from then on: a head level with the last event
+read leaves the stream as it is, and one still beyond it five seconds later
+replaces the stream, with the yard read again as when a stream ends. A link
+that went away is found by the system's keepalive within about a minute.
+
 **Who you are** is not typed. The window acts as `yardr chat` does: as the
 user named in `$YARDR_ACTOR`, else as your login name, when the yard has a
 user of that name; else as the yard's operator. A yard that has neither says

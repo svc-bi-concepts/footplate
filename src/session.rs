@@ -17,6 +17,25 @@ pub const RETRY: Duration = Duration::from_secs(3);
 /// itself with a newer build; this is the moment between the two.
 const REPLACING_PAUSE: Duration = Duration::from_millis(100);
 
+/// How a follower watches a stream that says nothing. The yard says
+/// nothing on a quiet stream, and nor does a stream that a proxy or a
+/// tunnel holds open after the yard behind it went away, while the yard
+/// moves on. After `quiet` with nothing the yard is asked its head, on a
+/// connection of its own. A head beyond the last event read gives that
+/// event `late` more to come, since it may be on its way; after that the
+/// stream is stuck, and the yard is read again as when a stream ends.
+#[derive(Debug, Clone, Copy)]
+pub struct Watch {
+    pub quiet: Duration,
+    pub late: Duration,
+}
+
+/// A stuck stream is replaced within about a minute and a few seconds.
+pub const WATCH: Watch = Watch {
+    quiet: Duration::from_secs(60),
+    late: Duration::from_secs(5),
+};
+
 /// What the thread tells the window.
 #[derive(Debug)]
 pub enum Update {
@@ -295,10 +314,13 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
 /// tried again: the window is told, and this returns.
 /// The handle stops the current stream from another thread, so switching
 /// yards does not leave an idle old yard's connection alive indefinitely.
+/// A stream that says nothing while the yard moves on is watched as
+/// `watch` says, and ends as one that ended.
 pub fn follow_with_control(
     client: &Client,
     name: &str,
     retry: Duration,
+    watch: Watch,
     control: FollowControl,
     mut tell: impl FnMut(Update) -> bool,
 ) {
@@ -315,20 +337,46 @@ pub fn follow_with_control(
                 if control.stopped() {
                     return;
                 }
+                // Whether the stream brought anything, or was found stuck
+                // while the yard answered beside it.
                 let mut heard = false;
-                if let Ok(mut events) = client.events(head) {
+                if let Ok(mut events) = client.events(head, watch.quiet) {
                     control.follow_stream(events.stop_handle());
+                    // The last seq read, and whether the yard's head was
+                    // beyond it when the stream last said nothing.
+                    let (mut read, mut behind) = (head, false);
                     // An event that cannot be read ends the stream as its
-                    // end does: the state is read again.
+                    // end does: the state is read again. So does a stuck
+                    // one, and one whose yard does not say its head.
                     while !control.stopped() {
                         match events.next() {
                             Some(Ok(event)) => {
                                 heard = true;
+                                read = read.max(event.seq);
                                 if !tell(Update::Event(event)) {
                                     control.stream_ended();
                                     return;
                                 }
                             }
+                            Some(Err(api::Error::Silent)) => match client.head() {
+                                Ok(at) if at <= read => {
+                                    if behind && events.set_quiet(watch.quiet).is_err() {
+                                        break;
+                                    }
+                                    behind = false;
+                                }
+                                Ok(_) if !behind => {
+                                    if events.set_quiet(watch.late).is_err() {
+                                        break;
+                                    }
+                                    behind = true;
+                                }
+                                Ok(_) => {
+                                    heard = true;
+                                    break;
+                                }
+                                Err(_) => break,
+                            },
                             Some(Err(_)) | None => break,
                         }
                     }
@@ -338,9 +386,10 @@ pub fn follow_with_control(
                     return;
                 }
                 // A stream that ended: a server that replaces itself is
-                // back in a moment, and the state is read again. One that
-                // gave nothing before it ended is not asked again in a
-                // loop without a pause.
+                // back in a moment, and the state is read again, as it is
+                // at once of a yard that answered beside a stuck stream.
+                // One that gave nothing before it ended is not asked again
+                // in a loop without a pause.
                 thread::sleep(if heard { REPLACING_PAUSE } else { retry });
                 continue;
             }
@@ -618,6 +667,7 @@ mod tests {
                     &client,
                     "mac-login",
                     Duration::from_millis(20),
+                    WATCH,
                     FollowControl::default(),
                     |update| tx.send(update).is_ok(),
                 )
@@ -683,6 +733,7 @@ mod tests {
                     &client,
                     "mac-login",
                     Duration::from_millis(20),
+                    WATCH,
                     FollowControl::default(),
                     |update| tx.send(update).is_ok(),
                 )
@@ -745,9 +796,14 @@ mod tests {
         let follower = thread::spawn({
             let client = yard.client();
             move || {
-                follow_with_control(&client, "jo", Duration::from_secs(10), stop, |update| {
-                    updates.send(update).is_ok()
-                });
+                follow_with_control(
+                    &client,
+                    "jo",
+                    Duration::from_secs(10),
+                    WATCH,
+                    stop,
+                    |update| updates.send(update).is_ok(),
+                );
                 finished.send(()).unwrap();
             }
         });
@@ -766,6 +822,114 @@ mod tests {
         done.recv_timeout(Duration::from_secs(1))
             .expect("stopping the follower ends its blocked read");
         follower.join().unwrap();
+    }
+
+    /// A follower of `yard` for jo, trying again after 20 milliseconds and
+    /// watching its stream as `watch` says, once its state is told and its
+    /// stream opened: what it tells from then on.
+    fn following(yard: &Yard, watch: Watch) -> mpsc::Receiver<Update> {
+        let (tx, rx) = mpsc::channel();
+        let client = yard.client();
+        thread::spawn(move || {
+            let retry = Duration::from_millis(20);
+            follow_with_control(&client, "jo", retry, watch, FollowControl::default(), |u| {
+                tx.send(u).is_ok()
+            })
+        });
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Update::Up(_)
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.streams_asked().is_empty() && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(yard.streams_asked(), vec![20]);
+        rx
+    }
+
+    /// A stream that stays open and brings nothing while the yard moves
+    /// on is replaced: the yard is read again, as when a stream ends, and
+    /// what happened meanwhile is in what it reads.
+    #[test]
+    fn a_stream_that_says_nothing_while_the_yard_moves_on_is_replaced() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let watch = Watch {
+            quiet: Duration::from_millis(100),
+            late: Duration::from_millis(100),
+        };
+        let rx = following(&yard, watch);
+        yard.mute();
+        yard.answer("Head", r#"{"result": 21}"#);
+        yard.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "yd-shed", "data": {"note": 7}}"#);
+        let Update::Up(state) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the yard read again, and no event before it")
+        };
+        assert_eq!(state.head, 21);
+        // The stream after it is opened from the head read again.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while yard.streams_asked().len() < 2 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(yard.streams_asked(), vec![20, 21]);
+    }
+
+    /// A stream that says nothing while the yard says nothing either is
+    /// read on: the yard is asked its head, and the stream stays.
+    #[test]
+    fn a_quiet_stream_of_a_quiet_yard_is_read_on() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let watch = Watch {
+            quiet: Duration::from_millis(50),
+            late: Duration::from_millis(50),
+        };
+        let rx = following(&yard, watch);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.asked("Head").len() < 4 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(yard.asked("Head").len() >= 4);
+        assert_eq!(yard.streams_asked(), vec![20]);
+        assert!(rx.try_recv().is_err());
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the stream read on brings the event")
+        };
+        assert_eq!(event.seq, 21);
+        assert_eq!(yard.streams_asked(), vec![20]);
+    }
+
+    /// A head beyond what the stream brought gives the event a moment
+    /// more to come: one that comes in it leaves the stream as it is.
+    #[test]
+    fn an_event_on_its_way_is_given_a_moment_to_come() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let watch = Watch {
+            quiet: Duration::from_millis(100),
+            late: Duration::from_secs(5),
+        };
+        let rx = following(&yard, watch);
+        yard.answer("Head", r#"{"result": 21}"#);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.asked("Head").len() < 2 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the event on its way")
+        };
+        assert_eq!(event.seq, 21);
+        // Read level with the head again: the stream stays past several
+        // more of its silences.
+        let asked = yard.asked("Head").len();
+        while yard.asked("Head").len() < asked + 3 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(yard.streams_asked(), vec![20]);
+        assert!(rx.try_recv().is_err());
     }
 
     /// The yard's last device removed: it answers 404 then, to a token as
@@ -821,6 +985,7 @@ mod tests {
                 &client,
                 "jo",
                 Duration::from_millis(20),
+                WATCH,
                 FollowControl::default(),
                 |update| tx.send(update).is_ok(),
             )
@@ -853,6 +1018,7 @@ mod tests {
                     &client,
                     "jo",
                     Duration::from_millis(20),
+                    WATCH,
                     FollowControl::default(),
                     |update| tx.send(update).is_ok(),
                 )

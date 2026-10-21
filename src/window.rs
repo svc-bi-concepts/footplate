@@ -2191,6 +2191,10 @@ fn pairing_failure(error: api::Error) -> String {
         api::Error::NoDevice => {
             "Pairing failed: no yard answers at this origin. Check the origin and ask its operator to open a pairing.".to_string()
         }
+        // A pairing reads no stream; said as nothing answering, were it.
+        api::Error::Silent => {
+            "Pairing failed because the yard does not answer. Check the origin and your connection, then try the code again.".to_string()
+        }
     }
 }
 
@@ -2438,6 +2442,8 @@ pub struct Footplate {
     /// ([`Held::session`]), and how many it started.
     session: u64,
     sessions: u64,
+    /// How each follower watches a stream that says nothing.
+    watch: session::Watch,
     /// The yard of the settings the open one was opened as, or none of
     /// the one yard the environment names.
     entry: Option<settings::Yard>,
@@ -2813,7 +2819,21 @@ impl Footplate {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::watching(env, name, file, session::WATCH, window, cx)
+    }
+
+    /// As [`Footplate::opened`], with each yard's stream watched as
+    /// `watch` says: the tests wait less for a stuck one.
+    fn watching(
+        env: Env,
+        name: String,
+        file: Option<PathBuf>,
+        watch: session::Watch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self::bare(env, name, window, cx).kept_in(file, cx);
+        this.watch = watch;
         this.reopen(cx);
         // A screenshot state that opens the settings (shot.rs): a debug
         // build's alone, on the section the state names.
@@ -3142,6 +3162,7 @@ impl Footplate {
             opening: 0,
             session: 0,
             sessions: 0,
+            watch: session::WATCH,
             entry: None,
             held: HashMap::new(),
             following: None,
@@ -3606,11 +3627,16 @@ impl Footplate {
         let stop = session::FollowControl::default();
         held.following_stop = Some(stop.clone());
         let follower = thread::Builder::new().name("yard".into()).spawn({
-            let (client, name) = (client.clone(), self.name.clone());
+            let (client, name, watch) = (client.clone(), self.name.clone(), self.watch);
             move || {
-                session::follow_with_control(&client, &name, session::RETRY, stop, |update| {
-                    tell.send_blocking(update).is_ok()
-                })
+                session::follow_with_control(
+                    &client,
+                    &name,
+                    session::RETRY,
+                    watch,
+                    stop,
+                    |update| tell.send_blocking(update).is_ok(),
+                )
             }
         });
         held.following = Some(cx.spawn(async move |this, cx| {
@@ -30382,6 +30408,101 @@ yardr.dev
             state_of(&view, cx, "second home") == "2 mail, 1 decision"
         });
         assert!(open_yard(&view, cx).contains("far"));
+    }
+
+    /// Two yards kept with the settings: this machine's, and a second
+    /// home's by its socket. Their settings file.
+    fn two_yards(dir: &std::path::Path, second: &Yard) -> PathBuf {
+        let file = dir.join("footplate/settings.json");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::near("second home", second.socket().to_str().unwrap()),
+                None,
+            )
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        file
+    }
+
+    /// The window on the yards of `file`, this machine's behind `near`,
+    /// with each stream watched as `watch` says.
+    fn watched<'a>(
+        near: &Yard,
+        file: &std::path::Path,
+        watch: session::Watch,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let file = file.to_path_buf();
+        cx.add_window_view(|window, cx| {
+            let view = Footplate::watching(env, "jo".into(), Some(file), watch, window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        })
+    }
+
+    /// A run ask raised in a yard whose stream stays open and brings
+    /// nothing, as one a proxy or a tunnel holds open after the yard
+    /// behind it went away, is counted by the switcher once the stream
+    /// has said nothing for its watch's while: the yard is read again,
+    /// with no restart.
+    #[gpui::test]
+    fn a_run_ask_raised_behind_a_stream_that_says_nothing_is_counted_without_a_restart(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        second.answer("Bead", &bead_run());
+        let file = two_yards(dir.path(), &second);
+        let watch = session::Watch {
+            quiet: Duration::from_millis(300),
+            late: Duration::from_millis(300),
+        };
+        let (view, cx) = watched(&near, &file, watch, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        wait(cx, "the second home's stream", |_| {
+            second.streams_asked().len() == 1
+        });
+
+        // The stream goes silent, and the yard moves on behind it.
+        second.mute();
+        second.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_run("", false)], "decided": []}}).to_string(),
+        );
+        second.answer("Head", r#"{"result": 21}"#);
+        let raised = std::time::Instant::now();
+        second.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "bead-s", "data": {"note": 7}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "the run ask counted in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail, 1 decision"
+        });
+        // Within the watch's while and a little: the yard is read at once
+        // once the stream is found stuck, not after a retry's pause.
+        let took = raised.elapsed();
+        assert!(
+            took < watch.quiet + watch.late + Duration::from_secs(2),
+            "{took:?}"
+        );
+        assert_eq!(open_yard(&view, cx), "this machine");
+        // This machine's stream, quiet with its yard, was read on.
+        assert_eq!(near.streams_asked(), vec![20]);
     }
 
     fn a_far_yard_of_jo(yard: &Yard) {

@@ -29,8 +29,8 @@ use serde_json::{Map, Value, json};
 /// What footplate says it is to the yard. Nothing is decided by it today.
 const CLIENT: &str = concat!("footplate/", env!("CARGO_PKG_VERSION"));
 
-/// How long a call may take to answer. The stream has no such limit: it is
-/// silent while nothing happens.
+/// How long a call may take to answer. The stream is silent while nothing
+/// happens: it is read as long as its follower says (`Client::events`).
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a yard's address may take to be connected to.
@@ -42,8 +42,13 @@ const RUN_PORT: u16 = 8789;
 
 /// A stream over the network is silent while nothing happens, and a link
 /// that went away says nothing either: the system asks the other end after
-/// this long a silence, so that a dead stream ends and is opened again.
+/// this long a silence, then again every `KEEPALIVE_INTERVAL`, and after
+/// `KEEPALIVE_RETRIES` asked with no answer the connection is dead. So a
+/// dead stream ends within about a minute and is opened again, where the
+/// system's own interval and count (75 s, 8 on macOS) take ten.
 const KEEPALIVE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_RETRIES: u32 = 3;
 
 /// A server that replaces itself with a newer build refuses calls meanwhile;
 /// yardr makes the call again after this long, for up to that long.
@@ -85,6 +90,10 @@ pub enum Error {
     /// yard answers so while it has no device at all, with a token or
     /// without, and so does an address that is no yard's listener.
     NoDevice,
+    /// The stream said nothing for as long as its reader waits, and stands
+    /// between two events: it may be read on. Its reader asks the yard
+    /// whether anything happened meanwhile.
+    Silent,
 }
 
 impl Error {
@@ -108,6 +117,7 @@ impl fmt::Display for Error {
             Error::NoDevice => {
                 f.write_str("the yard has no device, or the address is not a yard's")
             }
+            Error::Silent => f.write_str("the yard's stream said nothing for a while"),
         }
     }
 }
@@ -1522,8 +1532,12 @@ impl Address {
         };
         tcp.set_read_timeout(timeout)?;
         tcp.set_write_timeout(Some(CALL_TIMEOUT))?;
-        socket2::SockRef::from(&tcp)
-            .set_tcp_keepalive(&socket2::TcpKeepalive::new().with_time(KEEPALIVE))?;
+        socket2::SockRef::from(&tcp).set_tcp_keepalive(
+            &socket2::TcpKeepalive::new()
+                .with_time(KEEPALIVE)
+                .with_interval(KEEPALIVE_INTERVAL)
+                .with_retries(KEEPALIVE_RETRIES),
+        )?;
         if !self.tls {
             return Ok(Conn::Tcp(tcp));
         }
@@ -1596,7 +1610,8 @@ enum EventSocket {
 }
 
 /// A handle that shuts down an event stream while its reader is blocked.
-/// Calls use their own connections and are not affected.
+/// Calls use their own connections and are not affected. It holds the
+/// stream's own socket, so what is set on it is set on the stream.
 #[derive(Clone)]
 pub struct EventStop(Arc<EventSocket>);
 
@@ -2600,14 +2615,18 @@ impl Client {
     }
 
     /// The stream of events after a seq: those the yard still has, then
-    /// every one as it happens. It ends when the server goes away.
-    pub fn events(&self, after: u64) -> Result<Events> {
+    /// every one as it happens. It ends when the server goes away. Its
+    /// answer is waited for `quiet` long, and so is each event: a stream
+    /// that says nothing for that long between two events gives
+    /// [`Error::Silent`] and may be read on, and one that stops in the
+    /// middle of an event has ended.
+    pub fn events(&self, after: u64, quiet: Duration) -> Result<Events> {
         let (status, body) = self.send(
             "GET",
             &format!("/events?after={after}"),
             "Accept: application/x-ndjson\r\n",
             "",
-            None,
+            Some(quiet),
         )?;
         if status != 200 {
             return Err(Error::Protocol(format!(
@@ -2617,6 +2636,7 @@ impl Client {
         let stop = body.conn.get_ref().event_stop()?;
         Ok(Events {
             lines: BufReader::new(body),
+            line: String::new(),
             stop,
         })
     }
@@ -2639,7 +2659,8 @@ impl Client {
         if after >= until {
             return Ok(Vec::new());
         }
-        let events = self.events(after)?;
+        // The gap's events are the yard's already, and come at once.
+        let events = self.events(after, CALL_TIMEOUT)?;
         let most = until - after;
         let mut read = 0;
         let mut seen = HashSet::new();
@@ -2735,6 +2756,9 @@ impl Client {
 /// The events of a stream, one a line, until it ends.
 pub struct Events {
     lines: BufReader<Body>,
+    /// What is read of the next event: kept over a silence, so that one
+    /// that stopped mid-line is told from one between two lines.
+    line: String,
     stop: EventStop,
 }
 
@@ -2742,28 +2766,50 @@ impl Events {
     pub fn stop_handle(&self) -> EventStop {
         self.stop.clone()
     }
+
+    /// Waits `quiet` long for each event from here on, in place of what
+    /// the stream was opened with.
+    pub fn set_quiet(&self, quiet: Duration) -> io::Result<()> {
+        match self.stop.0.as_ref() {
+            EventSocket::Unix(socket) => socket.set_read_timeout(Some(quiet)),
+            EventSocket::Tcp(socket) => socket.set_read_timeout(Some(quiet)),
+        }
+    }
 }
 
 impl Iterator for Events {
     type Item = Result<Event>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
         loop {
-            line.clear();
-            match self.lines.read_line(&mut line) {
+            match self.lines.read_line(&mut self.line) {
                 Ok(0) => return None,
-                Ok(_) if line.trim().is_empty() => continue,
                 Ok(_) => {
+                    let line = std::mem::take(&mut self.line);
+                    if line.trim().is_empty() {
+                        continue;
+                    }
                     return Some(
                         serde_json::from_str(&line)
                             .map_err(|err| Error::Protocol(format!("an event: {err}"))),
                     );
                 }
+                Err(err) if timed_out(&err) && self.line.is_empty() => {
+                    return Some(Err(Error::Silent));
+                }
                 Err(err) => return Some(Err(Error::Down(err))),
             }
         }
     }
+}
+
+/// Whether a read gave up for its timeout: the system says so as a read
+/// that would block (macOS and Linux) or one that timed out.
+fn timed_out(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 /// Reads the status and the headers of a response, and gives its body.
@@ -2839,6 +2885,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
     let framing = match (chunked, length) {
         (true, _) => Framing::Chunked {
             left: 0,
+            size: String::new(),
             done: false,
         },
         (false, Some(n)) => Framing::Length(n),
@@ -2856,9 +2903,12 @@ struct Body {
 
 enum Framing {
     Length(u64),
-    /// `left` bytes remain of the chunk being read.
+    /// `left` bytes remain of the chunk being read. `size` is what is read
+    /// of the next chunk's size line: a read that gives up for its timeout
+    /// may stop anywhere in it, and goes on from there.
     Chunked {
         left: u64,
+        size: String,
         done: bool,
     },
     UntilClosed,
@@ -2883,18 +2933,23 @@ impl Read for Body {
                 *left -= n as u64;
                 Ok(n)
             }
-            Framing::Chunked { left, done } => {
+            Framing::Chunked { left, size, done } => {
                 if *done {
                     return Ok(0);
                 }
-                if *left == 0 {
-                    // "<size in hex>[;extension]\r\n"
-                    let mut size = String::new();
-                    if self.conn.read_line(&mut size)? == 0 {
+                while *left == 0 {
+                    // "<size in hex>[;extension]\r\n", after the line break
+                    // that ended the chunk before, which reads as a line of
+                    // nothing.
+                    if self.conn.read_line(size)? == 0 {
                         // The server went away between two chunks: for the
                         // stream that is its end.
                         *done = true;
                         return Ok(0);
+                    }
+                    let size = std::mem::take(size);
+                    if size.trim().is_empty() {
+                        continue;
                     }
                     let hex = size.trim().split(';').next().unwrap_or("").trim();
                     *left = u64::from_str_radix(hex, 16).map_err(|_| {
@@ -2914,11 +2969,6 @@ impl Read for Body {
                     return Err(io::ErrorKind::UnexpectedEof.into());
                 }
                 *left -= n as u64;
-                if *left == 0 {
-                    // The line break that ends the chunk.
-                    let mut end = [0u8; 2];
-                    self.conn.read_exact(&mut end)?;
-                }
                 Ok(n)
             }
         }
@@ -3842,7 +3892,7 @@ mod tests {
             // the server goes away.
             yard.emit(r#"{"seq": 3, "kind": "mail"}"#);
             yard.emit(r#"{"seq": 4, "kind": "mail", "data": {"text": "four"}}"#);
-            let mut events = client.events(3).unwrap();
+            let mut events = client.events(3, QUIET).unwrap();
             assert_eq!(events.next().unwrap().unwrap().text("text"), "four");
             yard.emit(r#"{"seq": 5, "kind": "crew_started"}"#);
             assert_eq!(events.next().unwrap().unwrap().seq, 5, "{way}");
@@ -3852,7 +3902,10 @@ mod tests {
             // And nothing listens.
             let head = client.head();
             assert!(matches!(head, Err(Error::Down(_))), "{way}: {head:?}");
-            assert!(matches!(client.events(0), Err(Error::Down(_))), "{way}");
+            assert!(
+                matches!(client.events(0, QUIET), Err(Error::Down(_))),
+                "{way}"
+            );
             assert!(matches!(client.blob(HASH), Err(Error::Down(_))), "{way}");
         }
     }
@@ -3860,7 +3913,7 @@ mod tests {
     #[test]
     fn stopping_an_idle_event_stream_unblocks_its_reader() {
         let yard = Yard::start();
-        let events = yard.client().events(0).unwrap();
+        let events = yard.client().events(0, QUIET).unwrap();
         let stop = events.stop_handle();
         let (sent, received) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
@@ -3910,7 +3963,7 @@ mod tests {
             yard.last_request()
                 .starts_with(&format!("GET /user/blobs/{HASH} HTTP/1.1\r\n"))
         );
-        let _stream = client.events(7).unwrap();
+        let _stream = client.events(7, QUIET).unwrap();
         assert!(
             yard.last_request()
                 .starts_with("GET /user/events?after=7 HTTP/1.1\r\n")
@@ -3954,7 +4007,7 @@ mod tests {
         assert_eq!(yard.requests(), before + 1);
         assert!(matches!(stranger.me(), Err(Error::NotLetIn)));
         assert!(matches!(stranger.blob(HASH), Err(Error::NotLetIn)));
-        assert!(matches!(stranger.events(0), Err(Error::NotLetIn)));
+        assert!(matches!(stranger.events(0, QUIET), Err(Error::NotLetIn)));
         assert_eq!(yard.requests(), before + 4);
         // The call never reached the yard's store.
         assert_eq!(yard.asked("Head"), Vec::<Value>::new());
@@ -3963,7 +4016,7 @@ mod tests {
         // refused from then on.
         let client = yard.client();
         assert_eq!(client.head().unwrap(), 12);
-        let mut events = client.events(0).unwrap();
+        let mut events = client.events(0, QUIET).unwrap();
         yard.add_device("yardr-dev-phone");
         yard.remove_device(TOKEN);
         assert!(events.next().is_none());
@@ -4021,7 +4074,7 @@ mod tests {
         assert!(!format!("{client:?}").contains(SESSION));
         // Who the pair is, and the stream after it.
         assert_eq!(client.me().unwrap().user, "jo");
-        let _stream = client.events(0).unwrap();
+        let _stream = client.events(0, QUIET).unwrap();
         assert_eq!(edge.proxied(), 3);
         assert!(
             edge.last_request()
@@ -4084,7 +4137,7 @@ mod tests {
         assert_eq!(yard.requests(), 0);
         assert!(matches!(stranger.me(), Err(Error::NotSignedIn)));
         assert!(matches!(stranger.blob(HASH), Err(Error::NotSignedIn)));
-        assert!(matches!(stranger.events(0), Err(Error::NotSignedIn)));
+        assert!(matches!(stranger.events(0, QUIET), Err(Error::NotSignedIn)));
         assert_eq!(edge.proxied(), 0);
         assert_eq!(yard.requests(), 0);
 
@@ -5495,7 +5548,7 @@ mod tests {
         // The socket is missing.
         let missing = Client::new(dir.path().join("yard.sock"));
         assert!(matches!(missing.head(), Err(Error::Down(_))));
-        assert!(matches!(missing.events(0), Err(Error::Down(_))));
+        assert!(matches!(missing.events(0, QUIET), Err(Error::Down(_))));
         // The file is there and nothing listens: the server is down.
         let yard = Yard::start();
         let client = yard.client();
@@ -5561,7 +5614,7 @@ mod tests {
         let yard = Yard::start();
         yard.emit(r#"{"seq": 12, "kind": "mail", "actor": "yardmaster", "data": {"text": "Shall I land it?", "to": "jo", "to_user": true}, "at": "2026-10-08T09:30:00Z"}"#);
         yard.emit(r#"{"seq": 15, "kind": "mail_read", "data": {"reader": "jo", "through": 12}}"#);
-        let mut events = yard.client().events(11).unwrap();
+        let mut events = yard.client().events(11, QUIET).unwrap();
 
         let mail = events.next().unwrap().unwrap();
         assert_eq!(
@@ -5610,8 +5663,119 @@ mod tests {
         let yard = Yard::start();
         yard.emit(r#"{"seq": 3, "kind": "mail"}"#);
         yard.emit(r#"{"seq": 4, "kind": "mail"}"#);
-        let mut events = yard.client().events(3).unwrap();
+        let mut events = yard.client().events(3, QUIET).unwrap();
         assert_eq!(events.next().unwrap().unwrap().seq, 4);
+    }
+
+    /// How long a test's stream is read with nothing said: long enough
+    /// that the tests of what it says never see it run out.
+    const QUIET: Duration = Duration::from_secs(60);
+
+    /// A stream at a port of this machine: the answer's head, then each
+    /// part after its pause, written as it is. It is held open a while
+    /// after the last part, as a stream that says nothing more is.
+    fn streaming(parts: Vec<(Duration, Vec<u8>)>) -> Client {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut asked = [0u8; 1024];
+            let _ = conn.read(&mut asked);
+            let _ = conn.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            for (pause, part) in parts {
+                thread::sleep(pause);
+                let _ = conn.write_all(&part);
+            }
+            thread::sleep(Duration::from_secs(2));
+        });
+        Client::remote(Address::parse(&address).unwrap(), TOKEN)
+    }
+
+    /// An event as a chunk of the stream: its size line, the line, and
+    /// the line break that ends the chunk.
+    fn chunk(event: &str) -> Vec<u8> {
+        let line = format!("{event}\n");
+        format!("{:x}\r\n{line}\r\n", line.len()).into_bytes()
+    }
+
+    /// A stream that says nothing for as long as it is read is said to be
+    /// silent between two events, and read on: what comes next is read
+    /// whole, even where the silence fell inside a chunk's size line.
+    #[test]
+    fn a_silent_stream_is_said_so_between_two_events_and_read_on() {
+        let first = r#"{"seq": 21, "kind": "mail"}"#;
+        let second = chunk(r#"{"seq": 22, "kind": "noted", "bead": "yd-shed"}"#);
+        let pause = Duration::from_millis(400);
+        let client = streaming(vec![
+            (Duration::ZERO, chunk(first)),
+            (pause, second[..1].to_vec()),
+            (pause, second[1..].to_vec()),
+        ]);
+        let mut events = client.events(20, Duration::from_millis(100)).unwrap();
+        assert_eq!(events.next().unwrap().unwrap().seq, 21);
+        let mut silences = 0;
+        let event = loop {
+            match events.next().unwrap() {
+                Err(Error::Silent) => silences += 1,
+                other => break other.unwrap(),
+            }
+        };
+        assert!(silences >= 2, "{silences}");
+        assert_eq!((event.seq, event.bead.as_str()), (22, "yd-shed"));
+    }
+
+    /// A stream that stops in the middle of an event has ended: what of
+    /// the event came cannot be read on from.
+    #[test]
+    fn a_stream_that_stops_in_the_middle_of_an_event_has_ended() {
+        let whole = chunk(r#"{"seq": 21, "kind": "mail"}"#);
+        let client = streaming(vec![(Duration::ZERO, whole[..12].to_vec())]);
+        let mut events = client.events(20, Duration::from_millis(100)).unwrap();
+        let next = events.next().unwrap();
+        assert!(matches!(next, Err(Error::Down(_))), "{next:?}");
+    }
+
+    /// A stream whose answer does not come is not waited for longer than
+    /// its events are: the follower's stop could not reach it before.
+    #[test]
+    fn a_stream_that_does_not_answer_is_not_waited_for_without_end() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let held = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(2));
+            drop(conn);
+        });
+        let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+        let asked = Instant::now();
+        let answer = client.events(20, Duration::from_millis(100));
+        assert!(matches!(answer, Err(Error::Down(_))), "{:?}", answer.err());
+        assert!(asked.elapsed() < Duration::from_secs(1));
+        held.join().unwrap();
+    }
+
+    /// The connection to a yard at an address asks the other end after
+    /// half a minute's silence, then every ten seconds, and is dead after
+    /// three asked with no answer: within about a minute.
+    #[test]
+    fn a_connection_to_an_address_is_found_dead_within_a_minute() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address =
+            Address::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let Conn::Tcp(tcp) = address.connect(Some(CALL_TIMEOUT)).unwrap() else {
+            panic!("an address with no TLS is reached by TCP alone")
+        };
+        let socket = socket2::SockRef::from(&tcp);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(socket.tcp_keepalive_time().unwrap(), KEEPALIVE);
+        assert_eq!(socket.tcp_keepalive_interval().unwrap(), KEEPALIVE_INTERVAL);
+        assert_eq!(socket.tcp_keepalive_retries().unwrap(), KEEPALIVE_RETRIES);
+        assert_eq!(
+            (KEEPALIVE + KEEPALIVE_INTERVAL * KEEPALIVE_RETRIES).as_secs(),
+            60
+        );
     }
 
     fn bead_news(seq: u64, kind: &str, bead: &str, originator: &str) -> Event {

@@ -1996,7 +1996,10 @@ mod tests {
                         3,
                         "{state}"
                     );
-                    let mut events = yard.client().events(20).unwrap();
+                    let mut events = yard
+                        .client()
+                        .events(20, crate::session::WATCH.quiet)
+                        .unwrap();
                     let added = events.next().unwrap().unwrap();
                     assert_eq!(added.kind.as_str(), "created", "{state}");
                     assert_eq!(added.text("originator"), "jo", "{state}");
@@ -2022,7 +2025,10 @@ mod tests {
                     // The lines badge's bead, added past the head: one of
                     // jo's.
                     if *state == "lines" {
-                        let mut events = yard.client().events(20).unwrap();
+                        let mut events = yard
+                            .client()
+                            .events(20, crate::session::WATCH.quiet)
+                            .unwrap();
                         let added = events.next().unwrap().unwrap();
                         assert_eq!(added.kind.as_str(), "created", "{state}");
                         assert_eq!(added.text("originator"), "jo", "{state}");
@@ -2162,7 +2168,10 @@ mod tests {
                     assert_eq!(letters[1].delivery, "failed", "{state}");
                     // The failed message and the telling of it cross past
                     // the head, as the stream tells of them.
-                    let mut events = yard.client().events(20).unwrap();
+                    let mut events = yard
+                        .client()
+                        .events(20, crate::session::WATCH.quiet)
+                        .unwrap();
                     let failed = events.next().unwrap().unwrap();
                     assert_eq!(failed.text("peer"), "north", "{state}");
                     assert_eq!(failed.text("id"), "m1", "{state}");

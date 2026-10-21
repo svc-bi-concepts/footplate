@@ -94,6 +94,11 @@ struct State {
     requests: usize,
     events: Vec<String>,
     streams: Vec<u64>,
+    /// The streams opened before this many stay open and bring nothing,
+    /// as one a proxy holds open after what was behind it went away: what
+    /// is emitted meanwhile is the yard's all the same, its calls answer
+    /// as they did, and a stream opened since brings what it asks for.
+    muted: usize,
     /// The images the yard holds, by hash, and every hash asked for.
     blobs: HashMap<String, Vec<u8>>,
     blobs_asked: Vec<String>,
@@ -367,6 +372,13 @@ impl Yard {
     pub fn emit(&self, event: &str) {
         self.shared.state.lock().unwrap().events.push(event.into());
         self.shared.changed.notify_all();
+    }
+
+    /// The streams that are open bring nothing from here on, and stay
+    /// open.
+    pub fn mute(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.muted = state.streams.len();
     }
 
     /// An image the yard holds: `GET /blobs/<hash>` answers the bytes.
@@ -724,6 +736,7 @@ fn stream(
     )?;
     conn.flush()?;
     let mut state = shared.state.lock().unwrap();
+    let opened = state.streams.len();
     state.streams.push(after);
     let mut sent = 0;
     loop {
@@ -734,7 +747,7 @@ fn stream(
                 .ok()
                 .and_then(|e| e["seq"].as_u64())
                 .unwrap_or(0);
-            if seq > after {
+            if seq > after && opened >= state.muted {
                 let line = format!("{event}\n");
                 write!(conn, "{:x}\r\n{line}\r\n", line.len())?;
                 conn.flush()?;
