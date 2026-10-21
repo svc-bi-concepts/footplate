@@ -5082,10 +5082,11 @@ fn shot_section() -> Option<Section> {
 
 /// The row a screenshot state opens on instead of the yard's own: the
 /// refused mail's conversation for the undelivered shot, the open card
-/// for the plain, plain-select, page, run and secret shots (the refused
-/// shot's with its refusal), the board for the arrivals and departures
-/// shots, one arrival's bead for the arrival shot and yardr's line for
-/// the flow shot, else none. A debug build's alone.
+/// for the plain, plain-select, page, run, weighty-mapping and secret
+/// shots (the refused shot's with its refusal), the board for the
+/// arrivals and departures shots, one arrival's bead for the arrival
+/// shot and yardr's line for the flow shot, else none. A debug build's
+/// alone.
 fn shot_selected() -> Option<Selected> {
     // The card shots open their cards, in decisions: a debug build's
     // alone, as the settings and the draft of Footplate::opened.
@@ -5098,7 +5099,12 @@ fn shot_selected() -> Option<Selected> {
         Ok("decisions") | Ok("decisions-filtered") => {
             return Some(Selected::Decision("bead-a".into()));
         }
-        Ok("run") | Ok("weighty") | Ok("secret") | Ok("secret-shown") | Ok("secret-refused") => {
+        Ok("run")
+        | Ok("weighty")
+        | Ok("weighty-mapping")
+        | Ok("secret")
+        | Ok("secret-shown")
+        | Ok("secret-refused") => {
             return Some(Selected::Decision("bead-s".into()));
         }
         Ok("arrivals") | Ok("departures") | Ok("old-lines") => return Some(Selected::Arrivals),
