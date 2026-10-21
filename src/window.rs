@@ -409,8 +409,9 @@ pub struct Footplate {
     /// the secret field: a secret ask's value and its number are typed
     /// apart, and the number never carries the value.
     typeback: Entity<Line>,
-    /// The ask the number field is for.
-    typeback_for: Option<(String, u64)>,
+    /// The session and ask the number field is for: bead IDs and ask
+    /// numbers can be the same in different yards.
+    typeback_for: Option<(u64, String, u64)>,
     /// The run ask whose approval is with the yard and not answered yet:
     /// no second one goes after it.
     approving: Option<(String, u64)>,
@@ -1280,7 +1281,7 @@ mod tests {
         );
         assert_eq!(secret_keys("bead-s", 7, Approval::Direct, false), ordinary);
         // Where the Mac's unlock stands in front, Enter opens it first;
-        // where the card has no gate, the terminal is the only way.
+        // where no unlock is offered, `i` types the number before the value.
         assert_eq!(
             secret_keys("bead-s", 7, Approval::Unlock, true),
             "i types it · enter sends it to the yard after unlocking · esc leaves, and nothing is sent · or in a terminal: yardr bead answer bead-s 7 --secret · a ask about this"
@@ -21316,11 +21317,18 @@ yardr.dev
                 "argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT}})
             .to_string(),
         );
+        // The number, not an unlock, passes this card's gate on the final
+        // approval; the earlier attempts still cover the offered unlock.
+        unlock_as(&view, cx, false, false);
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "approved", |cx| {
             notice(&view, cx) == format!("approved, ran: {command} · {WEIGHTY_RUN_RESULT}")
         });
         assert_eq!(yard.asked("ApproveAsk").len(), 3);
+        assert_eq!(typeback_text(&view, cx), "");
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
         let detail = decided_detail_of(&view, cx, "bead-s", 7);
         assert_eq!(detail.state_line, format!("approved, ran: {command}"));
@@ -21822,6 +21830,11 @@ yardr.dev
         assert_eq!(notice(&view, cx), "");
         assert_eq!(approvals(cx), [1, 0, 0]);
 
+        // A number belongs to this yard's ask. Another yard may have the
+        // same bead and ask IDs, but must ask for its own number.
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
         // After a switch the card names the other yard, and its key and
         // its button approve there. A yard not opened before opens in
         // chat; the card is read in decisions.
@@ -21834,6 +21847,9 @@ yardr.dev
                 to_decisions(&view, cx);
                 names(&view, cx, name)
             });
+            if name == "second home" {
+                assert_eq!(typeback_text(&view, cx), "");
+            }
             cx.simulate_keystrokes("secondary-enter");
             wait(cx, "that yard's refusal", |cx| {
                 refused_of(&view, cx, "bead-s", 7) == format!("not approved: {name} refuses")
@@ -22202,183 +22218,6 @@ yardr.dev
         opened_on_the_ask(at, file, cx)
     }
 
-    /// A weighty card with no gate approves after its number is typed
-    /// back, as at a terminal: a run ask, a setup ask and a secret give,
-    /// each with the gate fixed shut. A wrong number sends nothing and
-    /// leaves the card, saying so; the right number sends `weighed` with
-    /// the approval, and is used up. The secret's value and its number
-    /// are typed apart, and the number is asked before the value goes.
-    #[gpui::test]
-    fn a_weighty_card_without_a_gate_approves_after_its_number_is_typed_back(
-        cx: &mut TestAppContext,
-    ) {
-        const MISMATCH: &str = "ask 7's number was not typed back, so nothing was done";
-
-        // A run ask: anything but the ask's number sends nothing and
-        // leaves the card; the number approves, with `weighed`.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_run_ask(&yard, &file, cx);
-        unlock_as(&view, cx, false, false);
-        assert!(drawn(cx, "typeback bead-s 7"));
-        assert!(drawn(cx, "approve bead-s 7"));
-        cx.simulate_keystrokes("i");
-        cx.simulate_input("8");
-        cx.simulate_keystrokes("secondary-enter");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
-        assert_eq!(notice(&view, cx), MISMATCH);
-        assert_eq!(typeback_text(&view, cx), "8");
-        assert!(drawn(cx, "typeback bead-s 7"));
-        assert!(drawn(cx, "approve bead-s 7"));
-        let mut answered = queued_run("answered", true);
-        answered["run"] = weighty_run_of();
-        answered["weight"] = weighed("outside", WEIGHTY_RUN_LINE);
-        answered["ran"] = json!({"argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT});
-        yard.answer(
-            "UserAsks",
-            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
-        );
-        yard.answer(
-            "ApproveAsk",
-            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                "argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT}})
-            .to_string(),
-        );
-        view.update(cx, |v, cx| {
-            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
-        });
-        cx.simulate_keystrokes("secondary-enter");
-        wait(cx, "approved", |cx| {
-            notice(&view, cx)
-                == format!(
-                    "approved, ran: {} · {WEIGHTY_RUN_RESULT}",
-                    weighty_long_command()
-                )
-        });
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
-        // The number is used up, and the keys are the window's again.
-        assert_eq!(typeback_text(&view, cx), "");
-        let in_typeback = view.update_in(cx, |v, window, cx| {
-            v.typeback.focus_handle(cx).is_focused(window)
-        });
-        assert!(!in_typeback);
-
-        // A setup ask: the approval wants the account first, then the
-        // number, and sends both with the preset pick.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_setup_ask(&yard, &file, cx);
-        unlock_as(&view, cx, false, false);
-        assert!(drawn(cx, "typeback bead-s 7"));
-        click_on(cx, "account bead-s 7 courier-existing");
-        cx.run_until_parked();
-        cx.simulate_keystrokes("i");
-        cx.simulate_input("8");
-        cx.simulate_keystrokes("secondary-enter");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
-        assert_eq!(notice(&view, cx), MISMATCH);
-        assert!(drawn(cx, "typeback bead-s 7"));
-        assert!(drawn(cx, "approve bead-s 7"));
-        yard.answer(
-            "UserAsks",
-            &json!({"result": {"open": [], "decided": [{
-                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
-                "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
-                "setup": setup_of(&["COURIER_ACCOUNT"], true),
-                "weight": [{"class": "credential",
-                            "line": "gives a credential or an address to the yard: the account COURIER_ACCOUNT"}],
-                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
-            .to_string(),
-        );
-        yard.answer(
-            "ApproveSetup",
-            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
-                "pack": "courier", "preset": "read", "account": "courier-existing",
-                "result": "approved, to be carried out"}})
-            .to_string(),
-        );
-        view.update(cx, |v, cx| {
-            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
-        });
-        cx.simulate_keystrokes("secondary-enter");
-        wait(cx, "approved", |cx| {
-            notice(&view, cx)
-                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; took courier-existing"
-        });
-        assert_eq!(
-            yard.asked("ApproveSetup"),
-            [json!({"bead": "bead-s", "ask": 7, "option": 1,
-                     "account": "courier-existing", "actor": "jo", "weighed": true})]
-        );
-
-        // A secret give: `i` types the number first, and with the wrong
-        // number the value stays in its own field and nothing is sent.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("footplate/settings.json");
-        let yard = Yard::start();
-        let (view, cx) = opened_on_a_weighty_secret_ask(&yard, &file, cx);
-        unlock_as(&view, cx, false, false);
-        let mut answered = queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"]);
-        answered["weight"] = weighed(
-            "credential",
-            "gives a credential or an address to the yard: BOOKS_TOKEN, for the source books",
-        );
-        yard.answer(
-            "UserAsks",
-            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
-        );
-        yard.answer(
-            "GiveSecret",
-            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
-                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
-        );
-        assert!(drawn(cx, "typeback bead-s 7"));
-        cx.simulate_keystrokes("i");
-        cx.simulate_input("8");
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        assert_eq!(typeback_text(&view, cx), "8");
-        cx.simulate_keystrokes("i");
-        cx.run_until_parked();
-        let (in_secret, in_typeback) = view.update_in(cx, |v, window, cx| {
-            (
-                v.secret.focus_handle(cx).is_focused(window),
-                v.typeback.focus_handle(cx).is_focused(window),
-            )
-        });
-        assert!(!in_secret && in_typeback);
-        click_on(cx, "secret bead-s 7");
-        cx.simulate_input(VALUE);
-        assert_eq!(secret_field(&view, cx).0, VALUE);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
-        assert_eq!(notice(&view, cx), MISMATCH);
-        assert!(!notice(&view, cx).contains(VALUE));
-        assert_eq!(secret_field(&view, cx).0, VALUE);
-        // The number typed back, the value goes, with `weighed`.
-        view.update(cx, |v, cx| {
-            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
-        });
-        cx.simulate_keystrokes("enter");
-        assert_eq!(secret_field(&view, cx).0, "");
-        wait(cx, "given with the number", |_| {
-            yard.asked("GiveSecret")
-                == [json!({"bead": "bead-s", "ask": 7,
-                            "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo", "weighed": true})]
-        });
-        wait(cx, "the yard's line", |cx| {
-            notice(&view, cx)
-                == "gave BOOKS_TOKEN · BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"
-        });
-        let kept = kept_outside_the_field(&view, cx, dir.path());
-        assert!(!kept.contains(VALUE), "given with the number: {kept}");
-    }
-
     /// The courier pack's sentences as the yard cards them: the pack
     /// line, the credential with where it goes, the call with its path
     /// whole, the mint with its digest whole, the account, and the grants
@@ -22604,8 +22443,9 @@ yardr.dev
     /// mint's digest, the account and the grants — the account choice with
     /// each candidate's address, the presets to pick from, and the
     /// take-backs. A tap takes the candidate, and the approval sends the
-    /// preset pick with it after the Mac's unlock; the ask reads as being
-    /// carried out until the yard says it ran.
+    /// preset pick with it after its number is typed back where no unlock
+    /// is offered; the ask reads as being carried out until the yard says
+    /// it ran.
     #[gpui::test]
     fn a_setup_ask_s_card_shows_its_setup_and_is_approved_with_a_tap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22741,12 +22581,16 @@ yardr.dev
         cx.simulate_keystrokes("secondary-enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
-        unlock_as(&view, cx, true, true);
+        unlock_as(&view, cx, false, false);
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
         cx.simulate_keystrokes("secondary-enter");
         wait(cx, "approved", |cx| {
             notice(&view, cx)
                 == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; took courier-existing"
         });
+        assert_eq!(typeback_text(&view, cx), "");
         assert_eq!(
             yard.asked("ApproveSetup"),
             [json!({"bead": "bead-s", "ask": 7, "option": 1,
@@ -23914,7 +23758,8 @@ yardr.dev
     /// The Give button beside a secret's field gives the typed value by the
     /// same path as Enter: `GiveSecret`, the field empty whatever is
     /// answered, the yard's line shown. A weighty card passes the Mac's
-    /// unlock first. It is disabled while the field is
+    /// unlock first, and asks for its number again when the decided card
+    /// gives again without an unlock. It is disabled while the field is
     /// empty: a click then sends nothing. The value is in no label, no
     /// notice and nothing kept; the footer still names Enter. The look is
     /// untried.
@@ -24025,9 +23870,25 @@ yardr.dev
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
         assert!(drawn(cx, "give bead-s 7"));
         assert!(drawn(cx, "secret bead-s 7"));
+        unlock_as(&view, cx, false, false);
         cx.simulate_keystrokes("escape");
         cx.simulate_keystrokes("i");
+        cx.simulate_input("8");
+        cx.simulate_keystrokes("escape");
+        click_on(cx, "secret bead-s 7");
         cx.simulate_input(VALUE);
+        click_on(cx, "give bead-s 7");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("GiveSecret").len(), 1);
+        assert_eq!(
+            notice(&view, cx),
+            "ask 7's number was not typed back, so nothing was done"
+        );
+        assert!(!notice(&view, cx).contains(VALUE));
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
         click_on(cx, "give bead-s 7");
         wait(cx, "given again by the button", |_| {
             yard.asked("GiveSecret").len() == 2

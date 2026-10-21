@@ -118,12 +118,14 @@ impl Footplate {
                 );
             }
         }
-        // What is typed of a weighty card's number is for the ask it was
-        // typed on, and is kept for no other: one ask's number never
-        // stands in another's field.
-        if ask != self.typeback_for {
+        // A bead ID and ask number can recur in another yard. Keep the
+        // typed number only for the session and ask it was typed on.
+        let typeback_for = ask
+            .as_ref()
+            .map(|(bead, ask)| (self.session, bead.clone(), *ask));
+        if typeback_for != self.typeback_for {
             self.typeback.update(cx, |field, cx| field.set_text("", cx));
-            self.typeback_for = ask.clone();
+            self.typeback_for = typeback_for;
         }
         // A secret ask's card draws no line for words, nor does the card
         // of an ask taken back. A focus left in

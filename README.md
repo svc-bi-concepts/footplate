@@ -1006,10 +1006,12 @@ machine: `yardr bead answer <bead> <ask> --secret`. Every secret ask is
 weighty: its card shows the yard's lines for what giving does first, in
 rust. On a Mac giving passes Touch ID, a paired watch or the login
 password first: Enter opens it, and its cancel sends nothing and keeps
-what was typed for another try. On Linux, or where the Mac offers no
-unlock, the card shows where to give instead, with the command that
-answers in a terminal, and draws no field. One that was given can
-be given again from its card under "Decided", which replaces it.
+what was typed for another try. Where no system unlock is offered, the
+card asks for its number in a separate field before the value: `i` types
+the number first, then the value. The value goes only when the number
+matches; otherwise it stays in its field and nothing is sent. One that
+was given can be given again from its card under "Decided", which
+replaces it.
 
 **A run ask** (`yardr bead ask --run`) proposes one yardr command that is
 the operator's to give, and approving it has the yard run that command. Its
@@ -1048,9 +1050,10 @@ yard weighed weighty shows each class's line first on its card, in rust:
 ID, a paired watch or the login password — and the control says so:
 "Approve in plantime after unlocking". ⌘↵ alone approves nothing: it opens
 the unlock, and the approval goes where the person passes it; its cancel
-sends nothing. On Linux, or where the Mac offers no unlock, the card shows
-where to approve instead, with the command that approves in a terminal,
-and offers no control. `x` puts a run
+sends nothing. Where no system unlock is offered, the card asks for the
+ask's number in a separate field and approves only when it matches;
+anything else leaves the card and sends nothing. The number is used up
+after each approval. `x` puts a run
 ask aside and `d` declines it with words, as on any card; one put aside can
 be approved from its card under "Decided". An approved one reads `approved,
 ran:` there, with the command and, under it, what it printed; one the yard
@@ -1081,9 +1084,9 @@ says. Where the yard takes no approval from this window, the card says so
 in place of the button, with the command that approves in a terminal in a
 block that copies it. Every setup ask is weighty: its card shows the
 yard's lines for what approving does first, in rust, and its approval
-passes the Mac's unlock first, as a run ask's does. On Linux, or where
-the Mac offers no unlock, the card shows where to approve instead, and
-draws no account field. `x` puts a setup ask
+passes the Mac's unlock first, as a run ask's does. Where no system
+unlock is offered, the card asks for its number before the account in a
+separate field, and approves only when the number matches. `x` puts a setup ask
 aside and `d` declines it with words; one put aside can be approved from
 its card under "Decided".
 
@@ -1106,14 +1109,14 @@ its card under "Decided".
 | a click on a folded history row | opens it to show its rows, shut |
 | `/`, in decisions | opens the history with its filter typed in; `esc` leaves the filter, and what is typed stands |
 | `1`–`9`, `up`, `down`, on a card | chooses an option; the arrows choose even while words are typed, from the first row of the words up and from the last down |
-| `i`, on a card | types the words in, or a secret in its field; a setup ask's account too. The window holds the card's keys |
-| `cmd+enter` (`ctrl+enter` on Linux), on a run or setup ask's card | approves it: the yard runs the command the card shows, or applies the setup with the preset pick and the account. On a weighty card it opens the Mac's unlock first, and approves where the person passes it. No other card answers to it, and Enter alone approves nothing |
+| `i`, on a card | on a weighty card without a system unlock, types the ask's number first, then a secret or setup account; otherwise types words or the secret or account in its field. The window holds the card's keys |
+| `cmd+enter` (`ctrl+enter` on Linux), on a run or setup ask's card | approves it: the yard runs the command the card shows, or applies the setup with the preset pick and the account. On a weighty card it opens the offered system unlock first; where none is offered, the typed number must match the ask. No other card answers to it, and Enter alone approves nothing |
 | `x`, on the open `yard` row | marks one notice read; a notice never needs more than one key |
 | shift-`x`, on the open `yard` row | marks every notice read, as the button in the row's head does, shown with their count while one is unread |
 | `x`, on an open card | puts the ask aside |
 | `d`, on an open card | declines the ask with words; with an empty line the next Enter sends them. A secret ask is declined at once, with none |
 | `e`, on a card | expands it to the bead whole, or folds it again |
-| `esc`, on a card | leaves a decline asked for words, shuts the bead drawer where one is open, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone |
+| `esc`, on a card | leaves a decline asked for words, shuts the bead drawer where one is open, the words for the card's keys, the pick, then the words; in the field of a secret, the field, and what was typed is gone; in the number field, leaves it and keeps the number |
 | a click on a bead's chip in a mail | opens the bead in the drawer beside what is open, which stays as it was; the drawer's Open shows the bead whole, and `esc` shuts the drawer |
 | `?`, on a card, the yard row, Lines or the switcher; a click on "? all keys" | opens the cheatsheet of the open view's keys; `esc` closes it |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
