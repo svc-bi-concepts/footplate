@@ -4254,8 +4254,17 @@ impl Model {
             return Vec::new();
         }
         // Mail the user wrote to themselves is both: their own, and unread
-        // in their inbox until their row shows it.
-        let mine = e.actor == self.me;
+        // in their inbox until their row shows it. So is what they wrote
+        // from a linked yard under a name trusted as them, to anyone but
+        // themselves: it stands in the row of whoever it was written to,
+        // as yardr chat's mail has it, and being theirs it is not
+        // counted, acknowledged or notified.
+        let mine = e.actor == self.me
+            || (to != self.me
+                && self
+                    .trust
+                    .get(&e.actor)
+                    .is_some_and(|user| *user == self.me));
         let for_me = to == self.me && e.flag("to_user");
         if !mine && !for_me {
             return Vec::new();
@@ -6327,6 +6336,70 @@ mod tests {
             ("Land it.", true)
         );
         assert_eq!(m.unread("yardmaster"), 0);
+    }
+
+    /// Mail the user wrote from a linked yard under the name trusted as
+    /// them stands in the open row as their own, with its standing, and
+    /// being theirs it is not counted, acknowledged or notified.
+    /// (footplate-mmp6: with the mayor's row open, mckean's word from the
+    /// other yard did not appear as it was sent.)
+    #[test]
+    fn the_user_s_word_from_a_linked_yard_arrives_in_the_open_row_as_theirs() {
+        let (mut m, _) = Model::new(
+            plantime(),
+            Mode::Chat,
+            Some(Selected::Conversation("mayor".into())),
+        );
+        m.conversation("mayor", vec![]);
+        assert_eq!(
+            m.event(&event(
+                22,
+                "mail",
+                "mckean@yardr",
+                json!({"to": "mayor", "as": "mckean", "text": "hi"}),
+            )),
+            []
+        );
+        let entries = m.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].from.as_str(), "mckean@yardr");
+        assert!(entries[0].mine);
+        assert_eq!(entries[0].standing.as_deref(), Some("sent; mayor is idle"));
+        assert_eq!(m.unread("mayor"), 0);
+        // A mail from a name trusted as someone else is dropped, as
+        // before.
+        let mut trusted = plantime();
+        trusted.peers[0]
+            .trust
+            .insert("ops".to_string(), "yardmaster".to_string());
+        let (mut m, _) = Model::new(
+            trusted,
+            Mode::Chat,
+            Some(Selected::Conversation("mayor".into())),
+        );
+        m.conversation("mayor", vec![]);
+        m.event(&event(
+            22,
+            "mail",
+            "ops@yardr",
+            json!({"to": "mayor", "as": "ops", "text": "hi"}),
+        ));
+        assert_eq!(m.entries(), []);
+        // And one from the same name to the user's own row stays the
+        // other end of the conversation there.
+        let (mut m, _) = Model::new(
+            plantime(),
+            Mode::Chat,
+            Some(Selected::Conversation("mckean".into())),
+        );
+        m.conversation("mckean", vec![]);
+        m.event(&event(
+            22,
+            "mail",
+            "mckean@yardr",
+            json!({"to": "mckean", "as": "mckean", "text": "hi"}),
+        ));
+        assert_eq!(m.entries(), []);
     }
 
     #[test]
