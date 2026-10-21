@@ -228,7 +228,7 @@ fn waits_names(remark: &str) -> Option<Vec<&str>> {
 pub fn state_of(member: &CrewMember) -> &'static str {
     match (member.state.as_str(), member.status.as_str()) {
         ("failed", _) => "failed to start",
-        ("running", _) if member.login.screen => "not logged in",
+        ("running", _) if member.login_screen => "not logged in",
         ("running", "working") => "working",
         ("running", "idle") => "idle",
         ("running", "blocked") => "blocked",
@@ -255,7 +255,7 @@ pub enum Dot {
 pub fn dot_of(member: &CrewMember) -> Dot {
     match (member.state.as_str(), member.status.as_str()) {
         ("failed", _) => Dot::Failed,
-        ("running", _) if member.login.screen => Dot::Blocked,
+        ("running", _) if member.login_screen => Dot::Blocked,
         ("running", "idle") => Dot::Idle,
         ("running", "blocked") => Dot::Blocked,
         ("running", _) => Dot::Working,
@@ -3755,7 +3755,7 @@ impl Model {
             Some("blocked") => format!("{name} waits at a prompt in its pane and cannot read mail"),
             // Where the yard leads the login, the person answers it at the
             // asks: footplate's Decisions.
-            Some("not logged in") if member.is_some_and(|r| r.login.led) => format!(
+            Some("not logged in") if member.is_some_and(|r| r.login_led) => format!(
                 "{name} is not logged in and cannot read mail: the yard leads its login, and waits for the operator at its asks (yardr asks)"
             ),
             Some("not logged in") => format!("{name} is not logged in and cannot read mail"),
@@ -4300,15 +4300,10 @@ impl Model {
                 }
                 Vec::new()
             }
-            // A session sat down at its harness's login screen, or the yard
-            // began to lead its login. The yard marks the session's handle
-            // for it and raises no `crew_` event, so these tell of it: the
-            // crew is read again, where the mark is.
-            "nudge_held" if e.text("reason") == "not_logged_in" => vec![Effect::Crew],
-            "login_led" => vec![Effect::Crew],
             // A session started, stopped or failed, the list itself
-            // changed, or a crew member's first prompt arrived: the event
-            // carries less than what changed.
+            // changed, its login changed, or a crew member's first prompt
+            // arrived: the event carries less than what changed. `crew_login`
+            // arrives through this arm and needs none of its own.
             kind if kind.starts_with("crew_") => vec![Effect::Crew],
             kind if kind.starts_with("session_prompt") && !e.text("crew").is_empty() => {
                 vec![Effect::Crew]
@@ -5715,7 +5710,8 @@ mod tests {
             enabled: true,
             state: state.into(),
             status: status.into(),
-            login: api::Login::default(),
+            login_screen: false,
+            login_led: false,
         }
     }
 
@@ -5723,7 +5719,8 @@ mod tests {
     /// leads where `led` says.
     fn at_login(member: CrewMember, led: bool) -> CrewMember {
         CrewMember {
-            login: api::Login { screen: true, led },
+            login_screen: true,
+            login_led: led,
             ..member
         }
     }
@@ -6049,8 +6046,8 @@ mod tests {
 
     /// A session at its harness's login screen reads no mail, whatever its
     /// runtime says it does, and often it says idle: the state is the
-    /// yard's word, and the dot waits for a person. A mark left on the
-    /// handle of a session that ended says nothing.
+    /// yard's word, and the dot waits for a person. A login left on a
+    /// session that ended says nothing.
     #[test]
     fn a_session_at_its_harness_s_login_screen_is_not_logged_in_whatever_its_status() {
         for status in ["idle", "working", "blocked", "unknown", ""] {
@@ -6118,30 +6115,26 @@ mod tests {
         );
     }
 
-    /// The yard marks the session's handle for a login screen and raises no
-    /// `crew_` event, so the two events that tell of it read the crew again.
-    /// A held nudge for another reason says nothing of it.
+    /// A session's login changed: `crew_login` carries less than what
+    /// changed, as any other `crew_` event, so the crew is read again. An
+    /// event of another kind says nothing of it.
     #[test]
-    fn the_crew_is_read_again_when_a_session_sits_at_a_login_screen_or_the_yard_leads_it() {
+    fn the_crew_is_read_again_on_a_crew_login_event() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
-        let held = |seq, reason| {
-            event(
-                seq,
-                "nudge_held",
-                "yard",
-                json!({"crew": "yardmaster", "reason": reason}),
-            )
-        };
-        assert!(m.event(&held(21, "not_logged_in")).contains(&Effect::Crew));
-        assert!(!m.event(&held(22, "dialog")).contains(&Effect::Crew));
-        assert!(!m.event(&held(23, "")).contains(&Effect::Crew));
-        let led = event(
-            24,
-            "login_led",
+        let login = event(
+            21,
+            "crew_login",
             "yard",
-            json!({"crew": "yardmaster", "kind": "claude", "step": "asked", "ask": 12}),
+            json!({"crew": "yardmaster", "login_screen": true, "login_led": false}),
         );
-        assert!(m.event(&led).contains(&Effect::Crew));
+        assert!(m.event(&login).contains(&Effect::Crew));
+        let held = event(
+            22,
+            "nudge_held",
+            "yard",
+            json!({"crew": "yardmaster", "reason": "not_logged_in"}),
+        );
+        assert!(!m.event(&held).contains(&Effect::Crew));
     }
 
     #[test]

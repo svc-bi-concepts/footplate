@@ -19589,24 +19589,23 @@ mod tests {
     /// A crew member whose session sits at its harness's login screen is
     /// not logged in, whatever its runtime reads the screen as: its row and
     /// the header say so, its dot waits, and the line under the user's mail
-    /// to it says it cannot read it. The yard marks the handle with no
-    /// event of its own, so the events that tell of it read the crew again,
-    /// and the words go when the mark does.
+    /// to it says it cannot read it. The yard raises `crew_login` when the
+    /// login changes, so the crew is read again, and the words go when the
+    /// screen does.
     #[gpui::test]
     fn a_crew_member_at_its_login_screen_is_not_logged_in_and_the_mail_to_it_says_so(
         cx: &mut TestAppContext,
     ) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        let crew = |handle: &str| {
+        let crew = |login: &str| {
             format!(
                 r#"{{"result": [{{"name": "assembly", "enabled": true, "state": "stopped"}},
-                    {{"name": "yardmaster", "enabled": true, "state": "running", "status": "idle", "handle": {handle}}}]}}"#
+                    {{"name": "yardmaster", "enabled": true, "state": "running", "status": "idle", {login}}}]}}"#
             )
         };
-        let screen = r#"{"pane": "p1", "harness_login": "Select login method:"}"#;
-        let led = r#"{"pane": "p1", "harness_login": "Select login method:",
-            "harness_login_ask": {"journal": "yardr-x1y2", "ask": 12, "step": "pick", "kind": "claude"}}"#;
+        let screen = r#""login_screen": true"#;
+        let led = r#""login_screen": true, "login_led": true"#;
         yard.answer("Crew", &crew(screen));
         yard.converse(
             "yardmaster",
@@ -19639,7 +19638,7 @@ mod tests {
         // The yard leads the login: its event says so, the crew is read
         // again, and the words are the yard's.
         yard.answer("Crew", &crew(led));
-        yard.emit(r#"{"seq": 21, "kind": "login_led", "actor": "yard", "at": "2026-10-08T09:31:00Z", "data": {"crew": "yardmaster", "kind": "claude", "step": "asked", "ask": 12}}"#);
+        yard.emit(r#"{"seq": 21, "kind": "crew_login", "actor": "yard", "at": "2026-10-08T09:31:00Z", "data": {"crew": "yardmaster", "login_screen": true, "login_led": true}}"#);
         wait(cx, "the yard's words for the login", |cx| {
             stands(&view, cx).1.is_some_and(|line| {
                 line.ends_with(
@@ -19648,8 +19647,11 @@ mod tests {
             })
         });
 
-        // Logged in: the session starts again with no mark, idle as before.
-        yard.answer("Crew", &crew("{}"));
+        // Logged in: the session starts again with the screen gone, idle as before.
+        yard.answer(
+            "Crew",
+            &crew(r#""login_screen": false, "login_led": false"#),
+        );
         yard.emit(r#"{"seq": 22, "kind": "crew_started", "actor": "yard", "at": "2026-10-08T09:32:00Z", "data": {"crew": "yardmaster"}}"#);
         wait(cx, "the crew member idle again", |cx| {
             stands(&view, cx)
