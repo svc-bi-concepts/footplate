@@ -121,8 +121,8 @@ pub(crate) const SECRET_GOES: &str =
 
 /// The keys of a secret ask's card, with the way for a person without the
 /// field: the same answer in a terminal on the yard's machine. Where the
-/// Mac's unlock stands in front, Enter opens it first; where the card has
-/// no gate, the terminal is the only way.
+/// Mac's unlock stands in front, Enter opens it first; where the card
+/// takes its number back, `i` types the number before the value.
 pub(crate) fn secret_keys(bead: &str, ask: u64, approval: Approval, writable: bool) -> String {
     let keys = match approval {
         Approval::Direct => format!(
@@ -130,6 +130,9 @@ pub(crate) fn secret_keys(bead: &str, ask: u64, approval: Approval, writable: bo
         ),
         Approval::Unlock => format!(
             "i types it · enter sends it to the yard after unlocking · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
+        ),
+        Approval::TypeBack => format!(
+            "i types the number, then it · enter sends it to the yard with its number · esc leaves, and nothing is sent · or in a terminal: yardr bead answer {bead} {ask} --secret"
         ),
         Approval::Nowhere => format!("in a terminal: yardr bead answer {bead} {ask} --secret"),
     };
@@ -170,23 +173,26 @@ pub(crate) fn approve_unlock_label(yard: &str) -> String {
 }
 
 /// How the card's approval goes: straight to the yard, through the Mac's
-/// unlock first, or nowhere from this window, where the card shows where
-/// to approve instead.
+/// unlock first, after the ask's number is typed back where no unlock is
+/// offered, or nowhere from this window, where the card shows where to
+/// approve instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Approval {
     Direct,
     Unlock,
+    TypeBack,
     Nowhere,
 }
 
 /// How the ask's card approves: nowhere where the yard takes no approval
-/// from this window, or where a weighty card has no gate; through the
-/// Mac's unlock where a weighty card has one; straight to the yard
-/// otherwise.
+/// from this window; through the Mac's unlock where a weighty card has
+/// one; after the ask's number is typed back where it has none, as a
+/// terminal asks it back; straight to the yard otherwise.
 pub(crate) fn approval(weighty: bool, gate: bool, elsewhere: bool) -> Approval {
     match (weighty, gate, elsewhere) {
-        (_, _, true) | (true, false, _) => Approval::Nowhere,
+        (_, _, true) => Approval::Nowhere,
         (true, true, false) => Approval::Unlock,
+        (true, false, false) => Approval::TypeBack,
         (false, _, false) => Approval::Direct,
     }
 }
@@ -231,23 +237,39 @@ pub(crate) const SETUP_TAKE: &str = "take one with a tap, or type another below:
 pub(crate) const APPROVE_ELSEWHERE: &str =
     "this yard takes no approval from footplate. Approve in a terminal on the yard's machine:";
 
-/// What a weighty card says in place of the control that approves, where
-/// this window has no gate: the decline path, in the yard's words. The
-/// card stays open; nothing is declined for the person.
-pub(crate) const WEIGHTY_NO_GATE: &str = "this card is weighty and this window has no gate. Approve it in footplate on a Mac, or in a terminal on the yard's machine:";
+/// What a weighty card says over its number field where this window has
+/// no gate: what to type and why, in the terminal's words. `verb` is what
+/// the number lets through: approving a run or setup ask, giving a secret.
+pub(crate) fn typeback_line(ask: u64, verb: &str) -> String {
+    format!("type the ask's number, {ask}, to {verb} this weighty card")
+}
+
+/// What the window says where the number field holds anything but the
+/// ask's number: nothing went, and the card stays as it is, in the
+/// terminal's words.
+pub(crate) fn typeback_mismatch(ask: u64) -> String {
+    format!("ask {ask}'s number was not typed back, so nothing was done")
+}
 
 /// The keys of a run ask's card. Later, Decline and expand have their
 /// buttons; Enter is named because it does nothing here. Where the Mac's
-/// unlock stands in front, the key opens it first.
+/// unlock stands in front, the key opens it first; where the card takes
+/// its number back, `i` types it.
 pub(crate) fn run_keys(approval: Approval, writable: bool) -> String {
     let mut keys: Vec<String> = Vec::new();
     match approval {
         Approval::Direct => keys.push(format!("{APPROVE_KEY} approves")),
         Approval::Unlock => keys.push(format!("{APPROVE_KEY} approves after unlocking")),
+        Approval::TypeBack => {
+            keys.push(format!("{APPROVE_KEY} approves after its number is typed"))
+        }
         Approval::Nowhere => {}
     }
     if !matches!(approval, Approval::Nowhere) {
         keys.push("enter alone approves nothing".to_string());
+    }
+    if matches!(approval, Approval::TypeBack) {
+        keys.push("i types the number".to_string());
     }
     if writable {
         keys.push("a ask about this".to_string());
@@ -270,11 +292,17 @@ pub(crate) fn setup_keys(
     match approval {
         Approval::Direct => keys.push(format!("{APPROVE_KEY} approves")),
         Approval::Unlock => keys.push(format!("{APPROVE_KEY} approves after unlocking")),
+        Approval::TypeBack => {
+            keys.push(format!("{APPROVE_KEY} approves after its number is typed"))
+        }
         Approval::Nowhere => {}
     }
     if !matches!(approval, Approval::Nowhere) {
         keys.push("enter alone approves nothing".to_string());
-        keys.push("i types the account".to_string());
+        match approval {
+            Approval::TypeBack => keys.push("i types the number, then the account".to_string()),
+            _ => keys.push("i types the account".to_string()),
+        }
         keys.push(format!(
             "or in a terminal: {}",
             model::setup_approve_command(bead, ask, setup)

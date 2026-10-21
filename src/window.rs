@@ -404,6 +404,13 @@ pub struct Footplate {
     /// The field draws the secret as typed, for a look: its toggle's
     /// state, for the ask the field is for, and kept for no other.
     secret_shown: bool,
+    /// The field of a weighty card's typed-back number, where no unlock
+    /// is offered: the ask's number, drawn as typed. It is another than
+    /// the secret field: a secret ask's value and its number are typed
+    /// apart, and the number never carries the value.
+    typeback: Entity<Line>,
+    /// The ask the number field is for.
+    typeback_for: Option<(String, u64)>,
     /// The run ask whose approval is with the yard and not answered yet:
     /// no second one goes after it.
     approving: Option<(String, u64)>,
@@ -577,6 +584,11 @@ impl Footplate {
         let secret = cx.new(Line::masked);
         cx.subscribe(&secret, |this, _, _: &Submitted, cx| this.give(cx))
             .detach();
+        // A weighty card's typed-back number, where no unlock is offered:
+        // drawn as typed, as a terminal echoes it. Enter in it submits
+        // nothing: the approval or the give reads it, and Enter alone
+        // approves nothing still.
+        let typeback = cx.new(Line::new);
         // The card's Give and Send buttons are disabled while their field
         // is empty: the window is drawn again with what is typed.
         cx.observe(&line, |_, _, cx| cx.notify()).detach();
@@ -803,6 +815,8 @@ impl Footplate {
             secret_typed: Vec::new(),
             secret_for: None,
             secret_shown: false,
+            typeback,
+            typeback_for: None,
             approving: None,
             test_unlock: match cfg!(test) {
                 true => Some((false, false)),
@@ -970,7 +984,8 @@ impl Render for Footplate {
             _ if self.filter.focus_handle(cx).is_focused(window) => CONTEXT,
             Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
                 if self.line.focus_handle(cx).is_focused(window)
-                    || self.secret.focus_handle(cx).is_focused(window) =>
+                    || self.secret.focus_handle(cx).is_focused(window)
+                    || self.typeback.focus_handle(cx).is_focused(window) =>
             {
                 CONTEXT
             }
@@ -1134,11 +1149,11 @@ fn expanded_text_key(card_key: u64, section: &str, index: usize, text: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::ask::{
-        ANSWER_WORDS, Approval, DECLINE_IS_NO_PICK, PAIRING_GIVES, SEND_WORDS, WEIGHTY_NO_GATE,
-        answer_label, approval, approve_label, approve_unlock_label, asked_age,
-        candidate_choice_line, card_head, decided_keys, decision_head, description_line, fenced,
-        give_label, give_unlock_label, recommended_line, run_keys, run_runs, run_texts,
-        secret_keys, setup_keys, take_back_label, texts_label, words_send,
+        ANSWER_WORDS, Approval, DECLINE_IS_NO_PICK, PAIRING_GIVES, SEND_WORDS, answer_label,
+        approval, approve_label, approve_unlock_label, asked_age, candidate_choice_line, card_head,
+        decided_keys, decision_head, description_line, fenced, give_label, give_unlock_label,
+        recommended_line, run_keys, run_runs, run_texts, secret_keys, setup_keys, take_back_label,
+        texts_label, typeback_line, typeback_mismatch, words_send,
     };
     use super::asks::dir_url;
     use super::keys::{KeysView, SECONDARY, keys_for};
@@ -1271,22 +1286,35 @@ mod tests {
             "i types it · enter sends it to the yard after unlocking · esc leaves, and nothing is sent · or in a terminal: yardr bead answer bead-s 7 --secret · a ask about this"
         );
         assert_eq!(
+            secret_keys("bead-s", 7, Approval::TypeBack, true),
+            "i types the number, then it · enter sends it to the yard with its number · esc leaves, and nothing is sent · or in a terminal: yardr bead answer bead-s 7 --secret · a ask about this"
+        );
+        assert_eq!(
             secret_keys("bead-s", 7, Approval::Nowhere, true),
             "in a terminal: yardr bead answer bead-s 7 --secret · a ask about this"
         );
         assert_eq!(approval(false, true, false), Approval::Direct);
         assert_eq!(approval(false, false, false), Approval::Direct);
         assert_eq!(approval(true, true, false), Approval::Unlock);
-        assert_eq!(approval(true, false, false), Approval::Nowhere);
+        assert_eq!(approval(true, false, false), Approval::TypeBack);
         assert_eq!(approval(false, true, true), Approval::Nowhere);
         assert_eq!(approval(true, true, true), Approval::Nowhere);
+        assert_eq!(approval(true, false, true), Approval::Nowhere);
         assert_eq!(
             approve_unlock_label("plantime"),
             "Approve in plantime after unlocking"
         );
         assert_eq!(
-            WEIGHTY_NO_GATE,
-            "this card is weighty and this window has no gate. Approve it in footplate on a Mac, or in a terminal on the yard's machine:"
+            typeback_line(7, "approve"),
+            "type the ask's number, 7, to approve this weighty card"
+        );
+        assert_eq!(
+            typeback_line(7, "give"),
+            "type the ask's number, 7, to give this weighty card"
+        );
+        assert_eq!(
+            typeback_mismatch(7),
+            "ask 7's number was not typed back, so nothing was done"
         );
         assert_eq!(
             run_keys(Approval::Direct, true),
@@ -1295,6 +1323,12 @@ mod tests {
         assert_eq!(
             run_keys(Approval::Unlock, false),
             format!("{APPROVE_KEY} approves after unlocking · enter alone approves nothing")
+        );
+        assert_eq!(
+            run_keys(Approval::TypeBack, false),
+            format!(
+                "{APPROVE_KEY} approves after its number is typed · enter alone approves nothing · i types the number"
+            )
         );
         assert_eq!(run_keys(Approval::Nowhere, false), "");
         assert_eq!(run_keys(Approval::Nowhere, true), "a ask about this");
@@ -1310,6 +1344,12 @@ mod tests {
             setup_keys("bead-s", 7, &setup, Approval::Unlock, false),
             format!(
                 "{APPROVE_KEY} approves after unlocking · enter alone approves nothing · i types the account · {terminal}"
+            )
+        );
+        assert_eq!(
+            setup_keys("bead-s", 7, &setup, Approval::TypeBack, false),
+            format!(
+                "{APPROVE_KEY} approves after its number is typed · enter alone approves nothing · i types the number, then the account · {terminal}"
             )
         );
         assert_eq!(
@@ -1647,6 +1687,11 @@ mod tests {
 
     fn typed(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, cx| v.line.read(cx).text().to_string())
+    }
+
+    /// What a weighty card's number field holds.
+    fn typeback_text(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, cx| v.typeback.read(cx).text().to_string())
     }
 
     fn placeholder(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
@@ -21125,8 +21170,9 @@ yardr.dev
 
     /// A run ask's card: under the asker's lines the yard's one block, with
     /// the command whole and wrapped, the yard's sentence and the command
-    /// that takes it back. A weighty card has no control without a gate;
-    /// its button opens the gate before approving.
+    /// that takes it back. A weighty card without a gate takes its number
+    /// back, and anything else leaves the card; its button opens the gate
+    /// before approving.
     /// Enter approves nothing, with words or without; the card's own key
     /// calls `ApproveAsk` with the ask and nothing of the command. A call
     /// with no answer never says approved; a refusal is shown whole; an
@@ -21142,14 +21188,15 @@ yardr.dev
         let command = weighty_long_command();
 
         // The card draws no line for words, and the window has the keys.
+        // With no gate it takes the ask's number back above its control.
         let in_line = view.update_in(cx, |v, window, cx| {
             v.line.focus_handle(cx).is_focused(window)
         });
         assert!(!in_line);
         assert!(drawn(cx, "run bead-s 7"));
         assert!(drawn(cx, "weight bead-s 7 0"));
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "approve bead-s 7"));
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
         assert!(!drawn(cx, "words bead-s 7"));
         assert!(!drawn(cx, "send bead-s 7"));
 
@@ -21168,7 +21215,7 @@ yardr.dev
         );
         assert_eq!(
             view.read_with(cx, |v, cx| v.selection.read(cx).chip_count()),
-            3
+            2
         );
 
         // A line that looks like a fence selects as it was written.
@@ -21195,29 +21242,30 @@ yardr.dev
         cx.simulate_click(chip, gpui::Modifiers::default());
         assert_eq!(clipboard(cx).as_deref(), Some(command.as_str()));
 
-        // With no gate, the card gives the terminal path instead of a
-        // control. Its block copies the approval command.
-        let terminal = "yardr bead answer bead-s 7 --approve";
-        let chip = run_chip(&view, cx, run_text("approve", terminal)).unwrap();
-        cx.simulate_click(chip, gpui::Modifiers::default());
-        assert_eq!(clipboard(cx).as_deref(), Some(terminal));
-
         // Enter alone approves nothing, and nothing typed goes with it:
-        // the card has no line to type in, and the picking keys no option.
+        // `i` types the card's number, and the picking keys no option.
         cx.simulate_keystrokes("enter");
         cx.simulate_keystrokes("i");
         cx.simulate_input("yes");
         cx.simulate_keystrokes("enter 1 enter up enter");
         cx.run_until_parked();
         assert_eq!(typed(&view, cx), "");
+        assert_eq!(typeback_text(&view, cx), "yes1");
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
 
-        // ⌘↵ on the no-gate card does nothing. A cancelled unlock does
+        // The approval's key with anything but the ask's number sends
+        // nothing and leaves the card, saying so. A cancelled unlock does
         // nothing too; the control is available to try again.
         cx.simulate_keystrokes("secondary-enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        assert_eq!(
+            notice(&view, cx),
+            "ask 7's number was not typed back, so nothing was done"
+        );
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
         unlock_as(&view, cx, true, false);
         assert!(drawn(cx, "approve bead-s 7"));
         click_on(cx, "approve bead-s 7");
@@ -21943,20 +21991,24 @@ yardr.dev
         wait(cx, "put aside", |_| yard.asked("DeferAsk").len() == 1);
         open_decided(&view, cx, "bead-s", 7);
         wait(cx, "the card among the decided", |cx| {
-            drawn(cx, "weight bead-s 7 0") && drawn(cx, "weighty decline bead-s 7")
+            drawn(cx, "weight bead-s 7 0") && drawn(cx, "typeback bead-s 7")
         });
         assert!(drawn(cx, "run bead-s 7"));
-        assert!(!drawn(cx, "approve bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
 
-        // A put-aside weighty ask keeps its weight. Its card approves
-        // nowhere without a gate; cancel sends nothing, and passing the
-        // gate sends `weighed` with the approval.
+        // A put-aside weighty ask keeps its weight. Its card takes its
+        // number back without a gate; cancel sends nothing, and passing
+        // the gate sends `weighed` with the approval.
         cx.simulate_keystrokes("secondary-enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        assert_eq!(
+            notice(&view, cx),
+            "ask 7's number was not typed back, so nothing was done"
+        );
         unlock_as(&view, cx, true, false);
         assert!(drawn(cx, "approve bead-s 7"));
         click_on(cx, "approve bead-s 7");
@@ -22148,6 +22200,183 @@ yardr.dev
             ..Env::default()
         };
         opened_on_the_ask(at, file, cx)
+    }
+
+    /// A weighty card with no gate approves after its number is typed
+    /// back, as at a terminal: a run ask, a setup ask and a secret give,
+    /// each with the gate fixed shut. A wrong number sends nothing and
+    /// leaves the card, saying so; the right number sends `weighed` with
+    /// the approval, and is used up. The secret's value and its number
+    /// are typed apart, and the number is asked before the value goes.
+    #[gpui::test]
+    fn a_weighty_card_without_a_gate_approves_after_its_number_is_typed_back(
+        cx: &mut TestAppContext,
+    ) {
+        const MISMATCH: &str = "ask 7's number was not typed back, so nothing was done";
+
+        // A run ask: anything but the ask's number sends nothing and
+        // leaves the card; the number approves, with `weighed`.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_weighty_run_ask(&yard, &file, cx);
+        unlock_as(&view, cx, false, false);
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("8");
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk"), Vec::<Value>::new());
+        assert_eq!(notice(&view, cx), MISMATCH);
+        assert_eq!(typeback_text(&view, cx), "8");
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        let mut answered = queued_run("answered", true);
+        answered["run"] = weighty_run_of();
+        answered["weight"] = weighed("outside", WEIGHTY_RUN_LINE);
+        answered["ran"] = json!({"argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
+        );
+        yard.answer(
+            "ApproveAsk",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "argv": weighty_run_of()["argv"], "result": WEIGHTY_RUN_RESULT}})
+            .to_string(),
+        );
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == format!(
+                    "approved, ran: {} · {WEIGHTY_RUN_RESULT}",
+                    weighty_long_command()
+                )
+        });
+        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
+        // The number is used up, and the keys are the window's again.
+        assert_eq!(typeback_text(&view, cx), "");
+        let in_typeback = view.update_in(cx, |v, window, cx| {
+            v.typeback.focus_handle(cx).is_focused(window)
+        });
+        assert!(!in_typeback);
+
+        // A setup ask: the approval wants the account first, then the
+        // number, and sends both with the preset pick.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_weighty_setup_ask(&yard, &file, cx);
+        unlock_as(&view, cx, false, false);
+        assert!(drawn(cx, "typeback bead-s 7"));
+        click_on(cx, "account bead-s 7 courier-existing");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("8");
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        assert_eq!(notice(&view, cx), MISMATCH);
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [{
+                "bead": "bead-s", "ask": 7, "question": "Set up courier for the yardmaster?",
+                "asker": "yardmaster", "state": "answered", "option": 1, "option_label": "read",
+                "setup": setup_of(&["COURIER_ACCOUNT"], true),
+                "weight": [{"class": "credential",
+                            "line": "gives a credential or an address to the yard: the account COURIER_ACCOUNT"}],
+                "ran": {"argv": ["setup", "courier"], "result": "approved, to be carried out"}}]}})
+            .to_string(),
+        );
+        yard.answer(
+            "ApproveSetup",
+            &json!({"result": {"bead": "bead-s", "ask": 7, "asker": "yardmaster",
+                "pack": "courier", "preset": "read", "account": "courier-existing",
+                "result": "approved, to be carried out"}})
+            .to_string(),
+        );
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx)
+                == "approved, being carried out: setup of pack courier, preset read to crew yardmaster; took courier-existing"
+        });
+        assert_eq!(
+            yard.asked("ApproveSetup"),
+            [json!({"bead": "bead-s", "ask": 7, "option": 1,
+                     "account": "courier-existing", "actor": "jo", "weighed": true})]
+        );
+
+        // A secret give: `i` types the number first, and with the wrong
+        // number the value stays in its own field and nothing is sent.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let (view, cx) = opened_on_a_weighty_secret_ask(&yard, &file, cx);
+        unlock_as(&view, cx, false, false);
+        let mut answered = queued_secret(&["BOOKS_TOKEN"], 7, "answered", &["BOOKS_TOKEN"]);
+        answered["weight"] = weighed(
+            "credential",
+            "gives a credential or an address to the yard: BOOKS_TOKEN, for the source books",
+        );
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
+        );
+        yard.answer(
+            "GiveSecret",
+            r#"{"result": {"given": ["BOOKS_TOKEN"], "file": "/home/jo/.yardr/sources/books.env",
+                "credential": "BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"}}"#,
+        );
+        assert!(drawn(cx, "typeback bead-s 7"));
+        cx.simulate_keystrokes("i");
+        cx.simulate_input("8");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(typeback_text(&view, cx), "8");
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+        let (in_secret, in_typeback) = view.update_in(cx, |v, window, cx| {
+            (
+                v.secret.focus_handle(cx).is_focused(window),
+                v.typeback.focus_handle(cx).is_focused(window),
+            )
+        });
+        assert!(!in_secret && in_typeback);
+        click_on(cx, "secret bead-s 7");
+        cx.simulate_input(VALUE);
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("GiveSecret"), Vec::<Value>::new());
+        assert_eq!(notice(&view, cx), MISMATCH);
+        assert!(!notice(&view, cx).contains(VALUE));
+        assert_eq!(secret_field(&view, cx).0, VALUE);
+        // The number typed back, the value goes, with `weighed`.
+        view.update(cx, |v, cx| {
+            v.typeback.update(cx, |field, cx| field.set_text("7", cx))
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(secret_field(&view, cx).0, "");
+        wait(cx, "given with the number", |_| {
+            yard.asked("GiveSecret")
+                == [json!({"bead": "bead-s", "ask": 7,
+                            "values": {"BOOKS_TOKEN": VALUE}, "actor": "jo", "weighed": true})]
+        });
+        wait(cx, "the yard's line", |cx| {
+            notice(&view, cx)
+                == "gave BOOKS_TOKEN · BOOKS_TOKEN is set in /home/jo/.yardr/sources/books.env"
+        });
+        let kept = kept_outside_the_field(&view, cx, dir.path());
+        assert!(!kept.contains(VALUE), "given with the number: {kept}");
     }
 
     /// The courier pack's sentences as the yard cards them: the pack
@@ -22384,15 +22613,17 @@ yardr.dev
         let yard = Yard::start();
         let (view, cx) = opened_on_a_weighty_setup_ask(&yard, &file, cx);
 
-        // With no gate, a weighty setup has its terminal path instead of
-        // an approval control or account field.
+        // With no gate, a weighty setup takes its number back above
+        // its approval control and account field. The approval wants the
+        // account first, then the number.
         assert!(drawn(cx, "weight bead-s 7 0"));
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "approve bead-s 7"));
-        assert!(!drawn(cx, "secret bead-s 7"));
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        assert!(drawn(cx, "secret bead-s 7"));
         cx.simulate_keystrokes("secondary-enter");
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        assert_eq!(notice(&view, cx), "take a candidate, or type the account");
         unlock_as(&view, cx, true, false);
 
         // The yard's block, with what approving does and each sentence.
@@ -22488,6 +22719,23 @@ yardr.dev
             v.model.as_ref().unwrap().account_choice("bead-s", 7)
         });
         assert_eq!(taken, "courier-existing");
+        // Without a gate, anything but the ask's number sends nothing
+        // and leaves the taken account, saying so.
+        unlock_as(&view, cx, false, false);
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveSetup"), Vec::<Value>::new());
+        assert_eq!(
+            notice(&view, cx),
+            "ask 7's number was not typed back, so nothing was done"
+        );
+        assert_eq!(
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().account_choice("bead-s", 7)
+            }),
+            "courier-existing"
+        );
+        unlock_as(&view, cx, true, false);
         // Cancel sends nothing and leaves the selected account for another
         // try.
         cx.simulate_keystrokes("secondary-enter");
@@ -23690,19 +23938,26 @@ yardr.dev
             assert!(!kept.contains(VALUE), "{when}: {kept}");
         };
 
-        // With no gate, the weighty secret has its terminal path and no
-        // field to type into.
+        // With no gate, the weighty secret takes its number back above
+        // its value field and Give. `i` types the number first.
         assert!(drawn(cx, "weight bead-s 7 0"));
-        assert!(drawn(cx, "weighty decline bead-s 7"));
-        assert!(!drawn(cx, "give bead-s 7"));
-        assert!(!drawn(cx, "secret bead-s 7"));
+        assert!(drawn(cx, "typeback bead-s 7"));
+        assert!(drawn(cx, "give bead-s 7"));
+        assert!(drawn(cx, "secret bead-s 7"));
         cx.simulate_keystrokes("i");
         cx.run_until_parked();
-        let in_secret = view.update_in(cx, |v, window, cx| {
-            v.secret.focus_handle(cx).is_focused(window)
+        let (in_secret, in_typeback) = view.update_in(cx, |v, window, cx| {
+            (
+                v.secret.focus_handle(cx).is_focused(window),
+                v.typeback.focus_handle(cx).is_focused(window),
+            )
         });
-        assert!(!in_secret);
+        assert!(!in_secret && in_typeback);
         unlock_as(&view, cx, true, false);
+        // The test moved the gate under the card: esc leaves the number
+        // field it stood in, as after any card that approved.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
 
         // The button stands by the field, and the footer still names Enter.
         assert!(drawn(cx, "give bead-s 7"));

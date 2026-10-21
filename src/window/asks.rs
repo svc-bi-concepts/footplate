@@ -13,11 +13,11 @@ use super::Expanded;
 use super::Footplate;
 use super::ask::{
     ANSWER_WORDS, APPROVE_ELSEWHERE, Approval, DECLINE_IS_NO_PICK, RUN_PROPOSED, RunText,
-    SECRET_GOES, SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, WEIGHTY_NO_GATE, answer_label, approval,
-    approve_button, asked_age, candidate_choice_line, card_head, carried_texts, decided_keys,
-    decision_head, description_line, fenced, give_label, give_unlock_label, recommended_line,
-    run_keys, run_runs, run_texts, secret_keys, section_head, send_button, setup_keys, setup_runs,
-    show_button, take_back_label, texts_label, words_send,
+    SECRET_GOES, SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, answer_label, approval, approve_button,
+    asked_age, candidate_choice_line, card_head, carried_texts, decided_keys, decision_head,
+    description_line, fenced, give_label, give_unlock_label, recommended_line, run_keys, run_runs,
+    run_texts, secret_keys, section_head, send_button, setup_keys, setup_runs, show_button,
+    take_back_label, texts_label, typeback_line, typeback_mismatch, words_send,
 };
 use super::expanded_text_key;
 use super::keys::{APPROVE_KEY, SETUP_SECRET_CONTEXT};
@@ -118,6 +118,13 @@ impl Footplate {
                 );
             }
         }
+        // What is typed of a weighty card's number is for the ask it was
+        // typed on, and is kept for no other: one ask's number never
+        // stands in another's field.
+        if ask != self.typeback_for {
+            self.typeback.update(cx, |field, cx| field.set_text("", cx));
+            self.typeback_for = ask.clone();
+        }
         // A secret ask's card draws no line for words, nor does the card
         // of an ask taken back. A focus left in
         // the line by the conversation before it would hold the keys where
@@ -144,6 +151,30 @@ impl Footplate {
                 // A window that is closed has no focus to move.
                 let _ = handle.update(cx, |_, window, _| {
                     if line.is_focused(window) {
+                        window.focus(&focus);
+                    }
+                });
+            });
+        }
+        // The number field stands on a weighty card with no gate alone. A
+        // focus left in it by a card that approved since, or by another
+        // card, would hold the keys where nothing is drawn to take them:
+        // the window has them.
+        let typebacked = !self.settings_open
+            && ask.as_ref().is_some_and(|(bead, ask)| {
+                matches!(self.card_approval(bead, *ask), Approval::TypeBack)
+            });
+        if !typebacked {
+            let (handle, typeback, focus) = (
+                self.handle,
+                self.typeback.focus_handle(cx),
+                self.focus.clone(),
+            );
+            // Afterwards, as above.
+            cx.defer(move |cx| {
+                // A window that is closed has no focus to move.
+                let _ = handle.update(cx, |_, window, _| {
+                    if typeback.is_focused(window) {
                         window.focus(&focus);
                     }
                 });
@@ -402,7 +433,8 @@ impl Footplate {
     }
 
     /// How the ask's card approves: straight to the yard, through the
-    /// Mac's unlock first, or nowhere from this window.
+    /// Mac's unlock first, after the ask's number is typed back, or
+    /// nowhere from this window.
     pub(crate) fn card_approval(&self, bead: &str, ask: u64) -> Approval {
         let weighty = self
             .model
@@ -410,6 +442,20 @@ impl Footplate {
             .is_some_and(|m| !m.weight(bead, ask).is_empty());
         let elsewhere = self.approve_elsewhere.contains(&(bead.to_string(), ask));
         approval(weighty, self.unlock_available(), elsewhere)
+    }
+
+    /// Whether the number field holds exactly the ask's number: the gate
+    /// of a weighty card where no unlock is offered. What is pasted often
+    /// ends in a line break, which is trimmed as a value's is; anything
+    /// else but the number is no number typed back, as at a terminal.
+    pub(crate) fn typeback_ok(&self, ask: u64, cx: &gpui::App) -> bool {
+        self.typeback.read(cx).text().trim() == ask.to_string()
+    }
+
+    /// The typed-back number is used up: each weighty card asks again, as
+    /// the Mac's unlock does.
+    pub(crate) fn clear_typeback(&mut self, cx: &mut Context<Self>) {
+        self.typeback.update(cx, |field, cx| field.set_text("", cx));
     }
 
     /// The approval of the following `session` is no longer with the
@@ -480,6 +526,16 @@ impl Footplate {
             (None, Some((names, _))) => names.clone(),
             (None, None) => return,
         };
+        // A weighty secret with no gate takes its number first, as a
+        // terminal asks it before the values: with anything but the ask's
+        // number the value stays where it is and nothing is sent. A setup
+        // ask's names only wait here; the approval asks the number back.
+        if secret.is_some()
+            && matches!(self.card_approval(&bead, ask), Approval::TypeBack)
+            && !self.typeback_ok(ask, cx)
+        {
+            return self.notice(typeback_mismatch(ask), cx);
+        }
         // What is pasted often ends in a line break, which nobody sees
         // among the marks and which the yard refuses at either end.
         let value = self
@@ -512,11 +568,18 @@ impl Footplate {
         self.shown(cx);
         let session = self.session;
         match self.card_approval(&bead, ask) {
-            // No gate: the card shows where to give instead, and offers
+            // Nowhere: the card shows where to give instead, and offers
             // no control. What was typed is kept, as what was typed since.
             Approval::Nowhere => {
                 self.secret_typed = values.into_iter().map(|(_, value)| value).collect();
                 self.shown(cx);
+            }
+            // The number is typed back: the gate above asked it before
+            // the values, so the giving sends weighed, and the number is
+            // used up.
+            Approval::TypeBack => {
+                self.clear_typeback(cx);
+                self.send_give_in(session, bead, ask, values, true, cx);
             }
             // The Mac's unlock first: its cancel sends nothing, and what
             // was typed is kept for another try: the last value back in
@@ -553,7 +616,8 @@ impl Footplate {
     /// Gives the typed values to the yard in its own call and in nothing
     /// else. What the window says afterwards is the yard's words or
     /// footplate's, on the card, never the value. `weighed` goes where
-    /// the person passed the Mac's unlock for a weighty card.
+    /// the person passed the Mac's unlock for a weighty card, or typed
+    /// its number back where no unlock is offered.
     pub(crate) fn send_give_in(
         &mut self,
         session: u64,
@@ -598,8 +662,9 @@ impl Footplate {
     /// A run ask's approval names the ask and nothing of the command,
     /// which the yard runs as it stored it; a setup ask's the preset pick
     /// with the account together. A weighty card's approval passes the
-    /// Mac's unlock first, and a card that approves nowhere has no
-    /// control: its card says where to approve instead.
+    /// Mac's unlock first, or the typed-back number where no unlock is
+    /// offered, and a card that approves nowhere has no control: its card
+    /// says where to approve instead.
     pub(crate) fn approve(&mut self, cx: &mut Context<Self>) {
         let Some((bead, ask)) = self.card() else {
             return;
@@ -614,28 +679,40 @@ impl Footplate {
             return;
         }
         if let Some(run) = self.approvable() {
-            if matches!(self.card_approval(&bead, ask), Approval::Direct) {
-                return self.send_approve(bead, ask, cx);
+            match self.card_approval(&bead, ask) {
+                Approval::Direct => self.send_approve(bead, ask, cx),
+                // The number field holds the ask's number or the approval
+                // sends nothing: the card stays as it is, and says so.
+                Approval::TypeBack => {
+                    if !self.typeback_ok(ask, cx) {
+                        return self.notice(typeback_mismatch(ask), cx);
+                    }
+                    self.clear_typeback(cx);
+                    self.send_approve_in(self.session, bead, ask, true, cx);
+                }
+                // The Mac's unlock first: its cancel sends nothing, and
+                // the control sends again. Nowhere is turned away above.
+                Approval::Unlock => {
+                    let reason = unlock::approve_reason(&run.line(), &self.yard);
+                    let session = self.session;
+                    self.declining = None;
+                    self.approving = Some(at.clone());
+                    self.shown(cx);
+                    self.notice(String::new(), cx);
+                    self.refused.remove(&at);
+                    self.unlock_then(
+                        session,
+                        reason,
+                        cx,
+                        move |this, session, cx| this.send_approve_in(session, bead, ask, true, cx),
+                        move |this, session, cx| {
+                            this.clear_approving_in(session);
+                            this.shown(cx);
+                        },
+                    );
+                }
+                Approval::Nowhere => {}
             }
-            // The Mac's unlock first: its cancel sends nothing, and the
-            // control sends again.
-            let reason = unlock::approve_reason(&run.line(), &self.yard);
-            let session = self.session;
-            self.declining = None;
-            self.approving = Some(at.clone());
-            self.shown(cx);
-            self.notice(String::new(), cx);
-            self.refused.remove(&at);
-            self.unlock_then(
-                session,
-                reason,
-                cx,
-                move |this, session, cx| this.send_approve_in(session, bead, ask, true, cx),
-                move |this, session, cx| {
-                    this.clear_approving_in(session);
-                    this.shown(cx);
-                },
-            );
         } else if self.setup_approvable().is_some() {
             self.approve_setup(bead, ask, cx);
         }
@@ -651,7 +728,8 @@ impl Footplate {
     }
 
     /// Approves a run ask of the following `session`. `weighed` goes
-    /// where the person passed the Mac's unlock for a weighty card.
+    /// where the person passed the Mac's unlock for a weighty card, or
+    /// typed its number back where no unlock is offered.
     fn send_approve_in(
         &mut self,
         session: u64,
@@ -789,41 +867,56 @@ impl Footplate {
             }
         }
         let session = self.session;
-        if !matches!(self.card_approval(&bead, ask), Approval::Direct) {
+        match self.card_approval(&bead, ask) {
+            Approval::Direct => self.send_approve_setup_in(
+                session, bead, ask, option, values, account, setup, false, cx,
+            ),
+            // The number field holds the ask's number or the approval
+            // sends nothing: the card stays as it is, and says so.
+            Approval::TypeBack => {
+                if !self.typeback_ok(ask, cx) {
+                    return self.notice(typeback_mismatch(ask), cx);
+                }
+                self.clear_typeback(cx);
+                self.send_approve_setup_in(
+                    session, bead, ask, option, values, account, setup, true, cx,
+                );
+            }
             // The Mac's unlock first: its cancel sends nothing, and the
             // control sends again. `approve` turns a card that approves
             // nowhere away before this.
-            let reason = unlock::setup_reason(&setup.pack, &self.yard);
-            self.declining = None;
-            self.approving = Some(at.clone());
-            self.shown(cx);
-            self.notice(String::new(), cx);
-            self.refused.remove(&at);
-            return self.unlock_then(
-                session,
-                reason,
-                cx,
-                move |this, session, cx| {
-                    this.send_approve_setup_in(
-                        session, bead, ask, option, values, account, setup, true, cx,
-                    )
-                },
-                move |this, session, cx| {
-                    this.clear_approving_in(session);
-                    this.shown(cx);
-                },
-            );
+            Approval::Unlock => {
+                let reason = unlock::setup_reason(&setup.pack, &self.yard);
+                self.declining = None;
+                self.approving = Some(at.clone());
+                self.shown(cx);
+                self.notice(String::new(), cx);
+                self.refused.remove(&at);
+                self.unlock_then(
+                    session,
+                    reason,
+                    cx,
+                    move |this, session, cx| {
+                        this.send_approve_setup_in(
+                            session, bead, ask, option, values, account, setup, true, cx,
+                        )
+                    },
+                    move |this, session, cx| {
+                        this.clear_approving_in(session);
+                        this.shown(cx);
+                    },
+                );
+            }
+            Approval::Nowhere => {}
         }
-        self.send_approve_setup_in(
-            session, bead, ask, option, values, account, setup, false, cx,
-        );
     }
 
     /// Approves a setup ask of the following `session`: the preset pick
     /// with the account together. `weighed` goes where the person passed
-    /// the Mac's unlock for a weighty card. What the window says
-    /// afterwards is the yard's: that the server carries the setup out,
-    /// or the refusal whole, on the card.
+    /// the Mac's unlock for a weighty card, or typed its number back where
+    /// no unlock is offered. What the window says afterwards is the yard's:
+    /// that the server carries the setup out, or the refusal whole, on the
+    /// card.
     #[allow(clippy::too_many_arguments)]
     fn send_approve_setup_in(
         &mut self,
@@ -1367,11 +1460,21 @@ impl Footplate {
         {
             return;
         }
+        // A weighty card with no gate takes its number first: `i` types
+        // it until the field holds the ask's number, then what the card
+        // otherwise takes. A decline's words take the line as ever.
+        if self.declining.is_none()
+            && matches!(self.card_approval(&bead, ask), Approval::TypeBack)
+            && !self.typeback_ok(ask, cx)
+        {
+            window.focus(&self.typeback.focus_handle(cx));
+            return;
+        }
         // A run ask's card has a line only for the words of a decline.
         if self.run_card() && self.declining.is_none() {
             return;
         }
-        // A weighty card without the gate draws no field to type in: its
+        // A card that approves nowhere draws no field to type in: its
         // approval goes in a terminal, and a decline's words take the
         // line.
         if self.declining.is_none() && matches!(self.card_approval(&bead, ask), Approval::Nowhere) {
@@ -2223,7 +2326,8 @@ impl Footplate {
         };
         let mut card = div().flex().flex_col().gap_2();
         // How the card approves: nowhere where the yard takes no approval
-        // from this window, or where a weighty card has no gate.
+        // from this window, after the ask's number is typed back where a
+        // weighty card has no gate.
         let elsewhere = self.approve_elsewhere.contains(&(bead_id.clone(), ask_seq));
         let approval = approval(!ask.weight.is_empty(), self.unlock_available(), elsewhere);
         let sends = !matches!(approval, Approval::Nowhere);
@@ -2436,9 +2540,10 @@ impl Footplate {
             };
             let focus = field.focus_handle(cx);
             let kind = if secret_field { "secret" } else { "words" };
-            // Where this yard takes no approval from this window, or a
-            // weighty card has no gate, the card says where it does, in
-            // place of the control.
+            // Where this yard takes no approval from this window, the
+            // card says where it does, in place of the control. Where a
+            // weighty card has no gate, the card takes the ask's number
+            // back instead, before its value or account field.
             if (ask.run.is_some() || ask.setup.is_some()) && elsewhere {
                 let command = match &ask.setup {
                     Some(setup) => model::setup_approve_command(&bead_id, ask_seq, setup),
@@ -2446,13 +2551,19 @@ impl Footplate {
                 };
                 card =
                     card.child(self.approve_elsewhere_lines(&bead_id, ask_seq, command, palette));
-            } else if !sends && (ask.run.is_some() || ask.setup.is_some() || ask.secret.is_some()) {
-                let command = match (&ask.secret, &ask.setup) {
-                    (Some(_), _) => format!("yardr bead answer {bead_id} {ask_seq} --secret"),
-                    (_, Some(setup)) => model::setup_approve_command(&bead_id, ask_seq, setup),
-                    _ => model::approve_command(&bead_id, ask_seq),
+            } else if matches!(approval, Approval::TypeBack) {
+                let verb = match ask.secret.is_some() {
+                    true => "give",
+                    false => "approve",
                 };
-                card = card.child(self.weighty_decline_lines(&bead_id, ask_seq, command));
+                card = card.child(self.typeback_lines(&bead_id, ask_seq, verb, palette, cx));
+            } else if !sends && ask.secret.is_some() {
+                card = card.child(self.approve_elsewhere_lines(
+                    &bead_id,
+                    ask_seq,
+                    format!("yardr bead answer {bead_id} {ask_seq} --secret"),
+                    palette,
+                ));
             }
             // A secret's field stands beside its toggle: Show draws what
             // is typed as typed, for a look, Hide draws marks again.
@@ -3061,26 +3172,43 @@ impl Footplate {
             ))
     }
 
-    /// Where a weighty ask is approved when this window has no gate: the
-    /// decline path, with the command in a block that copies it. Plain
-    /// words, never in red: nothing went wrong, and the card stays open.
-    pub(crate) fn weighty_decline_lines(
+    /// A weighty card's number where this window has no gate: what to
+    /// type and why, with the field that takes it, in the terminal's
+    /// words. The approval or the give sends `weighed` only where the
+    /// field holds exactly the ask's number. The number is no secret: it
+    /// is the ask's own, drawn as typed. The approval's key approves from
+    /// the field too, as from a setup ask's account field.
+    pub(crate) fn typeback_lines(
         &self,
         bead: &str,
         ask: u64,
-        command: String,
+        verb: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let field = self.typeback.clone();
+        let focus = field.focus_handle(cx);
         div()
-            .debug_selector(|| format!("weighty decline {bead} {ask}"))
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().child(WEIGHTY_NO_GATE))
-            .child(select::text(
-                expanded_text_key(select::key((bead, ask)), "approve", 0, &command),
-                fenced(&command),
-                &self.selection,
-            ))
+            .child(div().child(typeback_line(ask, verb)))
+            .child(
+                div()
+                    .debug_selector(|| format!("typeback {bead} {ask}"))
+                    .key_context(SETUP_SECRET_CONTEXT)
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        window.focus(&focus);
+                        window.prevent_default();
+                    })
+                    .child(field),
+            )
     }
 
     /// One dealt with: what was decided, in plain words with who and when;
@@ -3298,20 +3426,26 @@ impl Footplate {
                     );
                 }
             }
-            // A secret ask says what it asks for in the yard's line.
+            // A secret ask says what it asks for in the yard's line. A
+            // weighty one with no gate takes its number back before its
+            // value field below.
             if let Some(secret) = &detail.secret {
                 body = body.child(self.secret_lines(bead, ask, secret, palette));
-                if giving.is_some() && !sends {
-                    body = body.child(self.weighty_decline_lines(
+                if giving.is_some() && matches!(approval, Approval::TypeBack) {
+                    body = body.child(self.typeback_lines(bead, ask, "give", palette, cx));
+                } else if giving.is_some() && !sends {
+                    body = body.child(self.approve_elsewhere_lines(
                         bead,
                         ask,
                         format!("yardr bead answer {bead} {ask} --secret"),
+                        palette,
                     ));
                 }
             }
             // A run ask has the yard's block, and under it the control
             // that approves while it is only put aside: one approved,
-            // declined or taken back takes no approval.
+            // declined or taken back takes no approval. A weighty one
+            // with no gate takes its number back above the control.
             if let Some(run) = &detail.run {
                 body = body.child(self.run_block(bead, ask, run, approving, palette, cx));
                 if approving && elsewhere {
@@ -3321,13 +3455,10 @@ impl Footplate {
                         model::approve_command(bead, ask),
                         palette,
                     ));
-                } else if approving && !sends {
-                    body = body.child(self.weighty_decline_lines(
-                        bead,
-                        ask,
-                        model::approve_command(bead, ask),
-                    ));
-                } else if approving {
+                } else if approving && sends {
+                    if matches!(approval, Approval::TypeBack) {
+                        body = body.child(self.typeback_lines(bead, ask, "approve", palette, cx));
+                    }
                     body = body.child(div().flex().child(approve_button(
                         format!("approve {bead} {ask}"),
                         &self.yard,
@@ -3340,7 +3471,8 @@ impl Footplate {
             }
             // A setup ask has the yard's block with its account choice,
             // and under it the control that approves while it is only put
-            // aside. Its presets stand to pick above.
+            // aside. Its presets stand to pick above, and a weighty one
+            // with no gate takes its number back above the control.
             if let Some(setup) = &detail.setup {
                 body = body.child(self.setup_block(bead, ask, setup, setup_approving, palette, cx));
                 if setup_approving {
@@ -3359,13 +3491,11 @@ impl Footplate {
                             model::setup_approve_command(bead, ask, setup),
                             palette,
                         ));
-                    } else if !sends {
-                        body = body.child(self.weighty_decline_lines(
-                            bead,
-                            ask,
-                            model::setup_approve_command(bead, ask, setup),
-                        ));
-                    } else {
+                    } else if sends {
+                        if matches!(approval, Approval::TypeBack) {
+                            body =
+                                body.child(self.typeback_lines(bead, ask, "approve", palette, cx));
+                        }
                         body = body.child(div().flex().child(approve_button(
                             format!("approve {bead} {ask}"),
                             &self.yard,

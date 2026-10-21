@@ -6,8 +6,8 @@
 //! The reasons are plain functions, tested on any system. Whether the
 //! system offers the gate ([`available`]) and asking it ([`evaluate`]) are
 //! the system's: macOS alone, and nowhere else. Where there is no gate
-//! the card shows where to approve instead, and no approval goes from
-//! this window.
+//! the card asks the ask's number back instead, as a terminal does, and
+//! sends `weighed` where the number matches.
 
 /// What the system shows with its prompt for a run ask's approval: what
 /// is approved, and in which yard. Never empty: the call throws on an

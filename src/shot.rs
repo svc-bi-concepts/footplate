@@ -1283,7 +1283,7 @@ fn populate(yard: &Yard, state: &str) {
         "weighty" => {
             // A weighty run ask's card beside a routine one's: the
             // weighty card shows its classes' lines first, and where
-            // the window has no gate the decline path in place of the
+            // the window has no gate the typed-back number above the
             // control, against the routine card's approval.
             yard.answer(
                 "UserInbox",

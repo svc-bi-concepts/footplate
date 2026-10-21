@@ -2799,6 +2799,12 @@ impl Footplate {
             window.focus(&self.focus.clone());
             return;
         }
+        // Esc in a weighty card's number field leaves it, and what is
+        // typed stays: the number is no secret.
+        if self.typeback.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus.clone());
+            return;
+        }
         if self.line.focus_handle(cx).is_focused(window) {
             window.focus(&self.focus.clone());
             return;

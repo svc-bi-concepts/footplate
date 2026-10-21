@@ -9,10 +9,11 @@ pub(crate) const CONTEXT: &str = "Footplate";
 /// history's filter focused, those keys are the line's text.
 pub(crate) const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 
-/// Where the account of a setup ask is typed in: its approval's key
-/// approves from the field too, with what the field holds. Only that key
-/// is bound here: a decline's words must not approve, and no other card's
-/// field approves anything.
+/// Where the account of a setup ask is typed in, or the number of a
+/// weighty card with no gate: its approval's key approves from the field
+/// too, with what the field holds. Only that key is bound here: a
+/// decline's words must not approve, and no other card's field approves
+/// anything.
 pub(crate) const SETUP_SECRET_CONTEXT: &str = "FootplateSetupSecret";
 
 /// Where the switcher's list is open: the arrows move in it, Enter opens
