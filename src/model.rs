@@ -743,7 +743,7 @@ pub struct DecisionAsk {
     pub setup: Option<Setup>,
     /// The card's weight, one entry a class; empty on a routine card. A
     /// card with any passes the Mac's unlock before its approval goes, or
-    /// shows where to approve where this window has no gate.
+    /// takes the ask's number typed back where this window has no gate.
     pub weight: Vec<AskWeight>,
     /// The candidate taken with a tap, by source name; empty where none
     /// is. A filled secret field types another instead.

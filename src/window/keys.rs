@@ -104,7 +104,7 @@ pub(crate) fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
             ),
             (
                 format!("{SECONDARY}+enter"),
-                "on a run or setup ask's card, approves it, after unlocking where the card is weighty"
+                "on a run or setup ask's card, approves it, after unlocking where the card is weighty, or after its number is typed where no unlock is offered"
                     .into(),
             ),
             (

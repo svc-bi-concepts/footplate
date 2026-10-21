@@ -49,8 +49,9 @@ Platform surface:
 - `src/dock.rs`: the number on the macOS Dock icon.
 - `src/taskbar.rs`: the Linux desktop entry and window icon.
 - `src/unlock.rs`: the Mac's unlock in front of a weighty approval
-  (LocalAuthentication), with the reasons as plain functions; no gate
-  elsewhere, where the card shows where to approve instead.
+  (LocalAuthentication), with the reasons as plain functions; where no
+  unlock is offered, the card takes the ask's number typed back instead
+  (`Approval::TypeBack`).
 
 Setup, release and tests:
 
