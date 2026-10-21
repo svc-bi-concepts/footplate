@@ -52,12 +52,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on. So is the number
-# on it (dock.rs), which gpui has no call for either, and the item in the
-# menu bar with its menu (tray.rs): more features of the same crates, and
-# no crate more.
+# on it (dock.rs), which gpui has no call for either, the item in the
+# menu bar with its menu (tray.rs), and the move of the window by the top
+# of its content (titlebar.rs), which gpui has no macOS call for: more
+# features of the same crates, and no crate more.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSDockTile", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSDockTile", "NSEvent", "NSGraphicsContext", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSError", "NSGeometry", "NSString"] }
 # A notification of the system's (notify.rs) goes through the user
 # notifications framework, whose answers come to blocks. block2 is in

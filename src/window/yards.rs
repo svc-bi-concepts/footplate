@@ -26,6 +26,7 @@ use crate::session;
 use crate::settings::{self, Section};
 use crate::setup;
 use crate::theme::{Palette, yard_color};
+use crate::titlebar;
 use crate::yard;
 
 impl Footplate {
@@ -1903,10 +1904,13 @@ impl Footplate {
         let avail = (f32::from(window.viewport_size().width) - (RAIL + 16.)).max(0.) / rem;
         let max = avail.min(SWITCHER_MAX);
         let min = SWITCHER_MIN.min(max);
+        // Level with the chip, which stands below the title bar's room
+        // where the content reaches up into it.
+        let top = titlebar::inset(self.means.titlebar.is_some(), window.is_fullscreen());
         div()
             .absolute()
             .left(px(RAIL + 8.))
-            .top(px(8.))
+            .top(px(8. + top))
             .min_w(rems(min))
             .max_w(rems(max))
             .debug_selector(|| "switcher".to_string())

@@ -28,6 +28,7 @@ mod shot;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
 mod theme;
+mod titlebar;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tray;
 mod unlock;
@@ -38,8 +39,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, px, size,
+    App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, WindowBounds,
+    WindowOptions, actions, px, size,
 };
 
 use crate::window::Footplate;
@@ -106,10 +107,7 @@ fn main() {
                 size(px(960.), px(640.)),
                 cx,
             ))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(NAME.into()),
-                ..Default::default()
-            }),
+            titlebar: Some(titlebar::options(cfg!(target_os = "macos"))),
             // 560 plus the rail's 56: every pane keeps its size.
             window_min_size: Some(size(px(616.), px(360.))),
             // On Linux the taskbar's icon and name are those of the desktop

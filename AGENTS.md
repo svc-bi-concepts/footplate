@@ -53,6 +53,9 @@ Platform surface:
   `assets/linux/`), with the reasons as plain functions; where no
   unlock is offered, the card takes the ask's number typed back instead
   (`Approval::TypeBack`).
+- `src/titlebar.rs`: the window's title bar options per platform, and on
+  macOS, where the content reaches up into it, the drag and double-click on
+  the window's top strip, which gpui has no call for there.
 
 Setup, release and tests:
 
@@ -75,14 +78,17 @@ Setup, release and tests:
   what the window must do), the drawing and the call site in
   `src/window.rs`.
 - A new view or pane: state in `src/model.rs`, drawing in `src/window.rs`;
-  window chrome in `src/main.rs`.
+  window chrome in `src/main.rs`. A pane's top row is under the macOS
+  title bar's strip (`src/titlebar.rs`): a press on it drags the window, so
+  a control there still clicks, and a text field or a drag of its own does
+  not belong in the strip.
 - A first-run step: the command in `src/setup.rs`, the screen in
   `src/window/firstrun.rs`.
 - A setting: `src/settings.rs`, then where it takes effect.
 - Platform surface (badge, tray, notifications, Linux icon, the Mac's
-  unlock): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
-  `src/taskbar.rs`, `src/unlock.rs`; rules stay plain functions, system
-  calls stay behind `cfg`.
+  unlock, title bar): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
+  `src/taskbar.rs`, `src/unlock.rs`, `src/titlebar.rs`; rules stay plain
+  functions, system calls stay behind `cfg`.
 - Screenshots: states in `src/shot.rs`, taken by `scripts/shot-linux.sh`;
   the states are named in `README.md`.
 - Releases: `scripts/release.sh` builds, `scripts/bundle-mac.sh`

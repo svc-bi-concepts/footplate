@@ -26,6 +26,7 @@ use crate::fetch;
 use crate::input::{Line, Submitted};
 use crate::setup::{self, Doctor, Form, Item, Login, Need, Offer, Yardr};
 use crate::theme::Palette;
+use crate::titlebar::{self, Gesture};
 
 /// Gives the yardr to run: where it is kept, and what there is to say of
 /// it where a newer one could not be had. In a sentence, why there is none.
@@ -34,8 +35,11 @@ pub type Fetches = Arc<dyn Fn() -> Result<(PathBuf, Option<String>), String> + S
 /// Opens a page on the web in the person's browser.
 pub type Opens = Rc<dyn Fn(&str, &mut App)>;
 
-/// What the first run reaches outside the window with. A test has a
-/// stand-in for each.
+/// What the window does for a gesture on its top strip: moves, or zooms.
+pub type Strip = Rc<dyn Fn(Gesture, &mut Window, &mut App)>;
+
+/// What the first run, and the window's top strip, reach outside the window
+/// with. A test has a stand-in for each.
 #[derive(Clone)]
 pub struct Means {
     pub yardr: Fetches,
@@ -48,6 +52,11 @@ pub struct Means {
     pub open: Opens,
     /// This is a Mac: git comes with Apple's own installer.
     pub apple: bool,
+    /// Where the window's content reaches up into its title bar, as on a
+    /// Mac, what the window does for a gesture on its top strip. None where
+    /// the desktop draws a title bar above the window, and in a test, whose
+    /// window has none.
+    pub titlebar: Option<Strip>,
 }
 
 impl Means {
@@ -76,6 +85,8 @@ impl Means {
             own: fetch::dir(),
             open: Rc::new(|url, cx| cx.open_url(url)),
             apple: cfg!(target_os = "macos"),
+            titlebar: (cfg!(target_os = "macos") && !cfg!(test))
+                .then(|| Rc::new(titlebar::perform) as Strip),
         }
     }
 }

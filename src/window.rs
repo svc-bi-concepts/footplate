@@ -23,6 +23,7 @@ use crate::session;
 use crate::settings::{self, Settings};
 use crate::setup;
 use crate::theme::Palette;
+use crate::titlebar;
 use crate::yard::Env;
 
 mod arrivals;
@@ -476,8 +477,10 @@ pub struct Footplate {
     /// yard that is not there would, and where its conversation will.
     first_run: Option<Entity<FirstRun>>,
     /// What the first run reaches outside the window with. The switch
-    /// reaches out with the same.
+    /// reaches out with the same, and so does the top strip.
     means: Means,
+    /// A left press on the window's top strip, waiting to be a drag.
+    title_press: titlebar::Press,
     /// The status row at the list's head: the yardr it runs, ensured
     /// once, and the PATH widened by doctor, once, which only grows.
     switch_program: Option<PathBuf>,
@@ -852,6 +855,7 @@ impl Footplate {
             run_said: None,
             first_run: None,
             means: Means::real(),
+            title_press: titlebar::Press::default(),
             switch_program: None,
             switch_path: None,
             switch_status: None,
@@ -1055,10 +1059,15 @@ impl Render for Footplate {
             .bg(palette.ground)
             .text_color(palette.text)
             .text_size(rems(0.875));
+        // Where the content reaches up into the title bar, a drag on the
+        // window's top moves it, and the rail leaves that strip to the
+        // traffic lights.
+        let root = self.title_strip(root, window, cx);
+        let top = titlebar::inset(self.means.titlebar.is_some(), window.is_fullscreen());
         // The rail stands on the window's far left whatever shows: the
         // modes answer where a yard's rows are there, and the foot's
         // switcher and settings stay alive while the yard is away.
-        let root = root.child(self.rail(palette, cx));
+        let root = root.child(self.rail(palette, top, cx));
         // A yard that is away keeps the status row beside the screen,
         // with none of its rows: what they open is not there. Only a
         // yard of this machine has one; one at an address, the one yard
@@ -14038,6 +14047,193 @@ yardr.dev
         assert!(!settings_open(&view, cx));
     }
 
+    /// A stand-in for what a Mac's window does with a gesture on its top
+    /// strip: the gestures it was asked for, in order.
+    fn strip_stand_in() -> (firstrun::Strip, Rc<RefCell<Vec<titlebar::Gesture>>>) {
+        let asked: Rc<RefCell<Vec<titlebar::Gesture>>> = Rc::default();
+        let seen = asked.clone();
+        let strip: firstrun::Strip = Rc::new(move |gesture, _, _| seen.borrow_mut().push(gesture));
+        (strip, asked)
+    }
+
+    /// Where the content reaches up into the title bar, as on a Mac, the
+    /// rail leaves the traffic lights their room above its first item,
+    /// and the switcher stands level with that item; where it does not,
+    /// as on Linux and in a test window, the rail is as it was. Full
+    /// screen has no title bar of its own to leave room for.
+    #[gpui::test]
+    fn the_rail_leaves_the_traffic_lights_their_room_where_the_content_reaches_the_title_bar(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the yard", |cx| {
+            view.read_with(cx, |v, _| v.model.is_some())
+        });
+        let chip_off_the_top = |cx: &mut VisualTestContext| {
+            let (rail, chip) = (bounds_of(cx, "rail"), bounds_of(cx, "yard chip"));
+            chip.top() - rail.top()
+        };
+
+        // A window whose content does not reach up into the title bar:
+        // the rail is as it was, whatever the platform.
+        let plain = chip_off_the_top(cx);
+        assert!(
+            plain < px(16.),
+            "the chip stands {plain:?} off the rail's top"
+        );
+        assert!(
+            view.read_with(cx, |v, _| v.means.titlebar.is_none()),
+            "a test window stands in for none"
+        );
+
+        // With one, the chip stands below the lights, by the title bar's
+        // height more than it did, and every other item of the rail with it.
+        let (strip, _) = strip_stand_in();
+        view.update(cx, |v, _| v.means.titlebar = Some(strip));
+        let reached = chip_off_the_top(cx);
+        assert!(
+            (reached - plain - px(titlebar::HEIGHT)).abs() < px(1.),
+            "the chip stands {reached:?} off the rail's top, not {plain:?} and the title bar lower"
+        );
+        assert!(
+            reached >= px(titlebar::LIGHTS),
+            "the chip stands {reached:?} off the rail's top, under the traffic lights"
+        );
+        let rail = bounds_of(cx, "rail");
+        assert!(
+            (rail.size.width - px(64.)).abs() < px(1.),
+            "the rail is {rail:?}, not 64 wide"
+        );
+        let mut last = bounds_of(cx, "yard chip").bottom();
+        for target in ["rail chat", "rail decisions", "rail timetable", "settings"] {
+            let at = bounds_of(cx, target);
+            assert!(at.top() >= last, "{target} stands over the last: {at:?}");
+            assert!(
+                at.bottom() <= rail.bottom(),
+                "{target} leaves the rail's foot: {at:?} {rail:?}"
+            );
+            last = at.bottom();
+        }
+
+        // The switcher's list stands level with the chip, and the window
+        // draws it where the chip is.
+        click_on(cx, "yard chip");
+        let (switcher, chip) = (bounds_of(cx, "switcher"), bounds_of(cx, "yard chip"));
+        assert!(
+            (switcher.top() - chip.top()).abs() < px(1.),
+            "the switcher stands at {switcher:?}, not level with the chip {chip:?}"
+        );
+        cx.simulate_keystrokes("escape");
+
+        // In full screen the window has none: the rail is as it was.
+        cx.update(|window, _| window.toggle_fullscreen());
+        assert!((chip_off_the_top(cx) - plain).abs() < px(1.));
+        cx.update(|window, _| window.toggle_fullscreen());
+        assert!((chip_off_the_top(cx) - reached).abs() < px(1.));
+    }
+
+    /// Where the content reaches up into the title bar, a drag that starts
+    /// on the window's top strip moves the window, and a double-click on it
+    /// zooms it. A click that stays there is a click, on what it hits as
+    /// ever, and a drag that starts below the strip moves nothing.
+    #[gpui::test]
+    fn a_drag_on_the_top_strip_moves_the_window_and_a_double_click_zooms_it(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        let (view, cx) = opened_on_the_yard_row(&yard, 3, cx);
+        let (strip, asked) = strip_stand_in();
+        view.update(cx, |v, _| v.means.titlebar = Some(strip));
+        let none = gpui::Modifiers::default();
+        let at = |x: f32, y: f32| gpui::point(px(x), px(y));
+        let (empty, below) = (at(700., 10.), at(700., 200.));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+
+        // A click that stays in the strip moves nothing.
+        cx.simulate_click(empty, none);
+        assert_eq!(*asked.borrow(), []);
+
+        // A drag that starts in the strip moves the window, once.
+        cx.simulate_mouse_down(empty, MouseButton::Left, none);
+        cx.simulate_mouse_move(at(702., 11.), MouseButton::Left, none);
+        assert_eq!(*asked.borrow(), [], "a hand's wander is no drag");
+        cx.simulate_mouse_move(at(730., 14.), MouseButton::Left, none);
+        cx.simulate_mouse_move(at(780., 40.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(780., 40.), MouseButton::Left, none);
+        assert_eq!(*asked.borrow(), [titlebar::Gesture::Move]);
+
+        // A drag that starts below it moves nothing.
+        cx.simulate_mouse_down(below, MouseButton::Left, none);
+        cx.simulate_mouse_move(at(780., 230.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(780., 230.), MouseButton::Left, none);
+        assert_eq!(asked.borrow().len(), 1);
+
+        // A double-click in the strip zooms.
+        cx.simulate_mouse_down(empty, MouseButton::Left, none);
+        cx.simulate_mouse_up(empty, MouseButton::Left, none);
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: empty,
+            modifiers: none,
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(empty, MouseButton::Left, none);
+        assert_eq!(
+            *asked.borrow(),
+            [titlebar::Gesture::Move, titlebar::Gesture::Zoom]
+        );
+
+        // The head's button stands in the strip, and a click on it is a
+        // click: the notices are read, and the window is not asked to move.
+        let button = bounds_of(cx, "mark all read");
+        assert!(
+            button.top() < px(titlebar::HEIGHT),
+            "the button stands at {button:?}, below the strip"
+        );
+        click_on(cx, "mark all read");
+        wait(cx, "every notice read", |_| {
+            yard.asked("AckUserNotifications") == [json!({"name": "jo", "through": 12})]
+        });
+        assert_eq!(asked.borrow().len(), 2);
+
+        // In full screen there is no title bar to drag by.
+        cx.update(|window, _| window.toggle_fullscreen());
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.simulate_mouse_down(empty, MouseButton::Left, none);
+        cx.simulate_mouse_move(at(780., 40.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(780., 40.), MouseButton::Left, none);
+        assert_eq!(asked.borrow().len(), 2);
+    }
+
+    /// Where the title bar is the desktop's, which is everywhere but a Mac,
+    /// the window listens for nothing on its top: a drag there waits for
+    /// nothing.
+    #[gpui::test]
+    fn a_window_whose_title_bar_is_the_desktop_s_has_no_strip(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        let (view, cx) = opened_on_the_yard_row(&yard, 3, cx);
+        assert!(view.read_with(cx, |v, _| v.means.titlebar.is_none()));
+        let none = gpui::Modifiers::default();
+        let at = |x: f32, y: f32| gpui::point(px(x), px(y));
+        cx.simulate_mouse_down(at(700., 10.), MouseButton::Left, none);
+        cx.simulate_mouse_move(at(780., 40.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(780., 40.), MouseButton::Left, none);
+        assert!(view.read_with(cx, |v, _| v.title_press == titlebar::Press::default()));
+    }
+
     /// The rail's chat and decisions tiles carry what waits in the open
     /// yard: its unread mail and its open asks, each at its tile's top
     /// right. The timetable carries none.
@@ -18483,6 +18679,7 @@ yardr.dev
             own: Some(dir.join("own")),
             open: Rc::new(move |url, _| pages.borrow_mut().push(url.to_string())),
             apple,
+            titlebar: None,
         };
         (means, program, opened)
     }

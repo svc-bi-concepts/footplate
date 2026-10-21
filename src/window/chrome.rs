@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::thread;
 
 use gpui::{
-    Action, AnyElement, App, ClipboardItem, Context, Div, Focusable, FontWeight, MouseButton, Rgba,
-    ScrollHandle, SharedString, Stateful, Task, Window, div, prelude::*, px, relative, rems, rgba,
+    Action, AnyElement, App, ClipboardItem, Context, Div, Focusable, FontWeight, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Rgba, ScrollHandle, SharedString, Stateful, Task, Window, div,
+    prelude::*, px, relative, rems, rgba,
 };
 
 use crate::api::{self, Address, Client};
@@ -29,6 +30,7 @@ use crate::session::{self, Update};
 use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
 use crate::theme::{Look, Palette, crew_dot, yard_color, yard_ink};
+use crate::titlebar::Gesture;
 use crate::yard::Env;
 
 use super::Footplate;
@@ -4416,9 +4418,51 @@ impl Footplate {
         cx.notify();
     }
 
+    /// The top strip of the window, where the content reaches up into the
+    /// title bar, as on a Mac: a press that drags there moves the window,
+    /// and a double-click does what the system's setting gives a title bar,
+    /// as the bar the content has taken the place of did. The press goes to
+    /// what is under it as ever, and only a drag moves the window, so a
+    /// control in the strip is still a click. Where the window has no such
+    /// title bar, or is in full screen, the root is as it was.
+    pub(crate) fn title_strip(&self, root: Div, window: &Window, cx: &mut Context<Self>) -> Div {
+        let Some(strip) = self
+            .means
+            .titlebar
+            .clone()
+            .filter(|_| !window.is_fullscreen())
+        else {
+            return root;
+        };
+        let (pressed, dragged) = (strip.clone(), strip);
+        root.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                match this.title_press.down(event.position, event.click_count) {
+                    Gesture::Nothing => {}
+                    gesture => pressed(gesture, window, cx),
+                }
+            }),
+        )
+        .on_mouse_move(
+            cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                match this.title_press.moved(event.position, event.dragging()) {
+                    Gesture::Nothing => {}
+                    gesture => dragged(gesture, window, cx),
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.title_press.up()),
+        )
+    }
+
     /// The rail on the window's far left: the open yard's chip on top,
     /// the three mode icons with their labels, and at the foot the
-    /// settings' gear with its. The chip is the yard's first two letters
+    /// settings' gear with its. Where the content reaches up into the
+    /// title bar, `top` pixels of the rail's top are left empty for the
+    /// traffic lights, which stand over them. The chip is the yard's first two letters
     /// on its colour, so the yard picks and approvals count in is
     /// unmistakable; a click opens the switcher. The open mode's tile
     /// stands in the accent on the open ground, as the open row does;
@@ -4428,7 +4472,12 @@ impl Footplate {
     /// person's beads added or closed since they last had Lines open.
     /// While the yard is away the modes stand dimmed and inert, and the
     /// chip and the foot stay alive, because leaving is their job.
-    pub(crate) fn rail(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn rail(
+        &self,
+        palette: Palette,
+        top: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mode = self.mode();
         // The modes answer where a yard's rows are there to show.
         let live = self.model.is_some();
@@ -4448,7 +4497,10 @@ impl Footplate {
             .py_2()
             .bg(palette.side)
             .border_r_1()
-            .border_color(palette.line);
+            .border_color(palette.line)
+            // In pixels, as the title bar is: it keeps its height whatever
+            // the text, and the padding below it goes with the text.
+            .children((top > 0.).then(|| div().flex_none().h(px(top))));
         // The open yard's chip: its first two letters on its colour.
         // The one yard the environment names has no switcher, but it
         // still has its chip, with its name alone for its words.
