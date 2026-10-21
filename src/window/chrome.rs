@@ -3,14 +3,18 @@
 //! and what answers the yard and the person: told and run, open and
 //! follow, jump and scroll, dismiss and leave.
 
+// A name only a screenshot state uses (shot.rs, a debug build's alone) is
+// named by its path where it is used, not imported here: a release build
+// has no such state, an import nothing else uses warns there, and the
+// gate builds no release.
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::thread;
 
 use gpui::{
-    Action, AnyElement, App, ClipboardItem, Context, Div, Entity, Focusable, FontWeight,
-    MouseButton, Rgba, ScrollHandle, SharedString, Stateful, Task, Window, div, prelude::*, px,
-    relative, rems, rgba,
+    Action, AnyElement, App, ClipboardItem, Context, Div, Focusable, FontWeight, MouseButton, Rgba,
+    ScrollHandle, SharedString, Stateful, Task, Window, div, prelude::*, px, relative, rems, rgba,
 };
 
 use crate::api::{self, Address, Client};
@@ -20,7 +24,7 @@ use crate::model::{
     self, Effect, Kind, Mode, Model, News, Read, Route, Row, Selected, Target, Top,
 };
 use crate::notify::{self, Permission};
-use crate::select::{self, Selection};
+use crate::select;
 use crate::session::{self, Update};
 use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
@@ -33,18 +37,16 @@ use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{DRAWER_WIDTH, RAIL, RAIL_LABEL, RAIL_TILE, grown};
-use super::rail::{
-    ImageOpen, PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, run_address_of,
-};
+use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, run_address_of};
 use super::state::{
-    Adding, Anchor, Away, Counts, Held, NOT_OPENED, Piece, Place, SwitchBusy, rail_counts, waiting,
+    Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
     checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented, semaphore_glyph, small_button,
     track_glyph,
 };
 use super::words::unread_words;
-use super::{Dismiss, JumpNewest, JumpOldest, Leave, expanded_text_key};
+use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 
 impl Footplate {
     /// As [`Footplate::opened`], with each yard's stream watched as
@@ -181,13 +183,13 @@ impl Footplate {
         // alone, as above.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-hover") {
-            this.react_hover = Some((15, Piece::Body));
+            this.react_hover = Some((15, super::state::Piece::Body));
         }
         // The reactions-zoom shot poses it on one emoji of that bar, so
         // the emoji draws larger in its square.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-zoom") {
-            this.react_hover = Some((15, Piece::Bar));
+            this.react_hover = Some((15, super::state::Piece::Bar));
             this.emoji_hover = Some((15, "❤️".to_string()));
         }
         this
@@ -1013,7 +1015,7 @@ impl Footplate {
                     #[cfg(debug_assertions)]
                     if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("image") {
                         let (hash, bytes) = crate::shot::IMAGE_OPEN;
-                        self.image_open = Some(ImageOpen {
+                        self.image_open = Some(super::rail::ImageOpen {
                             hash: hash.to_string(),
                             bytes,
                             back: None,
@@ -5073,7 +5075,11 @@ fn shot_departures() -> bool {
 /// context line past its first word, as a drag over it would. A debug
 /// build's alone.
 #[cfg(debug_assertions)]
-fn pose_shot_selection(selection: &Entity<Selection>, model: &Model, cx: &mut Context<Footplate>) {
+fn pose_shot_selection(
+    selection: &gpui::Entity<select::Selection>,
+    model: &Model,
+    cx: &mut Context<Footplate>,
+) {
     let Some((bead, ask)) = model.current_ask() else {
         return;
     };
@@ -5088,7 +5094,7 @@ fn pose_shot_selection(selection: &Entity<Selection>, model: &Model, cx: &mut Co
     // Past the first word, so the shot shows a selection and not the
     // whole line.
     let start = line.find(' ').map(|at| at + 1).unwrap_or(0);
-    let key = expanded_text_key(select::key((bead, ask)), "context", 0, line);
+    let key = super::expanded_text_key(select::key((bead, ask)), "context", 0, line);
     selection.update(cx, |selection, cx| {
         selection.pose(key, line.clone().into(), start..line.len(), cx)
     });
