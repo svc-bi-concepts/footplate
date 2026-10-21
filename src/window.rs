@@ -4044,7 +4044,14 @@ impl Footplate {
                         // gone: read it into this one, while the drawer
                         // stands open on it. A shut drawer reads nothing.
                         if let Some(bead) = self.drawer.clone() {
-                            effects.extend(model.read_bead(&bead));
+                            let drawer_read = model.read_bead(&bead);
+                            // `resumed` may already ask for it as the
+                            // selected decision; one answer serves both.
+                            if !effects.iter().any(
+                                |effect| matches!(effect, Effect::Bead { bead: queued } if queued == &bead),
+                            ) {
+                                effects.extend(drawer_read);
+                            }
                         }
                         (model, effects)
                     }
@@ -19745,6 +19752,14 @@ mod tests {
         wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
         assert!(drawn(cx, "bead title bead-a"));
 
+        // The drawer may stay open while the same bead is also the
+        // selected decision. Reconnecting must still ask for it once.
+        to_decisions(&view, cx);
+        wait(cx, "bead-a selected", |cx| {
+            open_row(&view, cx) == Some(Selected::Decision("bead-a".into()))
+        });
+        let asked = yard.asked("Bead").len();
+
         // The yard is lost and comes back: the drawer stands open, but
         // the new model holds no bead, so it reads "Reading the bead."
         let state = session::load(&yard.client(), "jo").unwrap();
@@ -19755,6 +19770,9 @@ mod tests {
         // Until the bead is read again, and the drawer shows it again.
         wait(cx, "bead-a read again", |cx| has_bead(&view, cx, "bead-a"));
         assert!(drawn(cx, "bead title bead-a"));
+        thread::sleep(Duration::from_millis(100));
+        frames(cx);
+        assert_eq!(yard.asked("Bead").len(), asked + 1);
     }
 
     /// A shut drawer reads no bead when the yard is read again: the bead
