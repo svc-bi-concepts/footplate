@@ -112,6 +112,17 @@ struct Subject {
     uid: u32,
 }
 
+/// The process details polkit checks, kept pure so their shape is tested
+/// on every system.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn process_subject(pid: u32, start_time: u64, uid: u32) -> Subject {
+    Subject {
+        pid,
+        start_time,
+        uid,
+    }
+}
+
 /// A process's start time, in clock ticks since boot, from its
 /// `/proc/<pid>/stat`: the 22nd field. The name, the 2nd, is in
 /// parentheses and may hold spaces and parentheses itself, so the fields
@@ -265,11 +276,7 @@ mod linux {
             .ok_or_else(|| zbus::Error::Failure("no start time in /proc/self/stat".into()))?;
         // SAFETY: getuid takes nothing and cannot fail.
         let uid = unsafe { libc::getuid() };
-        Ok(Subject {
-            pid: std::process::id(),
-            start_time,
-            uid,
-        })
+        Ok(process_subject(std::process::id(), start_time, uid))
     }
 }
 
@@ -370,6 +377,14 @@ mod tests {
         assert_eq!(start_time(stat), Some(873451));
         assert_eq!(start_time("4242 (footplate) S 1 2 3"), None);
         assert_eq!(start_time("no name here"), None);
+        assert_eq!(
+            process_subject(4242, 873451, 501),
+            Subject {
+                pid: 4242,
+                start_time: 873451,
+                uid: 501,
+            }
+        );
         assert_eq!(ACTION, "dev.yardr.footplate.approve");
     }
 

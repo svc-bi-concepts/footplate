@@ -1004,9 +1004,10 @@ never that it was sent. A yard that does not serve the call to this window
 is said so, with the command that answers in a terminal on the yard's
 machine: `yardr bead answer <bead> <ask> --secret`. Every secret ask is
 weighty: its card shows the yard's lines for what giving does first, in
-rust. On a Mac giving passes Touch ID, a paired watch or the login
-password first: Enter opens it, and its cancel sends nothing and keeps
-what was typed for another try. Where no system unlock is offered, the
+rust. Giving passes the system unlock first: on a Mac, Touch ID, a paired
+watch or the login password; on Linux, polkit as described under run asks.
+Enter opens it, and its cancel sends nothing and keeps what was typed for
+another try. Where no system unlock is offered, the
 card asks for its number in a separate field before the value: `i` types
 the number first, then the value. The value goes only when the number
 matches; otherwise it stays in its field and nothing is sent. One that
@@ -1046,8 +1047,8 @@ serve it to this window, has the card say so in place of the button, with
 the command that approves in a terminal on the yard's machine in a block
 that copies it: `yardr bead answer <bead> <ask> --approve`. A run ask the
 yard weighed weighty shows each class's line first on its card, in rust:
-`WEIGHTY · trust: …`. Its approval passes the Mac's unlock first — Touch
-ID, a paired watch or the login password — and the control says so:
+`WEIGHTY · trust: …`. On a Mac its approval passes Touch ID, a paired
+watch or the login password first, and the control says so:
 "Approve in plantime after unlocking". ⌘↵ alone approves nothing: it opens
 the unlock, and the approval goes where the person passes it; its cancel
 sends nothing. On Linux the unlock is polkit's: the desktop's own
@@ -1091,7 +1092,7 @@ says. Where the yard takes no approval from this window, the card says so
 in place of the button, with the command that approves in a terminal in a
 block that copies it. Every setup ask is weighty: its card shows the
 yard's lines for what approving does first, in rust, and its approval
-passes the Mac's unlock first, as a run ask's does. Where no system
+passes the system unlock first, as a run ask's does. Where no system
 unlock is offered, the card asks for its number before the account in a
 separate field, and approves only when the number matches. `x` puts a setup ask
 aside and `d` declines it with words; one put aside can be approved from

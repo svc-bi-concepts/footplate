@@ -420,7 +420,7 @@ impl Footplate {
         }
     }
 
-    /// Whether the Mac's unlock stands in front of a weighty approval:
+    /// Whether the system unlock stands in front of a weighty approval:
     /// where the system offers its gate, or where a test fixed it.
     pub(crate) fn unlock_available(&self) -> bool {
         self.test_unlock
@@ -428,14 +428,14 @@ impl Footplate {
             .unwrap_or_else(unlock::available)
     }
 
-    /// What the Mac's unlock answers where a test fixed it: the gate is
+    /// What the system unlock answers where a test fixed it: the gate is
     /// then answered at once, with no prompt. None asks the system.
     fn unlock_answer(&self) -> Option<bool> {
         self.test_unlock.map(|(_, answer)| answer)
     }
 
     /// How the ask's card approves: straight to the yard, through the
-    /// Mac's unlock first, after the ask's number is typed back, or
+    /// system unlock first, after the ask's number is typed back, or
     /// nowhere from this window.
     pub(crate) fn card_approval(&self, bead: &str, ask: u64) -> Approval {
         let weighty = self
@@ -455,7 +455,7 @@ impl Footplate {
     }
 
     /// The typed-back number is used up: each weighty card asks again, as
-    /// the Mac's unlock does.
+    /// the system unlock does.
     pub(crate) fn clear_typeback(&mut self, cx: &mut Context<Self>) {
         self.typeback.update(cx, |field, cx| field.set_text("", cx));
     }
@@ -470,7 +470,7 @@ impl Footplate {
         }
     }
 
-    /// Opens the Mac's unlock for a weighty approval or giving: `send`
+    /// Opens the system unlock for a weighty approval or giving: `send`
     /// goes where the person passes it, with `weighed`, and `cancel` puts
     /// the card back where they do not, sending nothing. The approval is
     /// the yard's of `session`: what came of it is that yard's, and is
@@ -583,7 +583,7 @@ impl Footplate {
                 self.clear_typeback(cx);
                 self.send_give_in(session, bead, ask, values, true, cx);
             }
-            // The Mac's unlock first: its cancel sends nothing, and what
+            // The system unlock first: its cancel sends nothing, and what
             // was typed is kept for another try: the last value back in
             // the field, the rest typed, so Enter tries again. Where the
             // window left the yard meanwhile, what was typed is dropped
@@ -618,7 +618,7 @@ impl Footplate {
     /// Gives the typed values to the yard in its own call and in nothing
     /// else. What the window says afterwards is the yard's words or
     /// footplate's, on the card, never the value. `weighed` goes where
-    /// the person passed the Mac's unlock for a weighty card, or typed
+    /// the person passed the system unlock for a weighty card, or typed
     /// its number back where no unlock is offered.
     pub(crate) fn send_give_in(
         &mut self,
@@ -664,7 +664,7 @@ impl Footplate {
     /// A run ask's approval names the ask and nothing of the command,
     /// which the yard runs as it stored it; a setup ask's the preset pick
     /// with the account together. A weighty card's approval passes the
-    /// Mac's unlock first, or the typed-back number where no unlock is
+    /// system unlock first, or the typed-back number where no unlock is
     /// offered, and a card that approves nowhere has no control: its card
     /// says where to approve instead.
     pub(crate) fn approve(&mut self, cx: &mut Context<Self>) {
@@ -692,7 +692,7 @@ impl Footplate {
                     self.clear_typeback(cx);
                     self.send_approve_in(self.session, bead, ask, true, cx);
                 }
-                // The Mac's unlock first: its cancel sends nothing, and
+                // The system unlock first: its cancel sends nothing, and
                 // the control sends again. Nowhere is turned away above.
                 Approval::Unlock => {
                     let reason = unlock::approve_reason(&run.line(), &self.yard);
@@ -730,7 +730,7 @@ impl Footplate {
     }
 
     /// Approves a run ask of the following `session`. `weighed` goes
-    /// where the person passed the Mac's unlock for a weighty card, or
+    /// where the person passed the system unlock for a weighty card, or
     /// typed its number back where no unlock is offered.
     fn send_approve_in(
         &mut self,
@@ -884,7 +884,7 @@ impl Footplate {
                     session, bead, ask, option, values, account, setup, true, cx,
                 );
             }
-            // The Mac's unlock first: its cancel sends nothing, and the
+            // The system unlock first: its cancel sends nothing, and the
             // control sends again. `approve` turns a card that approves
             // nowhere away before this.
             Approval::Unlock => {
@@ -915,7 +915,7 @@ impl Footplate {
 
     /// Approves a setup ask of the following `session`: the preset pick
     /// with the account together. `weighed` goes where the person passed
-    /// the Mac's unlock for a weighty card, or typed its number back where
+    /// the system unlock for a weighty card, or typed its number back where
     /// no unlock is offered. What the window says afterwards is the yard's:
     /// that the server carries the setup out, or the refusal whole, on the
     /// card.
