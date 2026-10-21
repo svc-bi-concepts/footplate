@@ -4,7 +4,9 @@
 use gpui::{Div, Rgba, div, prelude::*, rems};
 
 use crate::api::{FlowBead, FlowStage};
-use crate::model::{self, ArrivalDetail, Route, Selected, held_by_you, is_held, waits_on_you};
+use crate::model::{
+    self, ArrivalDetail, Route, Selected, WorkingGroup, held_by_you, is_held, waits_on_you,
+};
 use crate::theme::Palette;
 
 /// What a head says waits in it, the Decisions head's and a backlog
@@ -137,6 +139,55 @@ pub(crate) fn worker_words(bead: &FlowBead) -> Option<(String, String)> {
         format!("{session}\n{rest}"),
         format!("worked by {session} · {rest}"),
     ))
+}
+
+/// What the panel's head says is being worked: the number with
+/// "working", split by served kind where two or more kinds work, most
+/// first. One kind alone drops the split, as nothing is split: "5
+/// working: 3 muse, 2 claude", "2 working".
+pub(crate) fn working_words(working: usize, kinds: &[(String, usize)]) -> String {
+    if kinds.len() < 2 {
+        return format!("{working} working");
+    }
+    let split = kinds
+        .iter()
+        .map(|(kind, n)| format!("{n} {kind}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{working} working: {split}")
+}
+
+/// What the panel's "N working" tooltip says: each working group with
+/// its seats, one per line. None where no worked bead names a group,
+/// so an old yard shows no tooltip.
+pub(crate) fn working_tip(groups: &[WorkingGroup]) -> Option<String> {
+    if groups.is_empty() {
+        return None;
+    }
+    Some(
+        groups
+            .iter()
+            .map(working_group_words)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// What the tooltip says for one working group: its name with its
+/// seats where a current stage names them, the name alone where none
+/// does. Paused reads as paused, as a stage column's head does.
+pub(crate) fn working_group_words(group: &WorkingGroup) -> String {
+    match (group.limit, group.taken) {
+        (Some(0), _) => format!("{} · paused", group.name),
+        (Some(limit), Some(taken)) => {
+            let seats = match limit {
+                1 => "seat",
+                _ => "seats",
+            };
+            format!("{} · {taken} of {limit} {seats}", group.name)
+        }
+        _ => group.name.clone(),
+    }
 }
 
 /// What the folded Decided says was dealt with: the number with

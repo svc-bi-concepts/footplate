@@ -1139,7 +1139,7 @@ mod tests {
     use super::words::{
         ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words, headcode_color,
         remark_color, stage_group_words, stage_lamp, unread_words, waiting_words, waits_for_seat,
-        worker_words,
+        worker_words, working_group_words, working_tip, working_words,
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
@@ -1147,7 +1147,7 @@ mod tests {
     use crate::input;
     use crate::model::{
         ArrivalDetail, DecidedDetail, DecidedEntry, DecidedRow, DecisionAsk, Outcome, Route,
-        Target, Top, you_first,
+        Target, Top, WorkingGroup, you_first,
     };
     use crate::session::Update;
     use crate::settings::{Notify, Section};
@@ -10551,6 +10551,54 @@ yardr.dev
         );
     }
 
+    /// The panel's head splits "N working" by served kind where two or
+    /// more kinds work; one kind alone drops the split, as do beads
+    /// with no kind. Its tooltip lists each working group with its
+    /// seats, one per line: the name alone where no current stage
+    /// names the group, paused where it is paused, and none at all
+    /// where no worked bead names a group.
+    #[test]
+    fn the_panel_s_working_head_splits_by_kind_with_groups_on_hover() {
+        let kinds = |kinds: &[(&str, usize)]| {
+            kinds
+                .iter()
+                .map(|(k, n)| (k.to_string(), *n))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            working_words(5, &kinds(&[("muse", 3), ("claude", 2)])),
+            "5 working: 3 muse, 2 claude"
+        );
+        assert_eq!(working_words(2, &kinds(&[("muse", 2)])), "2 working");
+        assert_eq!(working_words(1, &kinds(&[])), "1 working");
+        let group = |name: &str, limit: Option<usize>, taken: Option<usize>| WorkingGroup {
+            name: name.to_string(),
+            limit,
+            taken,
+        };
+        assert_eq!(
+            working_tip(&[
+                group("muse-builders", Some(5), Some(3)),
+                group("opus-builders", Some(2), Some(2)),
+                group("footplate-assembly", Some(1), Some(1)),
+                group("old-builders", None, None),
+            ]),
+            Some(
+                "muse-builders · 3 of 5 seats\nopus-builders · 2 of 2 seats\nfootplate-assembly · 1 of 1 seat\nold-builders"
+                    .to_string()
+            )
+        );
+        assert_eq!(working_tip(&[]), None);
+        assert_eq!(
+            working_group_words(&group("muse-builders", Some(0), Some(1))),
+            "muse-builders · paused"
+        );
+        assert_eq!(
+            working_group_words(&group("muse-builders", Some(5), None)),
+            "muse-builders"
+        );
+    }
+
     /// A bead waits for a seat where it is unclaimed, its remark names
     /// no held, blocked or waiting state, and its group's seats are all
     /// taken. A late mark waits too; only a routed group with seats
@@ -12304,7 +12352,8 @@ yardr.dev
     /// above its stages, and Quiet stands below the fold, reached by
     /// scrolling down. Nothing runs past the pane's right edge, and the
     /// rules of a row stand level where a stage of people wraps its head
-    /// beside one that does not.
+    /// beside one that does not. The summary's longer worked line, split
+    /// by kind, holds inside the pane too.
     #[gpui::test]
     fn the_panel_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12313,6 +12362,8 @@ yardr.dev
         // A stage of people between yardr's `new` and `review`, whose
         // head `decide · people` wraps in the narrow cell where `new`
         // stands on one line: the first row of the track mixes the two.
+        // Two worked beads of different kinds, so the summary reads "2
+        // working: 1 claude, 1 muse" with groups on hover.
         let mut flows: Value = serde_json::from_str(&flows_panel()).unwrap();
         flows["result"]["depots"][0]["flows"][0]["stages"]
             .as_array_mut()
@@ -12322,6 +12373,21 @@ yardr.dev
                 json!({"stage": "decide", "group": "decisions", "human": true,
                        "lamp": "none", "beads": []}),
             );
+        let stages = flows["result"]["depots"][0]["flows"][0]["stages"]
+            .as_array_mut()
+            .unwrap();
+        stages[1]["beads"][2] = json!({"bead": "yd-extra", "title": "Third on the stage",
+            "expected": "2h–3h", "remark": "", "tone": "none", "working": true,
+            "worker": "herdr yd-extra-new", "group": "opus-builders", "kind": "claude",
+            "model": "claude-opus-5-5"});
+        stages[3]["beads"][1] = json!({"bead": "yd-work", "title": "Worked while it waits",
+            "expected": "1h–2h", "remark": "waits for jo", "tone": "amber", "working": true,
+            "worker": "herdr yd-work-new", "group": "muse-reviewers", "kind": "muse",
+            "model": "muse-spark-1.3-contributor"});
+        stages[1]["limit"] = json!(5);
+        stages[1]["taken"] = json!(3);
+        stages[3]["limit"] = json!(2);
+        stages[3]["taken"] = json!(1);
         yard.answer("Flows", &flows.to_string());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
@@ -12330,6 +12396,33 @@ yardr.dev
         cx.simulate_resize(gpui::size(px(616.), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
+        // The summary's longer worked line splits by kind, with each
+        // working group's seats, and holds inside the pane.
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.working_count(), 2);
+            let split = model.working_split();
+            assert_eq!(
+                split.kinds,
+                [("claude".to_string(), 1), ("muse".to_string(), 1)]
+            );
+            assert_eq!(
+                split
+                    .groups
+                    .iter()
+                    .map(|g| (g.name.as_str(), g.limit, g.taken))
+                    .collect::<Vec<_>>(),
+                [
+                    ("muse-reviewers", Some(2), Some(1)),
+                    ("opus-builders", None, None),
+                ]
+            );
+        });
+        let summary = bounds_of(cx, "panel summary");
+        assert!(
+            summary.right() <= px(616.),
+            "the summary runs past the pane: {summary:?}"
+        );
         // Down the pane: the head, the tracks, the stub, No line and
         // Quiet stand in order, Quiet below the fold.
         let head = bounds_of(cx, "arrivals head");

@@ -20,7 +20,7 @@ use super::panel::{
 use super::rail::RailTip;
 use super::words::{
     bead_words, flow_words, headcode_color, lamp_dot, remark_color, stage_group_words, stage_lamp,
-    waiting_words, waits_for_seat, worker_words,
+    waiting_words, waits_for_seat, worker_words, working_tip, working_words,
 };
 use crate::api::{Arrival, Flow, FlowBead, FlowDepot, FlowStage};
 use crate::model::{self, Mode, Model, Selected, backlog_count, short_bead, stage_age, you_first};
@@ -352,6 +352,8 @@ impl Footplate {
 
     /// The panel's summary words: how many beads are being worked, wait
     /// on the reader, and are held, each where any are, in quiet words.
+    /// The worked words split by served kind where two or more kinds
+    /// work, and hovering them lists each working group with its seats.
     /// The waiting words open the decisions mode, as the board's banner
     /// count does. None where nothing is worked, waited or held, and
     /// never on the departures board, whose banner counts the waits.
@@ -372,10 +374,16 @@ impl Footplate {
         }
         let mut parts: Vec<AnyElement> = Vec::new();
         if working > 0 {
+            let split = model.working_split();
             parts.push(
                 div()
+                    .id("panel working")
+                    .debug_selector(|| "panel working".to_string())
                     .text_color(palette.text)
-                    .child(format!("{working} working"))
+                    .when_some(working_tip(&split.groups), |el, tip| {
+                        el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+                    })
+                    .child(working_words(working, &split.kinds))
                     .into_any_element(),
             );
         }

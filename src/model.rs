@@ -609,6 +609,26 @@ pub struct RouteStage {
     pub human: bool,
 }
 
+/// How the panel's worked beads split, as its head line draws them:
+/// the served kinds with their counts, most first with ties by name,
+/// and the groups working them with their seats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkingSplit {
+    pub kinds: Vec<(String, usize)>,
+    pub groups: Vec<WorkingGroup>,
+}
+
+/// One group with a worked bead on the Flows view, with its seats
+/// where a current stage names the group. A group no current stage
+/// names (an old claim after a route change) carries no seats, and
+/// the tooltip lists its name alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkingGroup {
+    pub name: String,
+    pub limit: Option<usize>,
+    pub taken: Option<usize>,
+}
+
 /// One arrival's bead whole, as the details pane shows it: what the
 /// Bead call returned, with the line, expected arrival and remark of
 /// the arrivals row it came from.
@@ -1953,6 +1973,61 @@ impl Model {
     /// summary, beside what waits on the reader.
     pub fn working_count(&self) -> usize {
         self.flow_beads().filter(|bead| bead.working).count()
+    }
+
+    /// How the worked Flows beads split by served kind, and which
+    /// groups work them with their seats: the panel's head line and
+    /// its tooltip. Kinds count the worked beads with a kind served,
+    /// most first with ties by name; worked beads with no kind (a
+    /// command or a peer send) count in the total alone. Groups are
+    /// the worked beads' groups, most beads first with ties by name,
+    /// with the seats their stages serve; the yard serves one taken
+    /// number across the whole yard, so the first stage naming the
+    /// group speaks for all. The count matches the underlying worked
+    /// rows, not the visible dots (a stage shows at most two headcodes
+    /// then +N), so a worked bead hidden by overflow counts.
+    pub fn working_split(&self) -> WorkingSplit {
+        let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
+        for bead in self.flow_beads().filter(|bead| bead.working) {
+            if !bead.kind.is_empty() {
+                *kinds.entry(bead.kind.as_str()).or_default() += 1;
+            }
+            if !bead.group.is_empty() {
+                *groups.entry(bead.group.as_str()).or_default() += 1;
+            }
+        }
+        let mut kinds: Vec<(String, usize)> = kinds
+            .into_iter()
+            .map(|(kind, n)| (kind.to_string(), n))
+            .collect();
+        kinds.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut seats: HashMap<&str, (Option<usize>, Option<usize>)> = HashMap::new();
+        for depot in &self.flows.depots {
+            for flow in &depot.flows {
+                for stage in &flow.stages {
+                    if !stage.group.is_empty() {
+                        seats
+                            .entry(stage.group.as_str())
+                            .or_insert((stage.limit, stage.taken));
+                    }
+                }
+            }
+        }
+        let mut counted: Vec<(&str, usize)> = groups.into_iter().collect();
+        counted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let groups = counted
+            .into_iter()
+            .map(|(name, _)| {
+                let (limit, taken) = seats.get(name).copied().unwrap_or((None, None));
+                WorkingGroup {
+                    name: name.to_string(),
+                    limit,
+                    taken,
+                }
+            })
+            .collect();
+        WorkingSplit { kinds, groups }
     }
 
     /// How many of the Flows beads are held or stalled: the red tone,
@@ -8799,6 +8874,102 @@ mod tests {
                 ..Flow::default()
             }),
             0
+        );
+    }
+
+    /// The panel's worked beads split by served kind, most first with
+    /// ties by name, and list the groups working them with their
+    /// stages' seats. A worked bead with no kind counts in the total
+    /// alone; a working group no current stage names is listed with no
+    /// seat count; an unworked bead is in neither.
+    #[test]
+    fn the_panel_s_working_split_counts_kinds_and_groups() {
+        use crate::api::FlowBead;
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        let mut flows = flow_view();
+        let worked = |bead: &str, group: &str, kind: &str| FlowBead {
+            bead: bead.into(),
+            title: bead.into(),
+            working: true,
+            worker: format!("herdr {bead}"),
+            group: group.into(),
+            kind: kind.into(),
+            ..FlowBead::default()
+        };
+        let stage = &mut flows.depots[0].flows[0].stages[0];
+        stage.limit = Some(5);
+        stage.taken = Some(3);
+        stage.beads = vec![
+            worked("yd-one", "muse-builders", "muse"),
+            worked("yd-two", "muse-builders", "muse"),
+            worked("yd-three", "muse-builders", "muse"),
+            worked("yd-four", "opus-builders", "claude"),
+            worked("yd-five", "opus-builders", "claude"),
+        ];
+        let stage = &mut flows.depots[0].flows[0].stages[1];
+        stage.group = "opus-builders".into();
+        stage.limit = Some(2);
+        stage.taken = Some(2);
+        stage.beads.push(worked("yd-six", "footplate-assembly", ""));
+        stage.beads.push(worked("yd-seven", "old-builders", "muse"));
+        stage
+            .beads
+            .push(flowed("yd-idle", "Idle", "1h–2h", "", "none"));
+        m.flows(flows);
+        assert_eq!(m.working_count(), 7);
+        let split = m.working_split();
+        assert_eq!(
+            split.kinds,
+            [("muse".to_string(), 4), ("claude".to_string(), 2),]
+        );
+        assert_eq!(
+            split
+                .groups
+                .iter()
+                .map(|g| (g.name.as_str(), g.limit, g.taken))
+                .collect::<Vec<_>>(),
+            [
+                ("muse-builders", Some(5), Some(3)),
+                ("opus-builders", Some(2), Some(2)),
+                ("footplate-assembly", None, None),
+                ("old-builders", None, None),
+            ]
+        );
+    }
+
+    /// Tied kinds and groups split by name: two of each, where the
+    /// count alone would leave the order to the serve.
+    #[test]
+    fn the_working_split_breaks_ties_by_name() {
+        use crate::api::FlowBead;
+        let (mut m, _) = Model::new(yard(&[]), Mode::Timetable, None);
+        let mut flows = flow_view();
+        let worked = |bead: &str, group: &str, kind: &str| FlowBead {
+            bead: bead.into(),
+            title: bead.into(),
+            working: true,
+            worker: format!("herdr {bead}"),
+            group: group.into(),
+            kind: kind.into(),
+            ..FlowBead::default()
+        };
+        flows.depots[0].flows[0].stages[0].beads = vec![
+            worked("yd-one", "zebra-builders", "muse"),
+            worked("yd-two", "apple-builders", "claude"),
+        ];
+        m.flows(flows);
+        let split = m.working_split();
+        assert_eq!(
+            split.kinds,
+            [("claude".to_string(), 1), ("muse".to_string(), 1),]
+        );
+        assert_eq!(
+            split
+                .groups
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect::<Vec<_>>(),
+            ["apple-builders", "zebra-builders"]
         );
     }
 
