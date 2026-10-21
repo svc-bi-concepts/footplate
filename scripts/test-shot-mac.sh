@@ -5,7 +5,7 @@
 # tests stub docker. Nothing here needs an unlocked screen.
 set -eu
 
-script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+script_dir=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 script=$script_dir/shot-mac.sh
 tmp=$(mktemp -d)
 cleanup() {
@@ -111,7 +111,7 @@ case "$err" in
 esac
 
 # An unknown state is refused, before anything is written or launched.
-export MOCK_LOG=$tmp/log-bogus-state
+export MOCK_LOG="$tmp/log-bogus-state"
 set +e
 err=$(run_script bogus dark "$tmp/shot-bogus.png" "$tmp/bin/footplate-hold" 2>&1)
 code=$?
@@ -125,7 +125,7 @@ esac
 [ ! -e "$tmp/bin/footplate-hold.log" ] || fail "an unknown state launched the binary"
 
 # A look that is neither light nor dark is refused the same way.
-export MOCK_LOG=$tmp/log-bogus-look
+export MOCK_LOG="$tmp/log-bogus-look"
 set +e
 err=$(run_script yardmaster sepia "$tmp/shot-sepia.png" "$tmp/bin/footplate-hold" 2>&1)
 code=$?
@@ -167,7 +167,7 @@ expect_launch() {
 
 # Hold mode leaves the window up and quits with it: the stand-in quits at
 # once, so this ends. It names no picture, so no file named hold is left.
-export MOCK_LOG=$tmp/log-hold
+export MOCK_LOG="$tmp/log-hold"
 export YARDR_BEAD=sentinel-from-the-test
 export YARDR_SESSION=sentinel-from-the-test
 export YARDR_ACTOR=sentinel-from-the-test
@@ -186,7 +186,7 @@ expect_launch "hold" "$tmp/bin/footplate-hold.log" "yardmaster" "dark"
 
 # A shot takes the window the lookup names and writes where it is told,
 # after the seconds it was given.
-export MOCK_LOG=$tmp/log-shoot
+export MOCK_LOG="$tmp/log-shoot"
 export YARDR_BEAD=sentinel-from-the-test
 export YARDR_SESSION=sentinel-from-the-test
 export YARDR_ACTOR=sentinel-from-the-test
@@ -210,7 +210,7 @@ expect_launch "a shot" "$tmp/bin/footplate-shoot.log" "yardmaster" "dark"
 
 # A relative file lands under the directory the script is run from, not
 # the checkout it shoots from.
-export MOCK_LOG=$tmp/log-relative
+export MOCK_LOG="$tmp/log-relative"
 set +e
 out=$(cd "$tmp/cwd" && run_script crew light rel-shot.png "$tmp/bin/footplate-shoot" 2)
 code=$?

@@ -326,20 +326,24 @@ sleep 3
 # The first paint is not the settled frame: under load the card's bead
 # read answers after grim's first shot, so shoot until two frames in a row
 # agree (grim's bytes are deterministic for identical pixels: two shots of
-# a settled window cmp equal). At most ten rounds; past that the last
-# frame is kept with a warning, since a loaded machine must still get a
-# picture.
+# a settled window cmp equal). A round compares two frames; at most ten
+# rounds, then the last frame is kept with a warning, since a loaded
+# machine must still get a picture.
+docker exec "$name" sh -c 'su shot -c "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 grim /tmp/shots/footplate.png"' >&2
+docker exec "$name" sh -c 'cp /tmp/shots/footplate.png /tmp/shots/prev.png' >&2
 i=0
+settled=0
 while [ "$i" -lt 10 ]; do
+    sleep 1
     docker exec "$name" sh -c 'su shot -c "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 grim /tmp/shots/footplate.png"' >&2
-    if [ "$i" -gt 0 ] && docker exec "$name" cmp -s /tmp/shots/prev.png /tmp/shots/footplate.png; then
+    i=$((i + 1))
+    if docker exec "$name" cmp -s /tmp/shots/prev.png /tmp/shots/footplate.png; then
+        settled=1
         break
     fi
     docker exec "$name" sh -c 'cp /tmp/shots/footplate.png /tmp/shots/prev.png' >&2
-    i=$((i + 1))
-    sleep 1
 done
-if [ "$i" -ge 10 ]; then
+if [ "$settled" -eq 0 ]; then
     echo "shot-linux.sh: frame never settled after 10 tries; look at the picture" >&2
 fi
 docker cp "$name:/tmp/shots/footplate.png" "$out"
