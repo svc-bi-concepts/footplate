@@ -5514,16 +5514,28 @@ impl Footplate {
     }
 
     /// The read of `read` stamped `stamp` failed, in the yard of the
-    /// following `session`: it is made again after [`session::RETRY`],
-    /// while the yard is up, unless a newer one answered by then. A yard
-    /// that is down is its follower's: what it reads when it is up again
-    /// has all of it.
-    fn read_failed_in(&mut self, session: u64, read: Read, stamp: u64, cx: &mut Context<Self>) {
-        if !self
-            .model_in(session)
-            .is_some_and(|m| m.reads().failed(read, stamp))
-        {
-            return;
+    /// following `session`: if it is still current, says so and, where
+    /// `retryable`, makes it again after [`session::RETRY`] while the yard
+    /// is up. A yard that is down is its follower's: what it reads when it
+    /// is up again has all of it.
+    fn read_failed_in(
+        &mut self,
+        session: u64,
+        read: Read,
+        stamp: u64,
+        retryable: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(model) = self.model_in(session) else {
+            return false;
+        };
+        let accepted = model.reads().accepts_failure(read, stamp);
+        let retry = retryable && model.reads().failed(read, stamp);
+        if !accepted {
+            return false;
+        }
+        if !retry {
+            return true;
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(session::RETRY).await;
@@ -5539,6 +5551,7 @@ impl Footplate {
             .ok();
         })
         .detach();
+        true
     }
 
     /// Whether the yard of the following `session` answers, as its
@@ -5663,12 +5676,13 @@ impl Footplate {
                                 });
                             }
                             Err(err) => {
-                                this.notice_in(
-                                    session,
-                                    format!("the crew could not be read: {err}"),
-                                    cx,
-                                );
-                                this.read_failed_in(session, Read::Crew, stamp, cx);
+                                if this.read_failed_in(session, Read::Crew, stamp, true, cx) {
+                                    this.notice_in(
+                                        session,
+                                        format!("the crew could not be read: {err}"),
+                                        cx,
+                                    );
+                                }
                             }
                         },
                     )
@@ -5686,12 +5700,13 @@ impl Footplate {
                                 });
                             }
                             Err(err) => {
-                                this.notice_in(
-                                    session,
-                                    format!("the linked yards could not be read: {err}"),
-                                    cx,
-                                );
-                                this.read_failed_in(session, Read::Peers, stamp, cx);
+                                if this.read_failed_in(session, Read::Peers, stamp, true, cx) {
+                                    this.notice_in(
+                                        session,
+                                        format!("the linked yards could not be read: {err}"),
+                                        cx,
+                                    );
+                                }
                             }
                         },
                     )
@@ -5707,12 +5722,13 @@ impl Footplate {
                                 this.fresh_in(session, Read::Users, stamp, cx, |m| m.users(users));
                             }
                             Err(err) => {
-                                this.notice_in(
-                                    session,
-                                    format!("the users could not be read: {err}"),
-                                    cx,
-                                );
-                                this.read_failed_in(session, Read::Users, stamp, cx);
+                                if this.read_failed_in(session, Read::Users, stamp, true, cx) {
+                                    this.notice_in(
+                                        session,
+                                        format!("the users could not be read: {err}"),
+                                        cx,
+                                    );
+                                }
                             }
                         },
                     )
@@ -5731,12 +5747,19 @@ impl Footplate {
                                 });
                             }
                             Err(err) => {
-                                this.notice_in(
+                                if this.read_failed_in(
                                     session,
-                                    format!("the notices could not be read: {err}"),
+                                    Read::Notifications,
+                                    stamp,
+                                    true,
                                     cx,
-                                );
-                                this.read_failed_in(session, Read::Notifications, stamp, cx);
+                                ) {
+                                    this.notice_in(
+                                        session,
+                                        format!("the notices could not be read: {err}"),
+                                        cx,
+                                    );
+                                }
                             }
                         },
                     )
@@ -5770,12 +5793,17 @@ impl Footplate {
                                 });
                             }
                             Err(err) => {
-                                this.change_in(session, cx, |m| {
-                                    m.arrivals_failed(&err);
-                                    Vec::new()
-                                });
-                                if !model::lines_too_old(&err) {
-                                    this.read_failed_in(session, Read::Arrivals, stamp, cx);
+                                if this.read_failed_in(
+                                    session,
+                                    Read::Arrivals,
+                                    stamp,
+                                    !model::lines_too_old(&err),
+                                    cx,
+                                ) {
+                                    this.change_in(session, cx, |m| {
+                                        m.arrivals_failed(&err);
+                                        Vec::new()
+                                    });
                                 }
                             }
                         },
@@ -5792,9 +5820,14 @@ impl Footplate {
                                 this.fresh_in(session, Read::Flows, stamp, cx, |m| m.flows(board));
                             }
                             Err(err) => {
-                                this.change_in(session, cx, |m| m.flows_failed(&err));
-                                if !model::lines_too_old(&err) {
-                                    this.read_failed_in(session, Read::Flows, stamp, cx);
+                                if this.read_failed_in(
+                                    session,
+                                    Read::Flows,
+                                    stamp,
+                                    !model::lines_too_old(&err),
+                                    cx,
+                                ) {
+                                    this.change_in(session, cx, |m| m.flows_failed(&err));
                                 }
                             }
                         },
@@ -5829,12 +5862,13 @@ impl Footplate {
                                 }
                             }
                             Err(err) => {
-                                this.notice_in(
-                                    session,
-                                    format!("the decisions could not be read: {err}"),
-                                    cx,
-                                );
-                                this.read_failed_in(session, Read::Asks, stamp, cx);
+                                if this.read_failed_in(session, Read::Asks, stamp, true, cx) {
+                                    this.notice_in(
+                                        session,
+                                        format!("the decisions could not be read: {err}"),
+                                        cx,
+                                    );
+                                }
                             }
                         },
                     )

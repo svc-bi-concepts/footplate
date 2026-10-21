@@ -868,7 +868,7 @@ impl Reads {
     /// again after a while. Not where one is to be already, nor where a
     /// newer one answered.
     pub fn failed(&mut self, read: Read, stamp: u64) -> bool {
-        if stamp <= self.floor || self.applied.get(&read).is_some_and(|&a| a > stamp) {
+        if !self.accepts_failure(read, stamp) {
             return false;
         }
         if self.again.contains_key(&read) {
@@ -876,6 +876,12 @@ impl Reads {
         }
         self.again.insert(read, stamp);
         true
+    }
+
+    /// Whether a failed answer is still newer than the state read and any
+    /// answer already applied for its kind.
+    pub fn accepts_failure(&self, read: Read, stamp: u64) -> bool {
+        stamp > self.floor && self.applied.get(&read).is_none_or(|&a| a <= stamp)
     }
 
     /// The while is up: whether the read that failed is still to be made
@@ -10395,6 +10401,7 @@ mod tests {
         assert!(reads.failed(Read::Asks, failed));
         let newer = reads.make();
         assert!(reads.fresh(Read::Asks, newer));
+        assert!(!reads.accepts_failure(Read::Asks, failed));
         assert!(!reads.again(Read::Asks), "a newer one answered");
         // One that fails after a newer answered is not made again either.
         assert!(!reads.failed(Read::Asks, failed));
