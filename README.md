@@ -27,6 +27,75 @@ alone.
     cargo build --release    # one binary: target/release/footplate
     cargo test
 
+## Installing
+
+A release is one download for each system, and none of it needs a terminal.
+The files are on yardr.dev. `https://yardr.dev/releases/footplate/latest.json`
+names the newest version and each of its files, and a file is at
+`https://yardr.dev/releases/footplate/v<version>/<file>`.
+
+No download holds yardr. footplate fetches it the first time it opens, when it
+sets a yard up ([Setting up a yard here](#setting-up-a-yard-here)). The
+release script checks this for every archive it makes, and stops if a
+member's name has yardr in it ([Building](#building)).
+
+### macOS
+
+Take `Footplate_<version>_darwin_arm64.dmg` for a Mac with Apple silicon, or
+`Footplate_<version>_darwin_amd64.dmg` for an Intel Mac. About This Mac, in
+the Apple menu, says which you have.
+
+1. Open the disk image. Its window shows Footplate and a shortcut to
+   Applications.
+2. Drag Footplate onto Applications.
+3. Eject the disk image, then open Footplate from Applications.
+
+The releases on yardr.dev are signed with a Developer ID and notarized by
+Apple, so macOS asks once whether to open an app that came from the internet,
+and says that Apple checked it. The zip beside each disk image holds the same
+app, for anyone who would rather unpack it and drag the app to Applications.
+To remove footplate, drag it from Applications to the Trash.
+
+### Linux
+
+Take `footplate_<version>_linux_amd64.tar.gz` for a PC with an Intel or AMD
+processor, or `footplate_<version>_linux_arm64.tar.gz` for an ARM machine. It
+is built on Debian 13, so it runs on that and on anything newer. It draws
+with Vulkan, so the machine needs a Vulkan driver, which most desktop
+installs include.
+
+Every step is in the file manager.
+
+1. Extract the archive. A right click offers Extract Here, and most file
+   managers put what comes out in a folder of its own. It holds `footplate`,
+   the program, `footplate.desktop`, its entry for the menu of applications,
+   and `footplate.png`, its icon, beside README.md, LICENSE and NOTICE.
+2. Show hidden files, which is ctrl+H in most file managers, and open the
+   folder `.local` in your home folder.
+3. Copy `footplate` into `.local/bin`. Make the folder `bin` if it is not
+   there.
+4. Copy `footplate.desktop` into `.local/share/applications`. Make the
+   `share` and `applications` folders if either is missing. Replace the file
+   of that name if there is one. footplate writes one when it runs and finds
+   none.
+5. Open footplate from the menu of applications. Most desktops list it at
+   once. One that does not will after you log out and in.
+
+The entry runs `$HOME/.local/bin/footplate`, through `sh`. An entry cannot
+name a home folder, and `.local/bin` is on no desktop's PATH until its owner
+puts it there, which is why steps 3 and 4 go together.
+
+The first time it runs, footplate puts its icon in
+`.local/share/icons/hicolor/512x512/apps`, so the menu shows the icon from the
+second start. To have it from the first, copy `footplate.png` there yourself,
+making any folder that is missing. footplate leaves the `footplate.desktop`
+you copied as it is.
+
+To update, copy the new `footplate` over the old one. To remove it, delete
+`footplate` from `.local/bin`, `footplate.desktop` from
+`.local/share/applications` and `footplate.png` from
+`.local/share/icons/hicolor/512x512/apps`.
+
 ## Building
 
 Rust, stable (`rustup default stable`), and what gpui needs of the system:
@@ -54,8 +123,9 @@ copy, compiling only footplate itself. Deleting that directory loses
 nothing but time: the next gate run builds from nothing and leaves a fresh
 copy behind it.
 
-There is no installer. The binary is the application: copy it where you
-like and run it.
+A build of your own has no installer. The binary is the application, so copy
+it where you like and run it. A release is installed as
+[Installing](#installing) says.
 
 On macOS a script wraps it as an application for Finder, with the icon as
 an icns:
@@ -87,13 +157,25 @@ tree whose version is the tag:
 It builds both macOS targets, bundles each as above, zips the bundle and
 makes a disk image of it, then builds both Linux targets in the shot's
 Debian container (arm64 natively, amd64 emulated, which takes a while the
-first time) and packs each binary with README.md, LICENSE and NOTICE, with
-one `checksums.txt` over the six archives. The archives go to out-dir, else
-to `dist/`. The disk image is a compressed read-only HFS+ volume named
+first time) and packs each binary with `footplate.desktop`, its entry for the
+menu of applications (`assets/linux`), `footplate.png`, its icon
+(`assets/icon-512.png`), README.md, LICENSE and NOTICE, with one
+`checksums.txt` over the six archives. The archives go to out-dir, else to
+`dist/`. The disk image is a compressed read-only HFS+ volume named
 Footplate, made with `hdiutil create`. It holds the bundle beside a link to
 `/Applications`, so installing is a drag. The zip stays as it was. The
 Linux binaries link Debian 13's glibc and loaders, so they run on
 distributions as new as that.
+
+Each archive is listed as it will ship, the zip and the tarball with
+`tar -tf` and the disk image mounted read-only with `hdiutil attach`. The
+release stops if a member's path has yardr in it, in any case, since
+footplate fetches yardr the first time it opens
+([yardr, fetched](#yardr-fetched)) and carries none. An image that will not
+mount cannot be listed, and stops the release too. Nothing reaches out-dir
+until all six pass. yardr.dev's `scripts/sync-release` checks the members of
+a Linux archive against a list of its own, so a member added here is added
+there before the release is cut.
 
 The macOS apps are signed ad hoc and not notarized, and the disk images not
 signed, unless the release is asked for more, and says so. With both
@@ -1475,8 +1557,12 @@ options have no icon, so the program sees to it when it starts
   the icon under `icons/hicolor/512x512/apps` beside it. They are written
   when they are missing or differ, so the entry names the binary that ran
   last. It is for the open window and not in the menu of applications
-  (`NoDisplay`). A desktop that has not read the entry by the time the
-  window opens, on the very first start, shows the icon from the next.
+  (`NoDisplay`). The Linux archive carries an entry that does show in the
+  menu, which [Installing](#installing) has you copy to the same place.
+  footplate leaves an entry like that as it is, whichever binary ran, and
+  makes over only one that hides itself or is no entry at all. A desktop that
+  has not read the entry by the time the window opens, on the very first
+  start, shows the icon from the next.
   Under X11 the icon is also set on the window itself (`_NET_WM_ICON`), for
   a panel that reads no desktop entries. To be rid of both, delete the two
   files.

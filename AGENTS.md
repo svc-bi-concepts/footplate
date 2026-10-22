@@ -9,8 +9,8 @@ builders.
 ## Layout
 
 Top level: `src/` the program, `scripts/` release, screenshot and
-shell-test helpers, `assets/` icons and the Linux polkit action,
-`docs/design/` decision notes, `.yardr/` the yard's gate.
+shell-test helpers, `assets/` icons, the Linux polkit action and the Linux
+desktop entry, `docs/design/` decision notes, `.yardr/` the yard's gate.
 
 The window, its state and the yard:
 
@@ -47,7 +47,9 @@ Platform surface:
 - `src/tray.rs`: the Mac menu-bar item and the Linux tray item, with the
   yards menu.
 - `src/dock.rs`: the number on the macOS Dock icon.
-- `src/taskbar.rs`: the Linux desktop entry and window icon.
+- `src/taskbar.rs`: the Linux desktop entry and window icon; an entry that
+  shows in the menu (the archive's `assets/linux/footplate.desktop`, copied
+  there) is the person's, and stays.
 - `src/unlock.rs`: the system's unlock in front of a weighty approval
   (the Mac's LocalAuthentication, Linux's polkit with the action in
   `assets/linux/`), with the reasons as plain functions; where no
@@ -95,8 +97,12 @@ Setup, release and tests:
   functions, system calls stay behind `cfg`.
 - Screenshots: states in `src/shot.rs`, taken by `scripts/shot-linux.sh`;
   the states are named in `README.md`.
-- Releases: `scripts/release.sh` builds, `scripts/bundle-mac.sh`
-  bundles, `scripts/release-stage` drives the yard's release flow.
+- Releases: `scripts/release.sh` builds and lists each archive, stopping at
+  a yardr in one, `scripts/bundle-mac.sh` bundles, `scripts/release-stage`
+  drives the yard's release flow. A new file in the Linux archive is packed
+  in `scripts/release.sh`, listed in `scripts/test-release.sh`, and added to
+  yardr.dev's `scripts/sync-release` (another repository), which refuses a
+  member it does not know.
 
 ## Conventions
 

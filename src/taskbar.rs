@@ -6,7 +6,9 @@
 //! - the desktop entry whose id is the window's (`footplate`), with the icon
 //!   it names. A Wayland compositor has nothing else to go by, and GNOME and
 //!   KDE go by it under X11 too. There is no installer to put it there, so
-//!   the program does, under the person's own data directory.
+//!   the program does, under the person's own data directory. An entry
+//!   already there that shows in the menu of applications is left alone: the
+//!   person put it there, as the Linux archive has them do.
 //! - under X11, the window's `_NET_WM_ICON` property, which is all a panel
 //!   that reads no desktop entries has.
 //!
@@ -39,7 +41,9 @@ pub fn data_home(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Opt
 /// entry cannot hold. A desktop finds it by the window's id, which is the
 /// file's name and `StartupWMClass`. It is for the window that is open, not
 /// for a launcher (`NoDisplay`): the binary is wherever it was built, and an
-/// entry in the menu is an installer's to offer.
+/// entry in the menu is the Linux archive's to offer
+/// (`assets/linux/footplate.desktop`), for the person to copy into their data
+/// directory.
 pub fn entry(name: &str, exe: &Path) -> Option<String> {
     let exec = exec(exe)?;
     Some(format!(
@@ -79,10 +83,36 @@ fn exec(exe: &Path) -> Option<String> {
     Some(quoted)
 }
 
+/// Whether `text` is a desktop entry that shows in the menu of applications.
+/// The program's own is `NoDisplay`; one that is not was put there on purpose.
+/// A file that is no entry at all (a copy that did not finish) shows nothing,
+/// and is made over.
+fn shown(text: &str) -> bool {
+    let mut desktop_entry = false;
+    let mut in_desktop_entry = false;
+    let mut hidden = false;
+    for line in text.lines().map(str::trim) {
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            in_desktop_entry = section == "Desktop Entry";
+            desktop_entry |= in_desktop_entry;
+        } else if in_desktop_entry {
+            hidden |= line
+                .split_once('=')
+                .is_some_and(|(key, value)| key.trim() == "NoDisplay" && value.trim() == "true");
+        }
+    }
+    desktop_entry && !hidden
+}
+
 /// Puts the desktop entry and its icon under `data_home`, and says whether
 /// anything was written: a file that is there as it should be is left
 /// alone, so a start changes nothing after the first. The entry names the
-/// binary that ran last.
+/// binary that ran last, unless the entry there shows in the menu. That one
+/// is the person's, and writing the program's own over it would take it out of
+/// the menu at the first start.
 pub fn install(data_home: &Path, name: &str, exe: &Path, icon: &[u8]) -> io::Result<bool> {
     let entry = entry(name, exe).ok_or_else(|| {
         io::Error::new(
@@ -98,7 +128,8 @@ pub fn install(data_home: &Path, name: &str, exe: &Path, icon: &[u8]) -> io::Res
         .join(format!("{name}.desktop"));
     // The icon first: a desktop that reads the entry finds what it names.
     let icon_written = put(&icon_file, icon)?;
-    let entry_written = put(&entry_file, entry.as_bytes())?;
+    let kept = fs::read_to_string(&entry_file).is_ok_and(|there| shown(&there));
+    let entry_written = !kept && put(&entry_file, entry.as_bytes())?;
     Ok(icon_written || entry_written)
 }
 
@@ -288,6 +319,33 @@ mod tests {
              StartupWMClass=footplate\n\
              NoDisplay=true\n"
         );
+        assert!(!shown(&entry));
+    }
+
+    #[test]
+    fn an_entry_shows_in_the_menu_unless_it_says_no_display() {
+        for (text, in_the_menu) in [
+            ("[Desktop Entry]\nName=Footplate\n", true),
+            ("[Desktop Entry]\nNoDisplay=false\n", true),
+            ("[Desktop Entry]\nNoDisplay=true\n", false),
+            // Spaces around the equals sign are ignored, as the format has it.
+            ("[Desktop Entry]\nNoDisplay = true\n", false),
+            // The same key in a different group does not hide this entry.
+            (
+                "[Desktop Entry]\nName=Footplate\n[Desktop Action Open]\nNoDisplay=true\n",
+                true,
+            ),
+            // Nor does a key in a different group unhide this one.
+            (
+                "[Desktop Entry]\nNoDisplay=true\n[Desktop Action Open]\nNoDisplay=false\n",
+                false,
+            ),
+            // Not an entry: nothing to keep.
+            ("", false),
+            ("Name=Footplate\n", false),
+        ] {
+            assert_eq!(shown(text), in_the_menu, "{text:?}");
+        }
     }
 
     #[test]
@@ -329,6 +387,26 @@ mod tests {
             fs::read_to_string(&entry_file)
                 .unwrap()
                 .contains("Exec=\"/usr/local/bin/footplate\"\n")
+        );
+
+        // The launcher the Linux archive carries is found by the window's id,
+        // as the program's own is, and shows in the menu. Copied over the
+        // program's own it is the person's, and a start from anywhere leaves
+        // it as it is.
+        let launcher = include_str!("../assets/linux/footplate.desktop");
+        assert!(shown(launcher));
+        assert!(launcher.contains(&format!("\nStartupWMClass={}\n", crate::NAME)));
+        assert!(launcher.contains(&format!("\nIcon={}\n", crate::NAME)));
+        fs::write(&entry_file, launcher).unwrap();
+        assert!(!install(dir.path(), "footplate", exe, b"png").unwrap());
+        assert_eq!(fs::read_to_string(&entry_file).unwrap(), launcher);
+
+        // A copy that did not finish is no entry: the program's own comes.
+        fs::write(&entry_file, "").unwrap();
+        assert!(install(dir.path(), "footplate", exe, b"png").unwrap());
+        assert_eq!(
+            fs::read_to_string(&entry_file).unwrap(),
+            entry("footplate", exe).unwrap()
         );
     }
 

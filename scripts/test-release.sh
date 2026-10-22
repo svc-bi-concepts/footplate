@@ -4,13 +4,16 @@
 # macOS half is run whole, on any system, against stand-ins for what a Mac
 # and Apple do: the apps signed ad hoc and the disk images not signed with
 # neither signing variable set, both signed, notarized and stapled with both,
-# refused with one.
+# refused with one. The Linux archive's launcher is the repository's own, run
+# as a desktop runs it; and every archive is listed as it ships, a yardr in
+# the zip, the image or the Linux archive refused.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 script=$script_dir/release.sh
 lib=$script_dir/linux-container.sh
 bundle=$script_dir/bundle-mac.sh
+desktop=$script_dir/../assets/linux/footplate.desktop
 tmp=$(mktemp -d)
 cleanup() {
     rm -rf "$tmp"
@@ -41,10 +44,14 @@ make_checkout() {
     cp "$bundle" "$1/scripts/bundle-mac.sh"
     chmod +x "$1/scripts/release.sh" "$1/scripts/bundle-mac.sh"
     printf '[package]\nname = "footplate"\nversion = "%s"\n' "$2" > "$1/Cargo.toml"
-    # What a Linux archive holds beside the binary.
+    # What a Linux archive holds beside the binary: the launcher is the
+    # repository's own, and the icon only stands in for the icon.
     for f in README.md LICENSE NOTICE; do
         echo "$f" > "$1/$f"
     done
+    mkdir -p "$1/assets/linux"
+    cp "$desktop" "$1/assets/linux/footplate.desktop"
+    echo icon-512 > "$1/assets/icon-512.png"
     (cd "$1" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init)
 }
 
@@ -92,8 +99,30 @@ esac
 #   STANDIN_SUBMIT_EXIT   notarytool submit's exit status (0)
 #   STANDIN_ONLY          the one kind of submission, zip or dmg, those two are
 #                         for; the other is accepted (both are for each)
+#   STANDIN_STRAY         a file of that name in the app's Resources, so in its
+#                         zip and its image: yardr, smuggled in
+#   STANDIN_DMG_STRAY     a member of that path in the image alone
+#   STANDIN_TAR_STRAY     a file of that name in the Linux archive alone
+#   STANDIN_ATTACH_FAILS  hdiutil attach fails, as it does for an image a Mac
+#                         cannot open
+#   STANDIN_DETACH_FAILS  hdiutil cannot let go of a mounted image
+#   STANDIN_FIND_FAILS    find returns an incomplete image listing
 bin=$tmp/bin
 mkdir -p "$bin"
+REAL_FIND=$(command -v find)
+export REAL_FIND
+cat >"$bin/find" <<'EOF'
+#!/bin/sh
+case "$PWD" in
+    */mount.*)
+        if [ -n "${STANDIN_FIND_FAILS:-}" ]; then
+            echo ./Footplate.app
+            exit 1
+        fi
+        ;;
+esac
+exec "$REAL_FIND" "$@"
+EOF
 cat >"$bin/uname" <<'EOF'
 #!/bin/sh
 echo "${STANDIN_UNAME:-Darwin}"
@@ -150,9 +179,24 @@ cat >"$bin/iconutil" <<'EOF'
 #!/bin/sh
 prev=""
 for a in "$@"; do
-    if [ "$prev" = --output ]; then echo icns >"$a"; fi
+    if [ "$prev" = --output ]; then
+        echo icns >"$a"
+        [ -z "${STANDIN_STRAY:-}" ] || echo stray >"$(dirname "$a")/$STANDIN_STRAY"
+    fi
     prev=$a
 done
+EOF
+# The real tar, and with STANDIN_TAR_STRAY the Linux archive (the one made
+# with -czf) is made with a file of that name, made beside the others, too.
+REAL_TAR=$(command -v tar)
+export REAL_TAR
+cat >"$bin/tar" <<'EOF'
+#!/bin/sh
+if [ "$1" = -czf ] && [ -n "${STANDIN_TAR_STRAY:-}" ]; then
+    echo stray >"$STANDIN_TAR_STRAY"
+    exec "$REAL_TAR" "$@" "$STANDIN_TAR_STRAY"
+fi
+exec "$REAL_TAR" "$@"
 EOF
 # A signed app is one that holds the mark a signature leaves, and a signed
 # image one with a signature line of its own (an image is a manifest, below);
@@ -191,14 +235,69 @@ EOF
 # member (a link says where it points) after three lines for how it was made.
 # codesign and stapler add a line to it, which is how notarytool below and a
 # test ask what the image that ships has had done to it. Like the real one it
-# will not write over an image that is there.
+# will not write over an image that is there. Attached at an empty folder, the
+# image is a volume of its members, as empty files and links; detached, the
+# folder is empty again.
 cat >"$bin/hdiutil" <<'EOF'
 #!/bin/sh
 echo "hdiutil $*" >>"$CALLS"
-[ "$1" = create ] || {
-    echo "hdiutil: the stand-in makes images and does no more" >&2
-    exit 1
-}
+case "$1" in
+    attach)
+        shift
+        for last; do :; done
+        mnt=""
+        while [ $# -gt 1 ]; do
+            case "$1" in
+                -mountpoint) mnt=$2; shift ;;
+            esac
+            shift
+        done
+        [ -z "${STANDIN_ATTACH_FAILS:-}" ] || {
+            echo "hdiutil: attach failed - no mountable file systems" >&2
+            exit 1
+        }
+        [ -f "$last" ] && [ -d "$mnt" ] && [ -z "$(ls -A "$mnt")" ] || {
+            echo "hdiutil: attach failed - no image $last, or no empty folder $mnt" >&2
+            exit 1
+        }
+        # Children before the members they are in, so that those are folders.
+        grep -v -E '^(volname|fs|format|signature|ticket): ' "$last" | sort -r | while read -r member; do
+            case "$member" in
+                *" -> "*)
+                    mkdir -p "$mnt/$(dirname "${member%% -> *}")"
+                    ln -s "${member#* -> }" "$mnt/${member%% -> *}"
+                    ;;
+                *)
+                    [ -e "$mnt/$member" ] || {
+                        mkdir -p "$mnt/$(dirname "$member")"
+                        : >"$mnt/$member"
+                    }
+                    ;;
+            esac
+        done
+        printf '/dev/disk9\tApple_HFS\t%s\n' "$mnt"
+        exit 0
+        ;;
+    detach)
+        shift
+        [ "$1" != -force ] || shift
+        [ -z "${STANDIN_DETACH_FAILS:-}" ] || {
+            echo "hdiutil: detach failed - the volume is busy" >&2
+            exit 1
+        }
+        [ -d "$1" ] || {
+            echo "hdiutil: detach failed - no such volume $1" >&2
+            exit 1
+        }
+        find "$1" -mindepth 1 -delete
+        exit 0
+        ;;
+    create) ;;
+    *)
+        echo "hdiutil: the stand-in makes images, mounts them and lets them go, and does no more" >&2
+        exit 1
+        ;;
+esac
 shift
 for last; do :; done
 while [ $# -gt 1 ]; do
@@ -229,6 +328,7 @@ done
             echo "${member#./}"
         fi
     done)
+    [ -z "${STANDIN_DMG_STRAY:-}" ] || echo "$STANDIN_DMG_STRAY"
 } >"$last"
 EOF
 # A tar of the app stands in for its zip, which a test can list.
@@ -435,6 +535,80 @@ image_holds() {
     done
 }
 
+# listed_clean: the release said of each of its six archives that it listed it
+# and found no yardr in it, and let go of each image it mounted to do so.
+listed_clean() {
+    for what in "macOS arm64 zip" "macOS amd64 zip" "macOS arm64 disk image" \
+        "macOS amd64 disk image" "Linux arm64 archive" "Linux amd64 archive"; do
+        case "$text" in
+            *"$what: lists "*" members, none of yardr"*) ;;
+            *) fail "$name: it did not say that the $what holds no yardr: $text" ;;
+        esac
+    done
+    [ "$(grep -c '^hdiutil attach' "$calls")" = "$(grep -c '^hdiutil detach' "$calls")" ] ||
+        fail "$name: an image was left mounted: $(cat "$calls")"
+}
+
+# linux_archive_holds <tar.gz>: the archive holds the binary, the three texts,
+# the launcher and the icon, and nothing else. The icon is the checkout's. The
+# launcher is an entry for the menu of applications (the program's own is not
+# one), found by the window's id, naming that icon; and its Exec, run as a
+# desktop runs it, with no PATH but the system's and the person's home for
+# $HOME, starts the footplate that stands in ~/.local/bin.
+linux_archive_holds() {
+    members=$(tar -tzf "$1" | LC_ALL=C sort | tr '\n' ' ')
+    [ "$members" = "LICENSE NOTICE README.md footplate footplate.desktop footplate.png " ] ||
+        fail "$name: the archive $1 holds: $members"
+    unpacked=$tmp/$name/unpacked-${1##*/}
+    mkdir -p "$unpacked"
+    tar -xzf "$1" -C "$unpacked"
+    cmp -s "$unpacked/footplate.png" "$tmp/$name/checkout/assets/icon-512.png" ||
+        fail "$name: the icon in $1 is not the checkout's"
+    entry=$unpacked/footplate.desktop
+    for held in '[Desktop Entry]' Type=Application Name=Footplate Icon=footplate \
+        Terminal=false StartupWMClass=footplate; do
+        grep -q -x -F -- "$held" "$entry" || fail "$name: the launcher in $1 lacks [$held]: $(cat "$entry")"
+    done
+    ! grep -q -i NoDisplay "$entry" || fail "$name: the launcher in $1 is hidden from the menu"
+    [ "$(grep -c '^Exec=' "$entry")" = 1 ] || fail "$name: the launcher in $1 has not one Exec: $(cat "$entry")"
+    # The entry format's escapes first, a pair of backslashes being one; what
+    # is left is quoted as a shell reads it too.
+    command=$(sed -n 's/^Exec=//p' "$entry" | sed 's/\\\\/\\/g')
+    case "$command" in
+        *'/.local/bin/footplate'*) ;;
+        *) fail "$name: the Exec in $1 does not name the footplate in ~/.local/bin: $command" ;;
+    esac
+    home=$unpacked/home
+    mkdir -p "$home/.local/bin"
+    # shellcheck disable=SC2016 # the footplate expands $HOME when it runs
+    printf '#!/bin/sh\necho started >"$HOME/started"\n' >"$home/.local/bin/footplate"
+    chmod +x "$home/.local/bin/footplate"
+    env -i HOME="$home" PATH=/usr/bin:/bin sh -c "$command" ||
+        fail "$name: the Exec in $1 failed: $command"
+    [ "$(cat "$home/started" 2>/dev/null)" = started ] ||
+        fail "$name: the Exec in $1 did not start the footplate in ~/.local/bin: $command"
+}
+
+# stray_refused <case> <VAR=value> <archive> <member>: the knob puts a member
+# named for yardr into the archive, in any case, and the release is refused:
+# it says the archive carries yardr and names the member, writes nothing to the
+# out dir, and lets go of every image it mounted.
+stray_refused() {
+    release_run "stray-$1" "" "" "$2"
+    [ "$rc" = 1 ] || fail "$name: a release with yardr in the $3 exited $rc: $text"
+    case "$text" in
+        *"$3 carries yardr"*) ;;
+        *) fail "$name: it did not say the $3 carries yardr: $text" ;;
+    esac
+    case "$text" in
+        *"$4"*) ;;
+        *) fail "$name: it did not name the member $4: $text" ;;
+    esac
+    [ ! -e "$out" ] || fail "$name: a release with yardr in it wrote its out dir"
+    [ "$(grep -c '^hdiutil attach' "$calls")" = "$(grep -c '^hdiutil detach' "$calls")" ] ||
+        fail "$name: an image was left mounted: $(cat "$calls")"
+}
+
 # With neither variable the apps are signed ad hoc, as they were, and Apple
 # is not asked: no hardened runtime, no verify, no notary, no ticket, and
 # each zip made once. An image is made of each app, and is not signed.
@@ -450,11 +624,15 @@ lack "--options"
 lack "--timestamp"
 lack "--verify"
 lack "xcrun"
+# The image is mounted to be listed once it is made, the file that ships.
 one="codesign sign
 ditto
-hdiutil create"
+hdiutil create
+hdiutil attach
+hdiutil detach"
 [ "$(steps)" = "$(printf '%s\n%s' "$one" "$one")" ] ||
     fail "adhoc: the calls were: $(steps | tr '\n' ',')"
+listed_clean
 for arch in arm64 amd64; do
     zip=$out/Footplate_0.3.0_darwin_$arch.zip
     dmg=$out/Footplate_0.3.0_darwin_$arch.dmg
@@ -465,6 +643,7 @@ for arch in arm64 amd64; do
     ! in_dmg "$dmg" Footplate.app/Contents/CodeResources || fail "adhoc: the $arch image holds a ticket"
     ! in_dmg "$dmg" 'signature: sealed' || fail "adhoc: the $arch image is signed"
     ! in_dmg "$dmg" 'ticket: stapled' || fail "adhoc: the $arch image is stapled"
+    linux_archive_holds "$out/footplate_0.3.0_linux_$arch.tar.gz"
 done
 archives_in_out
 
@@ -500,9 +679,12 @@ hdiutil create
 codesign sign image
 codesign verify image
 notarytool submit image
-stapler staple image"
+stapler staple image
+hdiutil attach
+hdiutil detach"
 [ "$(steps)" = "$(printf '%s\n%s' "$one" "$one")" ] ||
     fail "signed: the calls were: $(steps | tr '\n' ',')"
+listed_clean
 for arch in arm64 amd64; do
     zip=$out/Footplate_0.3.0_darwin_$arch.zip
     dmg=$out/Footplate_0.3.0_darwin_$arch.dmg
@@ -520,6 +702,39 @@ for arch in arm64 amd64; do
 done
 lack_line '^codesign .*--options.* /.*\.dmg$'
 archives_in_out
+
+# A yardr in an archive is refused, whichever of the three kinds holds it: the
+# zip is listed first, so one in the app stops there; one in the image alone is
+# found once the image is mounted, and one in the Linux archive alone at the
+# end of the Mac's half. An image that cannot be mounted cannot be listed, and
+# a release that cannot show what it ships does not ship it.
+stray_refused zip STANDIN_STRAY=Yardr-helper "macOS arm64 zip" \
+    Footplate.app/Contents/Resources/Yardr-helper
+stray_refused image STANDIN_DMG_STRAY=Footplate.app/Contents/Resources/yardr "macOS arm64 disk image" \
+    Footplate.app/Contents/Resources/yardr
+stray_refused linux STANDIN_TAR_STRAY=yardr "Linux arm64 archive" yardr
+release_run no-mount "" "" STANDIN_ATTACH_FAILS=1
+[ "$rc" = 1 ] || fail "no-mount: a release whose image could not be opened exited $rc: $text"
+case "$text" in
+    *"could not open"*"to list it"*) ;;
+    *) fail "no-mount: it did not say it could not open the image: $text" ;;
+esac
+[ ! -e "$out" ] || fail "no-mount: a release that could not list an image wrote its out dir"
+release_run partial-list "" "" STANDIN_FIND_FAILS=1
+[ "$rc" = 1 ] || fail "partial-list: a release with an incomplete image listing exited $rc: $text"
+case "$text" in
+    *"could not list mounted image"*) ;;
+    *) fail "partial-list: it did not report the incomplete listing: $text" ;;
+esac
+[ ! -e "$out" ] || fail "partial-list: a release that could not list an image wrote its out dir"
+release_run no-detach "" "" STANDIN_DETACH_FAILS=1
+[ "$rc" = 1 ] || fail "no-detach: a release that could not detach its image exited $rc: $text"
+case "$text" in
+    *"could not detach mounted image"*) ;;
+    *) fail "no-detach: it did not report the mounted image: $text" ;;
+esac
+grep -q '^hdiutil detach -force ' "$calls" || fail "no-detach: cleanup did not retry with force: $(cat "$calls")"
+[ ! -e "$out" ] || fail "no-detach: a release with a mounted image wrote its out dir"
 
 # A submission Apple does not accept fails the release with the notary
 # service's log of it, whether or not notarytool's own exit status says so,

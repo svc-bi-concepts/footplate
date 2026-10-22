@@ -1,0 +1,21 @@
+# footplate's entry for the menu of applications, as the Linux archive carries
+# it. Copied to ~/.local/share/applications, with the footplate of the same
+# archive in ~/.local/bin (README.md, "Installing").
+#
+# Exec goes through sh because an entry cannot name a home folder, and
+# ~/.local/bin is on no desktop's PATH unless its owner put it there. What sh
+# is given is
+#   exec "$HOME/.local/bin/footplate"
+# and the backslashes are the entry format's escape and the Exec key's quoting
+# together, which is why they come in pairs.
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Footplate
+Comment=Talk with the crew of a yardr yard
+Exec=sh -c "exec \\"\\$HOME/.local/bin/footplate\\""
+Icon=footplate
+Terminal=false
+Categories=Network;Chat;
+Keywords=yardr;yard;chat;
+StartupWMClass=footplate

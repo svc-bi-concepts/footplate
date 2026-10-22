@@ -3,8 +3,12 @@
 # zips, one per darwin target, each holding the Footplate.app bundle, the two
 # disk images (dmg) of the same apps, each holding the bundle and a link to
 # /Applications to drag it onto, and the two Linux archives, one per arch,
-# each holding the binary, README.md, LICENSE and NOTICE, with one
-# checksums.txt (sha256) over the six.
+# each holding the binary, its desktop entry and icon (footplate.desktop,
+# footplate.png), README.md, LICENSE and NOTICE, with one checksums.txt
+# (sha256) over the six.
+# No archive holds yardr, which footplate fetches itself at its first run:
+# each is listed as it is made, the disk image mounted read-only for it, and
+# a member whose path names yardr fails the release.
 # Run it from anywhere: `scripts/release.sh <version> [out-dir]`.
 # <version> is the tag (v0.4.0) and must equal Cargo.toml's version, and the
 # tree must be clean, else the script refuses. The archives go to out-dir,
@@ -95,9 +99,14 @@ stage_out=$work/out
 mkdir -p "$stage_out"
 release_container=""
 release_marker=""
-# Each Linux container goes when the release ends, however it ends, and the
-# staging with it.
+# The disk image, while it is mounted to be listed.
+mounted=""
+# The mounted image and each Linux container go when the release ends,
+# however it ends, and the staging with them.
 cleanup() {
+    if [ -n "$mounted" ]; then
+        hdiutil detach -force "$mounted" >/dev/null 2>&1 || true
+    fi
     if [ -n "$release_container" ] && [ -n "$release_marker" ]; then
         docker exec "$release_container" rm -f "$release_marker" >/dev/null 2>&1 || true
     fi
@@ -139,6 +148,63 @@ notary_field() {
 dmg_app() {
     ln -s /Applications "$1/Applications"
     hdiutil create -volname Footplate -srcfolder "$1" -fs HFS+ -format UDZO "$2" >&2
+}
+
+# The members of the archive $1 as whoever opens it finds them, a path to a
+# line. tar reads the zip and the tarball alike. An image has to be mounted to
+# be read: read-only, at a mount point of its own in the work dir, and let go
+# before this returns (cleanup lets go of it, were the release to end here).
+list_archive() {
+    case "$1" in
+        *.dmg)
+            mounted=$(mktemp -d "$work/mount.XXXXXX")
+            if ! hdiutil attach -readonly -nobrowse -noverify -noautoopen -mountpoint "$mounted" "$1" >/dev/null; then
+                echo "release.sh: could not open $1 to list it" >&2
+                exit 1
+            fi
+            if ! (cd "$mounted" && find . -mindepth 1 -print >"$work/members"); then
+                echo "release.sh: could not list mounted image $1" >&2
+                exit 1
+            fi
+            if ! sed 's|^\./||' "$work/members"; then
+                echo "release.sh: could not read mounted image listing for $1" >&2
+                exit 1
+            fi
+            if hdiutil detach "$mounted" >/dev/null 2>&1; then
+                mounted=""
+            elif hdiutil detach -force "$mounted" >/dev/null 2>&1; then
+                mounted=""
+            else
+                echo "release.sh: could not detach mounted image $1" >&2
+                exit 1
+            fi
+            ;;
+        *) tar -tf "$1" ;;
+    esac
+}
+
+# Fails the release when the archive $1, called $2 in the messages, holds a
+# member whose path names yardr, in any case: footplate fetches yardr at its
+# first run (README.md, "Installing") and carries none, and the listing is how
+# that is known. A listing that is empty proves nothing, and fails too.
+assert_no_yardr() {
+    listing=$work/listing
+    list_archive "$1" >"$listing" || {
+        echo "release.sh: could not list $2" >&2
+        exit 1
+    }
+    count=$(wc -l <"$listing" | tr -d ' ')
+    if [ "$count" -eq 0 ]; then
+        echo "release.sh: $2 lists nothing, which proves nothing" >&2
+        exit 1
+    fi
+    stray=$(grep -i yardr "$listing" || true)
+    if [ -n "$stray" ]; then
+        echo "release.sh: $2 carries yardr, which a release leaves out; it holds:" >&2
+        printf '%s\n' "$stray" >&2
+        exit 1
+    fi
+    echo "release.sh: $2: lists $count members, none of yardr" >&2
 }
 
 # Has Apple notarize the signed file $2 and staples the ticket to $3, so that
@@ -206,6 +272,7 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
         echo "release.sh: macOS $arch: zipping the stapled app again" >&2
         zip_app "$work/mac-$arch" "$zip"
     fi
+    assert_no_yardr "$zip" "macOS $arch zip"
     # The image is made from the app as it ships, stapled or not.
     dmg=$stage_out/Footplate_${number}_darwin_${arch}.dmg
     echo "release.sh: macOS $arch: imaging $dmg" >&2
@@ -219,6 +286,8 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
         codesign --verify --strict "$dmg" >&2
         notarize "macOS $arch disk image" "$dmg" "$dmg"
     fi
+    # Listed last, as the file that ships, ticket and all.
+    assert_no_yardr "$dmg" "macOS $arch disk image"
 done
 
 # One container per checkout and arch. The path hash keeps same-named
@@ -269,10 +338,14 @@ for arch in arm64 amd64; do
         arm64) expect_binary "$stage/footplate" "ARM aarch64" ;;
         *) expect_binary "$stage/footplate" "x86-64" ;;
     esac
-    cp README.md LICENSE NOTICE "$stage/"
+    cp README.md LICENSE NOTICE assets/linux/footplate.desktop "$stage/"
+    # The icon the entry names, and the file the program itself installs
+    # as that icon (src/taskbar.rs), byte for byte.
+    cp assets/icon-512.png "$stage/footplate.png"
     archive=$stage_out/footplate_${number}_linux_${arch}.tar.gz
     echo "release.sh: Linux $arch: packing $archive" >&2
-    (cd "$stage" && tar -czf "$archive" LICENSE NOTICE README.md footplate)
+    (cd "$stage" && tar -czf "$archive" LICENSE NOTICE README.md footplate footplate.desktop footplate.png)
+    assert_no_yardr "$archive" "Linux $arch archive"
     docker exec "$name" rm -f "$release_marker" >/dev/null
     docker rm -f "$name" >/dev/null
     release_container=""
