@@ -35,7 +35,12 @@
 #
 # Needs on PATH: jq and git always; gh for build and verify; minisign and
 # shasum (or sha256sum) for verify. gh acts as whoever it is logged in as.
-# The build runs scripts/release.sh, so on a Mac, where that builds.
+# The build runs scripts/release.sh, so on a Mac, where that builds. It also
+# signs and notarizes the macOS apps when FOOTPLATE_RELEASE_SIGN_IDENTITY and
+# FOOTPLATE_RELEASE_NOTARY_PROFILE are in the environment this runs in, which
+# the exec group takes from its env_file (README "Building"); the build's
+# note says which it was. Needs this Mac logged in, with the keychain that
+# holds the identity unlocked.
 #
 # Vendored from yardr's contrib/release/stage (yardr@a3870526) with
 # footplate's release as the default: one checkout holds the whole release,
@@ -260,7 +265,18 @@ $f"
   fi
   url="https://github.com/$GHREPO/releases/tag/$v"
   dir="~/releases/$v"
-  done_with sign "build: $PRODUCT $v is released ($url, built from $at): $n archives and checksums.txt, the checksums not yet signed. Sign them with the five commands, in order (minisign asks for the key's password; each names $v):
+  # What the build made of the macOS apps, from what it was given: scripts/
+  # release.sh signs, notarizes and staples them when both signing variables
+  # are set, and signs them ad hoc when neither is (half a pair failed the
+  # build above). The variables come from the group's environment, so a
+  # group that lacks them would release apps another Mac blocks, without a
+  # word; the note says it before the checksums are signed.
+  if [ -n "${FOOTPLATE_RELEASE_SIGN_IDENTITY:-}" ] && [ -n "${FOOTPLATE_RELEASE_NOTARY_PROFILE:-}" ]; then
+    mac="The macOS apps are signed with Developer ID, notarized by Apple and stapled."
+  else
+    mac="The macOS apps are signed ad hoc and not notarized (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set where this group runs), so another Mac blocks them."
+  fi
+  done_with sign "build: $PRODUCT $v is released ($url, built from $at): $n archives and checksums.txt, the checksums not yet signed. $mac Sign the checksums with the five commands, in order (minisign asks for the key's password; each names $v):
 
 mkdir -p $dir
 gh release download $v --repo $GHREPO --pattern checksums.txt --dir $dir --clobber

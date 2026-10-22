@@ -1,11 +1,17 @@
 #!/bin/sh
 # Builds target/Footplate.app from the release binary, for macOS only: the
 # icon's sizes are rendered with sips and packed with iconutil, which no
-# other system has. Run it after `cargo build --release`. The bundle is
-# signed ad hoc and not notarized, and there is no installer: it is for the
-# machine that built it. With two arguments another binary is bundled
-# elsewhere, which the release script uses for each darwin target:
+# other system has. Run it after `cargo build --release`. There is no
+# installer: the bundle is for the machine that built it, signed ad hoc and
+# not notarized. With two arguments another binary is bundled elsewhere,
+# which the release script uses for each darwin target:
 # `scripts/bundle-mac.sh <binary> <app>`.
+#
+# FOOTPLATE_RELEASE_SIGN_IDENTITY, the name of a "Developer ID Application"
+# identity of the keychain, signs the bundle with it instead, with the
+# hardened runtime and a secure timestamp, which Apple's notary service asks
+# of a signature. Notarizing is the release script's, which asks for a
+# notary profile beside the identity (README.md, "Building").
 set -e
 
 if [ "$(uname -s)" != Darwin ]; then
@@ -73,9 +79,20 @@ cat >"$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad hoc, with no identity: the linker signed the binary alone, under a
-# name of its own making. Signed as a bundle, the signature carries the
-# bundle's id, which the system files its notifications under.
-codesign --force --sign - "$app"
+# Signed as a bundle, the signature carries the bundle's id, which the
+# system files its notifications under, where the linker signed the binary
+# alone, under a name of its own making. --force replaces that signature.
+identity=${FOOTPLATE_RELEASE_SIGN_IDENTITY:-}
+if [ -n "$identity" ]; then
+    # The notary service refuses a signature without the hardened runtime or
+    # without a secure timestamp, so both are asked for; and the signature
+    # is checked here, so that one that does not hold fails here and not
+    # after the wait for Apple.
+    codesign --force --options runtime --timestamp --sign "$identity" "$app"
+    codesign --verify --strict "$app"
+else
+    # Ad hoc, with no identity: a builder's or a contributor's build.
+    codesign --force --sign - "$app"
+fi
 
 echo "$app"

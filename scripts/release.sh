@@ -9,6 +9,15 @@
 # else to dist/ under the checkout. The Linux builds run in the shot's
 # Debian container (scripts/linux-container.sh): arm64 natively, amd64
 # emulated, which takes a while the first time.
+#
+# FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE, set
+# together, sign each macOS app with that "Developer ID Application"
+# identity of the keychain (scripts/bundle-mac.sh), have Apple notarize it
+# under that notarytool keychain profile, and staple the ticket to it before
+# it is zipped for the release (README.md, "Building"). With neither, the
+# apps are signed ad hoc and not notarized. They are named after yardr's
+# YARDR_RELEASE_SIGN_IDENTITY and YARDR_RELEASE_NOTARY_PROFILE, and take the
+# same values.
 set -e
 
 caller=$PWD
@@ -37,6 +46,24 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
+# Signing is asked for whole or not at all, and refused here, before the
+# first build: a signed app that is not notarized is one Gatekeeper refuses
+# like an unsigned one, and a release that was meant to be signed must not
+# come out ad hoc for a variable that was forgotten, as yardr's
+# contrib/release/build has it.
+identity=${FOOTPLATE_RELEASE_SIGN_IDENTITY:-}
+profile=${FOOTPLATE_RELEASE_NOTARY_PROFILE:-}
+if [ -n "$identity" ] && [ -z "$profile" ]; then
+    echo "release.sh: FOOTPLATE_RELEASE_SIGN_IDENTITY is set and FOOTPLATE_RELEASE_NOTARY_PROFILE is not; set both to sign and notarize the macOS apps, or neither" >&2
+    exit 2
+fi
+if [ -z "$identity" ] && [ -n "$profile" ]; then
+    echo "release.sh: FOOTPLATE_RELEASE_NOTARY_PROFILE is set and FOOTPLATE_RELEASE_SIGN_IDENTITY is not; set both to sign and notarize the macOS apps, or neither" >&2
+    exit 2
+fi
+
+# Both variables on another system are refused here too: codesign and
+# notarytool are macOS's, and so is the whole release.
 if [ "$(uname -s)" != Darwin ]; then
     echo "release.sh: a release is built on macOS" >&2
     exit 1
@@ -47,6 +74,9 @@ for tool in cargo docker ditto shasum file; do
         exit 1
     fi
 done
+if [ -z "$identity" ]; then
+    echo "release.sh: the macOS apps are signed ad hoc and not notarized (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set)" >&2
+fi
 
 work=$(mktemp -d)
 stage_out=$work/out
@@ -76,6 +106,46 @@ expect_binary() {
     fi
 }
 
+# The app as the zip a Mac unpacks: ditto keeps the bundle's modes and links,
+# and leaves out the resource forks and extended attributes it would pack
+# beside them. $1 is the directory the app stands in, $2 the zip.
+zip_app() {
+    (cd "$1" && ditto -c -k --keepParent --norsrc --noextattr Footplate.app "$2")
+}
+
+# The string field $1 of notarytool's JSON answer $2.
+notary_field() {
+    printf '%s\n' "$2" | sed -n 's/.*"'"$1"'" *: *"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+# Has Apple notarize the signed app whose zip is $2, and staples the ticket to
+# the app $3, so that it opens without asking Apple and the zip that ships
+# holds it. $1 names the app in the messages.
+notarize() {
+    echo "release.sh: $1: signed; waiting for Apple's notary service (minutes, as a rule)" >&2
+    # json, as the normal format is for reading: the id and the status are
+    # taken from it. A refusal is a status, which notarytool need not exit
+    # non-zero for, and some versions exit non-zero along with a finished
+    # submission: the answer is read either way, so that a refusal still
+    # gets its log.
+    submit_exit=0
+    answer=$(xcrun notarytool submit "$2" --keychain-profile "$profile" --wait --output-format json) || submit_exit=$?
+    status=$(notary_field status "$answer")
+    id=$(notary_field id "$answer")
+    if [ "$submit_exit" -ne 0 ] || [ "$status" != Accepted ]; then
+        echo "release.sh: $1: Apple did not notarize the app (status \"$status\", submission $id); its log:" >&2
+        if [ -n "$id" ]; then
+            xcrun notarytool log "$id" --keychain-profile "$profile" >&2 || true
+        else
+            echo "release.sh: $1: notarytool submit failed (exit $submit_exit)" >&2
+            printf '%s\n' "$answer" >&2
+        fi
+        exit 1
+    fi
+    echo "release.sh: $1: notarized (submission $id)" >&2
+    xcrun stapler staple "$3" >&2
+}
+
 # Both darwin targets are installed: a release builds each.
 if command -v rustup >/dev/null 2>&1; then
     for triple in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -102,7 +172,15 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
     scripts/bundle-mac.sh "$binary" "$work/mac-$arch/Footplate.app" >/dev/null
     zip=$stage_out/Footplate_${number}_darwin_${arch}.zip
     echo "release.sh: macOS $arch: zipping $zip" >&2
-    (cd "$work/mac-$arch" && ditto -c -k --keepParent --norsrc --noextattr Footplate.app "$zip")
+    zip_app "$work/mac-$arch" "$zip"
+    if [ -n "$identity" ]; then
+        # Apple takes the zip as it stands. The ticket it answers with goes to
+        # the app, and the zip is made again from the stapled app, so that
+        # the one that ships, and its line in checksums.txt, holds the ticket.
+        notarize "macOS $arch" "$zip" "$work/mac-$arch/Footplate.app"
+        echo "release.sh: macOS $arch: zipping the stapled app again" >&2
+        zip_app "$work/mac-$arch" "$zip"
+    fi
 done
 
 # One container per checkout and arch. The path hash keeps same-named

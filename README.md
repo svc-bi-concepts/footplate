@@ -69,6 +69,16 @@ application's [notifications](#notifications) under; it is not notarized,
 so it is for the Mac that built it. The script needs `sips` and `iconutil`, which
 macOS has, and says so on another system.
 
+With `FOOTPLATE_RELEASE_SIGN_IDENTITY` set to the name of a "Developer ID
+Application" identity of the keychain, the script signs the bundle with it
+instead, with the hardened runtime and a secure timestamp, and checks the
+signature (`codesign --verify --strict`). Unset, the signature is ad hoc as
+above, which is what a builder's or a contributor's build gets. The bundle
+carries no entitlements: the hardened runtime holds back code made at run
+time, libraries of another maker's, and the camera, the microphone and the
+like, and footplate does none of those. The signature alone leaves the app
+unnotarized, which the release script does next.
+
 A release is everything the site carries, built by one script from a clean
 tree whose version is the tag:
 
@@ -81,6 +91,33 @@ each binary with README.md, LICENSE and NOTICE, with one `checksums.txt`
 over the four archives. The archives go to out-dir, else to `dist/`. The
 Linux binaries link Debian 13's glibc and loaders, so they run on
 distributions as new as that.
+
+The macOS apps are signed ad hoc and not notarized unless the release is
+asked for more, and says so. With both `FOOTPLATE_RELEASE_SIGN_IDENTITY` (the
+identity's name, as `security find-identity -v -p codesigning` lists it) and
+`FOOTPLATE_RELEASE_NOTARY_PROFILE` (a `notarytool` keychain profile) set,
+each app is signed with that identity as above, sent to Apple's notary
+service in a zip (`xcrun notarytool submit --wait`: minutes, as a rule) and,
+once Apple has accepted it, stapled with the ticket. The zip that ships is
+made from the stapled app, so the app opens on any Mac with no "unidentified
+developer" block (a downloaded app still asks once whether to open it, and
+says that Apple checked it), and `checksums.txt` is of that zip:
+
+    FOOTPLATE_RELEASE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID1234)" \
+    FOOTPLATE_RELEASE_NOTARY_PROFILE=yardr-notary \
+      scripts/release.sh v0.4.0
+
+A submission Apple does not accept fails the release, which prints the notary
+service's log of it. One variable without the other is an error before
+anything is built, and so are both on a system that is not macOS (a release
+is built on macOS in any case). The two are named after yardr's own
+(`YARDR_RELEASE_SIGN_IDENTITY`, `YARDR_RELEASE_NOTARY_PROFILE`) and take the
+same values, so one setup serves both repositories: the certificate and its
+key in the login keychain, an App Store Connect API key, and `xcrun
+notarytool store-credentials`, once per Mac, are in yardr's `docs/install.md`
+under "Signed darwin binaries", and are not repeated here. The identity's key
+is read from the login keychain: the Mac must be logged in with that keychain
+unlocked, and the key must let `codesign` use it without asking.
 
 With the yard a release bead cuts the release instead: `build` makes the
 archives and the GitHub release, `sign` asks mckean to sign the checksums,
@@ -100,7 +137,8 @@ from there:
   existing release or tag, a dirty tree, or a checkout that is not the
   remote's `main`; builds the four archives and `checksums.txt` with
   `scripts/release.sh`; tags the base commit, pushes the tag, and makes
-  the GitHub release; notes the five signing commands on the bead.
+  the GitHub release; notes on the bead whether the macOS apps came out
+  signed and notarized or ad hoc, and the five signing commands.
 - `sign` asks mckean whether `checksums.txt.minisig` is uploaded. Run the
   five commands from the build's note, in a directory of their own, then
   Done. Each names the version, so a stale file or a wrong release shows
@@ -137,6 +175,17 @@ where `jq`, `git`, `gh` (logged in) and `minisign` are.
 holds the whole release, and no release depends on what a sibling yardr
 clone has checked out. A fix upstream is mirrored here, and a fix here
 belongs upstream too.
+
+The group runs `scripts/release.sh` as the operator, so for the macOS apps
+to come out signed and notarized it needs the two variables above in its
+environment, and the Mac logged in as that operator. An exec group takes
+them from an `env_file`, a `0600` file of `KEY=VALUE` lines the store never
+holds (yardr's `docs/groups.md`, "Outbound credentials"):
+
+    yardr group set footplate-release env_file=~/.yardr/groups/footplate-release.env
+
+Without them the release is made, with the apps signed ad hoc. The build's
+note says which it was, so it shows before the checksums are signed.
 
 A builder with a bead to prove takes a picture of the window with
 `scripts/shot-linux.sh`, from the worktree, after the last commit:

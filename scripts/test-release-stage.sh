@@ -120,8 +120,8 @@ exit "${FAKE_MINISIGN_RC:-0}"
 EOF
 
 # fakebuild stands in for scripts/release.sh: the four footplate archives
-# and a checksums.txt over them, and a log of where it ran and with what
-# cache.
+# and a checksums.txt over them, and a log of where it ran, with what cache
+# and with which of the signing variables the group's environment gave it.
 cat >"$bin/fakebuild" <<'EOF'
 #!/bin/sh
 # fakebuild <version> <out-dir>
@@ -130,6 +130,7 @@ cat >"$bin/fakebuild" <<'EOF'
   echo "pwd: $PWD"
   echo "gocache: $GOCACHE"
   echo "out: $2"
+  echo "signing: identity=[${FOOTPLATE_RELEASE_SIGN_IDENTITY:-}] profile=[${FOOTPLATE_RELEASE_NOTARY_PROFILE:-}]"
 } >>"$FAKE_DIR/calls.log"
 number=${1#v}
 printf 'fake footplate darwin arm64 for %s\n' "$1" >"$2/Footplate_${number}_darwin_arm64.zip"
@@ -197,6 +198,16 @@ repo() {
     git -C "$checkout" push -q origin main
 }
 
+# real_release: the build script itself in the checkout, committed and pushed,
+# for the cases that run it in place of fakebuild.
+real_release() {
+    mkdir -p "$checkout/scripts"
+    cp "$script_dir/release.sh" "$script_dir/linux-container.sh" "$script_dir/bundle-mac.sh" "$checkout/scripts/"
+    git -C "$checkout" add -A
+    git -C "$checkout" commit -qm scripts
+    git -C "$checkout" push -q origin main
+}
+
 # fixture <sig|nosig> <ok|corrupt>: a release for verify to download, of
 # two archives with a checksums.txt over them.
 fixture() {
@@ -211,13 +222,16 @@ fixture() {
 }
 
 # run <mode> [VAR=value ...]: release-stage the way the exec group runs it.
+# The signing variables are empty unless a case gives them, so that the
+# caller's own never reach it.
 run() {
     mode=$1
     shift
     FAKE_DIR=$casedir PATH="$bin:$PATH" \
         YARDR_BIN=yardr YARDR_BEAD=footplate-rel1 YARDR_BASE=main \
         YARDR_RELEASE_BUILD="$bin/fakebuild" \
-        env "$@" "$stage" "$mode" >"$casedir/out.log" 2>&1 ||
+        env FOOTPLATE_RELEASE_SIGN_IDENTITY= FOOTPLATE_RELEASE_NOTARY_PROFILE= \
+        "$@" "$stage" "$mode" >"$casedir/out.log" 2>&1 ||
         fail "$name: release-stage $mode exited $?: $(tail -n 20 "$casedir/out.log")"
 }
 
@@ -362,7 +376,49 @@ want "gh release download v0.3.0 --repo yardr-dev/footplate --pattern checksums.
 want "minisign -S -s ~/.minisign/yardr-release.key -m ~/releases/v0.3.0/checksums.txt"
 want "minisign -V -P $KEY -m ~/releases/v0.3.0/checksums.txt"
 want "gh release upload v0.3.0 --repo yardr-dev/footplate ~/releases/v0.3.0/checksums.txt.minisig --clobber"
+# With neither signing variable the build is given none, and the note says
+# the macOS apps are ad hoc: a group without them would release apps another
+# Mac blocks, and this is where it shows.
+want "signing: identity=[] profile=[]"
+want "The macOS apps are signed ad hoc and not notarized"
+lack "notarized by Apple"
 ok "build releases"
+
+# Both signing variables reach the build as the group's environment gave
+# them, a value with spaces and brackets whole, and the note says the apps
+# are signed and notarized.
+begin releases-signed
+repo
+show "footplate v0.3.0" "notes"
+run build "YARDR_DEPOT_PATH=$checkout" \
+    "FOOTPLATE_RELEASE_SIGN_IDENTITY=Developer ID Application: Stand In (ABCDE12345)" \
+    "FOOTPLATE_RELEASE_NOTARY_PROFILE=stand-in-profile"
+want "signing: identity=[Developer ID Application: Stand In (ABCDE12345)] profile=[stand-in-profile]"
+want "The macOS apps are signed with Developer ID, notarized by Apple and stapled."
+lack "signed ad hoc"
+want "gh release create v0.3.0"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+ok "build gives the build its signing variables"
+
+# One signing variable without the other is refused by the build script
+# itself, the real one, before it builds anything: the stage fails with what
+# it said, and nothing is tagged or released.
+begin half-pair
+repo
+real_release
+show "footplate v0.3.0" "notes"
+run build "YARDR_DEPOT_PATH=$checkout" "YARDR_RELEASE_BUILD=scripts/release.sh" \
+    "FOOTPLATE_RELEASE_SIGN_IDENTITY=Developer ID Application: Stand In (ABCDE12345)"
+want "yardr bead done footplate-rel1 --outcome failed --note -"
+want "building v0.3.0 failed"
+want "FOOTPLATE_RELEASE_SIGN_IDENTITY is set and FOOTPLATE_RELEASE_NOTARY_PROFILE is not"
+lack "gh release create"
+lack "fakebuild"
+if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
+    fail "half-pair: a tag was made for a refused build"
+fi
+ok "build refuses half a signing pair"
 
 # A signed release verifies.
 begin verify-ok
