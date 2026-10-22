@@ -8,10 +8,11 @@ builders.
 
 ## Layout
 
-Top level: `src/` the program, `scripts/` release, screenshot and
-shell-test helpers, `assets/` icons, the Linux polkit action and the Linux
-desktop entry, `docs/design/` decision notes, `.yardr/` the yard's gate,
-`.github/` the Windows job (build and test, which the gate does not try).
+Top level: `src/` the program, `build.rs` (the Windows stack size, nothing
+else), `scripts/` release, screenshot and shell-test helpers, `assets/`
+icons, the Linux polkit action and the Linux desktop entry, `docs/design/`
+decision notes, `.yardr/` the yard's gate, `.github/` the Windows job
+(build and test, which the gate does not try).
 
 The window, its state and the yard:
 

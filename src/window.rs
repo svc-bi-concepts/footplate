@@ -19052,7 +19052,8 @@ yardr.dev
     }
 
     /// A window with nothing at this run's socket and no settings kept:
-    /// the first screen, once it says there is no yard.
+    /// the first screen, once it says there is no yard. On Windows there is
+    /// no socket to look at, and it says so at once.
     fn no_yard<'a>(
         dir: &std::path::Path,
         cx: &'a mut TestAppContext,
@@ -19064,12 +19065,38 @@ yardr.dev
         let (view, cx) = opened_at(env, &dir.join("footplate/settings.json"), cx);
         wait(cx, "that there is no yard", |cx| {
             view.read_with(cx, |v, _| {
-                v.down
-                    .as_deref()
-                    .is_some_and(|why| why.starts_with("No yard: nothing answers"))
+                v.down.as_deref().is_some_and(|why| {
+                    why.starts_with("No yard: nothing answers")
+                        || why.starts_with("This system has no yard of its own")
+                })
             })
         });
         (view, cx)
+    }
+
+    /// Windows has no yard of this machine: the first screen says so, and
+    /// offers the ways to a yard at an address and none to one here. The
+    /// entry that is always listed is not tried again, there is no switch
+    /// to start it with, and the settings add a yard at an address alone.
+    #[cfg(not(unix))]
+    #[gpui::test]
+    fn on_windows_the_first_screen_offers_only_the_ways_to_a_yard_at_an_address(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        assert_eq!(view.read_with(cx, |v, _| v.away), Away::Stopped);
+        assert!(!view.read_with(cx, |v, _| v.sets_up_here()));
+        assert!(view.read_with(cx, |v, _| matches!(v.switch_for(), SwitchFor::Far)));
+        assert!(drawn(cx, "away why") && drawn(cx, "away lead"));
+        assert!(drawn(cx, "way far") && drawn(cx, "way hosted"));
+        assert!(!drawn(cx, "way here") && !drawn(cx, "way near"));
+        assert_eq!(away_why(&view, cx), "this machine · cannot be opened");
+
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
+        assert!(drawn(cx, "add far") && drawn(cx, "add hosted"));
+        assert!(!drawn(cx, "add near"));
     }
 
     /// With no yard the window offers the ways to one, which are the
@@ -20625,6 +20652,7 @@ yardr.dev
     /// socket, the error and the hint hide under details, shut at first.
     /// "Set up a yard here" is the first way, and the screen names the
     /// yard with its short why.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_made_here_says_so_plainly_with_its_details_shut(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -20676,6 +20704,7 @@ yardr.dev
 
     /// Enter opens the details where no yard was made, and shuts them
     /// again: the line it is typed in is not drawn to take it.
+    #[cfg(unix)]
     #[gpui::test]
     fn enter_opens_the_details_where_no_yard_was_made(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
