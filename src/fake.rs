@@ -4,7 +4,8 @@
 //! Or the same yard at its listener, a TCP port of this machine: the calls
 //! under `/user/` for a device's token, `/user/me`, and a pairing that
 //! gives a token for a code. Windows has no socket, so the yard there is at
-//! its listener alone.
+//! its listener alone, and the yard a test starts with, [`Yard::start`], is
+//! that one there: a test that never names its socket runs on both.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -146,14 +147,22 @@ pub struct Yard {
 }
 
 impl Yard {
-    /// A yard at a socket in a temp dir of its own.
-    #[cfg(all(test, unix))]
+    /// The yard a test starts with: at a socket in a temp dir of its own,
+    /// and where there is no socket (Windows) at its listener, as
+    /// [`Yard::start_tcp`]. [`Yard::client`] is a client of either; a test
+    /// that reads [`Yard::socket`] is about the socket and is unix's alone.
+    #[cfg(test)]
     pub fn start() -> Yard {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("yard.sock");
-        let mut yard = Yard::start_at(&socket);
-        yard.dir = Some(dir);
-        yard
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("yard.sock");
+            let mut yard = Yard::start_at(&socket);
+            yard.dir = Some(dir);
+            yard
+        }
+        #[cfg(not(unix))]
+        Yard::start_tcp()
     }
 
     /// A yard at a socket the test names.
@@ -231,6 +240,8 @@ impl Yard {
         Client::remote(Address::parse(self.address()).unwrap(), token)
     }
 
+    /// The socket of a yard that has one: empty at its listener, so a test
+    /// that reads it is about the socket, and unix's alone.
     pub fn socket(&self) -> &Path {
         &self.socket
     }
