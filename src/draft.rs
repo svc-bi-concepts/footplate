@@ -1318,17 +1318,23 @@ mod tests {
         );
         assert!(found[0].bytes.is_empty());
 
-        // No name the yard takes: refused, and not read.
-        let found = dropped(&at("a\nb.pdf", PNG), Some(1024), 64, 0);
-        assert!(
-            found[0]
-                .refused
-                .as_deref()
-                .unwrap()
-                .starts_with("a\nb.pdf is no name the yard takes"),
-            "{found:?}"
-        );
-        assert!(found[0].bytes.is_empty());
+        // No name the yard takes: refused, and not read. Windows cannot
+        // make a file with a newline in its name (os error 123), so this
+        // step is a unix system's; the names alone are refused on every
+        // system in the test above.
+        #[cfg(unix)]
+        {
+            let found = dropped(&at("a\nb.pdf", PNG), Some(1024), 64, 0);
+            assert!(
+                found[0]
+                    .refused
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("a\nb.pdf is no name the yard takes"),
+                "{found:?}"
+            );
+            assert!(found[0].bytes.is_empty());
+        }
 
         // A name past 255 bytes cannot exist on disk: shortening to
         // the yard's 255 is a zip entry's, and tested there.

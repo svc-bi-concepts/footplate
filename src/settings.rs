@@ -1206,6 +1206,14 @@ mod tests {
     fn the_yards_are_kept_in_their_order_with_the_open_one_and_never_a_token() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
+        // A path whole on this system: from /, or on Windows from a
+        // drive's root, where a path from / is not whole. The file holds
+        // it as JSON, which writes each backslash twice.
+        let socket = if cfg!(windows) {
+            r"C:\Users\shop\.yardr\yard.sock"
+        } else {
+            "/home/shop/.yardr/yard.sock"
+        };
         let set = Settings::default()
             .with_yard(
                 None,
@@ -1217,11 +1225,7 @@ mod tests {
                 Some(&file),
             )
             .unwrap()
-            .with_yard(
-                None,
-                Yard::near("shop", "/home/shop/.yardr/yard.sock"),
-                None,
-            )
+            .with_yard(None, Yard::near("shop", socket), None)
             .unwrap()
             .opening("plantime");
         assert_eq!(set.opened().name, "plantime");
@@ -1245,12 +1249,13 @@ mod tests {
     },
     {
       "name": "shop",
-      "socket": "/home/shop/.yardr/yard.sock"
+      "socket": SOCKET
     }
   ],
   "open": "plantime"
 }
 "#
+            .replace("SOCKET", &serde_json::to_string(socket).unwrap())
         );
         // The yard that was open last is opened, else the first: a name
         // of none, as of a yard removed by hand, is the first too.
