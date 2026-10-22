@@ -19093,7 +19093,11 @@ yardr.dev
         assert!(!drawn(cx, "way here") && !drawn(cx, "way near"));
         assert_eq!(away_why(&view, cx), "this machine · cannot be opened");
 
+        // The settings open on this window: the text size, and no item
+        // in a tray, which Windows does not draw.
         cx.simulate_keystrokes("secondary-,");
+        assert!(drawn(cx, "text size"));
+        assert!(!drawn(cx, "menu bar on") && !drawn(cx, "tray auto"));
         click_on(cx, "settings section yards");
         assert!(drawn(cx, "add far") && drawn(cx, "add hosted"));
         assert!(!drawn(cx, "add near"));

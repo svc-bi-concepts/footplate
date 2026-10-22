@@ -2552,8 +2552,8 @@ mod tests {
 
     #[test]
     fn on_windows_the_file_is_under_appdata_when_that_is_a_whole_path() {
-        // Whole on any system this runs on: the temp dir stands for the
-        // profile's `AppData\Roaming`.
+        // A whole path on any system the test runs on: the temp dir stands
+        // for the profile's `AppData\Roaming`.
         let roaming = std::env::temp_dir().join("Roaming");
         assert_eq!(
             file_under_appdata(Some(roaming.clone().into_os_string())),

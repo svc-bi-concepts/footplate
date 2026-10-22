@@ -26,7 +26,7 @@ const NO_HOME: &str = "There is no home directory to keep this device's token in
 
 /// What is said of a yard of this machine where this system has none.
 #[cfg(not(unix))]
-const NO_NEAR_YARD: &str = "This system has no yard of its own to open, and footplate reaches a yard by its socket only on a Mac or on Linux. Pair with a yard at an address: its operator opens a code with yardr user device pair <user> <device>.";
+const NO_NEAR_YARD: &str = "This system has no yard of its own, and footplate reaches a yard of this machine by a socket on a Mac or on Linux only. Pair with a yard at an address: its operator opens a code with yardr user device pair <user> <device>.";
 
 /// Marks a token file that footplate wrote after a pairing. A token from
 /// elsewhere may have the same first line, but removing a yard must not
@@ -282,8 +282,9 @@ fn check_token_file_target(file: &Path) -> Result<(), String> {
 /// Whether two paths are one file, by whichever way its directory is
 /// named: a link to the directory is the directory.
 pub fn same_file(a: &Path, b: &Path) -> bool {
-    // Windows has no inode std can read, so its files are told apart by
-    // their resolved paths alone, as a file that is not there yet is.
+    // std reads no inode on Windows, so there a file is told by its resolved
+    // path alone, as one that is not there yet is: a hard link to a file is
+    // another file to it.
     #[cfg(unix)]
     if let (Ok(a_meta), Ok(b_meta)) = (fs::metadata(a), fs::metadata(b)) {
         return a_meta.dev() == b_meta.dev() && a_meta.ino() == b_meta.ino();
@@ -1097,7 +1098,7 @@ mod tests {
             assert!(why.contains("names no token file"), "{none:?}: {why}");
         }
         assert!(is_bare("yard.token") && !is_bare("/home/jo/yard.token"));
-        // Windows tells a folder apart by its backslash as well.
+        // On Windows a backslash parts a folder from a name too.
         #[cfg(windows)]
         {
             assert!(!is_bare(r"keys\yard.token"));

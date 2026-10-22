@@ -20,6 +20,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+defaults:
+  run:
+    # Bash stops at the first command that fails; the runner's PowerShell
+    # does not, for a program that is not its own.
+    shell: bash
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -35,18 +41,8 @@ jobs:
           rustc --version
           cargo --version
 
-      # Compiling gpui's tree takes most of the job: what is built is kept
-      # for the next one, keyed on the lockfile.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: windows-${{ hashFiles('Cargo.lock') }}
-          restore-keys: windows-
-
+      # gpui's tree is most of the build, and a cache of `target` would be
+      # gigabytes: it is built each time.
       - name: Build
         run: cargo build --locked
 
