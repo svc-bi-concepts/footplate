@@ -1428,8 +1428,8 @@ The About card says which footplate and which yardr you run. It stands over
 the window, and esc, its close button or a click outside it shuts it. Two
 doors open it: "About footplate" in the application's menu on a Mac, and
 the "about footplate" row under "This window" in the
-[settings](#settings), which is the door on Linux, where footplate has no
-application menu.
+[settings](#settings), which is the door on Linux and on Windows, where
+footplate has no application menu.
 
 - footplate: the release this is, as its build names it (`v0.6.0`).
 - yardr: what the yardr footplate fetched says to `yardr --version`, asked
@@ -1437,7 +1437,8 @@ application menu.
   commit it was built from). Where footplate has fetched none, the card says
   "not fetched yet" ([yardr, fetched](#yardr-fetched) has when it does); a
   yardr that is kept and will not say gives the reason. A yardr you
-  installed yourself is not asked: footplate does not use it.
+  installed yourself is not asked: footplate does not use it. On Windows
+  footplate fetches none, and the card names footplate alone.
 
 The card looks for nothing newer, of either, and offers no update.
 

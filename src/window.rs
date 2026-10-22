@@ -11379,6 +11379,7 @@ yardr.dev
     /// first section. Esc and its button shut it, a click outside shuts it
     /// and goes no further, a click inside leaves it, and the cheatsheet
     /// stands over it, shut first.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_about_card_names_both_versions_and_two_doors_open_it(cx: &mut TestAppContext) {
         let home = tempfile::tempdir().unwrap();
@@ -19098,6 +19099,26 @@ yardr.dev
         cx.simulate_keystrokes("secondary-,");
         assert!(drawn(cx, "text size"));
         assert!(!drawn(cx, "menu bar on") && !drawn(cx, "tray auto"));
+
+        // The About card is opened from the same section, there being no
+        // application menu, and names footplate alone: Windows fetches no
+        // yardr, and the card asks this test's folder, not the person's.
+        let bin = dir.path().join("bin");
+        view.update(cx, |v, _| v.means.own = Some(bin));
+        click_on(cx, "about show");
+        wait(cx, "the card, told that none is kept", |cx| {
+            view.read_with(cx, |v, _| {
+                v.about
+                    .as_ref()
+                    .is_some_and(|about| about.kept == Some(Kept::Nothing))
+            })
+        });
+        assert!(drawn(cx, "about card") && drawn(cx, "about footplate"));
+        assert!(!drawn(cx, "about yardr"));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.about.is_none()));
+        assert!(settings_open(&view, cx));
+
         click_on(cx, "settings section yards");
         assert!(drawn(cx, "add far") && drawn(cx, "add hosted"));
         assert!(!drawn(cx, "add near"));

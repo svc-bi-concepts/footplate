@@ -4610,12 +4610,16 @@ impl Footplate {
                                         footplate_words(),
                                         palette.text,
                                     ))
-                                    .child(row(
-                                        "yardr",
-                                        "about yardr",
-                                        yardr_words(about.kept.as_ref()),
-                                        kept_color,
-                                    )),
+                                    // Windows fetches no yardr, so "not
+                                    // fetched yet" would promise one.
+                                    .when(!cfg!(windows), |lines| {
+                                        lines.child(row(
+                                            "yardr",
+                                            "about yardr",
+                                            yardr_words(about.kept.as_ref()),
+                                            kept_color,
+                                        ))
+                                    }),
                             ),
                     )
                     .child(
