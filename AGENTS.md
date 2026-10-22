@@ -61,7 +61,8 @@ Setup, release and tests:
 
 - `src/fetch.rs`: fetches yardr's release from yardr.dev (minisign over
   checksums against the built-in key, archive against checksums), plus
-  `yardr doctor`-named programs by checksum alone.
+  `yardr doctor`-named programs by checksum alone; and asks the kept yardr
+  its version, for the About card.
 - `src/setup.rs`: the first run as yardr's commands, with no window (args in,
   JSON out, PATH from doctor's data, never through a shell).
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for

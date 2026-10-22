@@ -52,7 +52,9 @@ use crate::yard::Env;
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, the yardmaster's conversation naming an ask and two
-/// bead ids, the cheatsheet open over an open card, and the
+/// bead ids, the cheatsheet open over an open card, the About card open
+/// over the yardmaster's conversation, with the yardr the shot script
+/// keeps and with none kept, and the
 /// yardmaster's conversation with the parties' reactions under three
 /// mails, with the bar of reactions to tap floating over one of them, the
 /// yardmaster's conversation with the notice a flows view that did not
@@ -130,6 +132,8 @@ pub const STATES: &[&str] = &[
     "decisions",
     "decisions-filtered",
     "keys",
+    "about",
+    "about-unfetched",
     "reactions",
     "reactions-hover",
     "reactions-zoom",
@@ -713,6 +717,8 @@ fn populate(yard: &Yard, state: &str) {
         | "flow"
         | "old-lines"
         | "switcher"
+        | "about"
+        | "about-unfetched"
         | "notice" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
@@ -1988,7 +1994,9 @@ mod tests {
                 | "answered"
                 | "signedout"
                 | "away"
-                | "switcher" => {
+                | "switcher"
+                | "about"
+                | "about-unfetched" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 6, "{state}");

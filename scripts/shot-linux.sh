@@ -55,8 +55,11 @@
 # list with one open ask and the 156-item history open: day groups
 # and a folded look-alike row), `decisions-filtered` (that history
 # with `docs` in its filter), `keys` (the cheatsheet open over an
-# open card), `reactions` (the conversation with the parties'
-# reactions under three mails), `reactions-hover` (that
+# open card), `about` (the About card open over the yardmaster's
+# conversation, naming footplate's version and the kept yardr's),
+# `about-unfetched` (that card with no yardr kept), `reactions` (the
+# conversation with the parties' reactions under three mails),
+# `reactions-hover` (that
 # conversation with the bar of reactions to tap floating over one mail),
 # `reactions-zoom` (that bar with the pointer on one emoji),
 # `notice` (the conversation with the notice a flows view that did not
@@ -67,7 +70,8 @@
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the
-# same on every shot.
+# same on every shot, and a release's version to --version, which the
+# About card shows.
 # The picture goes to the file named, else to footplate-shot.png under a
 # fresh directory of its own; its path is printed at the end either way.
 # Every run provisions a fresh container and builds footplate in it; the
@@ -82,7 +86,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer delivery"
+states="yardmaster crew thread column plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -297,7 +301,7 @@ docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_
     # state says the yard runs, and none starts at login.
     bin="$scratch/config/footplate/bin"
     mkdir -p "$bin"
-    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor, status and settings answer canned JSON." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "settings) case \"\$2\" in get) cat \"\$D/settings-get.json\" ;; set) echo {} ;; *) echo \"{\\\"error\\\":\\\"a shot takes no settings \$2\\\"}\"; exit 1 ;; esac ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
+    printf "%s\n" "#!/bin/sh" "# yardr for a shot alone: doctor, status and settings answer canned JSON, and --version the version of a release." "# Anything else is refused: a shot takes no click." "D=\$(dirname \"\$0\")" "case \"\$1\" in" "doctor) cat \"\$D/doctor.json\" ;;" "status) cat \"\$D/status.json\" ;;" "--version) echo \"v0.14.0 (cbceebd22919)\" ;;" "settings) case \"\$2\" in get) cat \"\$D/settings-get.json\" ;; set) echo {} ;; *) echo \"{\\\"error\\\":\\\"a shot takes no settings \$2\\\"}\"; exit 1 ;; esac ;;" "*) echo \"{\\\"error\\\":\\\"a shot takes no \$1\\\"}\"; exit 1 ;;" "esac" > "$bin/yardr"
     chmod +x "$bin/yardr"
     printf "%s\n" "v99.0.0" > "$bin/yardr.version"
     printf "%s\n" "{\"yard\": false, \"machine\": []}" > "$bin/doctor.json"

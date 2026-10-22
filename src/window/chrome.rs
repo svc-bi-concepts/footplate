@@ -15,11 +15,12 @@ use std::thread;
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Div, Focusable, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, Rgba, ScrollHandle, SharedString, Stateful, Task, Window, div,
-    prelude::*, px, relative, rems, rgba,
+    img, prelude::*, px, relative, rems, rgba,
 };
 
 use crate::api::{self, Address, Client};
 use crate::draft;
+use crate::fetch::{self, Kept};
 use crate::input;
 use crate::model::{
     self, Effect, Kind, Mode, Model, News, Read, Route, Row, Selected, Target, Top,
@@ -41,13 +42,13 @@ use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, grown};
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, run_address_of};
 use super::state::{
-    Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
+    About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
     band, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented, semaphore_glyph,
     small_button, track_glyph,
 };
-use super::words::unread_words;
+use super::words::{footplate_words, unread_words, yardr_words};
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 
 impl Footplate {
@@ -178,6 +179,22 @@ impl Footplate {
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("keys") {
             this.show_keys = true;
+        }
+        // The About shots open with the card standing over the yardmaster's
+        // conversation: the first with the yardr the shot script keeps, the
+        // second with the card pointed at a directory that keeps none. A
+        // debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        match std::env::var("FOOTPLATE_SHOT").as_deref() {
+            Ok("about") => this.show_about(window, cx),
+            Ok("about-unfetched") => {
+                this.means.own = Some(std::env::temp_dir().join(format!(
+                    "footplate-shot-{}-about-unfetched",
+                    std::process::id()
+                )));
+                this.show_about(window, cx);
+            }
+            _ => {}
         }
         // The reactions-hover shot poses the pointer on the last mail,
         // which reads under the one above's head: its bar of reactions
@@ -2762,14 +2779,17 @@ impl Footplate {
         self.change(cx, |m| m.dismiss_all());
     }
 
-    /// Esc leaves what it can: the image over the window, a decline
-    /// asked for words, the words for the card's keys, the pick, then
-    /// the words.
+    /// Esc leaves what it can: the cheatsheet, the About card, the image
+    /// over the window, a decline asked for words, the words for the
+    /// card's keys, the pick, then the words.
     pub(crate) fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
         if self.show_keys {
             self.show_keys = false;
             cx.notify();
             return;
+        }
+        if self.about.is_some() {
+            return self.shut_about(cx);
         }
         if self.image_open.is_some() {
             return self.shut_image(window, cx);
@@ -3128,6 +3148,41 @@ impl Footplate {
     /// the sheet, and esc shuts it first.
     pub(crate) fn toggle_keys(&mut self, cx: &mut Context<Self>) {
         self.show_keys = !self.show_keys;
+        cx.notify();
+    }
+
+    /// Shows the About card: the version of this footplate, and the one the
+    /// yardr it keeps gives to `--version`, which is asked now, off the
+    /// window's thread; the card stands meanwhile, saying so. One that
+    /// stands already is left as it is. The window keeps the focus it had,
+    /// as under the cheatsheet, and esc shuts it.
+    pub(crate) fn show_about(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.about.is_some() {
+            return;
+        }
+        self.about = Some(About { kept: None });
+        cx.notify();
+        let own = self.means.own.clone();
+        cx.spawn(async move |this, cx| {
+            let kept = cx
+                .background_executor()
+                .spawn(async move { fetch::kept(own.as_deref()) })
+                .await;
+            this.update(cx, |this, cx| {
+                // A card that was shut meanwhile has nothing to be told.
+                if let Some(about) = this.about.as_mut() {
+                    about.kept = Some(kept);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shuts the About card.
+    pub(crate) fn shut_about(&mut self, cx: &mut Context<Self>) {
+        self.about = None;
         cx.notify();
     }
 
@@ -3844,6 +3899,20 @@ impl Footplate {
                 palette,
             )),
         );
+        // The About card's second door: the application's menu has the
+        // first, where a desktop shows one, and a Linux desktop shows none.
+        let about = setting(
+            "about footplate".to_string(),
+            "which footplate this is, and which yardr it keeps".to_string(),
+        )
+        .child(
+            div().flex().child(
+                small_button("show".to_string(), palette)
+                    .id("about show")
+                    .debug_selector(|| "about show".to_string())
+                    .on_click(cx.listener(|this, _, window, cx| this.show_about(window, cx))),
+            ),
+        );
         // The sheet's own sections down the left side, as chat's rows are:
         // the open one stands out, and a click shows that section alone.
         let open = self.settings.section;
@@ -3986,7 +4055,7 @@ impl Footplate {
                                 .flex_col()
                                 .gap_4()
                                 .children(match open {
-                                    Section::ThisWindow => vec![size, menu_bar, mark],
+                                    Section::ThisWindow => vec![size, menu_bar, mark, about],
                                     Section::Appearance => vec![look],
                                     Section::Notifications => vec![notifications],
                                     Section::Yards => vec![yard],
@@ -4428,6 +4497,131 @@ impl Footplate {
                     .cursor_pointer()
                     .child("×")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx))),
+            )
+    }
+
+    /// The About card over the window: which footplate this is and which
+    /// yardr it keeps, each with its version, beside footplate's icon. A
+    /// click outside it shuts it, as esc and its button do. Where the
+    /// content reaches up into the title bar (`top` pixels) the overlay
+    /// starts under that strip, which stays the window's handle: a drag
+    /// there still moves it.
+    pub(crate) fn about_layer(
+        &self,
+        about: &About,
+        top: f32,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // The yardr's line is the colour of what it says: the program's own
+        // words are text, there being none is quiet, and its not saying
+        // warns.
+        let kept_color = match &about.kept {
+            Some(Kept::Says(_)) => palette.text,
+            Some(Kept::Silent(_)) => palette.warn,
+            Some(Kept::Nothing) | None => palette.faint,
+        };
+        let row = |name: &'static str, selector: &'static str, words: String, color: Rgba| {
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div()
+                        .w(rems(5.))
+                        .flex_none()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || selector.to_string())
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(color)
+                        .child(words),
+                )
+        };
+        div()
+            .id("about overlay")
+            .debug_selector(|| "about".to_string())
+            // A click outside the card shuts it and is no click on what
+            // stands under it.
+            .block_mouse_except_scroll()
+            .absolute()
+            .top(px(top))
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this, _, _, cx| this.shut_about(cx)))
+            .child(
+                div()
+                    .id("about card")
+                    .debug_selector(|| "about card".to_string())
+                    .w(rems(28.))
+                    .max_w(relative(0.9))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(palette.line)
+                    .bg(palette.side)
+                    // The kit's popover shadow, as the bar of reactions
+                    // has it: the card floats over the conversation's
+                    // lines, which it does not cover.
+                    .shadow(vec![gpui::BoxShadow {
+                        color: palette.shadow.into(),
+                        offset: gpui::point(px(0.), px(6.)),
+                        blur_radius: px(20.),
+                        spread_radius: px(0.),
+                    }])
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(img(self.icon.clone()).size(rems(4.5)).flex_none())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("About footplate"),
+                                    )
+                                    .child(row(
+                                        "footplate",
+                                        "about footplate",
+                                        footplate_words(),
+                                        palette.text,
+                                    ))
+                                    .child(row(
+                                        "yardr",
+                                        "about yardr",
+                                        yardr_words(about.kept.as_ref()),
+                                        kept_color,
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div().flex().justify_end().child(
+                            small_button("close (esc)".to_string(), palette)
+                                .id("about close")
+                                .debug_selector(|| "about close".to_string())
+                                .on_click(cx.listener(|this, _, _, cx| this.shut_about(cx))),
+                        ),
+                    ),
             )
     }
 

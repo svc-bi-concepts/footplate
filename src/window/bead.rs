@@ -965,13 +965,14 @@ impl Footplate {
     /// Whether the bar of reactions floats over the mail `seq`: the
     /// pointer stands on it, the yard takes reactions, and no overlay
     /// stands over the mail. The bar paints after the whole window, so
-    /// without this it would float over the switcher, an image or the
-    /// cheatsheet too.
+    /// without this it would float over the switcher, an image, the About
+    /// card or the cheatsheet too.
     pub(crate) fn reacting(&self, seq: u64) -> bool {
         self.react_hover.is_some_and(|(at, _)| at == seq)
             && self.model.as_ref().is_some_and(|m| !m.react_too_old())
             && self.switching.is_none()
             && self.image_open.is_none()
+            && self.about.is_none()
             && !self.show_keys
     }
 

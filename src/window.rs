@@ -47,7 +47,7 @@ use metrics::READING_WIDTH;
 // The window's floor, which main.rs sets as the window's minimum.
 pub(crate) use metrics::WINDOW_MIN;
 use rail::{ImageOpen, Picture, ViewUp};
-use state::{Adding, AgentsBusy, Anchor, Away, Held, Piece, Place, SwitchBusy, SwitchFor};
+use state::{About, Adding, AgentsBusy, Anchor, Away, Held, Piece, Place, SwitchBusy, SwitchFor};
 use ui::small_button;
 use words::count_words;
 
@@ -83,6 +83,7 @@ actions!(
         FocusFilter,
         Leave,
         OpenSettings,
+        OpenAbout,
         Larger,
         Smaller,
         UsualSize,
@@ -378,6 +379,9 @@ pub struct Footplate {
     switching: Option<usize>,
     /// The cheatsheet of the open view's keys stands over the window.
     show_keys: bool,
+    /// The About card stands over the window, with what it says of the
+    /// yardr footplate keeps.
+    about: Option<About>,
     /// The rail's mode icon the pointer stands on, if any: its glyph
     /// brightens, as quiet text does.
     rail_hover: Option<Mode>,
@@ -689,6 +693,8 @@ impl Footplate {
         // yard is away that is a line that is not drawn: it would go
         // nowhere.
         Self::on_app_action::<OpenSettings>(window, cx, Self::toggle_settings);
+        // The application menu's About, which no key opens.
+        Self::on_app_action::<OpenAbout>(window, cx, Self::show_about);
         Self::on_app_action::<Larger>(window, cx, |this, _, cx| this.resize(1, cx));
         Self::on_app_action::<Smaller>(window, cx, |this, _, cx| this.resize(-1, cx));
         Self::on_app_action::<UsualSize>(window, cx, |this, _, cx| this.usual_size(cx));
@@ -812,6 +818,7 @@ impl Footplate {
             late: None,
             switching: None,
             show_keys: false,
+            about: None,
             rail_hover: None,
             react_hover: None,
             emoji_hover: None,
@@ -1148,7 +1155,12 @@ impl Render for Footplate {
             Some(open) => shown.child(self.image_layer(open, window, cx)),
             None => shown,
         };
-        // The cheatsheet over everything else, as esc shuts it first.
+        // The About card over that, and the cheatsheet over everything
+        // else, as esc shuts it first.
+        let shown = match &self.about {
+            Some(about) => shown.child(self.about_layer(about, top, palette, cx)),
+            None => shown,
+        };
         let keys = self.show_keys.then(|| self.keys_view());
         shown
             .children(keys.map(|view| self.keys_layer(view, palette, cx)))
@@ -1176,13 +1188,15 @@ mod tests {
     use super::rail::{PROBE_AGAIN, post, run_address_of};
     use super::state::{Counts, pairing_failure, rail_counts, waiting};
     use super::words::{
-        ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words, headcode_color,
-        remark_color, stage_group_words, stage_lamp, unread_words, waiting_words, waits_for_seat,
-        worker_words, working_group_words, working_tip, working_words,
+        ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words,
+        footplate_words, headcode_color, remark_color, stage_group_words, stage_lamp, unread_words,
+        waiting_words, waits_for_seat, worker_words, working_group_words, working_tip,
+        working_words, yardr_words,
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
     use crate::fake::Yard;
+    use crate::fetch::{self, Kept};
     use crate::input;
     use crate::model::{
         ArrivalDetail, DecidedDetail, DecidedEntry, DecidedRow, DecisionAsk, Outcome, Route,
@@ -2970,12 +2984,18 @@ mod tests {
         assert!(drawn(cx, "react row 12"));
         assert!(reacting(&view, cx));
 
-        // The cheatsheet, the switcher and an image over the window: no
-        // bar while each stands, and back once it shuts.
+        // The cheatsheet, the About card, the switcher and an image over
+        // the window: no bar while each stands, and back once it shuts.
         view.update(cx, |v, cx| v.toggle_keys(cx));
         assert!(drawn(cx, "keys"));
         assert!(!reacting(&view, cx));
         view.update(cx, |v, cx| v.toggle_keys(cx));
+        assert!(reacting(&view, cx));
+
+        view.update_in(cx, |v, window, cx| v.show_about(window, cx));
+        assert!(drawn(cx, "about"));
+        assert!(!reacting(&view, cx));
+        view.update(cx, |v, cx| v.shut_about(cx));
         assert!(reacting(&view, cx));
 
         view.update_in(cx, |v, window, cx| v.toggle_switcher(window, cx));
@@ -11216,6 +11236,123 @@ yardr.dev
         assert_eq!(view.read_with(cx, |v, _| v.keys_view()), KeysView::Switcher);
     }
 
+    /// The About card names this footplate and the yardr it keeps, which
+    /// is asked its version each time the card opens, and two doors open
+    /// it: the application menu's action, and the row of the settings'
+    /// first section. Esc and its button shut it, a click outside shuts it
+    /// and goes no further, a click inside leaves it, and the cheatsheet
+    /// stands over it, shut first.
+    #[gpui::test]
+    fn the_about_card_names_both_versions_and_two_doors_open_it(cx: &mut TestAppContext) {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // What the card holds of the yardr: none while it stands shut,
+        // and nothing yet while the program is being asked.
+        let kept_of = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.about.as_ref().map(|about| about.kept.clone()))
+        };
+        // The card asks this test's home, not the person's.
+        view.update(cx, |v, _| v.means.own = Some(bin.clone()));
+        assert!(!drawn(cx, "about"));
+
+        // The application menu's door, with no yardr kept. A second use
+        // of it leaves the card as it is.
+        cx.dispatch_action(OpenAbout);
+        wait(cx, "the card, told that none is kept", |cx| {
+            kept_of(&view, cx) == Some(Some(Kept::Nothing))
+        });
+        assert!(drawn(cx, "about card"));
+        assert!(drawn(cx, "about footplate"));
+        assert!(drawn(cx, "about yardr"));
+        cx.dispatch_action(OpenAbout);
+        assert_eq!(kept_of(&view, cx), Some(Some(Kept::Nothing)));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(kept_of(&view, cx), None);
+
+        // A yardr is kept now, and says which it is, each time: it is
+        // asked again as the card opens, not once.
+        fetch::keep(
+            &bin,
+            "yardr",
+            b"#!/bin/sh\ncat \"$(dirname \"$0\")/says\"\n",
+        )
+        .unwrap();
+        std::fs::write(bin.join("yardr.version"), "v0.14.0\n").unwrap();
+        std::fs::write(bin.join("says"), "v0.14.0 (cbceebd22919)\n").unwrap();
+        cx.dispatch_action(OpenAbout);
+        wait(cx, "the card, told which yardr is kept", |cx| {
+            kept_of(&view, cx) == Some(Some(Kept::Says("v0.14.0 (cbceebd22919)".into())))
+        });
+        cx.simulate_keystrokes("escape");
+        std::fs::write(bin.join("says"), "v0.15.0 (0123456789ab)\n").unwrap();
+        cx.dispatch_action(OpenAbout);
+        wait(cx, "the card, told which yardr is kept now", |cx| {
+            kept_of(&view, cx) == Some(Some(Kept::Says("v0.15.0 (0123456789ab)".into())))
+        });
+
+        // A click inside leaves the card. A click outside shuts it, and
+        // does not reach the rail's chip under it, which opens the
+        // switcher.
+        click_on(cx, "about yardr");
+        assert!(drawn(cx, "about card"));
+        click_on(cx, "yard chip");
+        assert_eq!(kept_of(&view, cx), None);
+        assert!(
+            view.read_with(cx, |v, _| v.switching.is_none()),
+            "the click went through the card's overlay"
+        );
+
+        // Its button shuts it.
+        cx.dispatch_action(OpenAbout);
+        assert!(drawn(cx, "about close"));
+        click_on(cx, "about close");
+        assert_eq!(kept_of(&view, cx), None);
+
+        // The settings' door: the row of their first section, over the
+        // sheet. Esc shuts the card first, and the sheet after it.
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        click_on(cx, "about show");
+        assert!(drawn(cx, "about card"));
+        assert!(settings_open(&view, cx));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(kept_of(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
+
+        // The cheatsheet over the card goes first.
+        cx.dispatch_action(OpenAbout);
+        view.update(cx, |v, cx| v.toggle_keys(cx));
+        cx.simulate_keystrokes("escape");
+        assert!(!view.read_with(cx, |v, _| v.show_keys));
+        assert!(kept_of(&view, cx).is_some());
+        cx.simulate_keystrokes("escape");
+        assert_eq!(kept_of(&view, cx), None);
+    }
+
+    /// The About card's words: this footplate as a release's tag, which a
+    /// tag parses as, and the yardr's line as it says itself, or that it is
+    /// being asked, not fetched, or silent.
+    #[test]
+    fn the_about_card_says_what_it_knows_of_each_version() {
+        let tag = footplate_words();
+        assert!(tag.starts_with('v'), "{tag}");
+        assert!(fetch::Version::parse(&tag).is_some(), "{tag} is no tag");
+        assert_eq!(yardr_words(None), "reading…");
+        assert_eq!(yardr_words(Some(&Kept::Nothing)), "not fetched yet");
+        let says = Kept::Says("v0.14.0 (cbceebd22919)".into());
+        assert_eq!(yardr_words(Some(&says)), "v0.14.0 (cbceebd22919)");
+        let silent = Kept::Silent("ended with status 3".into());
+        assert_eq!(
+            yardr_words(Some(&silent)),
+            "could not say its version (ended with status 3)"
+        );
+    }
+
     /// A late overrun stands as words in the remark column: `late by
     /// 40m` where the yard prints it, last in the row, and the expected
     /// arrival alone in its own column.
@@ -14322,6 +14459,22 @@ yardr.dev
         cx.simulate_mouse_move(at(780., 40.), MouseButton::Left, none);
         cx.simulate_mouse_up(at(780., 40.), MouseButton::Left, none);
         assert_eq!(asked.borrow().len(), 2);
+
+        // The About card stands over the window, and its overlay leaves the
+        // strip alone: a drag there still moves the window.
+        cx.update(|window, _| window.toggle_fullscreen());
+        view.update_in(cx, |v, window, cx| v.show_about(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.simulate_mouse_down(empty, MouseButton::Left, none);
+        cx.simulate_mouse_move(at(730., 14.), MouseButton::Left, none);
+        cx.simulate_mouse_move(at(780., 40.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(780., 40.), MouseButton::Left, none);
+        assert_eq!(
+            asked.borrow().len(),
+            3,
+            "the About card's overlay took the drag"
+        );
     }
 
     /// Where the title bar is the desktop's, which is everywhere but a Mac,

@@ -296,6 +296,93 @@ pub fn stored(dir: &Path) -> Option<Stored> {
     })
 }
 
+/// What the yardr that is kept says of itself, for the About card.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kept {
+    /// None is kept: footplate has not fetched one.
+    Nothing,
+    /// Its own answer to `--version`, the first line of it: the release and
+    /// the commit it was built from, as yardr words them.
+    Says(String),
+    /// One is kept and would not say which it is: why, in a few words.
+    Silent(String),
+}
+
+/// How long a kept yardr has to answer `--version`, which takes it a few
+/// milliseconds: one that has not by then is stopped.
+const VERSION_WITHIN: Duration = Duration::from_secs(5);
+
+/// The most that is read of the answer, and the most of its line that is
+/// kept. Only the first line is wanted.
+const VERSION_MOST: u64 = 4 * 1024;
+const VERSION_LINE: usize = 80;
+
+/// The yardr kept in `dir`, found as [`stored`] finds it, and asked its
+/// version by its whole path. Its own answer is what the card shows, and
+/// not the tag in `yardr.version`: the file says what was fetched, this says
+/// what runs. None where `dir` is none, for a person without a home.
+pub fn kept(dir: Option<&Path>) -> Kept {
+    let Some(stored) = dir.and_then(stored) else {
+        return Kept::Nothing;
+    };
+    match version_of(&stored.path, VERSION_WITHIN) {
+        Ok(line) => Kept::Says(line),
+        Err(why) => Kept::Silent(why),
+    }
+}
+
+/// What the program at `path` answers to `--version`: the first line it
+/// prints, with anything that is not text taken out, or why there is none.
+/// It is started with no shell and nothing on its input, and one that has
+/// not ended in `within` is stopped.
+fn version_of(path: &Path, within: Duration) -> Result<String, String> {
+    let mut child = started(
+        Command::new(path)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|err| err.to_string())?;
+    let asked = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if asked.elapsed() > within => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("no answer in time".to_string());
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(err) => return Err(err.to_string()),
+        }
+    };
+    if !status.success() {
+        return Err(match status.code() {
+            Some(code) => format!("ended with status {code}"),
+            None => "ended by a signal".to_string(),
+        });
+    }
+    // Read once it has ended: an answer longer than a pipe holds never
+    // ends, and is stopped above.
+    let mut said = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = out.take(VERSION_MOST).read_to_end(&mut said);
+    }
+    String::from_utf8_lossy(&said)
+        .lines()
+        .map(|line| {
+            let text: String = line
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(VERSION_LINE)
+                .collect();
+            text.trim().to_string()
+        })
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| "printed nothing".to_string())
+}
+
 /// Where a release comes from and what it is held to. [`yardr`] has the
 /// built-in ones; a test has a stand-in for the site and a key of its own.
 struct Source<'a> {
@@ -1451,6 +1538,82 @@ mod tests {
             fs::metadata(&executable.path).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    /// What the About card says of the kept yardr is its own answer to
+    /// `--version`: the first line it prints, as text, and not the tag in
+    /// `yardr.version`. With none kept there is nothing to ask; one that
+    /// is kept and cannot say says why, and one that ends badly says
+    /// nothing of its words.
+    #[test]
+    fn the_kept_yardr_is_asked_its_version_and_says_why_when_it_cannot() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("bin");
+
+        // Nothing is kept: no home, no directory, an empty one, or a
+        // version file with no program beside it.
+        assert_eq!(kept(None), Kept::Nothing);
+        assert_eq!(kept(Some(&dir)), Kept::Nothing);
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(kept(Some(&dir)), Kept::Nothing);
+        fs::write(dir.join(VERSION_FILE), "v0.14.0\n").unwrap();
+        assert_eq!(kept(Some(&dir)), Kept::Nothing);
+
+        // The program is asked, whatever the file beside it says. One
+        // stand-in answers every row with the shell the row writes to
+        // `how`: a fresh program costs a Mac a third of a second to start
+        // the first time, and a rewritten one costs it again.
+        let program = keep(&dir, PROGRAM, b"#!/bin/sh\n. \"$(dirname \"$0\")/how\"\n").unwrap();
+        let ask = |how: &str| {
+            fs::write(dir.join("how"), how).unwrap();
+            kept(Some(&dir))
+        };
+        let says = |line: &str| Kept::Says(line.to_string());
+        let silent = |why: &str| Kept::Silent(why.to_string());
+        assert_eq!(
+            ask("echo 'v0.15.1 (cbceebd22919)'"),
+            says("v0.15.1 (cbceebd22919)")
+        );
+        // A build with no release says its commit, as it prints it.
+        assert_eq!(ask("echo 901cdec4be6d"), says("901cdec4be6d"));
+        // The first line with words in it, trimmed, and the rest unread.
+        assert_eq!(
+            ask("printf '\\n   \\n  v1.2.3 (abc)  \\nsecond line\\n'"),
+            says("v1.2.3 (abc)")
+        );
+        // Text only, and not a line of any length: what the program prints
+        // is put in a window.
+        assert_eq!(ask(r"printf 'v1\033[0m.2\n'"), says("v1[0m.2"));
+        assert_eq!(
+            ask(&format!("echo {}", "x".repeat(300))),
+            says(&"x".repeat(VERSION_LINE))
+        );
+
+        // A program that ends badly has no version, whatever it printed.
+        assert_eq!(
+            ask("echo 'v1.0.0 (x)'; exit 3"),
+            silent("ended with status 3")
+        );
+        assert_eq!(ask("kill -9 $$"), silent("ended by a signal"));
+        assert_eq!(ask("exit 0"), silent("printed nothing"));
+        assert_eq!(ask("echo; echo '  '"), silent("printed nothing"));
+
+        // One that does not answer is stopped, not waited for: this one
+        // would run for half a minute.
+        fs::write(dir.join("how"), "exec sleep 30").unwrap();
+        let asked = Instant::now();
+        assert_eq!(
+            version_of(&program, Duration::from_millis(300)),
+            Err("no answer in time".to_string())
+        );
+        assert!(asked.elapsed() < Duration::from_secs(10));
+
+        // One that cannot be started gives the system's reason.
+        keep(&dir, PROGRAM, b"#!/no/such/interpreter\n").unwrap();
+        assert!(matches!(
+            kept(Some(&dir)),
+            Kept::Silent(why) if why.contains("No such file")
+        ));
     }
 
     /// A program that is still open for writing somewhere when it is

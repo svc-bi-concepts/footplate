@@ -295,9 +295,12 @@ preview under the mail), `decisions` (the decisions list with one
 open ask and the 156-item history open: day groups and a folded
 look-alike row), `decisions-filtered` (that history with `docs`
 in its filter), `keys` (the cheatsheet open over an open card),
-`reactions` (the conversation with the parties' reactions under
-three mails), `reactions-hover` (that conversation with the bar
-of reactions to tap floating over one mail), `reactions-zoom`
+`about` (the About card open over the yardmaster's conversation,
+naming footplate's version and the kept yardr's), `about-unfetched`
+(that card with no yardr kept), `reactions` (the conversation with
+the parties' reactions under three mails), `reactions-hover` (that
+conversation with the bar of reactions to tap floating over one
+mail), `reactions-zoom`
 (that bar with the pointer on one emoji), `notice` (the
 conversation with the notice a flows view that did not answer
 leaves under the mail), `drawer` (the conversation with the
@@ -1251,6 +1254,7 @@ folder. A change is drawn at once and kept for the next start:
   usual size. Everything that goes with the text goes with it: the left
   column, the rows, the logo. And the menu bar item, on Linux the tray's,
   which [Closing the window](#closing-the-window) has, with its mark.
+  And "about footplate", which opens [the About card](#about).
 - Appearance: light, dark or auto. Auto is the desktop's look, and follows
   it when it changes while the window is open.
 - Notifications: what the system tells of, which
@@ -1275,6 +1279,25 @@ on macOS otherwise, and `~/.config/footplate/settings.json` on Linux
 otherwise. A relative `XDG_CONFIG_HOME` is ignored. Without the file, or
 with one footplate cannot read, the window is as it was before there were
 settings: 14 pixels, auto.
+
+## About
+
+The About card says which footplate and which yardr you run. It stands over
+the window, and esc, its close button or a click outside it shuts it. Two
+doors open it: "About footplate" in the application's menu on a Mac, and
+the "about footplate" row under "This window" in the
+[settings](#settings), which is the door on Linux, where footplate has no
+application menu.
+
+- footplate: the release this is, as its build names it (`v0.6.0`).
+- yardr: what the yardr footplate fetched says to `yardr --version`, asked
+  when the card opens (`v0.14.0 (cbceebd22919)`: the release, and the
+  commit it was built from). Where footplate has fetched none, the card says
+  "not fetched yet" ([yardr, fetched](#yardr-fetched) has when it does); a
+  yardr that is kept and will not say gives the reason. A yardr you
+  installed yourself is not asked: footplate does not use it.
+
+The card looks for nothing newer, of either, and offers no update.
 
 ## Closing the window
 
@@ -1463,7 +1486,7 @@ options have no icon, so the program sees to it when it starts
 | File | Holds |
 |---|---|
 | `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a Kratos account signed in at a hosted edge |
-| `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
+| `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one; the kept one asked its version for the About card. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
 | `src/setup.rs` | the first run as yardr's commands, with no window: each run with its arguments and its JSON read, the PATH made from doctor's data, the import's questions answered, a login led by what yardr prints |
 | `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode, a hosted yard's session file beside it |
 | `src/session.rs` | following a yard on a thread, one for each yard of the settings: who the window is for, the state it starts from, trying again, or not when the device is not let in |
@@ -1501,7 +1524,9 @@ the good path and each refusal. One signature in them was made by the
 key is held to the checksums and signature v0.10.0 published, kept in
 `src/fixtures/yardr-v0.10.0`. They ask yardr.dev nothing. A program doctor
 names is fetched from the same stand-in: sent on from one address to
-another, checked, kept or run, and refused for each reason.
+another, checked, kept or run, and refused for each reason. The kept
+yardr's version is asked of a script that stands in for it, which says
+what each test writes it to say, or ends badly, or does not end.
 
 The first run is tested against a stand-in for yardr, a script that answers
 each command with the JSON a test gives it and writes down what it was

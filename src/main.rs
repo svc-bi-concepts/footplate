@@ -86,6 +86,8 @@ fn main() {
         cx.set_menus(vec![Menu {
             name: NAME.into(),
             items: vec![
+                MenuItem::action("About footplate", window::OpenAbout),
+                MenuItem::separator(),
                 MenuItem::action("Settings…", window::OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Quit footplate", Quit),

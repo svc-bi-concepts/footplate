@@ -9,6 +9,7 @@ use gpui::{Pixels, Task};
 
 use super::count_words;
 use crate::api::{self, Client};
+use crate::fetch::Kept;
 use crate::model::{Mode, Model, Outcome, Selected};
 use crate::session;
 use crate::settings;
@@ -169,6 +170,14 @@ pub(crate) enum SwitchBusy {
 pub(crate) enum AgentsBusy {
     Reading,
     Saving,
+}
+
+/// The About card, while it stands over the window: what it says of the
+/// yardr footplate keeps. None until that yardr has been asked its version,
+/// which is done when the card opens.
+#[derive(Debug)]
+pub(crate) struct About {
+    pub(crate) kept: Option<Kept>,
 }
 
 /// What the status row at the list's head is for the open yard.

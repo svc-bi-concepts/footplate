@@ -29,7 +29,7 @@ caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is. The same
 # list as scripts/shot-linux.sh keeps.
-states="yardmaster crew thread column plain plain-select lines run weighty stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer delivery"
+states="yardmaster crew thread column plain plain-select lines run weighty stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -78,11 +78,15 @@ mkdir -p "$T/home/.local/bin" "$T/config/footplate/bin" "$T/data" "$T/tmp" "$T/y
 bin_dir="$T/config/footplate/bin"
 cat > "$bin_dir/yardr" <<'EOF'
 #!/bin/sh
-# yardr for a shot alone: doctor, status and settings answer canned JSON.
+# yardr for a shot alone: doctor, status and settings answer canned JSON,
+# and --version the version of a release, which the About card shows. (Its
+# version file says 99 so that the fetch keeps it; what it says to --version
+# is a real release's.)
 D=$(dirname "$0")
 case "$1" in
 doctor) cat "$D/doctor.json" ;;
 status) cat "$D/status.json" ;;
+--version) echo "v0.14.0 (cbceebd22919)" ;;
 settings) case "$2" in get) cat "$D/settings-get.json" ;; set) echo {} ;; *) echo "{\"error\":\"a shot takes no settings $2\"}"; exit 1 ;; esac ;;
 *) echo "{\"error\":\"a shot takes no $1\"}"; exit 1 ;;
 esac

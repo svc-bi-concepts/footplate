@@ -4,6 +4,7 @@
 use gpui::{Div, Rgba, div, prelude::*, rems};
 
 use crate::api::{FlowBead, FlowStage};
+use crate::fetch::Kept;
 use crate::model::{
     self, ArrivalDetail, Route, Selected, WorkingGroup, held_by_you, is_held, waits_on_you,
 };
@@ -293,6 +294,24 @@ const ASK_MANY: &str = "questions, among your decisions";
 /// open, which are the Decisions rows' job.
 pub(crate) fn ask_words(asks: usize) -> String {
     plural(asks, "", ASK_ONE, ASK_MANY)
+}
+
+/// What the About card says of this footplate: its release as the tag
+/// names it, as yardr's own `--version` names a release.
+pub(crate) fn footplate_words() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// What the About card says of the yardr footplate keeps: its own answer
+/// to `--version`, that none is fetched yet, or why it would not say.
+/// None is what it says until the program has been asked.
+pub(crate) fn yardr_words(kept: Option<&Kept>) -> String {
+    match kept {
+        None => "reading…".to_string(),
+        Some(Kept::Nothing) => "not fetched yet".to_string(),
+        Some(Kept::Says(line)) => line.clone(),
+        Some(Kept::Silent(why)) => format!("could not say its version ({why})"),
+    }
 }
 
 /// A count in words: the zero words where none stand, else the
