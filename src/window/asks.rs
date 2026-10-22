@@ -1815,6 +1815,7 @@ impl Footplate {
         &self,
         model: &Model,
         palette: Palette,
+        top: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let now = chrono::Utc::now();
@@ -1927,7 +1928,7 @@ impl Footplate {
         if model.is_operator() {
             body = body.child(self.grants_row(model, palette, cx));
         }
-        self.column(body, palette, cx)
+        self.column(body, palette, top, cx)
     }
 
     /// The history's filter field: `/` types in it, and every word typed

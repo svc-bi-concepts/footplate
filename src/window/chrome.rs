@@ -38,14 +38,14 @@ use super::ask::group_head;
 use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
-use super::metrics::{DRAWER_WIDTH, RAIL, RAIL_LABEL, RAIL_TILE, grown};
+use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, grown};
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, run_address_of};
 use super::state::{
     Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
-    checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented, semaphore_glyph, small_button,
-    track_glyph,
+    band, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented, semaphore_glyph,
+    small_button, track_glyph,
 };
 use super::words::unread_words;
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
@@ -3652,11 +3652,17 @@ impl Footplate {
     /// yard's agents work with the operator, and the addresses a note's
     /// pages go through, each with its controls, with its own sections
     /// down the left side and the file they are kept in as a footer.
+    /// It stands at the rail's edge with no list beside it, so where the
+    /// content reaches up into the title bar (`top` pixels) it starts under
+    /// an empty band, as the list's head is one: the rail's line runs on
+    /// along its foot, and the sheet's own lines down its sides begin under
+    /// it, clear of the traffic lights.
     pub(crate) fn talk_settings(
         &self,
         palette: Palette,
+        top: f32,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let head = div()
             .p_3()
             .border_b_1()
@@ -3945,7 +3951,7 @@ impl Footplate {
             );
         // The sheet stands centred in the window, over whatever stood
         // open: its own sections, not the timetable's rows beside them.
-        div()
+        let sheet = div()
             .debug_selector(|| "settings sheet".to_string())
             .flex_1()
             .min_w_0()
@@ -4000,7 +4006,20 @@ impl Footplate {
                         )
                     })
                     .child(foot),
-            )
+            );
+        match top > 0. {
+            false => sheet.into_any_element(),
+            true => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(palette.side)
+                .child(band(top, palette).debug_selector(|| "settings band".to_string()))
+                .child(sheet.min_h_0())
+                .into_any_element(),
+        }
     }
 
     /// Another name for the yard of this card, typed in it: the form
@@ -4461,14 +4480,16 @@ impl Footplate {
     /// The rail on the window's far left: the open yard's chip on top,
     /// the three mode icons with their labels, and at the foot the
     /// settings' gear with its. Where the content reaches up into the
-    /// title bar, `top` pixels of the rail's top are left empty for the
-    /// traffic lights, which stand over them. The chip is the yard's first two letters
-    /// on its colour, so the yard picks and approvals count in is
-    /// unmistakable; a click opens the switcher. The open mode's tile
-    /// stands in the accent on the open ground, as the open row does;
-    /// the others stand quiet and brighten on hover, as quiet text does.
-    /// Each mode's tile carries what waits in it as a badge, and in
-    /// words in its tooltip: the unread mail, the open asks, the
+    /// title bar it starts with the band, `top` pixels of nothing for the
+    /// traffic lights to stand over, with its hairline at the foot; the
+    /// rail's own line down its right edge starts under the band, where
+    /// the last light would otherwise stand on it. The chip is the yard's
+    /// first two letters on its colour, so the yard picks and approvals
+    /// count in is unmistakable; a click opens the switcher. The open
+    /// mode's tile stands in the accent on the open ground, as the open
+    /// row does; the others stand quiet and brighten on hover, as quiet
+    /// text does. Each mode's tile carries what waits in it as a badge,
+    /// and in words in its tooltip: the unread mail, the open asks, the
     /// person's beads added or closed since they last had Lines open.
     /// While the yard is away the modes stand dimmed and inert, and the
     /// chip and the foot stay alive, because leaving is their job.
@@ -4486,6 +4507,7 @@ impl Footplate {
         // and has nothing current to show.
         let away = self.down.is_some() && !self.answers_under_adding();
         let counts = rail_counts(self.model.as_ref(), away);
+        let banded = top > 0.;
         let mut rail = div()
             .debug_selector(|| "rail".to_string())
             .w(px(RAIL))
@@ -4494,13 +4516,30 @@ impl Footplate {
             .flex()
             .flex_col()
             .items_center()
-            .py_2()
+            .pb_2()
             .bg(palette.side)
-            .border_r_1()
-            .border_color(palette.line)
-            // In pixels, as the title bar is: it keeps its height whatever
-            // the text, and the padding below it goes with the text.
-            .children((top > 0.).then(|| div().flex_none().h(px(top))));
+            .when(!banded, |rail| {
+                rail.pt_2().border_r_1().border_color(palette.line)
+            })
+            // The band is in pixels, as the title bar is: it keeps its
+            // height whatever the text, and the chip's margin under it
+            // goes with the text, as the padding it stands in for did.
+            // The right line is its own element, from the band's foot down,
+            // since a border would run up through the band.
+            .when(banded, |rail| {
+                rail.relative()
+                    .child(band(top, palette).debug_selector(|| "rail band".to_string()))
+                    .child(
+                        div()
+                            .debug_selector(|| "rail rule".to_string())
+                            .absolute()
+                            .top(px(top))
+                            .bottom_0()
+                            .right_0()
+                            .w(px(1.))
+                            .bg(palette.line),
+                    )
+            });
         // The open yard's chip: its first two letters on its colour.
         // The one yard the environment names has no switcher, but it
         // still has its chip, with its name alone for its words.
@@ -4514,6 +4553,7 @@ impl Footplate {
                 .id("yard chip")
                 .debug_selector(|| "yard chip".to_string())
                 .size(px(40.))
+                .when(banded, |chip| chip.mt_2())
                 .rounded_md()
                 .bg(yard_color(&self.yard, palette.dark))
                 .text_color(yard_ink(&self.yard, palette.dark))
@@ -4674,14 +4714,22 @@ impl Footplate {
     }
 
     /// The left column: the status row at its head, outside what scrolls
-    /// so it stays in place, and `body` beneath it.
+    /// so it stays in place, and `body` beneath it. Where the content
+    /// reaches up into the title bar (`top` pixels) the head is the band:
+    /// the rail's top continues into it, its row is centred on the traffic
+    /// lights and begins clear of the last, and its line runs on from the
+    /// rail's. It stands there with no status row too, empty, as a yard at
+    /// an address has none, so that the first row never stands under the
+    /// lights.
     pub(crate) fn column(
         &self,
         body: impl IntoElement,
         palette: Palette,
+        top: f32,
         cx: &mut Context<Self>,
     ) -> Div {
         let status = self.switch_rows(palette, cx);
+        let banded = top > 0.;
         div()
             // 270 pixels at the usual text size. Its rows are cut to it,
             // so it grows with the text, but never over the conversation:
@@ -4695,15 +4743,28 @@ impl Footplate {
             .bg(palette.side)
             .border_r_1()
             .border_color(palette.line)
-            .children((!status.is_empty()).then(|| {
-                div()
-                    .flex_none()
-                    .px_3()
-                    .py_2p5()
-                    .border_b_1()
-                    .border_color(palette.line)
-                    .children(status)
-            }))
+            .children(match (banded, status.is_empty()) {
+                (true, _) => Some(
+                    band(top, palette)
+                        .debug_selector(|| "list band".to_string())
+                        .pl(px(HEAD_INSET))
+                        .pr_3()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .children(status),
+                ),
+                (false, false) => Some(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .py_2p5()
+                        .border_b_1()
+                        .border_color(palette.line)
+                        .children(status),
+                ),
+                (false, true) => None,
+            })
             .child(body)
     }
 
@@ -4713,12 +4774,17 @@ impl Footplate {
         &self,
         model: &Model,
         palette: Palette,
+        top: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.mode() {
-            Mode::Chat => self.list_chat(model, palette, cx).into_any_element(),
-            Mode::Decisions => self.list_decisions(model, palette, cx).into_any_element(),
-            Mode::Timetable => self.list_timetable(model, palette, cx).into_any_element(),
+            Mode::Chat => self.list_chat(model, palette, top, cx).into_any_element(),
+            Mode::Decisions => self
+                .list_decisions(model, palette, top, cx)
+                .into_any_element(),
+            Mode::Timetable => self
+                .list_timetable(model, palette, top, cx)
+                .into_any_element(),
         }
     }
 
@@ -4744,6 +4810,7 @@ impl Footplate {
         &self,
         model: &Model,
         palette: Palette,
+        top: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let groups = [
@@ -4774,7 +4841,7 @@ impl Footplate {
         body = body.child(group_head("Yard"));
         let yard = model.yard_row();
         body = body.child(self.row(yard, Selected::Yard, palette, cx));
-        self.column(body, palette, cx)
+        self.column(body, palette, top, cx)
     }
 
     /// One bead's route as a strip: one dot per stage of its flow in

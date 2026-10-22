@@ -894,7 +894,8 @@ rm -rf "$scratch"
 
 ## Starting and stopping the yard
 
-Under the yard's line in the head, one status row: a coloured dot, the
+Under the yard's line in the head, one status row (on macOS, in the band
+at the window's top, beside the traffic lights): a coloured dot, the
 yard's state, read from `yardr status --json`, and Start or Stop at its
 right end, which run `yardr up` and `yardr down`. The yard answers:
 Running. Nothing runs: Stopped. Between them, Starting while it is
@@ -1147,7 +1148,7 @@ its card under "Decided".
 | a drag over a message's text, a double click on a word | selects it; one selection at a time, within one message |
 | `cmd+c` (`ctrl+c` on Linux) | copies what is selected, as it was written: of a message, with the Markdown marks that are not drawn, or of the line while you type in it |
 | a file dropped on the window | is added to the draft; a zip drops to its files, a folder to the files one level deep |
-| a drag that starts in the window's top 32 pixels, a double-click there (macOS) | moves the window; the double-click zooms it, minimises it or does nothing, as the system's setting says of a title bar. On macOS the content reaches the top of the window, with the traffic lights over the rail's top and no title bar drawn above; on Linux the desktop draws the title bar, and these are its own |
+| a drag that starts in the window's top 32 pixels, a double-click there (macOS) | moves the window; the double-click zooms it, minimises it or does nothing, as the system's setting says of a title bar. On macOS the content reaches the top of the window and no title bar is drawn above it: the top 32 pixels are one band across the rail and the list's head, the traffic lights over it, with a hairline along its foot from the window's left edge, the rail's own line starting under it, and the list's status row centred on the lights and clear of the last; the settings' sheet stands under an empty band; on Linux the desktop draws the title bar, and these are its own |
 | `backspace` in an empty line | removes the last attachment |
 | `tab`, `shift+tab` | the next, the previous row |
 | a click on a row | opens it |
@@ -1412,7 +1413,7 @@ options have no icon, so the program sees to it when it starts
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
 | `src/dock.rs` | macOS: the number on the dock's icon, of what waits |
-| `src/titlebar.rs` | the window's title bar: its options for each platform, and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
+| `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
 | `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON; a stand-in edge in front of it with the login flow |

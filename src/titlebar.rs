@@ -13,18 +13,34 @@
 use gpui::{App, Pixels, Point, TitlebarOptions, Window};
 
 /// The title bar's height on macOS, in pixels: the strip across the top of
-/// the window that moves it, and what the rail leaves empty for the traffic
-/// lights. Measured on macOS 26, as the window's frame less its content
-/// layout rect. An older system's is a few pixels less, which a little room
-/// to spare does not hurt.
+/// the window that moves it, and the band the rail, the list's head and the
+/// settings' sheet start with, where the traffic lights stand. Measured on
+/// macOS 26, as the window's frame less its content layout rect. An older
+/// system's is a few pixels less, which a little room to spare does not
+/// hurt.
 pub const HEIGHT: f32 = 32.;
 
 /// Where the traffic lights end, from the window's top, in pixels: on macOS
 /// 26 they are 14 high and stand 9 below it, centred in the title bar, as
-/// AppKit's standard window buttons say.
+/// AppKit's standard window buttons say. What stands level with them, a
+/// head's row, is centred on the band, which is centred on them.
 pub const LIGHTS: f32 = 23.;
 
+/// Where the traffic lights end, from the window's left, in pixels: three of
+/// them, 14 across, from 9 at the system's pitch of 23. The last stands over
+/// the rail's edge, 5 pixels past it.
+pub const LIGHTS_RIGHT: f32 = 69.;
+
+/// Where what stands level with the lights may begin, from the window's
+/// left, in pixels: about a light's width clear of the last, so that the
+/// first word of a head reads as no part of them.
+pub const CLEAR: f32 = 84.;
+
 const _: () = assert!(LIGHTS <= HEIGHT, "the title bar holds the traffic lights");
+const _: () = assert!(
+    LIGHTS_RIGHT < CLEAR,
+    "a head begins clear of the traffic lights"
+);
 
 /// How far a press on the top strip moves before it is a drag and not a
 /// click: past gpui's own 2, since a hand on a trackpad wanders while it
@@ -47,10 +63,10 @@ pub fn options(macos: bool) -> TitlebarOptions {
     }
 }
 
-/// How much of the window's top the title bar covers, which the rail leaves
-/// empty: [`HEIGHT`] where the content reaches up into it, and nothing where
+/// How much of the window's top the title bar covers, which is the band's
+/// height: [`HEIGHT`] where the content reaches up into it, and nothing where
 /// the desktop draws the title bar above the window, or in full screen,
-/// where the window has none of its own.
+/// where the window has none of its own, and there is no band.
 pub fn inset(reaches_up: bool, fullscreen: bool) -> f32 {
     if reaches_up && !fullscreen {
         HEIGHT

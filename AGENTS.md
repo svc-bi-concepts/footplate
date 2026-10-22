@@ -81,7 +81,10 @@ Setup, release and tests:
   window chrome in `src/main.rs`. A pane's top row is under the macOS
   title bar's strip (`src/titlebar.rs`): a press on it drags the window, so
   a control there still clicks, and a text field or a drag of its own does
-  not belong in the strip.
+  not belong in the strip. What stands at the rail's edge begins with
+  the strip's band (`ui::band`), so that nothing is under the traffic
+  lights: the list's head is the band, and a pane that starts there (the
+  settings' sheet) stands under an empty one.
 - A first-run step: the command in `src/setup.rs`, the screen in
   `src/window/firstrun.rs`.
 - A setting: `src/settings.rs`, then where it takes effect.

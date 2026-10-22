@@ -1060,8 +1060,8 @@ impl Render for Footplate {
             .text_color(palette.text)
             .text_size(rems(0.875));
         // Where the content reaches up into the title bar, a drag on the
-        // window's top moves it, and the rail leaves that strip to the
-        // traffic lights.
+        // window's top moves it, and the band across the rail and the list
+        // leaves that strip to the traffic lights.
         let root = self.title_strip(root, window, cx);
         let top = titlebar::inset(self.means.titlebar.is_some(), window.is_fullscreen());
         // The rail stands on the window's far left whatever shows: the
@@ -1078,27 +1078,27 @@ impl Render for Footplate {
             (Some(_), _)
                 if !matches!(self.switch_for(), SwitchFor::Far) && self.first_run.is_none() =>
             {
-                Some(self.column(div().flex_1(), palette, cx))
+                Some(self.column(div().flex_1(), palette, top, cx))
             }
             _ => None,
         };
         let root = root.children(beside);
         let shown = match (&self.down, &self.model) {
             (Some(_), _) if self.settings_open && !self.reconnecting() => {
-                root.child(self.talk_settings(palette, cx))
+                root.child(self.talk_settings(palette, top, cx))
             }
             // A yard that answered in this run and is away now stays as
             // last seen: its rows, and its open row with its sends held.
             // The settings stand over that as their sheet, with no rows
             // beside them.
             (Some(_), Some(_)) if self.reconnecting() && self.settings_open => {
-                root.child(self.talk_settings(palette, cx))
+                root.child(self.talk_settings(palette, top, cx))
             }
             (Some(_), Some(model)) if self.reconnecting() && self.first_run.is_some() => root
-                .child(self.list(model, palette, cx))
+                .child(self.list(model, palette, top, cx))
                 .children(self.first_run.clone()),
             (Some(_), Some(model)) if self.reconnecting() => root
-                .child(self.list(model, palette, cx))
+                .child(self.list(model, palette, top, cx))
                 .child(self.talk(model, palette, cx))
                 .children(self.talk_drawer(model, palette, cx)),
             (Some(why), _) => match &self.first_run {
@@ -1108,7 +1108,7 @@ impl Render for Footplate {
             // The question before stopping stands where the conversation
             // is, and what was there is back once it is answered.
             (None, Some(model)) if self.switch_question.is_some() => {
-                root.child(self.list(model, palette, cx)).child(
+                root.child(self.list(model, palette, top, cx)).child(
                     self.stop_question(
                         self.switch_question
                             .as_ref()
@@ -1120,14 +1120,16 @@ impl Render for Footplate {
             }
             // The settings stand as their sheet, with their own
             // sections, over whatever stood open: no rows beside them.
-            (None, Some(_)) if self.settings_open => root.child(self.talk_settings(palette, cx)),
+            (None, Some(_)) if self.settings_open => {
+                root.child(self.talk_settings(palette, top, cx))
+            }
             // The yard answers before its first run is over: its rows are
             // there, and the first run where a conversation will be.
             (None, Some(model)) if self.first_run.is_some() => root
-                .child(self.list(model, palette, cx))
+                .child(self.list(model, palette, top, cx))
                 .children(self.first_run.clone()),
             (None, Some(model)) => root
-                .child(self.list(model, palette, cx))
+                .child(self.list(model, palette, top, cx))
                 .child(self.talk(model, palette, cx))
                 .children(self.talk_drawer(model, palette, cx)),
             (None, None) => root,
@@ -9770,6 +9772,35 @@ yardr.dev
         assert!(!drawn(cx, "view address"));
         // The sheet starts where the rail ends: no rows stand beside it.
         assert_eq!(bounds_of(cx, "settings sheet").origin.x, px(RAIL));
+        // With no title bar of its own to stand in it starts at the top.
+        assert!(!drawn(cx, "settings band"));
+        assert_eq!(bounds_of(cx, "settings sheet").origin.y, px(0.));
+        // Where the content reaches up into the title bar the sheet stands
+        // under the band, which is empty there and runs on from the rail's
+        // along its foot, so that nothing of the sheet's is under the
+        // traffic lights, whose last stands over its edge.
+        let (strip, _) = strip_stand_in();
+        view.update(cx, |v, _| v.means.titlebar = Some(strip));
+        let (band, sheet) = (
+            bounds_of(cx, "settings band"),
+            bounds_of(cx, "settings sheet"),
+        );
+        let rail = bounds_of(cx, "rail");
+        assert!(
+            (band.left() - px(RAIL)).abs() < px(0.5)
+                && band.top().abs() < px(0.5)
+                && (band.size.height - px(titlebar::HEIGHT)).abs() < px(0.5)
+                && (band.right() - sheet.right()).abs() < px(0.5),
+            "the settings' band is {band:?}, not the title bar high from the rail to the window's edge"
+        );
+        assert!(
+            (sheet.origin.x - px(RAIL)).abs() < px(0.5)
+                && (sheet.top() - band.bottom()).abs() < px(0.5)
+                && (sheet.bottom() - rail.bottom()).abs() < px(0.5),
+            "the settings' sheet is {sheet:?}, not under the band down to the window's foot"
+        );
+        assert!(bounds_of(cx, "settings back").top() >= band.bottom());
+        view.update(cx, |v, _| v.means.titlebar = None);
         // Appearance: the look alone.
         click_on(cx, "settings section appearance");
         assert!(drawn(cx, "look auto") && drawn(cx, "look light") && drawn(cx, "look dark"));
@@ -14057,10 +14088,13 @@ yardr.dev
     }
 
     /// Where the content reaches up into the title bar, as on a Mac, the
-    /// rail leaves the traffic lights their room above its first item,
-    /// and the switcher stands level with that item; where it does not,
-    /// as on Linux and in a test window, the rail is as it was. Full
-    /// screen has no title bar of its own to leave room for.
+    /// window starts with a band across the rail and the list, the
+    /// traffic lights standing over it: the rail's line down its right
+    /// edge starts under the band, one hairline runs along its foot from
+    /// the window's left edge, and the rail's first item stands below
+    /// it, with the switcher level with that item. Where it does not, as
+    /// on Linux and in a test window, there is no band and the rail is as
+    /// it was. Full screen has no title bar of its own to leave room for.
     #[gpui::test]
     fn the_rail_leaves_the_traffic_lights_their_room_where_the_content_reaches_the_title_bar(
         cx: &mut TestAppContext,
@@ -14095,6 +14129,16 @@ yardr.dev
             view.read_with(cx, |v, _| v.means.titlebar.is_none()),
             "a test window stands in for none"
         );
+        // No band, and the list is as it was: its status row's own head.
+        for band in ["rail band", "rail rule", "list band"] {
+            assert!(!drawn(cx, band), "{band} is drawn where there is no strip");
+        }
+        let plain_rows = bounds_of(cx, "rows").top();
+        let plain_rail = bounds_of(cx, "rail");
+        assert!(
+            (plain_rail.size.width - px(RAIL)).abs() < px(1.),
+            "the rail is {plain_rail:?}, not {RAIL} wide"
+        );
 
         // With one, the chip stands below the lights, by the title bar's
         // height more than it did, and every other item of the rail with it.
@@ -14125,6 +14169,49 @@ yardr.dev
             last = at.bottom();
         }
 
+        // The band is the window's top 32 pixels, from its left edge: the
+        // rail's part and the list's, side by side, so that one hairline
+        // runs along their foot.
+        let near = |at: Pixels, want: f32| (at - px(want)).abs() < px(0.5);
+        let rows = bounds_of(cx, "rows");
+        let (rail_band, list_band) = (bounds_of(cx, "rail band"), bounds_of(cx, "list band"));
+        assert!(
+            near(rail_band.left(), 0.) && near(rail_band.top(), 0.),
+            "the rail's band starts off the window's corner: {rail_band:?}"
+        );
+        assert!(
+            near(rail_band.size.width, RAIL) && near(rail_band.size.height, titlebar::HEIGHT),
+            "the rail's band is {rail_band:?}, not the rail wide and the title bar high"
+        );
+        assert!(
+            near(list_band.left(), RAIL) && near(list_band.top(), 0.),
+            "the list's band does not start where the rail's ends: {list_band:?}"
+        );
+        assert!(
+            near(list_band.bottom(), titlebar::HEIGHT)
+                && near(rail_band.bottom(), titlebar::HEIGHT),
+            "the bands' feet do not meet: {rail_band:?} {list_band:?}"
+        );
+        assert!(
+            near(list_band.right(), f32::from(rows.right())),
+            "the list's band is {list_band:?}, not the list wide: {rows:?}"
+        );
+        assert!(
+            rows.top() >= list_band.bottom(),
+            "the list's rows stand in the band: {rows:?}"
+        );
+        // The rail's own line starts under the band, down to the rail's
+        // foot, on its right edge.
+        let rule = bounds_of(cx, "rail rule");
+        assert!(
+            near(rule.top(), titlebar::HEIGHT) && near(rule.bottom(), f32::from(rail.bottom())),
+            "the rail's line is {rule:?}, not from the band's foot to the rail's: {rail:?}"
+        );
+        assert!(
+            near(rule.right(), RAIL) && near(rule.size.width, 1.),
+            "the rail's line is {rule:?}, not one pixel on the rail's edge"
+        );
+
         // The switcher's list stands level with the chip, and the window
         // draws it where the chip is.
         click_on(cx, "yard chip");
@@ -14135,11 +14222,14 @@ yardr.dev
         );
         cx.simulate_keystrokes("escape");
 
-        // In full screen the window has none: the rail is as it was.
+        // In full screen the window has none: the rail is as it was, and
+        // the list's rows stand where they did.
         cx.update(|window, _| window.toggle_fullscreen());
         assert!((chip_off_the_top(cx) - plain).abs() < px(1.));
+        assert!((bounds_of(cx, "rows").top() - plain_rows).abs() < px(1.));
         cx.update(|window, _| window.toggle_fullscreen());
         assert!((chip_off_the_top(cx) - reached).abs() < px(1.));
+        assert!(bounds_of(cx, "rows").top() >= list_band.bottom());
     }
 
     /// Where the content reaches up into the title bar, a drag that starts
@@ -14220,12 +14310,15 @@ yardr.dev
 
     /// Where the title bar is the desktop's, which is everywhere but a Mac,
     /// the window listens for nothing on its top: a drag there waits for
-    /// nothing.
+    /// nothing, and no band stands over its rail and list.
     #[gpui::test]
     fn a_window_whose_title_bar_is_the_desktop_s_has_no_strip(cx: &mut TestAppContext) {
         let yard = Yard::start();
         let (view, cx) = opened_on_the_yard_row(&yard, 3, cx);
         assert!(view.read_with(cx, |v, _| v.means.titlebar.is_none()));
+        for band in ["rail band", "rail rule", "list band"] {
+            assert!(!drawn(cx, band), "{band} is drawn where there is no strip");
+        }
         let none = gpui::Modifiers::default();
         let at = |x: f32, y: f32| gpui::point(px(x), px(y));
         cx.simulate_mouse_down(at(700., 10.), MouseButton::Left, none);
@@ -18427,7 +18520,9 @@ yardr.dev
 
     /// A yard at an address has no status row: while it is reconnecting
     /// the quiet line is the strip at the top of the conversation, and
-    /// Send is held as on a yard of this machine.
+    /// Send is held as on a yard of this machine. Where the content
+    /// reaches up into the title bar its list still starts under the
+    /// band, which stands there empty.
     #[gpui::test]
     fn a_far_yard_that_goes_away_says_so_in_a_strip_and_holds_send(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -18454,6 +18549,20 @@ yardr.dev
         wait(cx, "the yard's conversation", |cx| {
             texts(&view, cx) == ["From afar."]
         });
+        assert!(!drawn(cx, "list band"));
+        let (strip, _) = strip_stand_in();
+        view.update(cx, |v, _| v.means.titlebar = Some(strip));
+        let (band, rows) = (bounds_of(cx, "list band"), bounds_of(cx, "rows"));
+        assert!(
+            band.top().abs() < px(0.5) && (band.size.height - px(titlebar::HEIGHT)).abs() < px(0.5),
+            "the empty band is {band:?}, not the title bar high at the window's top"
+        );
+        assert!(
+            rows.top() >= band.bottom(),
+            "the list's rows stand in the band: {rows:?}"
+        );
+        assert!(!drawn(cx, "switch state"));
+        view.update(cx, |v, _| v.means.titlebar = None);
         cx.simulate_input("Noted.");
         far.stop();
         wait(cx, "that the yard is away", |cx| {
@@ -19477,22 +19586,63 @@ yardr.dev
         });
         // The narrowest window the application opens (main.rs).
         cx.simulate_resize(gpui::size(px(616.), px(360.)));
-        let state = bounds_of(cx, "switch state");
-        let button = bounds_of(cx, "switch stop");
-        let rows = bounds_of(cx, "rows");
+        let holds = |cx: &mut VisualTestContext| {
+            let state = bounds_of(cx, "switch state");
+            let button = bounds_of(cx, "switch stop");
+            let rows = bounds_of(cx, "rows");
+            assert!(
+                state.size.height <= button.size.height + px(2.),
+                "the status row wraps in {}: {state:?} against {button:?}",
+                mode.name()
+            );
+            assert!(
+                button.top() >= state.top() - px(1.) && button.bottom() <= state.bottom() + px(1.),
+                "Stop stands off the status row in {}: {state:?} {button:?}",
+                mode.name()
+            );
+            assert!(
+                button.right() <= rows.right() + px(1.),
+                "Stop runs past the list in {}: {button:?} past {rows:?}",
+                mode.name()
+            );
+            state
+        };
+        holds(cx);
+        // With no title bar of its own to stand in, the list begins where
+        // it always did, and the row has no band.
+        assert!(!drawn(cx, "list band"), "a band in {}", mode.name());
+        let plain = bounds_of(cx, "switch dot").left() - px(RAIL);
+        assert!(plain < px(titlebar::CLEAR - RAIL), "{plain:?}");
+
+        // Where the content reaches up into the title bar the status row
+        // is the band's: centred on the traffic lights, which stand over
+        // the band's left, and its first item clear of the last. Every
+        // mode's list has the one row, so each has the room.
+        let (strip, _) = strip_stand_in();
+        view.update(cx, |v, _| v.means.titlebar = Some(strip));
+        let state = holds(cx);
+        let band = bounds_of(cx, "list band");
         assert!(
-            state.size.height <= button.size.height + px(2.),
-            "the status row wraps in {}: {state:?} against {button:?}",
+            (band.left() - px(RAIL)).abs() < px(0.5)
+                && band.top().abs() < px(0.5)
+                && (band.size.height - px(titlebar::HEIGHT)).abs() < px(0.5),
+            "the band in {} is {band:?}, not the title bar high at the rail's edge",
             mode.name()
         );
         assert!(
-            button.top() >= state.top() - px(1.) && button.bottom() <= state.bottom() + px(1.),
-            "Stop stands off the status row in {}: {state:?} {button:?}",
+            (state.center().y - px(titlebar::HEIGHT / 2.)).abs() < px(1.),
+            "the status row in {} stands at {state:?}, not centred on the traffic lights",
+            mode.name()
+        );
+        let dot = bounds_of(cx, "switch dot");
+        assert!(
+            dot.left() >= px(titlebar::CLEAR - 0.5),
+            "the status row's first item in {} stands at {dot:?}, under the traffic lights",
             mode.name()
         );
         assert!(
-            button.right() <= rows.right() + px(1.),
-            "Stop runs past the list in {}: {button:?} past {rows:?}",
+            bounds_of(cx, "rows").top() >= band.bottom(),
+            "the rows in {} stand in the band",
             mode.name()
         );
     }

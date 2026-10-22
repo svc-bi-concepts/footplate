@@ -1,5 +1,5 @@
-//! The small pieces the window draws with: its glyphs, its buttons,
-//! its segments and its checkboxes.
+//! The small pieces the window draws with: its glyphs, the band of its
+//! top, its buttons, its segments and its checkboxes.
 
 use gpui::{Context, Div, FontWeight, Pixels, Rgba, Stateful, Window, div, prelude::*, px, rems};
 
@@ -126,6 +126,22 @@ pub(crate) fn gear_glyph(color: Rgba) -> impl IntoElement {
             window.paint_path(path, color);
         }
     })
+}
+
+/// The window's top band, where the content reaches up into the title bar
+/// and the traffic lights stand over the rail's top: `top` pixels high, with
+/// the hairline at its foot. The rail, the list's head and the settings'
+/// sheet each start with one, side by side, so the hairline is one line from
+/// the window's left edge across all of them, and no line of theirs runs
+/// down through the band, under the lights. It is a least height: the words
+/// in it, at the larger text sizes, make it taller.
+pub(crate) fn band(top: f32, palette: Palette) -> Div {
+    div()
+        .flex_none()
+        .w_full()
+        .min_h(px(top))
+        .border_b_1()
+        .border_color(palette.line)
 }
 
 /// Words that take a click, without the border: the status row at the

@@ -4,6 +4,8 @@
 
 use gpui::{Div, Pixels, div, prelude::*, px, rems};
 
+use crate::titlebar;
+
 /// How high an image of a mail stands in the conversation, whatever its own
 /// size: the room is there before the image is, so nothing moves under the
 /// reader when it comes.
@@ -27,6 +29,13 @@ pub(crate) const RAIL_TILE: f32 = 52.;
 
 /// A rail label's size in pixels, fixed with its tile.
 pub(crate) const RAIL_LABEL: f32 = 10.;
+
+/// How far in from the list's left edge a head's first item stands where
+/// the content reaches up into the title bar, in pixels: the list starts
+/// at the rail's edge, and the traffic lights run 5 pixels past it, so the
+/// item begins where [`titlebar::CLEAR`] says, from the window's left. In
+/// pixels as the lights are, whatever the text.
+pub(crate) const HEAD_INSET: f32 = titlebar::CLEAR - RAIL;
 
 /// A stage cell's narrowest width in rems: a headcode with its lamp
 /// dot and the cell's padding, and the longest stage word whole.

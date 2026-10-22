@@ -52,6 +52,7 @@ impl Footplate {
         &self,
         model: &Model,
         palette: Palette,
+        top: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut body = self.list_body();
@@ -97,7 +98,7 @@ impl Footplate {
                 }
             }
         }
-        self.column(body, palette, cx)
+        self.column(body, palette, top, cx)
     }
 
     /// One row of the departures board: the expected arrival in
