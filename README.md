@@ -1652,12 +1652,15 @@ options have no icon, so the program sees to it when it starts
 | `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (not on Windows), or a TCP port of this machine with tokens and a pairing, that answers the documented JSON; a stand-in edge in front of it with the login flow |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow |
 
-The tests run without a yard and without a screen. On Windows the ones that
-start the fake yard's socket, make a symlink, read a file mode or run the
-shell stand-in for yardr below are left out (`#[cfg(unix)]`), and the rest
-run in the Windows job. The client is tried against the
+The tests run without a yard and without a screen. The yard a test starts
+with is the fake's socket, and on Windows, which has none, its TCP port, so
+a test that needs no socket runs on both. On Windows the ones that are about
+the socket, make a symlink, read a file mode, run the shell stand-in for
+yardr below or check what the window offers on a Mac or Linux alone are left
+out (`#[cfg(unix)]`), and the rest run in the Windows job. The client is
+tried against the
 fake yard for each call, and through a stand-in edge for Kratos sign-in,
 including wrong passwords and expired flows; an image and the stream, by
 its socket and at an address, with a pairing, a wrong code and a removed

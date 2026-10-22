@@ -73,7 +73,8 @@ Setup, release and tests:
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for
   screenshots, named by `FOOTPLATE_SHOT`.
 - `src/fake.rs`: a yard for tests (socket or TCP, scripted JSON, tokens and
-  pairing; no TLS).
+  pairing; no TLS). `Yard::start()` is the socket's on unix and the TCP
+  one's on Windows.
 - `src/fixtures/`: `shot-page.png`, and the published yardr v0.10.0 checksums
   plus signature the built-in key is held to.
 
@@ -131,7 +132,12 @@ Setup, release and tests:
   file modes, symlinks, the shell stand-in for yardr and the Linux
   desktop's taskbar sit behind `cfg(unix)` (or the OS), and so do the tests
   that need them. A call that exists on unix alone arrives with its `cfg`
-  and, where Windows would reach it, an arm that says so.
+  and, where Windows would reach it, an arm that says so. A test that
+  starts `Yard::start()` needs no gate: on Windows that yard is the TCP one
+  and `client()` reaches either. One that names the socket (`socket()`,
+  `start_at`, `Env { socket }` for "this machine"), asserts what only the
+  socket does (its request text, `is_remote()`), or checks what the window
+  offers on one system alone, is `#[cfg(unix)]`.
 - Gate: `.yardr/test` (`cargo fmt --check`, `clippy -D warnings`,
   `cargo test`, `cargo build`). Landing runs the base copy of that
   script, not yours. It runs on a Mac; `.github/workflows/windows.yml`
