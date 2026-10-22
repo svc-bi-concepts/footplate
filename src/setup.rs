@@ -1172,8 +1172,9 @@ impl Drop for Login {
 
 /// A stand-in for yardr, for the tests of this module and of the window's
 /// first run: a script that answers each command with the JSON a file
-/// gives for it, and writes down what it was called with.
-#[cfg(test)]
+/// gives for it, and writes down what it was called with. A shell script,
+/// so a unix one's.
+#[cfg(all(test, unix))]
 pub mod standin {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -1399,7 +1400,8 @@ exit 0
     }
 }
 
-#[cfg(test)]
+// The tests run the stand-in, which only a unix system has a shell for.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;

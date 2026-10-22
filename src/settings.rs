@@ -2113,6 +2113,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn removing_an_unpaired_symlink_leaves_it_and_its_target_alone() {
         use std::os::unix::fs::symlink;
@@ -2508,6 +2509,9 @@ mod tests {
         )));
     }
 
+    // Its paths are a unix system's: `/elsewhere` is no absolute path on
+    // Windows, which `file_under_appdata`'s test stands for.
+    #[cfg(unix)]
     #[test]
     fn the_file_is_where_the_platform_has_a_program_s_configuration() {
         let os = |s: &str| Some(OsString::from(s));
@@ -2544,5 +2548,19 @@ mod tests {
             file_under(true, os("/elsewhere"), None),
             Some(PathBuf::from("/elsewhere/footplate/settings.json"))
         );
+    }
+
+    #[test]
+    fn on_windows_the_file_is_under_appdata_when_that_is_a_whole_path() {
+        // Whole on any system this runs on: the temp dir stands for the
+        // profile's `AppData\Roaming`.
+        let roaming = std::env::temp_dir().join("Roaming");
+        assert_eq!(
+            file_under_appdata(Some(roaming.clone().into_os_string())),
+            Some(roaming.join("footplate").join("settings.json"))
+        );
+        assert_eq!(file_under_appdata(Some(OsString::from("Roaming"))), None);
+        assert_eq!(file_under_appdata(Some(OsString::new())), None);
+        assert_eq!(file_under_appdata(None), None);
     }
 }

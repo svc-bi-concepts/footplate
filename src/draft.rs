@@ -1397,11 +1397,15 @@ mod tests {
         std::fs::write(root.join("b.pdf"), PDF).unwrap();
         std::fs::write(root.join("a.pdf"), PDF).unwrap();
         // A folder within is not walked into, and a symlink is not
-        // followed: neither attaches, silently.
+        // followed: neither attaches, silently. Making a symlink takes a
+        // privilege on Windows, so the links are a unix system's.
         std::fs::create_dir(root.join("more")).unwrap();
         std::fs::write(root.join("more").join("c.pdf"), PDF).unwrap();
-        std::os::unix::fs::symlink(root.join("a.pdf"), root.join("link.pdf")).unwrap();
-        std::os::unix::fs::symlink(root.join("more"), root.join("morer")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("a.pdf"), root.join("link.pdf")).unwrap();
+            std::os::unix::fs::symlink(root.join("more"), root.join("morer")).unwrap();
+        }
 
         // In the order of their names.
         let found = dropped(&root, Some(1024), 64, 0);

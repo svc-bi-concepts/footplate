@@ -7,6 +7,11 @@
 //! conversations a person has with this yard's crew and with the crew a
 //! linked yard exposes, as `yardr chat` shows them.
 
+// The tests that start the socket fake, or a shell, are a unix system's and
+// are left out on Windows: what only they use, helpers and imports, is unused
+// there. Only that build allows it; the others still fail on dead code.
+#![cfg_attr(all(test, not(unix)), allow(dead_code, unused_imports))]
+
 mod api;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod dock;

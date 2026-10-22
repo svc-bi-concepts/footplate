@@ -1112,7 +1112,9 @@ fn send_progress(progress: &async_channel::Sender<String>, line: &[u8]) {
     }
 }
 
-#[cfg(test)]
+// The fetch is a unix one (`target_of` names no yardr for Windows), and so are
+// its tests: they read file modes and make symlinks.
+#[cfg(all(test, unix))]
 mod tests {
     use std::io::Cursor;
     use std::net::{TcpListener, TcpStream};

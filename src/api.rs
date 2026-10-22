@@ -3582,6 +3582,7 @@ mod tests {
     /// A secret is given in its own call, by the socket and at an address
     /// alike: the value is in the call's body, and in nothing that comes
     /// back of the call, whatever the yard does with it.
+    #[cfg(unix)]
     #[test]
     fn a_secret_is_given_by_the_socket_and_at_an_address() {
         const VALUE: &str = "bk-live-3f9a";
@@ -3658,6 +3659,7 @@ mod tests {
     /// A run ask is approved in its own call, which names the ask and
     /// nothing of the command: in their order on the socket, by name at an
     /// address, as the yard takes them on each.
+    #[cfg(unix)]
     #[test]
     fn a_run_ask_is_approved_by_the_socket_and_at_an_address() {
         for yard in [Yard::start(), Yard::start_tcp()] {
@@ -3728,6 +3730,7 @@ mod tests {
     /// the preset pick counting the ask's options, and exactly one of the
     /// typed values and the picked candidate: by name on the socket and
     /// at an address alike, as the yard takes them on each.
+    #[cfg(unix)]
     #[test]
     fn a_setup_ask_is_approved_with_its_preset_and_its_account() {
         const VALUE: &str = "ops@example.com";
@@ -3843,6 +3846,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_setup_ask_in_the_queue_and_on_the_bead() {
         let yard = Yard::start();
@@ -3919,6 +3923,7 @@ mod tests {
 
     /// A setup ask on a pack already applied: its standing file holds
     /// every account name, or the card names the ones it misses.
+    #[cfg(unix)]
     #[test]
     fn a_setup_ask_on_a_pack_already_applied_names_what_stands() {
         let yard = Yard::start();
@@ -3950,6 +3955,7 @@ mod tests {
         assert_eq!(missing.missing, ["COURIER_REGION"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_run_ask_in_the_queue_and_on_the_bead() {
         let yard = Yard::start();
@@ -4088,6 +4094,7 @@ mod tests {
         assert!(!ran.failed);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_secret_ask_in_the_queue_and_on_the_bead() {
         let yard = Yard::start();
@@ -4149,6 +4156,7 @@ mod tests {
 
     /// The same client, the same requests, the same answers, whichever way
     /// the yard is reached.
+    #[cfg(unix)]
     #[test]
     fn a_call_an_image_and_the_stream_by_the_socket_and_at_an_address() {
         for yard in [Yard::start(), Yard::start_tcp()] {
@@ -4236,6 +4244,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn stopping_an_idle_event_stream_unblocks_its_reader() {
         let yard = Yard::start();
@@ -4253,6 +4262,7 @@ mod tests {
         reader.join().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn at_an_address_a_request_stands_under_user_with_the_token() {
         let yard = Yard::start_tcp();
@@ -4836,6 +4846,7 @@ mod tests {
         assert!(matches!(wrong.me(), Err(Error::Down(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn head() {
         let yard = Yard::start();
@@ -4844,6 +4855,7 @@ mod tests {
         assert_eq!(yard.asked("Head"), vec![json!({})]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn settings_with_and_without_an_operator() {
         let yard = Yard::start();
@@ -4853,6 +4865,7 @@ mod tests {
         assert_eq!(yard.client().settings().unwrap().operator, "");
     }
 
+    #[cfg(unix)]
     #[test]
     fn users() {
         let yard = Yard::start();
@@ -4870,6 +4883,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn get_user_and_the_one_the_yard_does_not_have() {
         let yard = Yard::start();
@@ -4889,6 +4903,7 @@ mod tests {
         assert_eq!(err.to_string(), "user nobody: not found");
     }
 
+    #[cfg(unix)]
     #[test]
     fn crew_with_the_fields_that_may_be_absent() {
         let yard = Yard::start();
@@ -4923,6 +4938,7 @@ mod tests {
     /// fields, which `Crew` serves only while true: what is present reads
     /// as served, and what is absent reads false, as on a yard from before
     /// it served them.
+    #[cfg(unix)]
     #[test]
     fn crew_at_a_login_screen_carry_it_on_their_fields() {
         let yard = Yard::start();
@@ -4956,6 +4972,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn arrivals_come_with_their_rows_in_arrival_order() {
         let yard = Yard::start();
@@ -5008,6 +5025,7 @@ mod tests {
         assert_eq!(rows[2].tone.as_str(), "amber");
     }
 
+    #[cfg(unix)]
     #[test]
     fn arrivals_from_a_yard_with_no_object_are_its_bare_rows() {
         let yard = Yard::start();
@@ -5028,6 +5046,7 @@ mod tests {
         assert_eq!(yard.client().arrivals().unwrap(), Arrivals::default());
     }
 
+    #[cfg(unix)]
     #[test]
     fn flows_come_with_depots_flows_stages_beads_lamps_and_totals() {
         let yard = Yard::start();
@@ -5142,6 +5161,7 @@ mod tests {
         assert_eq!(yard.client().flows().unwrap(), Flows::default());
     }
 
+    #[cfg(unix)]
     #[test]
     fn source_grants_come_with_each_call_s_own_grant() {
         let yard = Yard::start();
@@ -5207,6 +5227,7 @@ mod tests {
         assert!(yard.client().source_grants().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn null_where_a_list_is_promised_is_the_empty_list() {
         let yard = Yard::start();
@@ -5228,6 +5249,7 @@ mod tests {
         assert_eq!(yard.client().user_inbox("jo", 1).unwrap(), Inbox::default());
     }
 
+    #[cfg(unix)]
     #[test]
     fn peers_with_the_roster() {
         let yard = Yard::start();
@@ -5261,6 +5283,7 @@ mod tests {
         assert!(peers[1].trust.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn user_inbox() {
         let yard = Yard::start();
@@ -5283,6 +5306,7 @@ mod tests {
         assert!(!inbox.mail[0].read);
     }
 
+    #[cfg(unix)]
     #[test]
     fn ack_user_inbox_answers_nothing() {
         let yard = Yard::start();
@@ -5294,6 +5318,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn user_notifications_and_ack() {
         let yard = Yard::start();
@@ -5335,6 +5360,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn user_asks_open_oldest_first_with_what_was_decided() {
         let yard = Yard::start();
@@ -5401,6 +5427,7 @@ mod tests {
         assert!(asks.open[1].identity.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn bead_whole_with_options_recommendation_and_state() {
         let yard = Yard::start();
@@ -5484,6 +5511,7 @@ mod tests {
         assert!(bead.asks[1].identity.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn null_where_a_bead_lists_are_promised_is_no_lists() {
         let yard = Yard::start();
@@ -5498,6 +5526,7 @@ mod tests {
         assert_eq!(bead.asks, vec![]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn answer_defer_decline_and_note_write_what_they_are_given() {
         let yard = Yard::start();
@@ -5596,6 +5625,7 @@ mod tests {
         assert!(!bare.notified("jo"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn null_where_asks_are_promised_is_no_asks() {
         let yard = Yard::start();
@@ -5611,6 +5641,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn mail_and_what_the_yard_refuses() {
         let yard = Yard::start();
@@ -5635,6 +5666,7 @@ mod tests {
         assert!(!err.not_found());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_reaction_is_put_and_taken_away() {
         let yard = Yard::start();
@@ -5664,6 +5696,7 @@ mod tests {
         assert_eq!(err.to_string(), "no such method React");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_letter_carries_its_parties_reactions_or_none() {
         let yard = Yard::start();
@@ -5693,6 +5726,7 @@ mod tests {
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
     const HASH: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
 
+    #[cfg(unix)]
     #[test]
     fn the_cap_on_a_file_is_the_yard_s_or_8_mib() {
         let yard = Yard::start();
@@ -5707,6 +5741,7 @@ mod tests {
         assert_eq!(yard.client().settings().unwrap().blob_cap(), 8388608);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_count_on_a_letter_is_the_yard_s_or_64() {
         let yard = Yard::start();
@@ -5721,6 +5756,7 @@ mod tests {
         assert_eq!(yard.client().settings().unwrap().files_cap(), 64);
     }
 
+    #[cfg(unix)]
     #[test]
     fn put_blob_then_mail_with_the_hash() {
         let yard = Yard::start();
@@ -5770,6 +5806,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_image_by_its_hash_and_the_one_the_yard_does_not_hold() {
         let yard = Yard::start();
@@ -5802,6 +5839,7 @@ mod tests {
         assert!(matches!(yard.client().blob(HASH), Err(Error::Down(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_letter_and_a_mail_event_name_their_images() {
         let yard = Yard::start();
@@ -5854,6 +5892,7 @@ mod tests {
     /// The files of a hook delivery are asked by the delivery's seq, by the
     /// socket and at an address alike: each as the yard holds it or with
     /// the reason it did not take it, and none while it has fetched none.
+    #[cfg(unix)]
     #[test]
     fn a_delivery_s_files_are_asked_by_the_socket_and_at_an_address() {
         for yard in [Yard::start(), Yard::start_tcp()] {
@@ -5914,6 +5953,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn mail_peer() {
         let yard = Yard::start();
@@ -5961,6 +6001,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn conversation_with_a_crew_member_and_with_one_of_a_linked_yard() {
         let yard = Yard::start();
@@ -5992,6 +6033,7 @@ mod tests {
 
     /// A yard that holds the conversation with the yardmaster, the mails
     /// 1 to `n`.
+    #[cfg(unix)]
     fn long_conversation(n: u64) -> Yard {
         let yard = Yard::start();
         yard.converse(
@@ -6003,6 +6045,7 @@ mod tests {
         yard
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_conversation_is_read_from_its_newest_end_a_page_at_a_time() {
         let yard = long_conversation(120);
@@ -6038,6 +6081,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_yard_that_refuses_pages_is_asked_for_the_conversation_whole() {
         let yard = long_conversation(120);
@@ -6067,6 +6111,7 @@ mod tests {
         assert_eq!(yard.asked("Conversation").len(), 4);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_yard_that_answers_all_to_a_page_has_no_more() {
         let yard = Yard::start();
@@ -6082,6 +6127,7 @@ mod tests {
         assert_eq!(yard.asked("Conversation").len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_long_reply_comes_in_chunks() {
         let yard = Yard::start();
@@ -6100,6 +6146,7 @@ mod tests {
         assert_eq!(got[19].text, text);
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_yard_is_an_error_and_no_panic() {
         let dir = tempfile::tempdir().unwrap();
@@ -6120,6 +6167,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn what_is_no_reply_is_an_error_and_no_panic() {
         let yard = Yard::start();
@@ -6131,6 +6179,7 @@ mod tests {
         assert!(matches!(yard.client().head(), Err(Error::Protocol(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_call_refused_by_a_server_that_replaces_itself_is_made_again() {
         let yard = Yard::start();
@@ -6144,6 +6193,7 @@ mod tests {
         assert_eq!(yard.asked("Head").len(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_call_names_the_client_and_no_revision() {
         let yard = Yard::start();
@@ -6167,6 +6217,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_stream_gives_the_events_after_a_seq_until_it_ends() {
         let yard = Yard::start();
@@ -6216,6 +6267,7 @@ mod tests {
         assert!(events.next().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_stream_gives_only_what_is_after_the_seq() {
         let yard = Yard::start();
@@ -6316,7 +6368,10 @@ mod tests {
 
     /// The connection to a yard at an address asks the other end after
     /// half a minute's silence, then every ten seconds, and is dead after
-    /// three asked with no answer: within about a minute.
+    /// three asked with no answer: within about a minute. Windows takes the
+    /// time and the interval in one call and has none to read them back
+    /// with, so this is the other systems' to check.
+    #[cfg(not(windows))]
     #[test]
     fn a_connection_to_an_address_is_found_dead_within_a_minute() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -6363,6 +6418,7 @@ mod tests {
         assert!(!bare.timetable_news("jo"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn timetable_news_reads_the_gap_for_mine_added_or_closed() {
         let yard = Yard::start();
@@ -6392,6 +6448,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn timetable_news_asks_nothing_where_there_is_no_gap() {
         let yard = Yard::start();
@@ -6410,6 +6467,7 @@ mod tests {
         assert!(yard.streams_asked().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn timetable_news_leaves_the_stream_past_its_seq() {
         let yard = Yard::start();
@@ -6425,6 +6483,7 @@ mod tests {
         assert_eq!(yard.streams_asked(), vec![20]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn timetable_news_leaves_a_stream_that_outruns_its_gap() {
         let yard = Yard::start();
@@ -6444,6 +6503,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn timetable_news_reads_past_ten_thousand_events() {
         let yard = Yard::start();
