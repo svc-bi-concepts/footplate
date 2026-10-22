@@ -84,39 +84,47 @@ tree whose version is the tag:
 
     scripts/release.sh v0.4.0 [out-dir]
 
-It builds both macOS targets, bundles each as above and zips the bundles,
-then builds both Linux targets in the shot's Debian container (arm64
-natively, amd64 emulated, which takes a while the first time) and packs
-each binary with README.md, LICENSE and NOTICE, with one `checksums.txt`
-over the four archives. The archives go to out-dir, else to `dist/`. The
+It builds both macOS targets, bundles each as above, zips the bundle and
+makes a disk image of it, then builds both Linux targets in the shot's
+Debian container (arm64 natively, amd64 emulated, which takes a while the
+first time) and packs each binary with README.md, LICENSE and NOTICE, with
+one `checksums.txt` over the six archives. The archives go to out-dir, else
+to `dist/`. The disk image is a compressed read-only HFS+ volume named
+Footplate, made with `hdiutil create`. It holds the bundle beside a link to
+`/Applications`, so installing is a drag. The zip stays as it was. The
 Linux binaries link Debian 13's glibc and loaders, so they run on
 distributions as new as that.
 
-The macOS apps are signed ad hoc and not notarized unless the release is
-asked for more, and says so. With both `FOOTPLATE_RELEASE_SIGN_IDENTITY` (the
-identity's name, as `security find-identity -v -p codesigning` lists it) and
+The macOS apps are signed ad hoc and not notarized, and the disk images not
+signed, unless the release is asked for more, and says so. With both
+`FOOTPLATE_RELEASE_SIGN_IDENTITY` (the identity's name, as `security
+find-identity -v -p codesigning` lists it) and
 `FOOTPLATE_RELEASE_NOTARY_PROFILE` (a `notarytool` keychain profile) set,
 each app is signed with that identity as above, sent to Apple's notary
 service in a zip (`xcrun notarytool submit --wait`: minutes, as a rule) and,
 once Apple has accepted it, stapled with the ticket. The zip that ships is
 made from the stapled app, so the app opens on any Mac with no "unidentified
 developer" block (a downloaded app still asks once whether to open it, and
-says that Apple checked it), and `checksums.txt` is of that zip:
+says that Apple checked it). The release makes the disk image from that
+stapled app, signs it with the same identity, sends it to the notary service
+in its turn and staples it, so the image holds a ticket of its own.
+`checksums.txt` covers the zip and the image as they ship:
 
     FOOTPLATE_RELEASE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID1234)" \
     FOOTPLATE_RELEASE_NOTARY_PROFILE=yardr-notary \
       scripts/release.sh v0.4.0
 
-A submission Apple does not accept fails the release, which prints the notary
-service's log of it. One variable without the other is an error before
-anything is built, and so are both on a system that is not macOS (a release
-is built on macOS in any case). The two are named after yardr's own
-(`YARDR_RELEASE_SIGN_IDENTITY`, `YARDR_RELEASE_NOTARY_PROFILE`) and take the
-same values, so one setup serves both repositories: the certificate and its
-key in the login keychain, an App Store Connect API key, and `xcrun
-notarytool store-credentials`, once per Mac, are in yardr's `docs/install.md`
-under "Signed darwin binaries", and are not repeated here. The identity's key
-is read from the login keychain: the Mac must be logged in with that keychain
+A submission Apple does not accept, of an app or of an image, fails the
+release, which prints the notary service's log of it. One variable without
+the other is an error before anything is built, and so are both on a system
+that is not macOS (a release is built on macOS in any case). The two are
+named after yardr's own (`YARDR_RELEASE_SIGN_IDENTITY`,
+`YARDR_RELEASE_NOTARY_PROFILE`) and take the same values, so one setup
+serves both repositories: the certificate and its key in the login
+keychain, an App Store Connect API key, and `xcrun notarytool
+store-credentials`, once per Mac, are in yardr's `docs/install.md` under
+"Signed darwin binaries", and are not repeated here. The identity's key is
+read from the login keychain: the Mac must be logged in with that keychain
 unlocked, and the key must let `codesign` use it without asking.
 
 With the yard a release bead cuts the release instead: `build` makes the
@@ -135,10 +143,11 @@ from there:
 
 - `build` refuses a bad title, a version that is not `Cargo.toml`'s, an
   existing release or tag, a dirty tree, or a checkout that is not the
-  remote's `main`; builds the four archives and `checksums.txt` with
+  remote's `main`; builds the six archives and `checksums.txt` with
   `scripts/release.sh`; tags the base commit, pushes the tag, and makes
-  the GitHub release; notes on the bead whether the macOS apps came out
-  signed and notarized or ad hoc, and the five signing commands.
+  the GitHub release; notes on the bead whether the macOS apps and disk
+  images came out signed and notarized or ad hoc and unsigned, and the five
+  signing commands.
 - `sign` asks mckean whether `checksums.txt.minisig` is uploaded. Run the
   five commands from the build's note, in a directory of their own, then
   Done. Each names the version, so a stale file or a wrong release shows
@@ -181,15 +190,16 @@ clone has checked out. A fix upstream is mirrored here, and a fix here
 belongs upstream too.
 
 The group runs `scripts/release.sh` as the operator, so for the macOS apps
-to come out signed and notarized it needs the two variables above in its
-environment, and the Mac logged in as that operator. An exec group takes
+and disk images to come out signed and notarized it needs the two variables
+above in its environment, and the Mac logged in as that operator. An exec group takes
 them from an `env_file`, a `0600` file of `KEY=VALUE` lines the store never
 holds (yardr's `docs/groups.md`, "Outbound credentials"):
 
     yardr group set footplate-release env_file=~/.yardr/groups/footplate-release.env
 
-Without them the release is made, with the apps signed ad hoc. The build's
-note says which it was, so it shows before the checksums are signed.
+Without them the release is made, with the apps signed ad hoc and the images
+unsigned. The build's note says which it was, so it shows before the
+checksums are signed.
 
 A builder with a bead to prove takes a picture of the window with
 `scripts/shot-linux.sh`, from the worktree, after the last commit:

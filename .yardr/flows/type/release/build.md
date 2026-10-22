@@ -2,14 +2,14 @@ summary: The release group builds the archives, tags the base, makes the GitHub 
 
 The release group works this stage
 (`scripts/release-stage build`, README "Building"): it
-builds the four archives and `checksums.txt` from the depot's base, tags
+builds the six archives and `checksums.txt` from the depot's base, tags
 that commit, pushes the tag, and makes the GitHub release with the bead's
 body as its notes. It then notes the five signing commands on the bead, for
 the version, and reports done. No agent works this stage by hand.
 
 Before the bead leaves as `done`:
 
-- the release exists, with the four archives and `checksums.txt`, unsigned;
+- the release exists, with the six archives and `checksums.txt`, unsigned;
 - a note on the bead has the five signing commands.
 
 Outcomes:

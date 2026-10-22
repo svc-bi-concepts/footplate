@@ -1,8 +1,10 @@
 #!/bin/sh
 # Builds everything a footplate release carries, on this Mac: the two macOS
-# zips, one per darwin target, each holding the Footplate.app bundle, and
-# the two Linux archives, one per arch, each holding the binary, README.md,
-# LICENSE and NOTICE, with one checksums.txt (sha256) over the four.
+# zips, one per darwin target, each holding the Footplate.app bundle, the two
+# disk images (dmg) of the same apps, each holding the bundle and a link to
+# /Applications to drag it onto, and the two Linux archives, one per arch,
+# each holding the binary, README.md, LICENSE and NOTICE, with one
+# checksums.txt (sha256) over the six.
 # Run it from anywhere: `scripts/release.sh <version> [out-dir]`.
 # <version> is the tag (v0.4.0) and must equal Cargo.toml's version, and the
 # tree must be clean, else the script refuses. The archives go to out-dir,
@@ -14,8 +16,10 @@
 # together, sign each macOS app with that "Developer ID Application"
 # identity of the keychain (scripts/bundle-mac.sh), have Apple notarize it
 # under that notarytool keychain profile, and staple the ticket to it before
-# it is zipped for the release (README.md, "Building"). With neither, the
-# apps are signed ad hoc and not notarized. They are named after yardr's
+# it is zipped for the release; the disk image is made from the stapled app,
+# and is signed, notarized and stapled in its turn (README.md, "Building").
+# With neither, the apps are signed ad hoc and the images not signed, and
+# nothing is notarized. The two variables are named after yardr's
 # YARDR_RELEASE_SIGN_IDENTITY and YARDR_RELEASE_NOTARY_PROFILE, and take the
 # same values.
 set -e
@@ -68,15 +72,23 @@ if [ "$(uname -s)" != Darwin ]; then
     echo "release.sh: a release is built on macOS" >&2
     exit 1
 fi
-for tool in cargo docker ditto shasum file; do
+for tool in cargo docker ditto hdiutil shasum file; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "release.sh: $tool is not on PATH" >&2
         exit 1
     fi
 done
 if [ -z "$identity" ]; then
-    echo "release.sh: the macOS apps are signed ad hoc and not notarized (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set)" >&2
+    echo "release.sh: the macOS apps are signed ad hoc and not notarized; the disk images are neither signed nor notarized (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set)" >&2
 fi
+
+# What a release carries, in the order checksums.txt lists it.
+archives="Footplate_${number}_darwin_arm64.zip
+Footplate_${number}_darwin_amd64.zip
+Footplate_${number}_darwin_arm64.dmg
+Footplate_${number}_darwin_amd64.dmg
+footplate_${number}_linux_arm64.tar.gz
+footplate_${number}_linux_amd64.tar.gz"
 
 work=$(mktemp -d)
 stage_out=$work/out
@@ -118,9 +130,22 @@ notary_field() {
     printf '%s\n' "$2" | sed -n 's/.*"'"$1"'" *: *"\([^"]*\)".*/\1/p' | head -n 1
 }
 
-# Has Apple notarize the signed app whose zip is $2, and staples the ticket to
-# the app $3, so that it opens without asking Apple and the zip that ships
-# holds it. $1 names the app in the messages.
+# The app as the disk image a Mac mounts: the app and a link to /Applications
+# beside it, for the drag that installs it. The image holds what the directory
+# $1 holds, which is the app and nothing else, so the link is made there, once
+# the zips are done with it; $2 is the image. The filesystem is named, as
+# hdiutil's default is its own to change and a release should come out the
+# same image on any Mac.
+dmg_app() {
+    ln -s /Applications "$1/Applications"
+    hdiutil create -volname Footplate -srcfolder "$1" -fs HFS+ -format UDZO "$2" >&2
+}
+
+# Has Apple notarize the signed file $2 and staples the ticket to $3, so that
+# it opens without asking Apple. For an app, $2 is its zip and $3 the app, and
+# the zip that ships is made again from it, to hold the ticket; for a disk
+# image both are the image, which is the file that ships. $1 names what is
+# notarized in the messages, as each arch has two submissions.
 notarize() {
     echo "release.sh: $1: signed; waiting for Apple's notary service (minutes, as a rule)" >&2
     # json, as the normal format is for reading: the id and the status are
@@ -133,7 +158,7 @@ notarize() {
     status=$(notary_field status "$answer")
     id=$(notary_field id "$answer")
     if [ "$submit_exit" -ne 0 ] || [ "$status" != Accepted ]; then
-        echo "release.sh: $1: Apple did not notarize the app (status \"$status\", submission $id); its log:" >&2
+        echo "release.sh: $1: Apple did not notarize it (status \"$status\", submission $id); its log:" >&2
         if [ -n "$id" ]; then
             xcrun notarytool log "$id" --keychain-profile "$profile" >&2 || true
         else
@@ -177,9 +202,22 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
         # Apple takes the zip as it stands. The ticket it answers with goes to
         # the app, and the zip is made again from the stapled app, so that
         # the one that ships, and its line in checksums.txt, holds the ticket.
-        notarize "macOS $arch" "$zip" "$work/mac-$arch/Footplate.app"
+        notarize "macOS $arch app" "$zip" "$work/mac-$arch/Footplate.app"
         echo "release.sh: macOS $arch: zipping the stapled app again" >&2
         zip_app "$work/mac-$arch" "$zip"
+    fi
+    # The image is made from the app as it ships, stapled or not.
+    dmg=$stage_out/Footplate_${number}_darwin_${arch}.dmg
+    echo "release.sh: macOS $arch: imaging $dmg" >&2
+    dmg_app "$work/mac-$arch" "$dmg"
+    if [ -n "$identity" ]; then
+        # Apple takes an image only when its maker has signed it, and the
+        # signature is checked here as the app's is, before the wait. The
+        # ticket is stapled to the image itself, whose line in checksums.txt
+        # is of it. The hardened runtime is for code, which an image is not.
+        codesign --force --sign "$identity" --timestamp "$dmg" >&2
+        codesign --verify --strict "$dmg" >&2
+        notarize "macOS $arch disk image" "$dmg" "$dmg"
     fi
 done
 
@@ -248,28 +286,17 @@ done
 docker pull -q debian:13 >&2 \
     || echo "release.sh: could not restore the native debian:13 image" >&2
 
-(cd "$stage_out" && shasum -a 256 \
-    "Footplate_${number}_darwin_arm64.zip" \
-    "Footplate_${number}_darwin_amd64.zip" \
-    "footplate_${number}_linux_arm64.tar.gz" \
-    "footplate_${number}_linux_amd64.tar.gz" > checksums.txt)
+# The names have no spaces, so the list splits on its lines.
+# shellcheck disable=SC2086
+(cd "$stage_out" && shasum -a 256 $archives > checksums.txt)
 
 mkdir -p "$out"
 rm -f "$out/checksums.txt"
-for f in \
-        "Footplate_${number}_darwin_arm64.zip" \
-        "Footplate_${number}_darwin_amd64.zip" \
-        "footplate_${number}_linux_arm64.tar.gz" \
-        "footplate_${number}_linux_amd64.tar.gz"; do
+for f in $archives; do
     mv "$stage_out/$f" "$out/$f"
 done
 mv "$stage_out/checksums.txt" "$out/checksums.txt"
 
-for f in \
-        "$out/Footplate_${number}_darwin_arm64.zip" \
-        "$out/Footplate_${number}_darwin_amd64.zip" \
-        "$out/footplate_${number}_linux_arm64.tar.gz" \
-        "$out/footplate_${number}_linux_amd64.tar.gz" \
-        "$out/checksums.txt"; do
-    echo "$f"
+for f in $archives checksums.txt; do
+    echo "$out/$f"
 done

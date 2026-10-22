@@ -121,7 +121,7 @@ printf '%s\n' "${FAKE_MINISIGN_OUT:-Signature and comment signature verified}"
 exit "${FAKE_MINISIGN_RC:-0}"
 EOF
 
-# fakebuild stands in for scripts/release.sh: the four footplate archives
+# fakebuild stands in for scripts/release.sh: the six footplate archives
 # and a checksums.txt over them, and a log of where it ran, with what cache
 # and with which of the signing variables the group's environment gave it.
 cat >"$bin/fakebuild" <<'EOF'
@@ -136,8 +136,12 @@ cat >"$bin/fakebuild" <<'EOF'
 } >>"$FAKE_DIR/calls.log"
 number=${1#v}
 printf 'fake footplate darwin arm64 for %s\n' "$1" >"$2/Footplate_${number}_darwin_arm64.zip"
+printf 'fake footplate darwin arm64 image for %s\n' "$1" >"$2/Footplate_${number}_darwin_arm64.dmg"
 if [ "${FAKE_BUILD_OMIT:-}" != "Footplate_${number}_darwin_amd64.zip" ]; then
     printf 'fake footplate darwin amd64 for %s\n' "$1" >"$2/Footplate_${number}_darwin_amd64.zip"
+fi
+if [ "${FAKE_BUILD_OMIT:-}" != "Footplate_${number}_darwin_amd64.dmg" ]; then
+    printf 'fake footplate darwin amd64 image for %s\n' "$1" >"$2/Footplate_${number}_darwin_amd64.dmg"
 fi
 printf 'fake footplate linux arm64 for %s\n' "$1" >"$2/footplate_${number}_linux_arm64.tar.gz"
 printf 'fake footplate linux amd64 for %s\n' "$1" >"$2/footplate_${number}_linux_amd64.tar.gz"
@@ -145,7 +149,7 @@ if [ "${FAKE_BUILD_EXTRA:-}" = yes ]; then
     printf 'unexpected release asset\n' >"$2/unexpected.txt"
 fi
 # shellcheck disable=SC2086 # $FAKE_SUM is a list
-(cd "$2" && $FAKE_SUM Footplate_*_darwin_*.zip footplate_*_linux_*.tar.gz >checksums.txt)
+(cd "$2" && $FAKE_SUM Footplate_*_darwin_*.zip Footplate_*_darwin_*.dmg footplate_*_linux_*.tar.gz >checksums.txt)
 EOF
 # fake xcrun answers stapler's validate from a canned line and exit status.
 cat >"$bin/xcrun" <<'EOF'
@@ -343,19 +347,22 @@ lack "fakebuild"
 lack "gh release create"
 ok "build refuses a version that is not Cargo.toml's"
 
-# A partial archive set is refused before the tag or release is created.
-begin missing-archive
-repo
-show "footplate v0.3.0" "notes"
-run build "YARDR_DEPOT_PATH=$checkout" \
-    "FAKE_BUILD_OMIT=Footplate_0.3.0_darwin_amd64.zip"
-want "yardr bead done footplate-rel1 --outcome failed --note -"
-want "the build left no Footplate_0.3.0_darwin_amd64.zip"
-lack "gh release create"
-if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
-    fail "missing-archive: a tag was made for a partial build"
-fi
-ok "build refuses a missing archive"
+# A partial archive set is refused before the tag or release is created,
+# whether it lacks a zip or a disk image.
+for omitted in Footplate_0.3.0_darwin_amd64.zip Footplate_0.3.0_darwin_amd64.dmg; do
+    begin "missing-$omitted"
+    repo
+    show "footplate v0.3.0" "notes"
+    run build "YARDR_DEPOT_PATH=$checkout" \
+        "FAKE_BUILD_OMIT=$omitted"
+    want "yardr bead done footplate-rel1 --outcome failed --note -"
+    want "the build left no $omitted"
+    lack "gh release create"
+    if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
+        fail "$name: a tag was made for a partial build"
+    fi
+    ok "build refuses a missing archive ($omitted)"
+done
 
 # An extra file is refused instead of riding along as a release asset.
 begin extra-asset
@@ -434,9 +441,12 @@ want "--title v0.3.0"
 want "--verify-tag"
 want "Footplate_0.3.0_darwin_arm64.zip"
 want "Footplate_0.3.0_darwin_amd64.zip"
+want "Footplate_0.3.0_darwin_arm64.dmg"
+want "Footplate_0.3.0_darwin_amd64.dmg"
 want "footplate_0.3.0_linux_arm64.tar.gz"
 want "footplate_0.3.0_linux_amd64.tar.gz"
 want "checksums.txt"
+want "6 archives and checksums.txt"
 printf '%s\n' "$body" | cmp -s - "$casedir/notes.md" ||
     fail "releases: the notes file is not the body's bytes"
 want "yardr bead done footplate-rel1 --note -"
@@ -447,16 +457,16 @@ want "minisign -S -s ~/.minisign/yardr-release.key -m ~/releases/v0.3.0/checksum
 want "minisign -V -P $KEY -m ~/releases/v0.3.0/checksums.txt"
 want "gh release upload v0.3.0 --repo yardr-dev/footplate ~/releases/v0.3.0/checksums.txt.minisig --clobber"
 # With neither signing variable the build is given none, and the note says
-# the macOS apps are ad hoc: a group without them would release apps another
-# Mac blocks, and this is where it shows.
+# the macOS apps are ad hoc and the disk images unsigned: a group without
+# them would release apps another Mac blocks, and this is where it shows.
 want "signing: identity=[] profile=[]"
-want "The macOS apps are signed ad hoc and not notarized"
+want "The macOS apps are signed ad hoc and not notarized, and the disk images are not signed"
 lack "notarized by Apple"
 ok "build releases"
 
 # Both signing variables reach the build as the group's environment gave
 # them, a value with spaces and brackets whole, and the note says the apps
-# are signed and notarized.
+# and the disk images are signed and notarized.
 begin releases-signed
 repo
 show "footplate v0.3.0" "notes"
@@ -464,7 +474,7 @@ run build "YARDR_DEPOT_PATH=$checkout" \
     "FOOTPLATE_RELEASE_SIGN_IDENTITY=Developer ID Application: Stand In (ABCDE12345)" \
     "FOOTPLATE_RELEASE_NOTARY_PROFILE=stand-in-profile"
 want "signing: identity=[Developer ID Application: Stand In (ABCDE12345)] profile=[stand-in-profile]"
-want "The macOS apps are signed with Developer ID, notarized by Apple and stapled."
+want "The macOS apps and disk images are signed with Developer ID, notarized by Apple and stapled."
 lack "signed ad hoc"
 want "gh release create v0.3.0"
 want "yardr bead done footplate-rel1 --note -"

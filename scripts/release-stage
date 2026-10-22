@@ -43,11 +43,11 @@
 # has, for verify's look at the macOS apps (off a Mac the note says that
 # look was skipped). gh acts as whoever it is logged in as.
 # The build runs scripts/release.sh, so on a Mac, where that builds. It also
-# signs and notarizes the macOS apps when FOOTPLATE_RELEASE_SIGN_IDENTITY and
-# FOOTPLATE_RELEASE_NOTARY_PROFILE are in the environment this runs in, which
-# the exec group takes from its env_file (README "Building"); the build's
-# note says which it was. Needs this Mac logged in, with the keychain that
-# holds the identity unlocked.
+# signs and notarizes the macOS apps and disk images when
+# FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are in
+# the environment this runs in, which the exec group takes from its env_file
+# (README "Building"); the build's note says which it was. Needs this Mac
+# logged in, with the keychain that holds the identity unlocked.
 #
 # Vendored from yardr's contrib/release/stage (yardr@a3870526) with
 # footplate's release as the default: one checkout holds the whole release,
@@ -232,12 +232,14 @@ build() {
     fail failed "building $v failed" "$(tail -n 30 "$log")"
   fi
   [ -f "$out/checksums.txt" ] || fail failed "the build left no checksums.txt in $out; nothing was tagged"
-  # This depot's release has four fixed archive names. Do not publish a
+  # This depot's release has six fixed archive names. Do not publish a
   # partial build or let an unexpected file ride along as a release asset.
   files=""
   for f in \
       "Footplate_${number}_darwin_arm64.zip" \
       "Footplate_${number}_darwin_amd64.zip" \
+      "Footplate_${number}_darwin_arm64.dmg" \
+      "Footplate_${number}_darwin_amd64.dmg" \
       "footplate_${number}_linux_arm64.tar.gz" \
       "footplate_${number}_linux_amd64.tar.gz"; do
     [ -f "$out/$f" ] || fail failed "the build left no $f in $out; nothing was tagged"
@@ -251,18 +253,20 @@ $f"
     checksums.txt | \
     "Footplate_${number}_darwin_arm64.zip" | \
     "Footplate_${number}_darwin_amd64.zip" | \
+    "Footplate_${number}_darwin_arm64.dmg" | \
+    "Footplate_${number}_darwin_amd64.dmg" | \
     "footplate_${number}_linux_arm64.tar.gz" | \
     "footplate_${number}_linux_amd64.tar.gz") ;;
-    *) fail failed "the build left unexpected file $b in $out; expected four archives and checksums.txt" ;;
+    *) fail failed "the build left unexpected file $b in $out; expected six archives and checksums.txt" ;;
     esac
   done
-  n=4
+  n=6
   [ -z "$tagat" ] || echo "== $BEAD: tag $v is already at $at; finishing that run"
   [ -n "$tagat" ] || git -C "$REPO" tag "$v" "$base" || fail failed "tagging $at as $v failed; nothing was pushed"
   git -C "$REPO" push "$REMOTE" "$v" >"$tmp/push.log" 2>&1 ||
     fail failed "tag $v is made but pushing it to $REMOTE failed; push it by hand, then advance the bead back to build" "$(tail -n 10 "$tmp/push.log")"
   printf '%s\n' "$body" >"$tmp/notes.md"
-  # The asset list is the four fixed filenames, so pass it from inside the
+  # The asset list is the six fixed filenames, so pass it from inside the
   # output directory; a TMPDIR containing spaces stays one path.
   # shellcheck disable=SC2086 # $files is a newline-separated list
   if (cd "$out" && gh release create "$v" $files checksums.txt --repo "$GHREPO" --title "$v" --notes-file "$tmp/notes.md" --verify-tag >"$tmp/create.log" 2>&1); then
@@ -272,16 +276,17 @@ $f"
   fi
   url="https://github.com/$GHREPO/releases/tag/$v"
   dir="~/releases/$v"
-  # What the build made of the macOS apps, from what it was given: scripts/
-  # release.sh signs, notarizes and staples them when both signing variables
-  # are set, and signs them ad hoc when neither is (half a pair failed the
-  # build above). The variables come from the group's environment, so a
-  # group that lacks them would release apps another Mac blocks, without a
-  # word; the note says it before the checksums are signed.
+  # What the build made of the macOS apps and disk images, from what it was
+  # given: scripts/release.sh signs, notarizes and staples them when both
+  # signing variables are set, and signs the apps ad hoc and leaves the
+  # images unsigned when neither is (half a pair failed the build above). The
+  # variables come from the group's environment, so a group that lacks them
+  # would release apps another Mac blocks, without a word; the note says it
+  # before the checksums are signed.
   if [ -n "${FOOTPLATE_RELEASE_SIGN_IDENTITY:-}" ] && [ -n "${FOOTPLATE_RELEASE_NOTARY_PROFILE:-}" ]; then
-    mac="The macOS apps are signed with Developer ID, notarized by Apple and stapled."
+    mac="The macOS apps and disk images are signed with Developer ID, notarized by Apple and stapled."
   else
-    mac="The macOS apps are signed ad hoc and not notarized (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set where this group runs), so another Mac blocks them."
+    mac="The macOS apps are signed ad hoc and not notarized, and the disk images are not signed (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set where this group runs), so another Mac blocks them."
   fi
   done_with sign "build: $PRODUCT $v is released ($url, built from $at): $n archives and checksums.txt, the checksums not yet signed. $mac Sign the checksums with the five commands, in order (minisign asks for the key's password; each names $v):
 
@@ -414,7 +419,7 @@ publish() {
   title="Sync $PRODUCT $v to yardr.dev: scripts/sync-release $PRODUCT $v"
   body="$PRODUCT $v is released ($url, built from $at) and its checksums.txt.minisig is uploaded and verified against the release key on $day.
 
-Run, from the depot's checkout: \`scripts/sync-release $PRODUCT $v\` (fetches the release with gh from $GHREPO, verifies the signature and the four archives, replaces the previous $PRODUCT release directory with $v/ and rewrites $latest). Commit what it wrote. Nothing else changes.
+Run, from the depot's checkout: \`scripts/sync-release $PRODUCT $v\` (fetches the release with gh from $GHREPO, verifies the signature and the archives, replaces the previous $PRODUCT release directory with $v/ and rewrites $latest). Commit what it wrote. Nothing else changes.
 
 Done when: the depot's test command passes; \`git diff main --stat\` shows only public/releases/ (the $PRODUCT paths, not $other's). After the deploy, $site names $v and the page offers it."
   new=$(printf '%s' "$body" | "$Y" bead create "$title" -d yardr.dev -p 1 -b - -l difficulty:1,size:small --json 2>"$tmp/create.err" | jq -r '.id // empty') || new=""
