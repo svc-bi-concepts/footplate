@@ -49,6 +49,27 @@ impl Wire {
             Wire::Tcp(conn) => conn.set_nonblocking(nonblocking),
         }
     }
+
+    /// Whether the other end has hung up: a read that would block says it
+    /// has not, one that gives nothing or fails says it has. What a client
+    /// sends on a connection it only listens to is read and let go.
+    fn hung_up(&mut self) -> bool {
+        if self.set_nonblocking(true).is_err() {
+            return true;
+        }
+        let mut sink = [0u8; 64];
+        let gone = loop {
+            match self.read(&mut sink) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break false,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break true,
+            }
+        };
+        let _ = self.set_nonblocking(false);
+        gone
+    }
 }
 
 impl Read for Wire {
@@ -743,8 +764,16 @@ fn conversation(state: &State, args: &Value) -> Option<Reply> {
     Some(reply(body.to_string()))
 }
 
+/// How often a stream that has nothing to send looks whether its client is
+/// still there.
+const LOOK: Duration = Duration::from_millis(50);
+
 /// The stream: the events with a seq after `after`, then every one as the
-/// test emits it, until the yard stops.
+/// test emits it, until the yard stops or the client hangs up. A real yard
+/// sees the hang-up and ends the stream, and a client that stops its own
+/// stream by shutting its end down relies on that: where shutting down
+/// wakes no reader blocked on the same socket (Windows) it is the yard's
+/// closing that does.
 fn stream(
     mut conn: Wire,
     shared: &Shared,
@@ -780,7 +809,10 @@ fn stream(
         if state.stopped || removed {
             return Ok(());
         }
-        state = shared.changed.wait(state).unwrap();
+        state = shared.changed.wait_timeout(state, LOOK).unwrap().0;
+        if conn.hung_up() {
+            return Ok(());
+        }
     }
 }
 
@@ -1178,4 +1210,44 @@ fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> i
     conn.flush()?;
     io::copy(&mut yard, conn)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Shutdown;
+
+    /// A client that hangs up its end of a stream has the stream ended by
+    /// the yard, as a real yard ends it. That is what wakes a follower
+    /// stopped while it waits for an event on a system where shutting down
+    /// one's own end wakes nothing that reads (Windows).
+    #[test]
+    fn a_stream_whose_client_hung_up_is_ended_by_the_yard() {
+        let yard = Yard::start_tcp();
+        let host = yard.address().strip_prefix("http://").unwrap();
+        let mut conn = TcpStream::connect(host).unwrap();
+        // Not waited for for ever where the yard does not end it.
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(
+            conn,
+            "GET /user/events?after=0 HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+        )
+        .unwrap();
+        let mut reader = BufReader::new(conn.try_clone().unwrap());
+        // The head of the answer: the stream is open.
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0, "the stream opened");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        // Hung up on the client's side only: it still reads.
+        conn.shutdown(Shutdown::Write).unwrap();
+        let mut rest = Vec::new();
+        reader
+            .read_to_end(&mut rest)
+            .expect("the yard ended the stream");
+        assert!(rest.is_empty());
+    }
 }
