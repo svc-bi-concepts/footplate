@@ -26,6 +26,16 @@ use crate::api::{Address, Client};
 pub const TOKEN: &str = "yardr-dev-fake";
 const ME: &str = r#"{"user": "jo", "said_by": "laptop", "yard": "south"}"#;
 
+/// A TCP connection that sends what is written to it at once, as a Go
+/// server's does by default, and so a real yard's. A reply is written in
+/// several small pieces, and with Nagle's algorithm on each piece after the
+/// first waits for the client to acknowledge the one before, which a client
+/// holds back (up to 200 ms on Windows) for every call of a test.
+fn at_once(conn: TcpStream) -> TcpStream {
+    let _ = conn.set_nodelay(true);
+    conn
+}
+
 /// A connection to the yard, by its socket or its listener.
 enum Wire {
     #[cfg(unix)]
@@ -206,7 +216,7 @@ impl Yard {
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let yard = Yard::run(PathBuf::new(), Some(address), move || {
-            listener.accept().map(|(conn, _)| Wire::Tcp(conn))
+            listener.accept().map(|(conn, _)| Wire::Tcp(at_once(conn)))
         });
         yard.shared.state.lock().unwrap().devices = vec![TOKEN.to_string()];
         yard
@@ -904,6 +914,7 @@ impl Router {
                 while !*shared.stopped.lock().unwrap() {
                     match listener.accept() {
                         Ok((conn, _)) => {
+                            let conn = at_once(conn);
                             let shared = shared.clone();
                             let target = target.clone();
                             let origin = origin.clone();
@@ -1192,7 +1203,7 @@ fn relay(
 
 #[cfg(any(test, debug_assertions))]
 fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> io::Result<()> {
-    let mut yard = TcpStream::connect(target)?;
+    let mut yard = at_once(TcpStream::connect(target)?);
     yard.write_all(head.as_bytes())?;
     yard.write_all(body)?;
     yard.flush()?;
