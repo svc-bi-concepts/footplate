@@ -1145,10 +1145,15 @@ pub struct Model {
     /// entry once the yard has fetched its files, and the yard records a
     /// delivery's files once: an entry is never replaced.
     deliveries: HashMap<u64, Vec<BlobRef>>,
-    /// The deliveries `DeliveryFiles` was asked of when their notices were
-    /// first shown, and not since failed: what `hook_files` asks about
-    /// again.
+    /// Deliveries whose `DeliveryFiles` ask has not failed: a successful
+    /// empty answer is not asked again when the row opens.
     delivering: HashSet<u64>,
+    /// The hook delivery notices shown in the yard row. A failed first ask
+    /// still needs its one refetch when `hook_files` comes.
+    delivery_notices: HashSet<u64>,
+    /// The deliveries whose `hook_files` event has already asked for a
+    /// refetch, so replaying that event does not ask twice.
+    delivery_refetched: HashSet<u64>,
     /// The yard has no DeliveryFiles call: one from before it. The notices
     /// show no files, and no notice is raised.
     deliveries_too_old: bool,
@@ -3598,6 +3603,7 @@ impl Model {
             return Vec::new();
         }
         self.delivering.extend(wanted.iter().copied());
+        self.delivery_notices.extend(wanted.iter().copied());
         vec![Effect::DeliveryFiles { seqs: wanted }]
     }
 
@@ -3615,18 +3621,24 @@ impl Model {
         asked: &[u64],
         answers: Vec<(u64, Result<Vec<BlobRef>, api::Error>)>,
     ) {
+        let shown: HashSet<u64> = self
+            .notifications
+            .iter()
+            .filter(|n| n.kind == "hook")
+            .map(|n| n.seq)
+            .collect();
         let mut answered = HashSet::new();
         let mut failed = None;
         for (seq, answer) in answers {
             match answer {
                 Ok(files) => {
                     answered.insert(seq);
-                    if !files.is_empty() {
+                    if shown.contains(&seq) && !files.is_empty() {
                         self.deliveries.entry(seq).or_insert(files);
                     }
                 }
                 Err(err) => {
-                    failed.get_or_insert(err);
+                    failed.get_or_insert((seq, err));
                 }
             }
         }
@@ -3636,10 +3648,11 @@ impl Model {
             self.delivering.remove(seq);
         }
         match failed {
-            Some(err) if deliveries_too_old(&err) => self.deliveries_too_old = true,
-            Some(err) => {
+            Some((_, err)) if deliveries_too_old(&err) => self.deliveries_too_old = true,
+            Some((seq, err)) if shown.contains(&seq) => {
                 self.notice = format!("the files of a hook delivery could not be read: {err}");
             }
+            Some(_) => {}
             None => {}
         }
     }
@@ -4627,9 +4640,14 @@ impl Model {
             // reads the notices again.
             "hook_files" => {
                 let seq = e.number("seq");
-                match self.delivering.contains(&seq) && !self.deliveries_too_old {
-                    true => vec![Effect::DeliveryFiles { seqs: vec![seq] }],
-                    false => Vec::new(),
+                if !self.deliveries_too_old
+                    && self.delivery_notices.contains(&seq)
+                    && self.delivery_refetched.insert(seq)
+                {
+                    self.delivering.insert(seq);
+                    vec![Effect::DeliveryFiles { seqs: vec![seq] }]
+                } else {
+                    Vec::new()
                 }
             }
             // A note on a bead: a question asked, answered, put aside or
@@ -4956,6 +4974,15 @@ impl Model {
     /// and where it is open a hook delivery that came is asked for its
     /// files.
     pub fn notifications(&mut self, list: Vec<Notification>) -> Vec<Effect> {
+        let shown: HashSet<u64> = list
+            .iter()
+            .filter(|n| n.kind == "hook")
+            .map(|n| n.seq)
+            .collect();
+        self.deliveries.retain(|seq, _| shown.contains(seq));
+        self.delivering.retain(|seq| shown.contains(seq));
+        self.delivery_notices.retain(|seq| shown.contains(seq));
+        self.delivery_refetched.retain(|seq| shown.contains(seq));
         let before = std::mem::replace(&mut self.notifications, list);
         self.notice_news(&before);
         self.deliveries_wanted()
@@ -12524,6 +12551,28 @@ mod tests {
             [delivery_asked(&[34])]
         );
         assert_eq!(m.images(), [held.hash.as_str(), late.hash.as_str()]);
+
+        // When notices roll off the row, their cached files and fetch
+        // markers leave with them, including an answer that arrives late.
+        assert_eq!(
+            m.notifications(vec![notification(35, "yd-shed", "created", false)]),
+            []
+        );
+        m.delivery_files(&[34], vec![(34, Ok(vec![late.clone()]))]);
+        assert_eq!(m.delivered_count(), 0);
+        assert!(m.deliveries.is_empty());
+        assert!(m.delivering.is_empty());
+        assert!(m.delivery_notices.is_empty());
+        assert!(m.delivery_refetched.is_empty());
+        assert_eq!(
+            m.event(&event(
+                37,
+                "hook_files",
+                "hook:telegram",
+                json!({"seq": 32})
+            )),
+            []
+        );
     }
 
     /// A yard from before DeliveryFiles has none to show: the notices show
@@ -12601,6 +12650,28 @@ mod tests {
                 vec![(32, Ok(vec![held.clone()])), (31, Err(err))],
             );
             assert_eq!(m.notice, said);
+            // The hook_files event gets its one refetch even though its
+            // first call failed, then an unsuccessful refetch can be tried
+            // again when the row shows it.
+            assert_eq!(
+                m.event(&event(
+                    41,
+                    "hook_files",
+                    "hook:telegram",
+                    json!({"seq": 31})
+                )),
+                [delivery_asked(&[31])]
+            );
+            assert_eq!(
+                m.event(&event(
+                    42,
+                    "hook_files",
+                    "hook:telegram",
+                    json!({"seq": 31})
+                )),
+                []
+            );
+            m.delivery_files(&[31], vec![(31, Err(refused("the files are closed")))]);
             // What was answered stays, and what was not is asked again.
             m.select(Selected::Conversation("assembly".into()));
             assert_eq!(
