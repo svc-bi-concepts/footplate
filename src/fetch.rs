@@ -323,12 +323,48 @@ const VERSION_LINE: usize = 80;
 /// not the tag in `yardr.version`: the file says what was fetched, this says
 /// what runs. None where `dir` is none, for a person without a home.
 pub fn kept(dir: Option<&Path>) -> Kept {
+    kept_for(env::consts::OS, env::consts::ARCH, dir)
+}
+
+/// The kept yardr, only where releases name a target. In particular,
+/// Windows does not fetch yardr, so an old or misplaced file under the
+/// app's data directory must not be started by the About card.
+fn kept_for(os: &str, arch: &str, dir: Option<&Path>) -> Kept {
+    if target_of(os, arch).is_none() {
+        return Kept::Nothing;
+    }
     let Some(stored) = dir.and_then(stored) else {
         return Kept::Nothing;
     };
     match version_of(&stored.path, VERSION_WITHIN) {
         Ok(line) => Kept::Says(line),
         Err(why) => Kept::Silent(why),
+    }
+}
+
+#[cfg(test)]
+mod kept_tests {
+    use super::{Kept, VERSION_FILE, kept_for};
+    use std::fs;
+
+    /// An unsupported target has no yardr release: a file with yardr's
+    /// stored names is not enough reason for the About card to run it.
+    #[test]
+    fn an_unsupported_system_does_not_run_a_kept_yardr() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("yardr"), b"not a program").unwrap();
+        fs::write(dir.path().join(VERSION_FILE), "0.11.0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path().join("yardr"), fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+
+        assert_eq!(
+            kept_for("windows", "x86_64", Some(dir.path())),
+            Kept::Nothing
+        );
     }
 }
 
