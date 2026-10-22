@@ -1181,7 +1181,7 @@ mod tests {
         recommended_line, run_keys, run_runs, run_texts, secret_keys, setup_keys, take_back_label,
         texts_label, typeback_line, typeback_mismatch, words_send,
     };
-    use super::asks::dir_url;
+    use super::asks::{dir_url, file_url};
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, RAIL, drawer_fits};
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
@@ -8338,6 +8338,22 @@ yardr.dev
             dir_url(std::path::Path::new("/home/jo/.config/footplate")),
             "file:///home/jo/.config/footplate"
         );
+        // On Windows the drive stands after three slashes, the backslashes
+        // are slashes, and a share is a host.
+        assert_eq!(
+            file_url(r"C:\Users\jo\AppData\Roaming\footplate", true),
+            "file:///C:/Users/jo/AppData/Roaming/footplate"
+        );
+        assert_eq!(
+            file_url(r"C:\Users\Jo Smith\footplate", true),
+            "file:///C:/Users/Jo%20Smith/footplate"
+        );
+        assert_eq!(
+            file_url(r"\\host\share\footplate", true),
+            "file://host/share/footplate"
+        );
+        // Elsewhere a backslash is a character of a name.
+        assert_eq!(file_url(r"/home/jo/a\b", false), "file:///home/jo/a%5Cb");
     }
 
     /// The footer's reveal opens the settings' directory: where the file

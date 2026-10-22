@@ -4056,6 +4056,9 @@ impl Footplate {
                                 .flex_col()
                                 .gap_4()
                                 .children(match open {
+                                    // Windows draws no such item: its controls are
+                                    // left out there, as they would do nothing.
+                                    Section::ThisWindow if cfg!(windows) => vec![size, about],
                                     Section::ThisWindow => vec![size, menu_bar, mark, about],
                                     Section::Appearance => vec![look],
                                     Section::Notifications => vec![notifications],

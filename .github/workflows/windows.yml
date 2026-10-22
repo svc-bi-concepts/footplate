@@ -1,0 +1,54 @@
+# footplate on Windows: it builds, and its tests pass, with a yard on another
+# machine as the only yard there is (no socket, no yard of its own). The
+# yard's own gate (.yardr/test) runs on a Mac, where there is no Windows to
+# try; this is that try. It is the debug build, as the gate's: a release
+# build also compiles gpui's shaders, with fxc.exe of the Windows SDK.
+name: windows
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The edition is 2024, which wants a newer Rust than an image may carry.
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      # Compiling gpui's tree takes most of the job: what is built is kept
+      # for the next one, keyed on the lockfile.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
