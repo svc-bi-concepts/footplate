@@ -289,7 +289,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
 | `Bead` | the open bead whole: each ask's options, recommendation and words, the body, notes and about-beads. Also once for each id the open mail names that looks like a bead's and that no list holds, to learn whether the yard has it: a bead that closed still chips |
 | `Conversation` | the mail both ways with the one whose row is open, and with each name trusted as them; on the `yard` row with the yard and with each sender who has no row |
-| `GET /blobs/<hash>` | an image a mail of the open conversation carries, or a hook delivery of the open `yard` row, once for each hash |
+| `GET /blobs/<hash>` | an image a mail of the open conversation or of the open `yard` row carries, or a hook delivery of the open `yard` row, once for each hash |
 
 | It writes | When |
 |---|---|

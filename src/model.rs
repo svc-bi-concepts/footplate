@@ -4013,14 +4013,14 @@ impl Model {
         out
     }
 
-    /// The hash of every image shown, each once: the open conversation's,
-    /// the open yard row's hook deliveries', then the open row's expanded
-    /// cards' notes'. One this yard did not take, from a linked yard or
-    /// for a delivery, is none it has.
+    /// The hash of every image shown, each once: the open conversation's
+    /// or the open yard row's mail's, the yard row's hook deliveries', then
+    /// the open row's expanded cards' notes'. One this yard did not take,
+    /// from a linked yard or for a delivery, is none it has.
     pub fn images(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
         let letters = match self.selected.as_ref() {
-            Some(sel @ Selected::Conversation(_)) => self.letters(sel),
+            Some(sel @ (Selected::Conversation(_) | Selected::Yard)) => self.letters(sel),
             _ => Vec::new(),
         };
         for f in letters.into_iter().flat_map(|l| &l.files) {
@@ -10420,6 +10420,18 @@ mod tests {
             [Effect::Ack { through: 21 }]
         );
         assert_eq!(m.yard_mail().len(), 4);
+        // A picture in such mail is asked for as a conversation's is, while
+        // the yard row shows it and not elsewhere.
+        m.event(&event(
+            22,
+            "mail",
+            "zed@south",
+            json!({"to": "jo", "to_user": true, "text": "A picture.", "files": [png("aa")]}),
+        ));
+        assert_eq!(m.yard_mail().last().unwrap().files[0].hash, "aa");
+        assert_eq!(m.images(), ["aa"]);
+        m.select(Selected::Conversation("assembly".into()));
+        assert_eq!(m.images(), Vec::<&str>::new());
     }
 
     #[test]
