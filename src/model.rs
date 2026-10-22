@@ -681,6 +681,11 @@ pub struct Notice {
     pub bead: String,
     pub text: String,
     pub read: bool,
+    /// The files of a hook delivery, shown under its text: each as the
+    /// yard holds it, or with why it did not take it. None for any other
+    /// notice, and for a delivery until the yard has fetched its files,
+    /// which it does after it told of the delivery.
+    pub files: Vec<BlobRef>,
 }
 
 /// One option of a card, numbered from 1, `you decide` last.
@@ -857,6 +862,9 @@ pub enum Effect {
     /// beads of the yard: ids mail names that no list the window reads
     /// holds, as a closed bead's is; answered to [`Model::beads_looked`].
     Beads { beads: Vec<String> },
+    /// `DeliveryFiles` of each hook delivery `seqs` names, one after
+    /// another, newest first; answered to [`Model::delivery_files`].
+    DeliveryFiles { seqs: Vec<u64> },
 }
 
 /// A read of the yard made again and again, whose answer replaces what
@@ -1132,6 +1140,18 @@ pub struct Model {
     looked: HashMap<String, bool>,
     /// The ids asked about and not answered yet.
     looking: HashSet<String>,
+    /// The files of the hook deliveries the yard row shows, by the
+    /// delivery's seq, as `DeliveryFiles` answered them. A delivery has an
+    /// entry once the yard has fetched its files, and the yard records a
+    /// delivery's files once: an entry is never replaced.
+    deliveries: HashMap<u64, Vec<BlobRef>>,
+    /// The deliveries `DeliveryFiles` was asked of when their notices were
+    /// first shown, and not since failed: what `hook_files` asks about
+    /// again.
+    delivering: HashSet<u64>,
+    /// The yard has no DeliveryFiles call: one from before it. The notices
+    /// show no files, and no notice is raised.
+    deliveries_too_old: bool,
     /// The bead the drawer was opened on last. The queue read again keeps
     /// it read, as it keeps the open travelling bead: it is none of the
     /// queue's, and a closed bead never is.
@@ -3533,8 +3553,95 @@ impl Model {
                 bead: n.bead.clone(),
                 text: plain(&n.text),
                 read: n.read,
+                files: self.delivered(n).to_vec(),
             })
             .collect()
+    }
+
+    /// The files of the hook delivery `n` tells of, as the yard held them
+    /// when it was last asked. A notice of any other kind has none, and a
+    /// delivery has none until the yard has fetched them.
+    fn delivered(&self, n: &Notification) -> &[BlobRef] {
+        match n.kind.as_str() {
+            "hook" => self.deliveries.get(&n.seq).map_or(&[], Vec::as_slice),
+            _ => &[],
+        }
+    }
+
+    /// How many files the hook deliveries of the notices have: what makes
+    /// the yard row taller after its notices were laid out.
+    pub fn delivered_count(&self) -> usize {
+        self.notifications
+            .iter()
+            .map(|n| self.delivered(n).len())
+            .sum()
+    }
+
+    /// The hook deliveries the open yard row shows that `DeliveryFiles` was
+    /// not asked of, newest first, as one [`Effect::DeliveryFiles`]: each
+    /// once, when its notice is first shown. The yard fetches a delivery's
+    /// files after it told of the delivery, so the answer may be none; the
+    /// delivery's `hook_files` asks again.
+    fn deliveries_wanted(&mut self) -> Vec<Effect> {
+        if self.selected != Some(Selected::Yard) || self.deliveries_too_old {
+            return Vec::new();
+        }
+        let wanted: Vec<u64> = self
+            .notifications
+            .iter()
+            .rev()
+            .filter(|n| n.kind == "hook")
+            .map(|n| n.seq)
+            .filter(|seq| !self.delivering.contains(seq) && !self.deliveries.contains_key(seq))
+            .collect();
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        self.delivering.extend(wanted.iter().copied());
+        vec![Effect::DeliveryFiles { seqs: wanted }]
+    }
+
+    /// What the yard said of the deliveries [`Effect::DeliveryFiles`] asked
+    /// about: the files of each it has fetched show with its notice from
+    /// here on, and one with none yet shows none until its `hook_files`
+    /// asks again. The yard records a delivery's files once and whole, so
+    /// the first answer with files stands, and a later one with none is of
+    /// a call made before they came. What was not answered is asked again
+    /// when the yard row next shows it. A yard from before the call has
+    /// none to show: no notice is raised. Any other failure is said as a
+    /// notice, as ever.
+    pub fn delivery_files(
+        &mut self,
+        asked: &[u64],
+        answers: Vec<(u64, Result<Vec<BlobRef>, api::Error>)>,
+    ) {
+        let mut answered = HashSet::new();
+        let mut failed = None;
+        for (seq, answer) in answers {
+            match answer {
+                Ok(files) => {
+                    answered.insert(seq);
+                    if !files.is_empty() {
+                        self.deliveries.entry(seq).or_insert(files);
+                    }
+                }
+                Err(err) => {
+                    failed.get_or_insert(err);
+                }
+            }
+        }
+        // The batch ends at its first failure, and what it did not reach
+        // was never asked.
+        for seq in asked.iter().filter(|seq| !answered.contains(*seq)) {
+            self.delivering.remove(seq);
+        }
+        match failed {
+            Some(err) if deliveries_too_old(&err) => self.deliveries_too_old = true,
+            Some(err) => {
+                self.notice = format!("the files of a hook delivery could not be read: {err}");
+            }
+            None => {}
+        }
     }
 
     /// What stands above the open conversation: nothing for a crew member,
@@ -3907,8 +4014,9 @@ impl Model {
     }
 
     /// The hash of every image shown, each once: the open conversation's,
-    /// then the open row's expanded cards' notes'. One this yard did not
-    /// take from a linked yard is none it has.
+    /// the open yard row's hook deliveries', then the open row's expanded
+    /// cards' notes'. One this yard did not take, from a linked yard or
+    /// for a delivery, is none it has.
     pub fn images(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
         let letters = match self.selected.as_ref() {
@@ -3917,6 +4025,11 @@ impl Model {
         };
         for f in letters.into_iter().flat_map(|l| &l.files) {
             push_image(&mut out, f);
+        }
+        if self.selected == Some(Selected::Yard) {
+            for f in self.notifications.iter().flat_map(|n| self.delivered(n)) {
+                push_image(&mut out, f);
+            }
         }
         for note in self.expanded_notes() {
             for f in &note.files {
@@ -4137,7 +4250,8 @@ impl Model {
                 effects
             }
             // The yard row has no top to reach among its notices: the mail
-            // it shows is read whole.
+            // it shows is read whole, and the files of its hook deliveries
+            // are asked for.
             Some(sel @ Selected::Yard) => {
                 let mut effects: Vec<Effect> = self
                     .sources(&sel)
@@ -4147,6 +4261,7 @@ impl Model {
                     .collect();
                 effects.extend(self.ack());
                 effects.extend(self.lookups());
+                effects.extend(self.deliveries_wanted());
                 effects
             }
             Some(Selected::Decision(bead))
@@ -4505,6 +4620,18 @@ impl Model {
                 }
                 Vec::new()
             }
+            // A hook delivery's files were fetched and recorded, after the
+            // delivery and its notice: a delivery asked about before then
+            // is asked again. One never shown is asked with its notice,
+            // when the row shows it. It is no notification, so it never
+            // reads the notices again.
+            "hook_files" => {
+                let seq = e.number("seq");
+                match self.delivering.contains(&seq) && !self.deliveries_too_old {
+                    true => vec![Effect::DeliveryFiles { seqs: vec![seq] }],
+                    false => Vec::new(),
+                }
+            }
             // A note on a bead: a question asked, answered, put aside or
             // declined, or the asker's next note. It says no more than
             // that, so the queue is read again.
@@ -4825,10 +4952,13 @@ impl Model {
         self.open()
     }
 
-    /// The notices as read again. The yard row stands whatever they are.
-    pub fn notifications(&mut self, list: Vec<Notification>) {
+    /// The notices as read again. The yard row stands whatever they are,
+    /// and where it is open a hook delivery that came is asked for its
+    /// files.
+    pub fn notifications(&mut self, list: Vec<Notification>) -> Vec<Effect> {
         let before = std::mem::replace(&mut self.notifications, list);
         self.notice_news(&before);
+        self.deliveries_wanted()
     }
 
     /// Marks one notice read: the oldest unread, one key. Elsewhere than
@@ -5631,6 +5761,15 @@ pub fn grants_too_old(err: &api::Error) -> bool {
 pub const GRANTS_TOO_OLD: &str =
     "this yard's yardr is older than the grants view (it needs yardr from 21 Oct 2026 or later)";
 
+/// Whether the yard has no DeliveryFiles call: one from before a device
+/// could learn a hook delivery's files, which says it has no such method.
+/// That is no error: the notices show no files, and no notice is raised.
+/// Its words are read here, as above, and when they change this is shown
+/// as any refusal.
+pub fn deliveries_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
 /// Who holds a grant, with the user called as where there is one:
 /// `crew member yardmaster`, `group builders as ada`.
 pub fn grant_holder(grant: &SourceGrant) -> String {
@@ -6182,18 +6321,25 @@ fn push_image<'a>(out: &mut Vec<&'a str>, file: &'a BlobRef) {
     }
 }
 
-/// The line for a file of mail from a linked yard that this yard did not
-/// take, with the yard's reason.
+/// The line for a file of mail from a linked yard or of a hook delivery
+/// that this yard did not take, with the yard's reason: under its name
+/// where it has one, as a file that was taken is, else as what it is. The
+/// name and the reason of a delivery's file can carry the source's own
+/// words, so they are shown as text and nothing else.
 pub fn not_taken(file: &BlobRef) -> String {
     let what = match (is_page(file), is_image(file)) {
         (true, _) => "page",
         (false, true) => "image",
         (false, false) => "file",
     };
+    let named = match file.name.is_empty() {
+        true => what.to_string(),
+        false => plain(&file.name),
+    };
     format!(
-        "{what}, {}, not taken: {}",
+        "{named}, {}, not taken: {}",
         size(file.bytes),
-        file.not_taken
+        plain(&file.not_taken)
     )
 }
 
@@ -10537,6 +10683,19 @@ mod tests {
             not_taken(&file),
             "file, 900 bytes, not taken: the link does not take files"
         );
+        // A delivery's file is told apart by its name, where it has one,
+        // and its name and reason can carry the source's words: text, and
+        // no control character of a terminal's.
+        let file = BlobRef {
+            bytes: 9437184,
+            name: "shed\u{1b}[31m-plans.pdf".into(),
+            not_taken: "document not fetched: \u{1b}[31mdenied\u{0}".into(),
+            ..BlobRef::default()
+        };
+        assert_eq!(
+            not_taken(&file),
+            "shed[31m-plans.pdf, 9.0 MiB, not taken: document not fetched: [31mdenied"
+        );
     }
 
     #[test]
@@ -12215,6 +12374,230 @@ mod tests {
         assert_eq!(m.yard_unread(), 1);
     }
 
+    /// A notice of a hook delivery.
+    fn hook(seq: u64) -> Notification {
+        Notification {
+            kind: "hook".into(),
+            ..notification(
+                seq,
+                "",
+                "hook (all) telegram message by ada: a photo",
+                false,
+            )
+        }
+    }
+
+    fn delivery_asked(seqs: &[u64]) -> Effect {
+        Effect::DeliveryFiles {
+            seqs: seqs.to_vec(),
+        }
+    }
+
+    /// The deliveries an opening asks for, among its other effects.
+    fn deliveries_of(effects: Vec<Effect>) -> Vec<Effect> {
+        effects
+            .into_iter()
+            .filter(|e| matches!(e, Effect::DeliveryFiles { .. }))
+            .collect()
+    }
+
+    /// A hook delivery's files are fetched after the delivery and its
+    /// notice: the yard row asks for them when it shows the notice, and
+    /// again when the yard says it fetched them, so the notice shows first
+    /// and its images after.
+    #[test]
+    fn a_hook_delivery_s_files_are_asked_when_its_notice_shows_and_again_when_they_come() {
+        let held = BlobRef {
+            hash: "ab".repeat(32),
+            kind: "image/png".into(),
+            bytes: 70,
+            ..BlobRef::default()
+        };
+        let over = BlobRef {
+            bytes: 1048576,
+            name: "shed-plans.pdf".into(),
+            not_taken: "document of 1048576 bytes, over the yard's limit of 8192".into(),
+            ..BlobRef::default()
+        };
+        let late = BlobRef {
+            hash: "cd".repeat(32),
+            kind: "image/jpeg".into(),
+            bytes: 900,
+            ..BlobRef::default()
+        };
+        let mut list = vec![
+            hook(30),
+            notification(31, "yd-shed", "yd-shed created", false),
+            hook(32),
+        ];
+        let mut state = yard(&[]);
+        state.notifications = list.clone();
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        // Not shown, not asked: the stream tells of files for a delivery
+        // none is shown for.
+        assert_eq!(
+            m.event(&event(
+                35,
+                "hook_files",
+                "hook:telegram",
+                json!({"seq": 30})
+            )),
+            []
+        );
+        // The yard row asks for each hook delivery once, the newest first,
+        // and for no other notice.
+        assert_eq!(
+            deliveries_of(m.select(Selected::Yard)),
+            [delivery_asked(&[32, 30])]
+        );
+        m.select(Selected::Conversation("assembly".into()));
+        assert_eq!(deliveries_of(m.select(Selected::Yard)), []);
+        // The yard had 30's files and none of 32's yet: 30 shows its photo
+        // and the file it did not take, 32 shows its notice alone, and the
+        // only image to ask for is the one the yard holds.
+        m.delivery_files(
+            &[32, 30],
+            vec![
+                (32, Ok(Vec::new())),
+                (30, Ok(vec![held.clone(), over.clone()])),
+            ],
+        );
+        let files: Vec<Vec<BlobRef>> = m.notices().into_iter().map(|n| n.files).collect();
+        assert_eq!(files, [vec![held.clone(), over.clone()], vec![], vec![]]);
+        assert_eq!(m.images(), [held.hash.as_str()]);
+
+        // The stream tells of the source's files with the delivery: they
+        // are the source's refs, with no hash, and no file of the notice.
+        let refs = json!({"files": [{"id": "AgAD", "name": "photo.jpg",
+            "type": "image/jpeg", "size": 51200}], "notified": {"jo": "all"}});
+        assert_eq!(
+            m.event(&event(33, "hook", "hook:telegram", refs)),
+            [Effect::Notifications]
+        );
+        assert_eq!(m.images(), [held.hash.as_str()]);
+        // The notices read again bring the delivery: asked for its files
+        // with the notice, and the ones asked for before are not.
+        list.push(hook(33));
+        assert_eq!(m.notifications(list.clone()), [delivery_asked(&[33])]);
+        assert_eq!(m.notifications(list.clone()), []);
+
+        // 32's files came: asked again, for that delivery alone, and no
+        // notice is read again for it.
+        assert_eq!(
+            m.event(&event(
+                36,
+                "hook_files",
+                "hook:telegram",
+                json!({"seq": 32})
+            )),
+            [delivery_asked(&[32])]
+        );
+        m.delivery_files(&[32], vec![(32, Ok(vec![late.clone()]))]);
+        assert_eq!(m.notices()[2].files, vec![late.clone()]);
+        assert_eq!(m.images(), [held.hash.as_str(), late.hash.as_str()]);
+        // The yard records a delivery's files once: an answer with none
+        // after that is a call made before they came, and takes nothing
+        // back. Nor does one with other files.
+        m.delivery_files(&[32], vec![(32, Ok(Vec::new()))]);
+        m.delivery_files(&[32], vec![(32, Ok(vec![held.clone()]))]);
+        assert_eq!(m.notices()[2].files, vec![late.clone()]);
+
+        // Only the yard row shows them, and it asks only while it is open.
+        m.select(Selected::Conversation("assembly".into()));
+        assert_eq!(m.images(), Vec::<&str>::new());
+        list.push(hook(34));
+        assert_eq!(m.notifications(list), []);
+        assert_eq!(
+            deliveries_of(m.select(Selected::Yard)),
+            [delivery_asked(&[34])]
+        );
+        assert_eq!(m.images(), [held.hash.as_str(), late.hash.as_str()]);
+    }
+
+    /// A yard from before DeliveryFiles has none to show: the notices show
+    /// no files, and nothing is said or asked again. Any other failure is
+    /// said as a notice, and what it left unanswered is asked again when
+    /// the yard row next shows it.
+    #[test]
+    fn an_old_yard_has_no_files_for_a_delivery_and_another_failure_is_said_and_asked_again() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        assert!(deliveries_too_old(&refused("no such method DeliveryFiles")));
+        assert!(!deliveries_too_old(&refused("the files are closed")));
+        assert!(!deliveries_too_old(&api::Error::Protocol(
+            "DeliveryFiles: status 200, and no JSON object".into()
+        )));
+
+        let held = BlobRef {
+            hash: "ab".repeat(32),
+            kind: "image/png".into(),
+            bytes: 70,
+            ..BlobRef::default()
+        };
+        let opened = || {
+            let mut state = yard(&[]);
+            state.notifications = vec![hook(30), hook(31), hook(32)];
+            let (mut m, _) = Model::new(state, Mode::Chat, None);
+            assert_eq!(
+                deliveries_of(m.select(Selected::Yard)),
+                [delivery_asked(&[32, 31, 30])]
+            );
+            m
+        };
+
+        let mut m = opened();
+        // 32 answered, and the batch ended at 31, which the yard refused
+        // as a method it does not have; 30 was never reached.
+        m.delivery_files(
+            &[32, 31, 30],
+            vec![
+                (32, Ok(vec![held.clone()])),
+                (31, Err(refused("no such method DeliveryFiles"))),
+            ],
+        );
+        assert!(m.notice.is_empty(), "{}", m.notice);
+        assert_eq!(m.notices()[2].files, vec![held.clone()]);
+        // Nothing is asked again, by the row or by the files coming.
+        m.select(Selected::Conversation("assembly".into()));
+        assert_eq!(deliveries_of(m.select(Selected::Yard)), []);
+        assert_eq!(
+            m.event(&event(
+                40,
+                "hook_files",
+                "hook:telegram",
+                json!({"seq": 32})
+            )),
+            []
+        );
+        assert_eq!(
+            m.notifications(vec![hook(30), hook(31), hook(32), hook(33)]),
+            []
+        );
+
+        // Any other failure is a notice, as ever, and not the old yard's.
+        for err in [
+            refused("the files are closed"),
+            api::Error::Protocol("DeliveryFiles: status 200, and no JSON object".into()),
+            api::Error::Down(std::io::Error::other("the yard went away")),
+        ] {
+            let mut m = opened();
+            let said = format!("the files of a hook delivery could not be read: {err}");
+            m.delivery_files(
+                &[32, 31, 30],
+                vec![(32, Ok(vec![held.clone()])), (31, Err(err))],
+            );
+            assert_eq!(m.notice, said);
+            // What was answered stays, and what was not is asked again.
+            m.select(Selected::Conversation("assembly".into()));
+            assert_eq!(
+                deliveries_of(m.select(Selected::Yard)),
+                [delivery_asked(&[31, 30])]
+            );
+        }
+    }
+
     #[test]
     fn the_lists_follow_the_stream_and_ask_nothing_in_a_loop() {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
@@ -12252,6 +12635,17 @@ mod tests {
                 json!({"note": 2, "notified": {"jo": "all"}})
             )),
             [Effect::Notifications, Effect::Asks]
+        );
+        // A hook delivery's files arrived: no notification, so the notices
+        // are not read again, and a delivery never shown is not asked.
+        assert_eq!(
+            m.event(&event(
+                25,
+                "hook_files",
+                "hook:telegram",
+                json!({"seq": 22})
+            )),
+            []
         );
     }
 

@@ -60,8 +60,10 @@
 # conversation with the bar of reactions to tap floating over one mail),
 # `reactions-zoom` (that bar with the pointer on one emoji),
 # `notice` (the conversation with the notice a flows view that did not
-# answer leaves under the mail) and `drawer` (the conversation with
-# the bead its chip names open in the drawer beside it).
+# answer leaves under the mail), `drawer` (the conversation with the
+# bead its chip names open in the drawer beside it) and `delivery` (the
+# yard row open on a hook delivery whose photo the yard holds, with a
+# document it did not take under the photo).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the
@@ -80,7 +82,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer"
+states="yardmaster crew thread column plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys reactions reactions-hover reactions-zoom notice drawer delivery"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

@@ -25115,6 +25115,109 @@ yardr.dev
         assert!(!drawn(cx, "mark all read"));
     }
 
+    /// A hook delivery's photo comes after its notice. The yard row shows
+    /// the notice at once, and the photo under it when the yard says it
+    /// fetched the files, with the row left open and, where it stood at its
+    /// newest, standing there still, and where it was scrolled up, standing
+    /// where it was: the files are asked for at the yard's listener, as a
+    /// device asks, when the notice shows and again on `hook_files`. A file
+    /// the yard did not take is a line that says why, not an image.
+    #[gpui::test]
+    fn a_hook_delivery_s_photo_shows_under_its_notice_when_the_yard_has_fetched_it(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        // Two deliveries, the first of them at the top of a row that scrolls
+        // and the second at its end.
+        let hook = |seq: u64| {
+            json!({"seq": seq, "at": "2026-10-08T09:31:00Z", "kind": "hook",
+                   "text": "hook (all) telegram message by ada: the fence, painted",
+                   "read": false})
+        };
+        let mut notices = vec![hook(5)];
+        notices.extend((0..40).map(|i| {
+            json!({"seq": i as u64 + 10, "at": "2026-10-08T09:30:00Z", "kind": "created",
+                   "bead": "yd-shed", "text": format!("notice {i} of the evening's work"),
+                   "read": false})
+        }));
+        notices.push(hook(60));
+        yard.answer(
+            "UserNotifications",
+            &json!({"result": {"notifications": notices, "unread": 42, "last": 60}}).to_string(),
+        );
+        // The delivery and its notice came before its files were fetched.
+        yard.answer("DeliveryFiles", r#"{"result": null}"#);
+        let held = "ab".repeat(32);
+        yard.blob(&held, &png());
+        mails(&yard, &["Hello."]);
+        let (view, cx) = opened(&yard, &["Hello."], cx);
+        view.update_in(cx, |v, window, cx| v.select(Selected::Yard, window, cx));
+        wait(cx, "the deliveries asked for their files", |_| {
+            yard.asked("DeliveryFiles") == [json!({"seq": 60}), json!({"seq": 5})]
+        });
+        // The notice shows, with no photo yet, at the newest of a row that
+        // scrolls; the yard is asked for no bytes, and the notices that are
+        // no deliveries were not asked for.
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let over = view.read_with(cx, |v, _| v.conversation.max_offset().height);
+        assert!(over > px(40.), "the yard row does not scroll: {over:?}");
+        assert!(at_bottom(&view, cx));
+        assert!(!drawn(cx, &format!("image open {held}")));
+        assert_eq!(yard.blobs_asked(), Vec::<String>::new());
+
+        // The yard fetched the files: its event says so, and the photo
+        // shows under the notice with no row opened again.
+        yard.answer(
+            "DeliveryFiles",
+            &json!({"result": [
+                {"hash": held, "type": "image/png", "bytes": 70},
+                {"hash": "", "type": "", "bytes": 1048576, "name": "shed-plans.pdf",
+                 "not_taken": "document of 1048576 bytes, over the yard's limit of 8192"}
+            ]})
+            .to_string(),
+        );
+        yard.emit(
+            r#"{"seq": 61, "kind": "hook_files", "actor": "hook:telegram", "data": {"seq": 60}}"#,
+        );
+        wait(cx, "the photo", |cx| picture(&view, cx, &held) == "here");
+        assert_eq!(
+            yard.asked("DeliveryFiles").last(),
+            Some(&json!({"seq": 60}))
+        );
+        assert_eq!(yard.asked("DeliveryFiles").len(), 3);
+        assert_eq!(yard.blobs_asked(), vec![held.clone()]);
+        assert_eq!(open_row(&view, cx), Some(Selected::Yard));
+        assert!(drawn(cx, &format!("image open {held}")));
+        assert!(drawn(cx, "not taken shed-plans.pdf"));
+        // The row grew by the files under the newest notice, and the view
+        // that stood at its newest stands there still, with them in it.
+        assert!(at_bottom(&view, cx));
+
+        // The first delivery's files come while the view is scrolled to the
+        // top: the row grows under it, and the view stays where it is.
+        cx.simulate_keystrokes("secondary-home");
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.));
+        yard.emit(
+            r#"{"seq": 62, "kind": "hook_files", "actor": "hook:telegram", "data": {"seq": 5}}"#,
+        );
+        wait(cx, "the first delivery's files", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| !m.notices()[0].files.is_empty())
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(offset_of(&view, cx).y, px(0.));
+        assert!(!at_bottom(&view, cx));
+    }
+
     /// How far above its newest the open conversation stands.
     fn above_newest(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> gpui::Pixels {
         view.read_with(cx, |v, _| {

@@ -556,7 +556,10 @@ impl Footplate {
     ) -> impl IntoElement + use<> {
         let line = move |text: String| div().text_sm().text_color(palette.faint).child(text);
         if !file.not_taken.is_empty() {
-            return line(model::not_taken(file)).into_any_element();
+            let name = file.name.clone();
+            return line(model::not_taken(file))
+                .debug_selector(move || format!("not taken {name}"))
+                .into_any_element();
         }
         if model::is_page(file) {
             return self.page_row(file, note, palette).into_any_element();

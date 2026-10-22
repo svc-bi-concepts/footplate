@@ -1192,6 +1192,7 @@ impl Footplate {
             .then(|| self.conversation.offset());
         let before_span = model.span();
         let before_notices = model.notices().len() + model.yard_mail().len();
+        let before_files = model.delivered_count();
         let effects = f(model);
         let after_sel = model.selected().cloned();
         if let (Some(Selected::Conversation(name)), Some(position), Some(Selected::Decision(_))) =
@@ -1270,6 +1271,15 @@ impl Footplate {
                 }
                 Some(Selected::Yard)
                     if model.notices().len() + model.yard_mail().len() != before_notices =>
+                {
+                    self.scroll_to_newest();
+                }
+                // A delivery's files that came after its notice make the
+                // row taller where the view stands: a view at its newest
+                // stays there, and one scrolled up is the reader's.
+                Some(Selected::Yard)
+                    if model.delivered_count() != before_files
+                        && (self.bottom_pending || self.at_bottom()) =>
                 {
                     self.scroll_to_newest();
                 }
@@ -2320,8 +2330,7 @@ impl Footplate {
                         move |this, notifications, cx| match notifications {
                             Ok(notifications) => {
                                 this.fresh_in(session, Read::Notifications, stamp, cx, |m| {
-                                    m.notifications(notifications.notifications);
-                                    Vec::new()
+                                    m.notifications(notifications.notifications)
                                 });
                             }
                             Err(err) => {
@@ -2536,6 +2545,34 @@ impl Footplate {
                         move |this, answers, cx| {
                             this.change_in(session, cx, |m| {
                                 m.beads_looked(&asked, answers);
+                                Vec::new()
+                            })
+                        },
+                    )
+                }
+                // As the ids above: the yard row may show many deliveries,
+                // so they go one connection at a time, and the first call
+                // that fails ends the batch.
+                Effect::DeliveryFiles { seqs } => {
+                    let asked = seqs.clone();
+                    self.ask_in(
+                        session,
+                        cx,
+                        move |client, _| {
+                            let mut answers = Vec::new();
+                            for seq in seqs {
+                                let answer = client.delivery_files(seq);
+                                let failed = answer.is_err();
+                                answers.push((seq, answer));
+                                if failed {
+                                    break;
+                                }
+                            }
+                            answers
+                        },
+                        move |this, answers, cx| {
+                            this.change_in(session, cx, |m| {
+                                m.delivery_files(&asked, answers);
                                 Vec::new()
                             })
                         },
@@ -5085,8 +5122,8 @@ fn shot_section() -> Option<Section> {
 /// for the plain, plain-select, page, run, weighty-mapping and secret
 /// shots (the refused shot's with its refusal), the board for the
 /// arrivals and departures shots, one arrival's bead for the arrival
-/// shot and yardr's line for the flow shot, else none. A debug build's
-/// alone.
+/// shot, yardr's line for the flow shot and the yard row for the
+/// delivery shot, else none. A debug build's alone.
 fn shot_selected() -> Option<Selected> {
     // The card shots open their cards, in decisions: a debug build's
     // alone, as the settings and the draft of Footplate::opened.
@@ -5111,6 +5148,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
         Ok("flow") => return Some(Selected::Line("yardr".into())),
         Ok("grants") => return Some(Selected::Grants),
+        Ok("delivery") => return Some(Selected::Yard),
         _ => {}
     }
     None

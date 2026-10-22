@@ -56,8 +56,10 @@ use crate::yard::Env;
 /// yardmaster's conversation with the parties' reactions under three
 /// mails, with the bar of reactions to tap floating over one of them, the
 /// yardmaster's conversation with the notice a flows view that did not
-/// answer leaves under the mail, and the yardmaster's conversation with
-/// the bead its chip names open in the drawer beside it.
+/// answer leaves under the mail, the yardmaster's conversation with
+/// the bead its chip names open in the drawer beside it, and the yard row
+/// open on a hook delivery whose photo the yard holds, with a document it
+/// did not take under the photo.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -133,6 +135,7 @@ pub const STATES: &[&str] = &[
     "reactions-zoom",
     "notice",
     "drawer",
+    "delivery",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -800,6 +803,40 @@ fn populate(yard: &Yard, state: &str) {
                 ]})
                 .to_string(),
             );
+        }
+        "delivery" => {
+            // The yard row open on a hook delivery: ada's Telegram message
+            // of a photo of the fence, which the yard holds, and a
+            // document it did not take, over its limit. A bead's creation
+            // stands before it, the one notice that is no delivery. No mail
+            // and no asks, so the row shows the notices alone.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.answer("Conversation", r#"{"result": []}"#);
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            yard.answer(
+                "UserNotifications",
+                &json!({"result": {"notifications": [
+                    {"seq": 24, "at": "2026-10-13T09:30:00Z", "kind": "created",
+                     "bead": "yd-fence", "text": "Paint the fence was opened", "read": true},
+                    {"seq": 25, "at": "2026-10-13T09:41:00Z", "kind": "hook",
+                     "text": "hook (all) telegram message by ada: the fence, painted",
+                     "read": false},
+                ], "unread": 1, "last": 25}})
+                .to_string(),
+            );
+            yard.answer(
+                "DeliveryFiles",
+                &json!({"result": [
+                    {"hash": IMAGE_HASH, "type": "image/png", "bytes": IMAGE.len()},
+                    {"hash": "", "type": "", "bytes": 9437184, "name": "shed-plans.pdf",
+                     "not_taken": "document of 9437184 bytes, over the yard's limit of 8388608 (yardr settings set blob_max_bytes <bytes>)"},
+                ]})
+                .to_string(),
+            );
+            yard.blob(IMAGE_HASH, IMAGE);
         }
         "crew" => {
             // Chat with the sidebar's groups full: the yardmaster
@@ -2447,6 +2484,30 @@ mod tests {
                     assert!(loaded.flows_too_old, "{state}");
                     assert!(loaded.grants.is_empty(), "{state}");
                     assert!(loaded.grants_too_old, "{state}");
+                }
+                "delivery" => {
+                    // Two notices, the second a hook delivery whose files
+                    // the yard answers: the photo it holds, and a document
+                    // it did not take. No asks, so the window opens on the
+                    // yard row alone.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    assert_eq!(loaded.notifications.len(), 2, "{state}");
+                    assert_eq!(loaded.notifications[0].kind, "created", "{state}");
+                    assert_eq!(loaded.notifications[1].kind, "hook", "{state}");
+                    let files = yard
+                        .client()
+                        .delivery_files(loaded.notifications[1].seq)
+                        .unwrap();
+                    assert_eq!(files.len(), 2, "{state}");
+                    assert!(crate::model::is_image(&files[0]), "{state}");
+                    assert!(files[0].not_taken.is_empty(), "{state}");
+                    assert!(files[1].hash.is_empty(), "{state}");
+                    assert!(
+                        files[1].not_taken.contains("over the yard's limit"),
+                        "{state}"
+                    );
+                    let image = yard.client().blob(&files[0].hash).unwrap().unwrap();
+                    assert_eq!(image.len(), IMAGE.len(), "{state}");
                 }
                 "grants" => {
                     // The grants the view opens on: a read, an update as a

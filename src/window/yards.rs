@@ -2316,6 +2316,13 @@ impl Footplate {
                             .when(n.read, |el| el.text_color(palette.faint))
                             .child(n.text),
                     )
+                    // A hook delivery's files, as a mail's are drawn.
+                    .children(n.files.iter().map(|file| {
+                        div()
+                            .pl_4()
+                            .pt_1()
+                            .child(self.picture(file, false, palette, cx))
+                    }))
                     .into_any_element()
             }))
         };

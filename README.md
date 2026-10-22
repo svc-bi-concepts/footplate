@@ -237,8 +237,10 @@ three mails), `reactions-hover` (that conversation with the bar
 of reactions to tap floating over one mail), `reactions-zoom`
 (that bar with the pointer on one emoji), `notice` (the
 conversation with the notice a flows view that did not answer
-leaves under the mail) and `drawer` (the conversation with the
-bead its chip names open in the drawer beside it).
+leaves under the mail), `drawer` (the conversation with the
+bead its chip names open in the drawer beside it) and `delivery`
+(the yard row open on a hook delivery whose photo the yard holds,
+with a document it did not take under the photo).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
@@ -283,10 +285,11 @@ Or a yard that is not on this machine, at the address of its listener: see
 | `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on a file and how many a letter carries, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
+| `DeliveryFiles` | the files of each hook delivery the open `yard` row shows, once for each when its notice first shows, and once more when the yard's `hook_files` for it says they were fetched (they come after the delivery and its notice): shown under the notice as a mail's files are, a line for each one the yard did not take |
 | `UserAsks` | the open questions above the conversations, grouped by topic, with the decided folded under |
 | `Bead` | the open bead whole: each ask's options, recommendation and words, the body, notes and about-beads. Also once for each id the open mail names that looks like a bead's and that no list holds, to learn whether the yard has it: a bead that closed still chips |
 | `Conversation` | the mail both ways with the one whose row is open, and with each name trusted as them; on the `yard` row with the yard and with each sender who has no row |
-| `GET /blobs/<hash>` | an image a mail of the open conversation carries, once for each hash |
+| `GET /blobs/<hash>` | an image a mail of the open conversation carries, or a hook delivery of the open `yard` row, once for each hash |
 
 | It writes | When |
 |---|---|
@@ -309,7 +312,8 @@ It follows the stream and asks nothing of the yard in a loop: `mail`,
 `reaction`, `mail_read`, `notifications_read` and `crew_status` are applied
 as they come, the crew is read again on the other `crew_*` events, the linked
 yards on `peer_*`, the users on mail from a name of this yard that has no
-row, the notices on an event that notified the user, the
+row, the notices on an event that notified the user, a hook
+delivery's files on its `hook_files`, the
 queue on every `noted` event and once more at each put-aside ask's
 return, and a bead shown on every event whose bead it is. Mail and
 notices arriving never cover or move the open card.
@@ -317,7 +321,8 @@ notices arriving never cover or move the open card.
 Those reads may answer out of the order they were made in: an answer older
 than one already applied of its kind is dropped. A failed read is made
 again 3 seconds later while the yard answers, until it does; the two Lines
-calls of an older yard stay marked as too old. A yard that is not reached
+calls of an older yard stay marked as too old, and so does `DeliveryFiles`: its
+notices show no files. A yard that is not reached
 is read whole when it is back.
 
 A stream says nothing while nothing happens, and so does one that a proxy
@@ -977,7 +982,10 @@ newest when scrolled up, with a line under your own mail that says
 where it stands (`read`, `sent; yardmaster is idle`, `queued for north:
 …`, or the yard's words for a crew member at its harness's login screen: it
 cannot read mail, and where the yard leads the login it waits for the
-operator at the asks) and the line to write in; the notices, oldest first; or a bead's open
+operator at the asks) and the line to write in; the notices, oldest first, with a hook
+delivery's files under its notice as a mail's are (its images, a page or file as a row,
+a line for one the yard did not take): they come after the notice, and show when the yard
+says it has them, with the row left open; or a bead's open
 asks, each as its card.
 
 A conversation opens on its newest fifty mails. Towards its top the fifty

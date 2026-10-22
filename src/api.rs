@@ -174,9 +174,9 @@ impl Settings {
     }
 }
 
-/// A file mail carries, or a note of a bead: an image, a page, or any
-/// other bytes under the cap, with its base name. As a letter or a note
-/// names it.
+/// A file mail carries, or a note of a bead, or a hook delivery: an image,
+/// a page, or any other bytes under the cap, with its base name. As a
+/// letter, a note or `DeliveryFiles` names it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct BlobRef {
     /// The SHA-256 of its bytes, in hex: `GET /blobs/<hash>` answers them.
@@ -193,8 +193,9 @@ pub struct BlobRef {
     /// pasted, and for a letter from before files carried names.
     #[serde(default)]
     pub name: String,
-    /// On mail from a linked yard only: why this yard did not take the
-    /// file, when it did not. There is none to ask for then.
+    /// On mail from a linked yard and on a hook delivery's file only: why
+    /// this yard did not take the file, when it did not. There is none to
+    /// ask for then, and no hash.
     #[serde(default)]
     pub not_taken: String,
 }
@@ -1320,8 +1321,13 @@ impl Event {
         self.data.get(field).and_then(Value::as_u64).unwrap_or(0)
     }
 
-    /// The files of a `mail` event, none when it carries none.
+    /// The files of a `mail` event, none when it carries none. A `hook`
+    /// event has none here: its `files` are the source's own refs, with no
+    /// hash to read them by, and the yard's are [`Client::delivery_files`].
     pub fn files(&self) -> Vec<BlobRef> {
+        if self.kind == "hook" {
+            return Vec::new();
+        }
         self.data
             .get("files")
             .and_then(|files| serde_json::from_value(files.clone()).ok())
@@ -2469,6 +2475,15 @@ impl Client {
     /// oldest first; `limit` 0 is all the inbox keeps.
     pub fn user_notifications(&self, name: &str, limit: u64) -> Result<Notifications> {
         self.answer("UserNotifications", json!({ "name": name, "limit": limit }))
+    }
+
+    /// The files the yard fetched of a hook delivery, by the delivery's seq
+    /// (the `seq` of its notification): each as the yard holds it, to be
+    /// read with [`Client::blob`], or with the reason it was not taken.
+    /// None while the yard has fetched none, which it does after it has
+    /// told of the delivery: its `hook_files` event says when to ask again.
+    pub fn delivery_files(&self, seq: u64) -> Result<Vec<BlobRef>> {
+        self.list("DeliveryFiles", json!({ "seq": seq }))
     }
 
     /// Marks the user's notifications read through a seq: a position of its
@@ -5810,6 +5825,77 @@ mod tests {
             serde_json::from_value(json!({"seq": 13, "kind": "mail", "data": {"files": "none"}}))
                 .unwrap();
         assert_eq!(plain.files(), vec![]);
+        // A hook delivery's own files are the source's refs, with no hash:
+        // read as a mail's they would be images of nothing the yard holds.
+        let hook: Event = serde_json::from_value(json!({"seq": 139, "kind": "hook",
+            "actor": "hook:telegram",
+            "data": {"source": "telegram", "files": [{"id": "AgAD", "name": "photo.jpg",
+                                                      "type": "image/jpeg", "size": 51200}]}}))
+        .unwrap();
+        assert_eq!(hook.files(), vec![]);
+    }
+
+    /// The files of a hook delivery are asked by the delivery's seq, by the
+    /// socket and at an address alike: each as the yard holds it or with
+    /// the reason it did not take it, and none while it has fetched none.
+    #[test]
+    fn a_delivery_s_files_are_asked_by_the_socket_and_at_an_address() {
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            let client = yard.client();
+            let way = client.place();
+            // A yard from before the call says so, as of any method.
+            let err = client.delivery_files(139).unwrap_err();
+            assert_eq!(err.to_string(), "no such method DeliveryFiles", "{way}");
+            // One that has it answers in the order the source named the
+            // files, as docs/api.md shows.
+            yard.answer(
+                "DeliveryFiles",
+                &json!({"result": [
+                    {"hash": HASH, "type": "image/png", "bytes": 70},
+                    {"hash": "", "type": "", "bytes": 1048576, "name": "shed-plans.pdf",
+                     "not_taken": "document of 1048576 bytes, over the yard's limit of 8192"}
+                ]})
+                .to_string(),
+            );
+            let files = client.delivery_files(139).unwrap();
+            assert_eq!(
+                yard.asked("DeliveryFiles").last(),
+                Some(&json!({"seq": 139}))
+            );
+            let under = if client.is_remote() { "/user" } else { "" };
+            let request = yard.last_request();
+            assert!(
+                request.starts_with(&format!("POST {under}/call/DeliveryFiles HTTP/1.1\r\n")),
+                "{way}: {request}"
+            );
+            assert_eq!(
+                files,
+                vec![
+                    BlobRef {
+                        hash: HASH.into(),
+                        kind: "image/png".into(),
+                        bytes: 70,
+                        name: String::new(),
+                        not_taken: String::new(),
+                    },
+                    BlobRef {
+                        hash: String::new(),
+                        kind: String::new(),
+                        bytes: 1048576,
+                        name: "shed-plans.pdf".into(),
+                        not_taken: "document of 1048576 bytes, over the yard's limit of 8192"
+                            .into(),
+                    },
+                ],
+                "{way}"
+            );
+            // A delivery whose files are not fetched answers null, and a
+            // list with nothing in it reads the same.
+            yard.answer("DeliveryFiles", r#"{"result": null}"#);
+            assert_eq!(client.delivery_files(140).unwrap(), vec![], "{way}");
+            yard.answer("DeliveryFiles", r#"{"result": []}"#);
+            assert_eq!(client.delivery_files(140).unwrap(), vec![], "{way}");
+        }
     }
 
     #[test]
