@@ -4,7 +4,8 @@
 //! Or the same yard at its listener, a TCP port of this machine: the calls
 //! under `/user/` for a device's token, `/user/me`, and a pairing that
 //! gives a token for a code. Windows has no socket, so the yard there is at
-//! its listener alone.
+//! its listener alone, and the yard a test starts with, [`Yard::start`], is
+//! that one there: a test that never names its socket runs on both.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -24,6 +25,15 @@ use crate::api::{Address, Client};
 /// `/user/me` says it is.
 pub const TOKEN: &str = "yardr-dev-fake";
 const ME: &str = r#"{"user": "jo", "said_by": "laptop", "yard": "south"}"#;
+
+/// A TCP connection that sends what is written to it at once, as a Go
+/// server's does by default, and so a real yard's. The fake writes a reply
+/// in several small pieces, and Nagle's algorithm would hold each piece
+/// after the first until the client has acknowledged the one before.
+fn at_once(conn: TcpStream) -> TcpStream {
+    let _ = conn.set_nodelay(true);
+    conn
+}
 
 /// A connection to the yard, by its socket or its listener.
 enum Wire {
@@ -47,6 +57,27 @@ impl Wire {
             Wire::Unix(conn) => conn.set_nonblocking(nonblocking),
             Wire::Tcp(conn) => conn.set_nonblocking(nonblocking),
         }
+    }
+
+    /// Whether the other end has hung up: a read that would block says it
+    /// has not, one that gives nothing or fails says it has. What a client
+    /// sends on a connection it only listens to is read and let go.
+    fn hung_up(&mut self) -> bool {
+        if self.set_nonblocking(true).is_err() {
+            return true;
+        }
+        let mut sink = [0u8; 64];
+        let gone = loop {
+            match self.read(&mut sink) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break false,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break true,
+            }
+        };
+        let _ = self.set_nonblocking(false);
+        gone
     }
 }
 
@@ -146,14 +177,22 @@ pub struct Yard {
 }
 
 impl Yard {
-    /// A yard at a socket in a temp dir of its own.
-    #[cfg(all(test, unix))]
+    /// The yard a test starts with: at a socket in a temp dir of its own,
+    /// and where there is no socket (Windows) at its listener, as
+    /// [`Yard::start_tcp`]. [`Yard::client`] is a client of either; a test
+    /// that reads [`Yard::socket`] is about the socket and is unix's alone.
+    #[cfg(test)]
     pub fn start() -> Yard {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("yard.sock");
-        let mut yard = Yard::start_at(&socket);
-        yard.dir = Some(dir);
-        yard
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("yard.sock");
+            let mut yard = Yard::start_at(&socket);
+            yard.dir = Some(dir);
+            yard
+        }
+        #[cfg(not(unix))]
+        Yard::start_tcp()
     }
 
     /// A yard at a socket the test names.
@@ -176,7 +215,7 @@ impl Yard {
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let yard = Yard::run(PathBuf::new(), Some(address), move || {
-            listener.accept().map(|(conn, _)| Wire::Tcp(conn))
+            listener.accept().map(|(conn, _)| Wire::Tcp(at_once(conn)))
         });
         yard.shared.state.lock().unwrap().devices = vec![TOKEN.to_string()];
         yard
@@ -231,6 +270,8 @@ impl Yard {
         Client::remote(Address::parse(self.address()).unwrap(), token)
     }
 
+    /// The socket of a yard that has one: empty at its listener, so a test
+    /// that reads it is about the socket, and unix's alone.
     pub fn socket(&self) -> &Path {
         &self.socket
     }
@@ -732,8 +773,16 @@ fn conversation(state: &State, args: &Value) -> Option<Reply> {
     Some(reply(body.to_string()))
 }
 
+/// How often a stream that has nothing to send looks whether its client is
+/// still there.
+const LOOK: Duration = Duration::from_millis(50);
+
 /// The stream: the events with a seq after `after`, then every one as the
-/// test emits it, until the yard stops.
+/// test emits it, until the yard stops or the client hangs up. A real yard
+/// sees the hang-up and ends the stream, and a client that stops its own
+/// stream by shutting its end down relies on that: where shutting down
+/// wakes no reader blocked on the same socket (Windows) it is the yard's
+/// closing that does.
 fn stream(
     mut conn: Wire,
     shared: &Shared,
@@ -769,7 +818,10 @@ fn stream(
         if state.stopped || removed {
             return Ok(());
         }
-        state = shared.changed.wait(state).unwrap();
+        state = shared.changed.wait_timeout(state, LOOK).unwrap().0;
+        if conn.hung_up() {
+            return Ok(());
+        }
     }
 }
 
@@ -861,6 +913,7 @@ impl Router {
                 while !*shared.stopped.lock().unwrap() {
                     match listener.accept() {
                         Ok((conn, _)) => {
+                            let conn = at_once(conn);
                             let shared = shared.clone();
                             let target = target.clone();
                             let origin = origin.clone();
@@ -1149,7 +1202,7 @@ fn relay(
 
 #[cfg(any(test, debug_assertions))]
 fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> io::Result<()> {
-    let mut yard = TcpStream::connect(target)?;
+    let mut yard = at_once(TcpStream::connect(target)?);
     yard.write_all(head.as_bytes())?;
     yard.write_all(body)?;
     yard.flush()?;
@@ -1167,4 +1220,44 @@ fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> i
     conn.flush()?;
     io::copy(&mut yard, conn)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Shutdown;
+
+    /// A client that hangs up its end of a stream has the stream ended by
+    /// the yard, as a real yard ends it. That is what wakes a follower
+    /// stopped while it waits for an event on a system where shutting down
+    /// one's own end wakes nothing that reads (Windows).
+    #[test]
+    fn a_stream_whose_client_hung_up_is_ended_by_the_yard() {
+        let yard = Yard::start_tcp();
+        let host = yard.address().strip_prefix("http://").unwrap();
+        let mut conn = TcpStream::connect(host).unwrap();
+        // Not waited for for ever where the yard does not end it.
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // In one write, as the client sends it.
+        let request = format!(
+            "GET /user/events?after=0 HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+        );
+        conn.write_all(request.as_bytes()).unwrap();
+        let mut reader = BufReader::new(conn.try_clone().unwrap());
+        // The head of the answer: the stream is open.
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0, "the stream opened");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        // Hung up on the client's side only: it still reads.
+        conn.shutdown(Shutdown::Write).unwrap();
+        let mut rest = Vec::new();
+        reader
+            .read_to_end(&mut rest)
+            .expect("the yard ended the stream");
+        assert!(rest.is_empty());
+    }
 }
