@@ -3236,6 +3236,9 @@ impl Footplate {
     /// home's yard, and one at an address, are not footplate's to make.
     /// Nor is one that is only stopped: its home holds a yard already.
     pub(crate) fn sets_up_here(&self) -> bool {
+        if !cfg!(unix) {
+            return false;
+        }
         let here = self.entry.as_ref().is_some_and(|yard| {
             !yard.is_far()
                 && (yard.socket.is_empty() || std::path::Path::new(&yard.socket) == self.env.socket)
