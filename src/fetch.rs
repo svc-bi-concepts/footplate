@@ -342,32 +342,6 @@ fn kept_for(os: &str, arch: &str, dir: Option<&Path>) -> Kept {
     }
 }
 
-#[cfg(test)]
-mod kept_tests {
-    use super::{Kept, VERSION_FILE, kept_for};
-    use std::fs;
-
-    /// An unsupported target has no yardr release: a file with yardr's
-    /// stored names is not enough reason for the About card to run it.
-    #[test]
-    fn an_unsupported_system_does_not_run_a_kept_yardr() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("yardr"), b"not a program").unwrap();
-        fs::write(dir.path().join(VERSION_FILE), "0.11.0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir.path().join("yardr"), fs::Permissions::from_mode(0o700))
-                .unwrap();
-        }
-
-        assert_eq!(
-            kept_for("windows", "x86_64", Some(dir.path())),
-            Kept::Nothing
-        );
-    }
-}
-
 /// What the program at `path` answers to `--version`: the first line it
 /// prints, with anything that is not text taken out, or why there is none.
 /// It is started with no shell and nothing on its input, and one that has
@@ -1607,6 +1581,23 @@ mod tests {
         // version file with no program beside it.
         assert_eq!(kept(None), Kept::Nothing);
         assert_eq!(kept(Some(&dir)), Kept::Nothing);
+
+        // A file with yardr's marker is not enough on a target with no
+        // release: the About card must not try to start it.
+        let misplaced = home.path().join("misplaced-bin");
+        fs::create_dir(&misplaced).unwrap();
+        let old = misplaced.join(PROGRAM);
+        fs::write(&old, b"not a program").unwrap();
+        fs::write(misplaced.join(VERSION_FILE), "0.14.0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&old, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(
+            kept_for("windows", "x86_64", Some(&misplaced)),
+            Kept::Nothing
+        );
+
         fs::create_dir_all(&dir).unwrap();
         assert_eq!(kept(Some(&dir)), Kept::Nothing);
         fs::write(dir.join(VERSION_FILE), "v0.14.0\n").unwrap();

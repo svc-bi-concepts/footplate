@@ -19102,8 +19102,11 @@ yardr.dev
 
         // The About card is opened from the same section, there being no
         // application menu, and names footplate alone: Windows fetches no
-        // yardr, and the card asks this test's folder, not the person's.
+        // yardr, even if an old file with its names is in this test's folder.
         let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("yardr"), b"not a program").unwrap();
+        std::fs::write(bin.join("yardr.version"), "0.14.0\n").unwrap();
         view.update(cx, |v, _| v.means.own = Some(bin));
         click_on(cx, "about show");
         wait(cx, "the card, told that none is kept", |cx| {
