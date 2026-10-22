@@ -1239,11 +1239,11 @@ mod tests {
         let mut conn = TcpStream::connect(host).unwrap();
         // Not waited for for ever where the yard does not end it.
         conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        write!(
-            conn,
+        // In one write, as the client sends it.
+        let request = format!(
             "GET /user/events?after=0 HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
-        )
-        .unwrap();
+        );
+        conn.write_all(request.as_bytes()).unwrap();
         let mut reader = BufReader::new(conn.try_clone().unwrap());
         // The head of the answer: the stream is open.
         loop {
