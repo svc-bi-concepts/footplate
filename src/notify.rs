@@ -278,6 +278,10 @@ pub type Activated = (String, Selected);
 /// Whether the system lets footplate notify, as it answered when asked.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Permission {
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     Allowed,
     /// It does not, or cannot: why, in a line for the settings.
     Refused(String),

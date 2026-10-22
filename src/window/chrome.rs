@@ -147,8 +147,9 @@ impl Footplate {
         }
         // The setup shot is step 2 of setting up a yard here, posed: no
         // yard answers, and the first run stands at the yard's form. A
-        // debug build's alone, as above.
-        #[cfg(debug_assertions)]
+        // debug build's alone, as above, and one with a socket: the shots
+        // are taken against a fake yard at one.
+        #[cfg(all(debug_assertions, unix))]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("setup") {
             let first_run = cx.new(|cx| {
                 FirstRun::shot_step2(
@@ -1032,8 +1033,8 @@ impl Footplate {
                     // The image shot opens the mail's image over the
                     // window, as a click on its thumbnail does: the yard
                     // holds the shot's bytes, and they show when they
-                    // come. A debug build's alone, as above.
-                    #[cfg(debug_assertions)]
+                    // come. A debug build's alone, as above, and a unix one's.
+                    #[cfg(all(debug_assertions, unix))]
                     if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("image") {
                         let (hash, bytes) = crate::shot::IMAGE_OPEN;
                         self.image_open = Some(super::rail::ImageOpen {

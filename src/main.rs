@@ -23,7 +23,7 @@ mod select;
 mod session;
 mod settings;
 mod setup;
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, unix))]
 mod shot;
 #[cfg(any(target_os = "linux", test))]
 mod taskbar;
@@ -56,8 +56,8 @@ fn main() {
     // In a debug build only, a screenshot state starts a fake yard of its
     // own and points this run's socket at it; held for the run, since
     // dropping it stops the yard. A release build does not read the
-    // variable at all.
-    #[cfg(debug_assertions)]
+    // variable at all, nor does Windows, which has no socket to point.
+    #[cfg(all(debug_assertions, unix))]
     let (env, _shot) = shot::start_if_asked(env);
     let name = session::login_name();
 

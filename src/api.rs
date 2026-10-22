@@ -11,10 +11,14 @@
 //! lines of HTTP are written out, since a call is one request on one
 //! connection and neither needs a runtime nor a client library with a unix
 //! connector.
+//!
+//! The socket is a unix one: on Windows there is no yard of this machine to
+//! reach by it, and a yard is reached at its address alone.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -1760,12 +1764,14 @@ fn tls() -> io::Result<Arc<rustls::ClientConfig>> {
 
 /// One connection to a yard, whichever way it is reached.
 enum Conn {
+    #[cfg(unix)]
     Unix(UnixStream),
     Tcp(TcpStream),
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
 enum EventSocket {
+    #[cfg(unix)]
     Unix(UnixStream),
     Tcp(TcpStream),
 }
@@ -1781,6 +1787,7 @@ impl EventStop {
         use std::net::Shutdown;
 
         match self.0.as_ref() {
+            #[cfg(unix)]
             EventSocket::Unix(socket) => {
                 let _ = socket.shutdown(Shutdown::Both);
             }
@@ -1794,6 +1801,7 @@ impl EventStop {
 impl Conn {
     fn event_stop(&self) -> io::Result<EventStop> {
         Ok(EventStop(Arc::new(match self {
+            #[cfg(unix)]
             Conn::Unix(socket) => EventSocket::Unix(socket.try_clone()?),
             Conn::Tcp(socket) => EventSocket::Tcp(socket.try_clone()?),
             Conn::Tls(stream) => EventSocket::Tcp(stream.sock.try_clone()?),
@@ -1804,6 +1812,7 @@ impl Conn {
 impl Read for Conn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
+            #[cfg(unix)]
             Conn::Unix(conn) => conn.read(buf),
             Conn::Tcp(conn) => conn.read(buf),
             Conn::Tls(conn) => conn.read(buf),
@@ -1814,6 +1823,7 @@ impl Read for Conn {
 impl Write for Conn {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
+            #[cfg(unix)]
             Conn::Unix(conn) => conn.write(buf),
             Conn::Tcp(conn) => conn.write(buf),
             Conn::Tls(conn) => conn.write(buf),
@@ -1822,6 +1832,7 @@ impl Write for Conn {
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Conn::Unix(conn) => conn.flush(),
             Conn::Tcp(conn) => conn.flush(),
             Conn::Tls(conn) => conn.flush(),
@@ -2275,9 +2286,10 @@ fn split_url(url: &str) -> Result<(Address, String)> {
 
 /// How a yard is reached: by the socket of this machine's, or by the
 /// address of another's listener with a device's token, and at a hosted
-/// yard the session token beside it.
+/// yard the session token beside it. Windows has the second alone.
 #[derive(Clone)]
 enum Way {
+    #[cfg(unix)]
     Socket(PathBuf),
     Listener {
         address: Address,
@@ -2301,6 +2313,7 @@ impl fmt::Debug for Client {
 
 impl Client {
     /// The yard of this machine, by its socket.
+    #[cfg(unix)]
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Client {
             way: Way::Socket(socket.into()),
@@ -2345,6 +2358,7 @@ impl Client {
     /// address.
     pub fn place(&self) -> String {
         match &self.way {
+            #[cfg(unix)]
             Way::Socket(socket) => format!("The socket: {}", socket.display()),
             Way::Listener { address, .. } => format!("The yard: {address}"),
         }
@@ -2383,6 +2397,7 @@ impl Client {
         timeout: Option<Duration>,
     ) -> Result<(u16, Body)> {
         let (mut conn, head) = match &self.way {
+            #[cfg(unix)]
             Way::Socket(socket) => {
                 let conn = UnixStream::connect(socket)?;
                 conn.set_read_timeout(timeout)?;
@@ -2992,6 +3007,7 @@ impl Events {
     /// the stream was opened with.
     pub fn set_quiet(&self, quiet: Duration) -> io::Result<()> {
         match self.stop.0.as_ref() {
+            #[cfg(unix)]
             EventSocket::Unix(socket) => socket.set_read_timeout(Some(quiet)),
             EventSocket::Tcp(socket) => socket.set_read_timeout(Some(quiet)),
         }

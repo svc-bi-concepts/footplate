@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -290,7 +291,7 @@ pub fn stored(dir: &Path) -> Option<Stored> {
     let version = fs::read_to_string(dir.join(VERSION_FILE)).ok()?;
     let version = Version::parse(version.trim())?;
     let metadata = fs::symlink_metadata(&path).ok()?;
-    (metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0).then(|| Stored {
+    (metadata.file_type().is_file() && runnable(&metadata)).then(|| Stored {
         path,
         version: version.to_string(),
     })
@@ -381,6 +382,19 @@ fn version_of(path: &Path, within: Duration) -> Result<String, String> {
         })
         .find(|line| !line.is_empty())
         .ok_or_else(|| "printed nothing".to_string())
+}
+
+/// Whether the file is one its user can run: a mode says so on a unix
+/// system. Windows runs a file by its name, and fetches no yardr at all
+/// ([`target_of`]), so what is kept there is taken as runnable.
+#[cfg(unix)]
+fn runnable(metadata: &fs::Metadata) -> bool {
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn runnable(_: &fs::Metadata) -> bool {
+    true
 }
 
 /// Where a release comes from and what it is held to. [`yardr`] has the
@@ -736,7 +750,9 @@ pub fn keep(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     keep_as(dir, name, bytes, 0o755)
 }
 
-/// As [`keep`], for a file of the mode `mode`.
+/// As [`keep`], for a file of the mode `mode`. A system without modes
+/// (Windows) sets none: what is kept lies in the person's own profile.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn keep_as(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
     // `name` comes from the program's data for the shared fetch mechanism.
     // Keep it one filename so a caller cannot make this helper write beyond
@@ -761,12 +777,11 @@ fn keep_as(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> io::Result<PathBu
     let (part, mut file) = loop {
         let serial = NEXT_PART.fetch_add(1, Ordering::Relaxed);
         let part = dir.join(format!(".{name}.part.{}.{serial}", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&part)
-        {
+        let mut open = OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        open.mode(0o600);
+        match open.open(&part) {
             Ok(file) => break (part, file),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
@@ -776,6 +791,7 @@ fn keep_as(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> io::Result<PathBu
         file.write_all(bytes)?;
         // Keep the file private until it is whole, then make it runnable;
         // the mode is set again because umask may have cut it.
+        #[cfg(unix)]
         file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
         fs::rename(&part, &path)
@@ -894,9 +910,7 @@ pub fn program_with_progress(
                 place.display()
             ));
         }
-        Ok(metadata)
-            if metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0 =>
-        {
+        Ok(metadata) if metadata.file_type().is_file() && runnable(&metadata) => {
             return Ok(());
         }
         Ok(_) => {} // A verified install below atomically replaces it.
@@ -944,10 +958,11 @@ pub fn program_with_progress(
     let serial = NEXT_PART.fetch_add(1, Ordering::Relaxed);
     let aside = own.join(format!(".install.{}.{serial}", std::process::id()));
     fs::create_dir_all(own).map_err(|err| cannot(own, err))?;
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&aside)
-        .map_err(|err| cannot(&aside, err))?;
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(&aside).map_err(|err| cannot(&aside, err))?;
     let ran = keep(&aside, name, &program)
         .map_err(|err| cannot(&aside, err))
         .and_then(|installer| run_installer(&installer, &wanted.run, path, progress));

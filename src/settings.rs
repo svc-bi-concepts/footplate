@@ -2,9 +2,10 @@
 //! look, the yards it can show and which of them is open, what the system
 //! tells of, and whether footplate stays up in the menu bar. One small JSON file where the platform has a program's own
 //! configuration: `~/Library/Application Support/footplate/settings.json`
-//! on macOS, `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere
-//! (`~/.config` when that is not set). It is footplate's to write, on every
-//! change; a file that is missing or that it cannot read is today's look.
+//! on macOS, `%APPDATA%\footplate\settings.json` on Windows,
+//! `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere (`~/.config` when
+//! that is not set). It is footplate's to write, on every change; a file
+//! that is missing or that it cannot read is today's look.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -1094,8 +1095,21 @@ pub fn file_under(
     Some(dir.join(crate::NAME).join("settings.json"))
 }
 
+/// Where the settings are kept on Windows: `%APPDATA%\footplate`, the
+/// person's own profile, which other users cannot read by default. No mode
+/// is set on the file or its folder, as there is none to set: that is
+/// also where the device's token lies beside it. An `APPDATA` that is not
+/// an absolute path is none, as a relative `XDG_CONFIG_HOME` is.
+pub fn file_under_appdata(appdata: Option<OsString>) -> Option<PathBuf> {
+    let dir = Some(PathBuf::from(appdata?)).filter(|dir| dir.is_absolute())?;
+    Some(dir.join(crate::NAME).join("settings.json"))
+}
+
 /// Where this run keeps them.
 pub fn file() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return file_under_appdata(std::env::var_os("APPDATA"));
+    }
     file_under(
         cfg!(target_os = "macos"),
         std::env::var_os("XDG_CONFIG_HOME"),
