@@ -887,8 +887,10 @@ https://...`.
 as a Windows program, reaches its listener at `http://localhost:<hook
 port>`: plain http is accepted for `localhost`, and WSL2 forwards the
 localhost ports of its virtual machine to Windows (`localhostForwarding` in
-`.wslconfig`, on by default). The listener is the yard's setting `hook_addr`,
-port 8790 unless that says otherwise. In WSL2:
+`.wslconfig`, on by default). footplate tries `localhost` at `127.0.0.1`
+before `::1`, as Windows lists `::1` first and is slow to refuse a
+connection there. The listener is the yard's setting `hook_addr`, port 8790
+unless that says otherwise. In WSL2:
 
     yardr user device pair <user> <device> --url http://localhost:8790
 

@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -1683,7 +1683,8 @@ impl Address {
             format!("{} names no address", self.host),
         );
         let mut tcp = None;
-        for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
+        let addrs = (self.host.as_str(), self.port).to_socket_addrs()?;
+        for addr in in_order(&self.host, addrs) {
             match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
                 Ok(conn) => {
                     tcp = Some(conn);
@@ -1726,6 +1727,21 @@ impl fmt::Display for Address {
         let scheme = if self.tls { "https" } else { "http" };
         write!(f, "{scheme}://{}{}", self.authority, self.path)
     }
+}
+
+/// The addresses a host came to, in the order they are tried. `localhost` is
+/// `::1` and `127.0.0.1`, and Windows lists `::1` first: a yard that listens
+/// on the IPv4 loopback alone (yardr's listener does, and WSL2 passes its
+/// ports to Windows' `localhost`) is refused at `::1` only after the system
+/// has sent the SYN again, a second or two for each of the dozen calls a
+/// window opens with. The IPv4 ones go first for that name; any other host
+/// keeps the order it was given.
+fn in_order(host: &str, addrs: impl Iterator<Item = SocketAddr>) -> Vec<SocketAddr> {
+    let mut addrs: Vec<SocketAddr> = addrs.collect();
+    if host.eq_ignore_ascii_case("localhost") {
+        addrs.sort_by_key(SocketAddr::is_ipv6);
+    }
+    addrs
 }
 
 /// How a server is trusted: by the roots this system trusts, read once.
@@ -3280,6 +3296,21 @@ mod tests {
         assert_eq!(
             socket_under(Some("".into()), Some("/h".into())),
             PathBuf::from("/h/.yardr/yard.sock")
+        );
+    }
+
+    #[test]
+    fn localhost_is_tried_at_its_ipv4_address_first_and_any_other_host_in_its_order() {
+        let v6: SocketAddr = "[::1]:8790".parse().unwrap();
+        let v4: SocketAddr = "127.0.0.1:8790".parse().unwrap();
+        let other: SocketAddr = "10.0.0.7:8790".parse().unwrap();
+        assert_eq!(in_order("localhost", [v6, v4].into_iter()), [v4, v6]);
+        assert_eq!(in_order("LocalHost", [v6, v4].into_iter()), [v4, v6]);
+        assert_eq!(in_order("localhost", [v4, v6].into_iter()), [v4, v6]);
+        assert_eq!(in_order("localhost", [v6].into_iter()), [v6]);
+        assert_eq!(
+            in_order("yard.example.net", [v6, other, v4].into_iter()),
+            [v6, other, v4]
         );
     }
 
