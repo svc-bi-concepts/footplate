@@ -1684,7 +1684,14 @@ impl Address {
         );
         let mut tcp = None;
         let addrs = (self.host.as_str(), self.port).to_socket_addrs()?;
-        for addr in in_order(&self.host, addrs) {
+        let addrs = in_order(&self.host, self.tls, addrs);
+        if addrs.is_empty() && !self.tls {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "plain http did not resolve to a loopback address",
+            ));
+        }
+        for addr in addrs {
             match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
                 Ok(conn) => {
                     tcp = Some(conn);
@@ -1729,15 +1736,19 @@ impl fmt::Display for Address {
     }
 }
 
-/// The addresses a host came to, in the order they are tried. `localhost` is
-/// `::1` and `127.0.0.1`, and Windows lists `::1` first: a yard that listens
-/// on the IPv4 loopback alone (yardr's listener does, and WSL2 passes its
-/// ports to Windows' `localhost`) is refused at `::1` only after the system
-/// has sent the SYN again, a second or two for each of the dozen calls a
-/// window opens with. The IPv4 ones go first for that name; any other host
-/// keeps the order it was given.
-fn in_order(host: &str, addrs: impl Iterator<Item = SocketAddr>) -> Vec<SocketAddr> {
-    let mut addrs: Vec<SocketAddr> = addrs.collect();
+/// The addresses a host came to, in the order they are tried. Plain HTTP
+/// may resolve only to loopback, so a changed hosts file cannot send a local
+/// address and its token to another machine. `localhost` is `::1` and
+/// `127.0.0.1`, and Windows lists `::1` first: a yard that listens on the
+/// IPv4 loopback alone (yardr's listener does, and WSL2 passes its ports to
+/// Windows' `localhost`) is refused at `::1` only after the system has sent
+/// the SYN again, a second or two for each of the dozen calls a window opens
+/// with. The IPv4 ones go first for that name; any other host keeps the
+/// order it was given.
+fn in_order(host: &str, tls: bool, addrs: impl Iterator<Item = SocketAddr>) -> Vec<SocketAddr> {
+    let mut addrs: Vec<SocketAddr> = addrs
+        .filter(|addr| tls || addr.ip().is_loopback())
+        .collect();
     if host.eq_ignore_ascii_case("localhost") {
         addrs.sort_by_key(SocketAddr::is_ipv6);
     }
@@ -3300,18 +3311,23 @@ mod tests {
     }
 
     #[test]
-    fn localhost_is_tried_at_its_ipv4_address_first_and_any_other_host_in_its_order() {
+    fn plain_http_stays_on_loopback_and_localhost_tries_ipv4_first() {
         let v6: SocketAddr = "[::1]:8790".parse().unwrap();
         let v4: SocketAddr = "127.0.0.1:8790".parse().unwrap();
         let other: SocketAddr = "10.0.0.7:8790".parse().unwrap();
-        assert_eq!(in_order("localhost", [v6, v4].into_iter()), [v4, v6]);
-        assert_eq!(in_order("LocalHost", [v6, v4].into_iter()), [v4, v6]);
-        assert_eq!(in_order("localhost", [v4, v6].into_iter()), [v4, v6]);
-        assert_eq!(in_order("localhost", [v6].into_iter()), [v6]);
+        assert_eq!(in_order("localhost", false, [v6, v4].into_iter()), [v4, v6]);
+        assert_eq!(in_order("LocalHost", false, [v6, v4].into_iter()), [v4, v6]);
+        assert_eq!(in_order("localhost", false, [v4, v6].into_iter()), [v4, v6]);
+        assert_eq!(in_order("localhost", false, [v6].into_iter()), [v6]);
         assert_eq!(
-            in_order("yard.example.net", [v6, other, v4].into_iter()),
+            in_order("yard.example.net", true, [v6, other, v4].into_iter()),
             [v6, other, v4]
         );
+        assert_eq!(
+            in_order("localhost", false, [other, v6, v4].into_iter()),
+            [v4, v6]
+        );
+        assert!(in_order("localhost", false, [other].into_iter()).is_empty());
     }
 
     #[test]
