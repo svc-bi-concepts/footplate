@@ -1,6 +1,7 @@
 # footplate
 
-footplate is the yard's desktop app, for macOS and Linux. It sets a yard up
+footplate is the yard's desktop app, for macOS and Linux, and for Windows
+against a yard at an address ([Windows](#windows)). It sets a yard up
 on a machine with no terminal, starts and stops it, puts the yard's
 decisions in front of you to answer, and lets you talk with the crew of
 this yard and of the yards it is linked with, on this machine or paired
@@ -29,10 +30,13 @@ alone.
 
 ## Installing
 
-A release is one download for each system, and none of it needs a terminal.
-The files are on yardr.dev. `https://yardr.dev/releases/footplate/latest.json`
-names the newest version and each of its files, and a file is at
-`https://yardr.dev/releases/footplate/v<version>/<file>`.
+A release is one download for each of macOS and Linux, and none of it needs a
+terminal. The files are on yardr.dev.
+`https://yardr.dev/releases/footplate/latest.json` names the newest version
+and each of its files, and a file is at
+`https://yardr.dev/releases/footplate/v<version>/<file>`. Windows has no
+download yet: it is built from source ([Building](#building)), and
+[Windows](#windows) says what it does and does not do.
 
 No download holds yardr. footplate fetches it the first time it opens, when it
 sets a yard up ([Setting up a yard here](#setting-up-a-yard-here)). The
@@ -109,6 +113,14 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   The yard runs on a Mac and so does the gate: the Linux build is tried by
   hand, in a container (Debian 13, arm64) under Xvfb and under a headless
   sway.
+- Windows: the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`)
+  and the Visual Studio Build Tools with the C++ workload, which bring the
+  linker and the Windows SDK (gpui embeds a manifest with its resource
+  compiler). A debug build compiles gpui's shaders when the window opens; a
+  release build compiles them with the SDK's `fxc.exe`, which
+  `GPUI_FXC_PATH` names if the build does not find it. The job in
+  `.github/workflows/windows.yml` runs `cargo build` and `cargo test` on a
+  `windows-latest` runner; the gate runs on a Mac and tries no Windows.
 
 gpui is the release on crates.io, pinned exactly in `Cargo.toml`, and
 `Cargo.lock` is committed: the gate builds with `--locked`. `Cargo.toml`
@@ -776,7 +788,8 @@ name the file as the yard's `token_file`, whole.)
   trusts, for the address's host;
 - a token file that anyone but you can read or write (any bit of mode 077):
   whoever reads it calls the yard as you. `chmod 600 <file>` and start
-  again. A file that is missing, or holds no token, is said too;
+  again. A file that is missing, or holds no token, is said too. Windows
+  has no mode to read: see [Windows](#windows);
 - a token whose file names another yard's address than the one it would be
   sent to: pair the device with this yard;
 - a token file that cannot be bound to an address, or is not a regular file;
@@ -844,6 +857,55 @@ machine. A flow the edge forgot meanwhile is opened once more; one that is
 forgotten twice is said. The password is in the request's body and in
 nothing else of footplate: no field once it is sent, no file, no setting,
 no error and no log.
+
+## Windows
+
+footplate runs on Windows (x86_64) against a yard at an address, and against
+no other: a yard of this machine is reached by a unix socket, which Windows
+has not, so the yard is on another machine, or in WSL2. The window offers
+no "yard of this machine", sets none up ("set up a yard here" is not
+there), fetches no yardr, and has no Start or Stop. The entry
+`this machine`, which the settings always list, cannot be opened: opening it
+says so and offers the other ways, "pair with a yard at an address" and "open a
+hosted yard", which [A yard at an address](#a-yard-at-an-address) and [A
+hosted yard](#a-hosted-yard) describe. The calls, the stream and the
+pairing are the same over TCP, with TLS trusted by the roots Windows
+trusts.
+
+**Where it keeps things.** The settings are
+`%APPDATA%\footplate\settings.json`, and the token of each paired yard is a
+file beside them, `yard-<name>.token`, or the whole path a yard's
+`token_file` names. footplate sets no mode on them and reads none: a user's
+profile folder is private to that user by default (other users cannot read
+it; administrators can), which is what mode 0600 stands for on a Mac or on
+Linux, where a token file others can read is refused. Keep a token file in
+the profile, and not in a folder others share.
+
+**A yard on another machine.** As [A yard at an address](#a-yard-at-an-address)
+has it: "add a yard at an address", the `https://` address and the code its
+operator opens with `yardr user device pair <user> <device> --url
+https://...`.
+
+**A yard in WSL2 on the same PC.** yardr runs inside WSL2, and footplate,
+as a Windows program, reaches its listener at `http://localhost:<hook
+port>`: plain http is accepted for `localhost`, and WSL2 forwards the
+localhost ports of its virtual machine to Windows (`localhostForwarding` in
+`.wslconfig`, on by default). footplate tries `localhost` at `127.0.0.1`
+before `::1`, as Windows lists `::1` first and is slow to refuse a
+connection there. The listener is the yard's setting `hook_addr`, port 8790
+unless that says otherwise. In WSL2:
+
+    yardr user device pair <user> <device> --url http://localhost:8790
+
+then, in footplate, "add a yard at an address" with that address and the
+code it printed.
+
+**Left out of Windows for now.** The system's unlock before a weighty
+approval: the card asks for the ask's number typed back, as it does where a
+system offers none. System notifications, which the settings say there are
+none of; the item in the tray, whose settings are not shown; the number on
+the taskbar. The title bar is the system's. An installer, and signing, are
+for later; a release build is a console-less `footplate.exe`.
 
 ## yardr, fetched
 
@@ -1358,7 +1420,8 @@ They are kept in one file footplate writes on every change:
 `$XDG_CONFIG_HOME/footplate/settings.json` when
 `XDG_CONFIG_HOME` is set, `~/Library/Application Support/footplate/settings.json`
 on macOS otherwise, and `~/.config/footplate/settings.json` on Linux
-otherwise. A relative `XDG_CONFIG_HOME` is ignored. Without the file, or
+otherwise; on Windows `%APPDATA%\footplate\settings.json`, and nothing
+else. A relative `XDG_CONFIG_HOME` is ignored. Without the file, or
 with one footplate cannot read, the window is as it was before there were
 settings: 14 pixels, auto.
 
@@ -1368,8 +1431,8 @@ The About card says which footplate and which yardr you run. It stands over
 the window, and esc, its close button or a click outside it shuts it. Two
 doors open it: "About footplate" in the application's menu on a Mac, and
 the "about footplate" row under "This window" in the
-[settings](#settings), which is the door on Linux, where footplate has no
-application menu.
+[settings](#settings), which is the door on Linux and on Windows, where
+footplate has no application menu.
 
 - footplate: the release this is, as its build names it (`v0.6.0`).
 - yardr: what the yardr footplate fetched says to `yardr --version`, asked
@@ -1377,7 +1440,8 @@ application menu.
   commit it was built from). Where footplate has fetched none, the card says
   "not fetched yet" ([yardr, fetched](#yardr-fetched) has when it does); a
   yardr that is kept and will not say gives the reason. A yardr you
-  installed yourself is not asked: footplate does not use it.
+  installed yourself is not asked: footplate does not use it. On Windows
+  footplate fetches none, and the card names footplate alone.
 
 The card looks for nothing newer, of either, and offers no update.
 
@@ -1588,9 +1652,12 @@ options have no icon, so the program sees to it when it starts
 | `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir, or a TCP port of this machine with tokens and a pairing, that answers the documented JSON; a stand-in edge in front of it with the login flow |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (not on Windows), or a TCP port of this machine with tokens and a pairing, that answers the documented JSON; a stand-in edge in front of it with the login flow |
 
-The tests run without a yard and without a screen: the client against the
+The tests run without a yard and without a screen. On Windows the ones that
+start the fake yard's socket, make a symlink, read a file mode or run the
+shell stand-in for yardr below are left out (`#[cfg(unix)]`), and the rest
+run in the Windows job. The client is tried against the
 fake yard for each call, and through a stand-in edge for Kratos sign-in,
 including wrong passwords and expired flows; an image and the stream, by
 its socket and at an address, with a pairing, a wrong code and a removed

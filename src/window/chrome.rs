@@ -147,8 +147,9 @@ impl Footplate {
         }
         // The setup shot is step 2 of setting up a yard here, posed: no
         // yard answers, and the first run stands at the yard's form. A
-        // debug build's alone, as above.
-        #[cfg(debug_assertions)]
+        // debug build's alone, as above, and one with a socket: the shots
+        // are taken against a fake yard at one.
+        #[cfg(all(debug_assertions, unix))]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("setup") {
             let first_run = cx.new(|cx| {
                 FirstRun::shot_step2(
@@ -1032,8 +1033,8 @@ impl Footplate {
                     // The image shot opens the mail's image over the
                     // window, as a click on its thumbnail does: the yard
                     // holds the shot's bytes, and they show when they
-                    // come. A debug build's alone, as above.
-                    #[cfg(debug_assertions)]
+                    // come. A debug build's alone, as above, and a unix one's.
+                    #[cfg(all(debug_assertions, unix))]
                     if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("image") {
                         let (hash, bytes) = crate::shot::IMAGE_OPEN;
                         self.image_open = Some(super::rail::ImageOpen {
@@ -3235,6 +3236,9 @@ impl Footplate {
     /// home's yard, and one at an address, are not footplate's to make.
     /// Nor is one that is only stopped: its home holds a yard already.
     pub(crate) fn sets_up_here(&self) -> bool {
+        if !cfg!(unix) {
+            return false;
+        }
         let here = self.entry.as_ref().is_some_and(|yard| {
             !yard.is_far()
                 && (yard.socket.is_empty() || std::path::Path::new(&yard.socket) == self.env.socket)
@@ -4055,6 +4059,9 @@ impl Footplate {
                                 .flex_col()
                                 .gap_4()
                                 .children(match open {
+                                    // Windows draws no such item: its controls are
+                                    // left out there, as they would do nothing.
+                                    Section::ThisWindow if cfg!(windows) => vec![size, about],
                                     Section::ThisWindow => vec![size, menu_bar, mark, about],
                                     Section::Appearance => vec![look],
                                     Section::Notifications => vec![notifications],
@@ -4606,12 +4613,16 @@ impl Footplate {
                                         footplate_words(),
                                         palette.text,
                                     ))
-                                    .child(row(
-                                        "yardr",
-                                        "about yardr",
-                                        yardr_words(about.kept.as_ref()),
-                                        kept_color,
-                                    )),
+                                    // Windows fetches no yardr, so "not
+                                    // fetched yet" would promise one.
+                                    .when(!cfg!(windows), |lines| {
+                                        lines.child(row(
+                                            "yardr",
+                                            "about yardr",
+                                            yardr_words(about.kept.as_ref()),
+                                            kept_color,
+                                        ))
+                                    }),
                             ),
                     )
                     .child(

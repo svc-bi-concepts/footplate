@@ -473,6 +473,7 @@ mod tests {
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;
 
+    #[cfg(unix)]
     #[test]
     fn the_name_is_the_one_the_window_runs_as_when_the_yard_has_that_user() {
         let yard = Yard::start();
@@ -482,6 +483,7 @@ mod tests {
         assert_eq!(yard.asked("Settings"), Vec::<serde_json::Value>::new());
     }
 
+    #[cfg(unix)]
     #[test]
     fn else_it_is_the_yard_s_operator() {
         let yard = Yard::start();
@@ -495,6 +497,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_yard_without_an_operator_has_nobody_to_show_it_to() {
         let yard = Yard::start();
@@ -517,6 +520,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_reads_the_unread_mail_all_of_it() {
         let yard = Yard::start();
@@ -542,6 +546,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_reads_the_notifications_and_the_asks() {
         let yard = Yard::start();
@@ -579,6 +584,7 @@ mod tests {
 
     /// An arrivals board the yard serves unreadably does not fail the
     /// state read: the board is empty, with why for the window to say.
+    #[cfg(unix)]
     #[test]
     fn load_reads_on_past_an_unreadable_arrivals_board() {
         let yard = Yard::start();
@@ -603,6 +609,7 @@ mod tests {
 
     /// A flows view the yard serves unreadably does not fail the state
     /// read either: the view is empty, with why for the window to say.
+    #[cfg(unix)]
     #[test]
     fn load_reads_on_past_an_unreadable_flows_view() {
         let yard = Yard::start();
@@ -634,6 +641,7 @@ mod tests {
     /// both read as empty, with neither raising a notice, and the Lines
     /// pane says the yard is too old instead. Either half alone reads
     /// the same, and a half that reads is not too old.
+    #[cfg(unix)]
     #[test]
     fn load_reads_on_past_a_yard_too_old_for_lines() {
         let yard = Yard::start();
@@ -677,6 +685,7 @@ mod tests {
     /// yard's operator as read: a yard from before the call reads as
     /// empty with its pane saying so, and an unreadable one with why.
     /// Anywhere else no grants call is made.
+    #[cfg(unix)]
     #[test]
     fn load_reads_the_grants_for_the_operator_alone() {
         let yard = Yard::start();
@@ -723,6 +732,7 @@ mod tests {
     /// Anywhere but the operator's, the window reads no grants: not for
     /// another user, not where the yard names no operator, and not where
     /// its settings could not be read. The window still opens.
+    #[cfg(unix)]
     #[test]
     fn load_reads_no_grants_where_the_window_is_not_the_operator_s() {
         let yard = Yard::start();
@@ -894,6 +904,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn stopping_a_follower_closes_its_idle_stream() {
         let yard = Yard::start();
@@ -960,6 +971,7 @@ mod tests {
     /// A stream that stays open and brings nothing while the yard moves
     /// on is replaced: the yard is read again, as when a stream ends, and
     /// what happened meanwhile is in what it reads.
+    #[cfg(unix)]
     #[test]
     fn a_stream_that_says_nothing_while_the_yard_moves_on_is_replaced() {
         let yard = Yard::start();
@@ -986,6 +998,7 @@ mod tests {
 
     /// A stream that says nothing while the yard says nothing either is
     /// read on: the yard is asked its head, and the stream stays.
+    #[cfg(unix)]
     #[test]
     fn a_quiet_stream_of_a_quiet_yard_is_read_on() {
         let yard = Yard::start();
@@ -1012,6 +1025,7 @@ mod tests {
 
     /// A head beyond what the stream brought gives the event a moment
     /// more to come: one that comes in it leaves the stream as it is.
+    #[cfg(unix)]
     #[test]
     fn an_event_on_its_way_is_given_a_moment_to_come() {
         let yard = Yard::start();
@@ -1115,6 +1129,7 @@ mod tests {
         follower.join().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_yard_is_said_in_words_and_tried_again_until_it_is_there() {
         let dir = tempfile::tempdir().unwrap();

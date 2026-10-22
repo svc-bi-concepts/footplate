@@ -2,9 +2,10 @@
 //! look, the yards it can show and which of them is open, what the system
 //! tells of, and whether footplate stays up in the menu bar. One small JSON file where the platform has a program's own
 //! configuration: `~/Library/Application Support/footplate/settings.json`
-//! on macOS, `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere
-//! (`~/.config` when that is not set). It is footplate's to write, on every
-//! change; a file that is missing or that it cannot read is today's look.
+//! on macOS, `%APPDATA%\footplate\settings.json` on Windows,
+//! `$XDG_CONFIG_HOME/footplate/settings.json` elsewhere (`~/.config` when
+//! that is not set). It is footplate's to write, on every change; a file
+//! that is missing or that it cannot read is today's look.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -1094,8 +1095,21 @@ pub fn file_under(
     Some(dir.join(crate::NAME).join("settings.json"))
 }
 
+/// Where the settings are kept on Windows: `%APPDATA%\footplate`, the
+/// person's own profile, which other users cannot read by default. No mode
+/// is set on the file or its folder, as there is none to set: that is
+/// also where the device's token lies beside it. An `APPDATA` that is not
+/// an absolute path is none, as a relative `XDG_CONFIG_HOME` is.
+pub fn file_under_appdata(appdata: Option<OsString>) -> Option<PathBuf> {
+    let dir = Some(PathBuf::from(appdata?)).filter(|dir| dir.is_absolute())?;
+    Some(dir.join(crate::NAME).join("settings.json"))
+}
+
 /// Where this run keeps them.
 pub fn file() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return file_under_appdata(std::env::var_os("APPDATA"));
+    }
     file_under(
         cfg!(target_os = "macos"),
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -1192,6 +1206,14 @@ mod tests {
     fn the_yards_are_kept_in_their_order_with_the_open_one_and_never_a_token() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
+        // A path whole on this system: from /, or on Windows from a
+        // drive's root, where a path from / is not whole. The file holds
+        // it as JSON, which writes each backslash twice.
+        let socket = if cfg!(windows) {
+            r"C:\Users\shop\.yardr\yard.sock"
+        } else {
+            "/home/shop/.yardr/yard.sock"
+        };
         let set = Settings::default()
             .with_yard(
                 None,
@@ -1203,11 +1225,7 @@ mod tests {
                 Some(&file),
             )
             .unwrap()
-            .with_yard(
-                None,
-                Yard::near("shop", "/home/shop/.yardr/yard.sock"),
-                None,
-            )
+            .with_yard(None, Yard::near("shop", socket), None)
             .unwrap()
             .opening("plantime");
         assert_eq!(set.opened().name, "plantime");
@@ -1231,12 +1249,13 @@ mod tests {
     },
     {
       "name": "shop",
-      "socket": "/home/shop/.yardr/yard.sock"
+      "socket": SOCKET
     }
   ],
   "open": "plantime"
 }
 "#
+            .replace("SOCKET", &serde_json::to_string(socket).unwrap())
         );
         // The yard that was open last is opened, else the first: a name
         // of none, as of a yard removed by hand, is the first too.
@@ -2099,6 +2118,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn removing_an_unpaired_symlink_leaves_it_and_its_target_alone() {
         use std::os::unix::fs::symlink;
@@ -2494,6 +2514,9 @@ mod tests {
         )));
     }
 
+    // Its paths are a unix system's: `/elsewhere` is no absolute path on
+    // Windows, which `file_under_appdata`'s test stands for.
+    #[cfg(unix)]
     #[test]
     fn the_file_is_where_the_platform_has_a_program_s_configuration() {
         let os = |s: &str| Some(OsString::from(s));
@@ -2530,5 +2553,19 @@ mod tests {
             file_under(true, os("/elsewhere"), None),
             Some(PathBuf::from("/elsewhere/footplate/settings.json"))
         );
+    }
+
+    #[test]
+    fn on_windows_the_file_is_under_appdata_when_that_is_a_whole_path() {
+        // A whole path on any system the test runs on: the temp dir stands
+        // for the profile's `AppData\Roaming`.
+        let roaming = std::env::temp_dir().join("Roaming");
+        assert_eq!(
+            file_under_appdata(Some(roaming.clone().into_os_string())),
+            Some(roaming.join("footplate").join("settings.json"))
+        );
+        assert_eq!(file_under_appdata(Some(OsString::from("Roaming"))), None);
+        assert_eq!(file_under_appdata(Some(OsString::new())), None);
+        assert_eq!(file_under_appdata(None), None);
     }
 }

@@ -3,11 +3,13 @@
 //! as docs/api.md of the yardr repository shows it, and serves the stream.
 //! Or the same yard at its listener, a TCP port of this machine: the calls
 //! under `/user/` for a device's token, `/user/me`, and a pairing that
-//! gives a token for a code.
+//! gives a token for a code. Windows has no socket, so the yard there is at
+//! its listener alone.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -25,6 +27,7 @@ const ME: &str = r#"{"user": "jo", "said_by": "laptop", "yard": "south"}"#;
 
 /// A connection to the yard, by its socket or its listener.
 enum Wire {
+    #[cfg(unix)]
     Unix(UnixStream),
     Tcp(TcpStream),
 }
@@ -32,6 +35,7 @@ enum Wire {
 impl Wire {
     fn try_clone(&self) -> io::Result<Wire> {
         Ok(match self {
+            #[cfg(unix)]
             Wire::Unix(conn) => Wire::Unix(conn.try_clone()?),
             Wire::Tcp(conn) => Wire::Tcp(conn.try_clone()?),
         })
@@ -39,6 +43,7 @@ impl Wire {
 
     fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Wire::Unix(conn) => conn.set_nonblocking(nonblocking),
             Wire::Tcp(conn) => conn.set_nonblocking(nonblocking),
         }
@@ -48,6 +53,7 @@ impl Wire {
 impl Read for Wire {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
+            #[cfg(unix)]
             Wire::Unix(conn) => conn.read(buf),
             Wire::Tcp(conn) => conn.read(buf),
         }
@@ -57,6 +63,7 @@ impl Read for Wire {
 impl Write for Wire {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
+            #[cfg(unix)]
             Wire::Unix(conn) => conn.write(buf),
             Wire::Tcp(conn) => conn.write(buf),
         }
@@ -64,6 +71,7 @@ impl Write for Wire {
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
+            #[cfg(unix)]
             Wire::Unix(conn) => conn.flush(),
             Wire::Tcp(conn) => conn.flush(),
         }
@@ -139,7 +147,7 @@ pub struct Yard {
 
 impl Yard {
     /// A yard at a socket in a temp dir of its own.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn start() -> Yard {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("yard.sock");
@@ -149,6 +157,7 @@ impl Yard {
     }
 
     /// A yard at a socket the test names.
+    #[cfg(unix)]
     pub fn start_at(socket: &Path) -> Yard {
         let _ = std::fs::remove_file(socket);
         let listener = UnixListener::bind(socket).unwrap();
@@ -210,10 +219,11 @@ impl Yard {
     /// A client of the yard: by its socket, or at its address as the
     /// device it started with.
     pub fn client(&self) -> Client {
-        match &self.address {
-            Some(_) => self.client_with(TOKEN),
-            None => Client::new(&self.socket),
+        #[cfg(unix)]
+        if self.address.is_none() {
+            return Client::new(&self.socket);
         }
+        self.client_with(TOKEN)
     }
 
     /// A client at the yard's address with a token of the test's.

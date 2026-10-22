@@ -2,16 +2,18 @@
 //! at an address, as a device of its user. The environment names the one
 //! yard of a run, else the settings list several and say which is open. A
 //! device's token is kept in a file only its user reads, one for each yard
-//! and never in the settings; the yard gives it for a pairing code.
+//! and never in the settings; the yard gives it for a pairing code. Windows
+//! has no yard of this machine: it opens a yard at an address alone.
 
 use std::fs;
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{self, Address, Client};
-use crate::settings::Settings;
+use crate::settings::{self, Settings};
 
 /// The file beside the settings that holds the token of the device of the
 /// yard the environment names, and of the one yard of a settings file from
@@ -21,6 +23,10 @@ pub const TOKEN_FILE: &str = "yard.token";
 /// What is said where a token's file would be beside the settings and
 /// there are none.
 const NO_HOME: &str = "There is no home directory to keep this device's token in. Name a file for it: FOOTPLATE_TOKEN_FILE";
+
+/// What is said of a yard of this machine where this system has none.
+#[cfg(not(unix))]
+const NO_NEAR_YARD: &str = "This system has no yard of its own, and footplate reaches a yard of this machine by a socket on a Mac or on Linux only. Pair with a yard at an address: its operator opens a code with yardr user device pair <user> <device>.";
 
 /// Marks a token file that footplate wrote after a pairing. A token from
 /// elsewhere may have the same first line, but removing a yard must not
@@ -141,21 +147,7 @@ impl Env {
     pub fn open(&self, set: &Settings, settings: Option<&Path>) -> Result<Client, String> {
         let opened = set.opened();
         let Some(address) = self.address(set) else {
-            let socket = Path::new(&opened.socket);
-            if opened.socket.is_empty() {
-                return Ok(Client::new(&self.socket));
-            }
-            // The settings take no such socket where one is typed, and a
-            // list edited by hand is held to the same: a path from
-            // wherever footplate was started would be whoever's socket
-            // lies there.
-            if !socket.is_absolute() {
-                return Err(format!(
-                    "{:?} is no path of a socket: the yard {} wants it whole, from /, where the settings are kept.",
-                    opened.socket, opened.name
-                ));
-            }
-            return Ok(Client::new(socket));
+            return self.open_near(opened);
         };
         let address = Address::parse(address)?;
         let session = match self.session_of(set, &opened.name, settings)? {
@@ -168,6 +160,33 @@ impl Env {
             Some(session) => Client::remote_hosted(address, token, session),
             None => Client::remote(address, token),
         })
+    }
+
+    /// A client of the yard of this machine `opened` is, by its socket.
+    #[cfg(unix)]
+    fn open_near(&self, opened: &settings::Yard) -> Result<Client, String> {
+        let socket = Path::new(&opened.socket);
+        if opened.socket.is_empty() {
+            return Ok(Client::new(&self.socket));
+        }
+        // The settings take no such socket where one is typed, and a
+        // list edited by hand is held to the same: a path from
+        // wherever footplate was started would be whoever's socket
+        // lies there.
+        if !socket.is_absolute() {
+            return Err(format!(
+                "{:?} is no path of a socket: the yard {} wants it whole, from /, where the settings are kept.",
+                opened.socket, opened.name
+            ));
+        }
+        Ok(Client::new(socket))
+    }
+
+    /// Windows has no socket to reach a yard of this machine by, and no
+    /// yard of its own: the yard is another machine's, at its address.
+    #[cfg(not(unix))]
+    fn open_near(&self, _: &settings::Yard) -> Result<Client, String> {
+        Err(NO_NEAR_YARD.to_string())
     }
 
     /// The file the session token of the far yard called `name` is in,
@@ -214,7 +233,7 @@ impl Env {
 /// beside the settings: footplate's own to make and to delete.
 pub fn is_bare(token_file: &str) -> bool {
     let name = token_file.trim();
-    !name.is_empty() && !name.contains('/') && name != "." && name != ".."
+    !name.is_empty() && !name.contains(std::path::is_separator) && name != "." && name != ".."
 }
 
 /// Where the token file a yard of the settings names is: beside the
@@ -223,7 +242,7 @@ pub fn is_bare(token_file: &str) -> bool {
 /// started would be another file the next time.
 pub fn token_path(token_file: &str, settings: Option<&Path>) -> Result<PathBuf, String> {
     let name = token_file.trim();
-    let path = if Path::new(name).is_absolute() && !name.ends_with('/') {
+    let path = if Path::new(name).is_absolute() && !name.ends_with(std::path::is_separator) {
         PathBuf::from(name)
     } else if is_bare(name) {
         settings.ok_or(NO_HOME)?.with_file_name(name)
@@ -263,6 +282,10 @@ fn check_token_file_target(file: &Path) -> Result<(), String> {
 /// Whether two paths are one file, by whichever way its directory is
 /// named: a link to the directory is the directory.
 pub fn same_file(a: &Path, b: &Path) -> bool {
+    // std reads no inode on Windows, so there a file is told by its resolved
+    // path alone, as one that is not there yet is: a hard link to a file is
+    // another file to it.
+    #[cfg(unix)]
     if let (Ok(a_meta), Ok(b_meta)) = (fs::metadata(a), fs::metadata(b)) {
         return a_meta.dev() == b_meta.dev() && a_meta.ino() == b_meta.ino();
     }
@@ -328,7 +351,9 @@ pub(crate) struct KeptKind {
     marker: &'static str,
     /// `token` or `session`, as a refusal names the file and what it holds.
     noun: &'static str,
-    /// Why the file may not be read by others, past the mode.
+    /// Why the file may not be read by others, past the mode. Said where a
+    /// mode is read, which Windows has none to.
+    #[cfg_attr(not(unix), allow(dead_code))]
     open: &'static str,
     /// What gave the token: `the yard` or `signing in`.
     giver: &'static str,
@@ -403,12 +428,18 @@ fn kept_as(file: &Path, kind: KeptKind) -> Result<KeptToken, String> {
             "The {noun} file {at} is not a regular file, and is refused."
         ));
     }
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "The {noun} file {at} is open to others (mode {mode:04o}), and is refused: {}. Make it yours alone: chmod 600 {at}",
-            kind.open
-        ));
+    // No mode is read on Windows, and none is set when a pairing writes the
+    // file (`token_place`): it lies in the person's profile (%APPDATA%),
+    // which other users cannot read by default.
+    #[cfg(unix)]
+    {
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "The {noun} file {at} is open to others (mode {mode:04o}), and is refused: {}. Make it yours alone: chmod 600 {at}",
+                kind.open
+            ));
+        }
     }
     let text = fs::read_to_string(file)
         .map_err(|err| format!("The {noun} file {at} cannot be read: {err}"))?;
@@ -466,7 +497,7 @@ pub fn read_session(file: &Path) -> Result<String, String> {
 
 /// Whether the tests run as root, which no file mode holds: a test of a
 /// refusal a mode carries says so and returns instead of trying it.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn running_as_root() -> bool {
     // SAFETY: geteuid takes nothing, touches nothing, and fails nowhere.
     unsafe { libc::geteuid() == 0 }
@@ -632,12 +663,13 @@ pub fn token_place(file: &Path) -> io::Result<TokenPlace> {
         let mut candidate = name.clone();
         candidate.push(format!("-{sequence}.new"));
         let new = file.with_file_name(candidate);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&new)
-        {
+        let mut open = fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        // Windows sets no mode: the file is made in the person's profile,
+        // which is private to them by default.
+        #[cfg(unix)]
+        open.mode(0o600);
+        match open.open(&new) {
             Ok(out) => {
                 return Ok(TokenPlace {
                     file: file.to_path_buf(),
@@ -736,9 +768,13 @@ mod tests {
     use crate::session;
     use crate::settings;
 
+    /// A file of `text` with the mode: on Windows there is none to set, and
+    /// the file is private to the profile it lies in.
+    #[cfg_attr(not(unix), allow(unused_variables))]
     fn file_of_mode(dir: &Path, name: &str, mode: u32, text: &str) -> PathBuf {
         let file = dir.join(name);
         fs::write(&file, text).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
         file
     }
@@ -809,6 +845,7 @@ mod tests {
         assert_eq!(far.asked("SourceGrants"), vec![serde_json::json!({})]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn without_them_it_is_this_machine_s_socket_as_before() {
         let near = Yard::start();
@@ -872,6 +909,7 @@ mod tests {
         assert_eq!(client.place(), "The yard: https://mac.example.net");
     }
 
+    #[cfg(unix)]
     #[test]
     fn each_yard_of_the_settings_is_opened_by_its_own_socket_or_token_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -982,9 +1020,6 @@ mod tests {
 
     #[test]
     fn the_environment_cannot_use_the_settings_or_a_special_file_as_its_token_file() {
-        use std::os::unix::fs::FileTypeExt;
-        use std::os::unix::net::UnixListener;
-
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         fs::write(&settings, "{}").unwrap();
@@ -1000,19 +1035,26 @@ mod tests {
             .unwrap_err();
         assert!(why.contains("file the settings are kept in"), "{why}");
 
-        let socket = dir.path().join("token.socket");
-        let listener = UnixListener::bind(&socket).unwrap();
-        drop(listener);
-        let why = env(socket.clone())
-            .token_of(&set, "", Some(&settings))
-            .unwrap_err();
-        assert!(why.contains("not a regular file"), "{why}");
-        assert!(
-            fs::symlink_metadata(socket)
-                .unwrap()
-                .file_type()
-                .is_socket()
-        );
+        // The special file is a socket, which only a unix system has.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            use std::os::unix::net::UnixListener;
+
+            let socket = dir.path().join("token.socket");
+            let listener = UnixListener::bind(&socket).unwrap();
+            drop(listener);
+            let why = env(socket.clone())
+                .token_of(&set, "", Some(&settings))
+                .unwrap_err();
+            assert!(why.contains("not a regular file"), "{why}");
+            assert!(
+                fs::symlink_metadata(socket)
+                    .unwrap()
+                    .file_type()
+                    .is_socket()
+            );
+        }
     }
 
     #[test]
@@ -1038,10 +1080,11 @@ mod tests {
             token_path(" yard-mac.token ", Some(&settings)),
             Ok(dir.path().join("yard-mac.token"))
         );
-        assert_eq!(
-            token_path("/home/jo/secrets/mac.token", None),
-            Ok(PathBuf::from("/home/jo/secrets/mac.token"))
-        );
+        let whole = match cfg!(windows) {
+            true => r"C:\Users\jo\secrets\mac.token",
+            false => "/home/jo/secrets/mac.token",
+        };
+        assert_eq!(token_path(whole, None), Ok(PathBuf::from(whole)));
         for none in [
             "",
             "a/b.token",
@@ -1055,19 +1098,32 @@ mod tests {
             assert!(why.contains("names no token file"), "{none:?}: {why}");
         }
         assert!(is_bare("yard.token") && !is_bare("/home/jo/yard.token"));
+        // On Windows a backslash parts a folder from a name too.
+        #[cfg(windows)]
+        {
+            assert!(!is_bare(r"keys\yard.token"));
+            let why = token_path(r"C:\Users\jo\", Some(&settings)).unwrap_err();
+            assert!(why.contains("names no token file"), "{why}");
+        }
         // One file by two ways to its directory is one file.
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
-        assert!(same_file(
-            &dir.path().join("yard.token"),
-            &link.join("yard.token")
-        ));
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+            assert!(same_file(
+                &dir.path().join("yard.token"),
+                &link.join("yard.token")
+            ));
+        }
         assert!(!same_file(
             &dir.path().join("yard.token"),
             &dir.path().join("yard-2.token")
         ));
     }
 
+    // A link is a file's name that std makes only on a unix system, and a
+    // hard link is told from its file there by the inode alone.
+    #[cfg(unix)]
     #[test]
     fn token_paths_that_are_file_links_or_hard_links_are_one_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1107,6 +1163,7 @@ mod tests {
         let token = dir.path().join("yard-mac.token");
         let other = dir.path().join("yard-mac.token.new");
         fs::write(&other, "yardr-dev-other\n").unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&other, fs::Permissions::from_mode(0o600)).unwrap();
 
         keep_token(&token, "yardr-dev-mac").unwrap();
@@ -1430,6 +1487,7 @@ mod tests {
             .keep_as(session, Some(&address), SESSION_KIND)
             .unwrap();
 
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
@@ -1445,7 +1503,9 @@ mod tests {
     #[test]
     fn a_session_file_open_to_others_or_holding_none_is_refused() {
         // No file mode holds root: what is refused below for another
-        // user is let through here.
+        // user is let through here. Nor is there a mode on Windows, and
+        // a file holding none is the one case left there.
+        #[cfg(unix)]
         if running_as_root() {
             eprintln!("skipped: root (euid 0) is not held by a file's mode");
             return;
@@ -1468,6 +1528,7 @@ mod tests {
                 .opening("south")
         };
         let env = Env::default();
+        #[cfg(unix)]
         for mode in [0o644, 0o640] {
             let file = file_of_mode(dir.path(), "open.session", mode, "kratos-dev-south\n");
             let why = env.open(&at("open.session"), Some(&settings)).unwrap_err();
@@ -1557,8 +1618,9 @@ mod tests {
         let file = dir.path().join("yard-south.session");
         let address = Address::parse("https://south.example.net").unwrap();
         keep_session(&file, "kratos-dev-south", &address).unwrap();
-        // Mode 0600, the session's marker, the edge's address, and the
-        // session reads back for that edge.
+        // Mode 0600 (on unix), the session's marker, the edge's address,
+        // and the session reads back for that edge.
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
@@ -1588,9 +1650,15 @@ mod tests {
         .unwrap();
         let set = Settings::read(&settings);
         let whole = settings.to_str().unwrap();
-        let link = dir.path().join("link.token");
-        std::os::unix::fs::symlink(&settings, &link).unwrap();
-        for own in ["settings.json", whole, "link.token"] {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut owns = vec!["settings.json", whole];
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.token");
+            std::os::unix::fs::symlink(&settings, &link).unwrap();
+            owns.push("link.token");
+        }
+        for own in owns {
             let why = token_path(own, Some(&settings)).unwrap_err();
             assert!(
                 why.contains("it is the file the settings are kept in"),
@@ -1608,17 +1676,23 @@ mod tests {
         assert_eq!(left, settings::TokenLeft::None);
         assert!(settings.exists() && less.yard("mac").is_none());
 
+        // A yard of this machine is a socket's, which Windows has not.
         let why = env.open(&set.opening("shop"), Some(&settings)).unwrap_err();
+        #[cfg(unix)]
         assert!(
             why.starts_with("\"run/yard.sock\" is no path of a socket: the yard shop"),
             "{why}"
         );
+        #[cfg(not(unix))]
+        assert_eq!(why, NO_NEAR_YARD);
     }
 
     #[test]
     fn a_token_file_open_to_others_is_refused_with_the_reason() {
         // No file mode holds root: what is refused below for another
-        // user is let through here.
+        // user is let through here. Nor is there a mode on Windows, where
+        // a file missing or holding no token is the cases left.
+        #[cfg(unix)]
         if running_as_root() {
             eprintln!("skipped: root (euid 0) is not held by a file's mode");
             return;
@@ -1629,6 +1703,7 @@ mod tests {
             token_file: Some(file),
             ..Env::default()
         };
+        #[cfg(unix)]
         for mode in [0o644, 0o640, 0o604, 0o660] {
             let file = file_of_mode(dir.path(), "open.token", mode, TOKEN);
             let why = env(file.clone())
@@ -1643,17 +1718,22 @@ mod tests {
                 "{why}"
             );
         }
-        let read_only = file_of_mode(dir.path(), "mine.token", 0o400, TOKEN);
-        let why = token_for(
-            &read_only,
-            &Address::parse("https://mac.example.net").unwrap(),
-        )
-        .unwrap_err();
-        assert!(
-            why.contains("cannot be safely bound") && why.contains("no request was sent"),
-            "{why}"
-        );
-        assert!(env(read_only).open(&Settings::default(), None).is_err());
+        // A file nobody can write cannot have its yard bound to it. Windows
+        // sets no mode to make one so.
+        #[cfg(unix)]
+        {
+            let read_only = file_of_mode(dir.path(), "mine.token", 0o400, TOKEN);
+            let why = token_for(
+                &read_only,
+                &Address::parse("https://mac.example.net").unwrap(),
+            )
+            .unwrap_err();
+            assert!(
+                why.contains("cannot be safely bound") && why.contains("no request was sent"),
+                "{why}"
+            );
+            assert!(env(read_only).open(&Settings::default(), None).is_err());
+        }
         // No file, and one that holds no token.
         let why = env(dir.path().join("gone.token"))
             .open(&Settings::default(), None)
@@ -1673,11 +1753,13 @@ mod tests {
         let file = dir.path().join("footplate/yard.token");
         keep_token(&file, "yardr-dev-one").unwrap();
         assert_eq!(read_token(&file).unwrap(), "yardr-dev-one");
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
         // The next pairing's replaces it, also where the last was left open.
+        #[cfg(unix)]
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
         keep_token(&file, "yardr-dev-two").unwrap();
         assert_eq!(read_token(&file).unwrap(), "yardr-dev-two");
@@ -1697,6 +1779,7 @@ mod tests {
         let beside = || fs::read_dir(dir.path().join("tokens")).unwrap().count();
         assert_eq!(beside(), 1);
         assert!(!file.exists());
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&place.new).unwrap().mode() & 0o777, 0o600);
         drop(place);
         assert_eq!(beside(), 0);
@@ -1721,6 +1804,8 @@ mod tests {
         assert!(token_place(&file.join("yard.token")).is_err());
     }
 
+    // The other kind is a socket, which only a unix system has.
+    #[cfg(unix)]
     #[test]
     fn a_token_path_of_another_kind_is_refused_without_reading_or_replacing_it() {
         use std::os::unix::fs::FileTypeExt;
@@ -1743,6 +1828,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reading_a_symlink_follows_it_but_pairing_replaces_only_the_link() {
         let dir = tempfile::tempdir().unwrap();

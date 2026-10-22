@@ -1181,7 +1181,7 @@ mod tests {
         recommended_line, run_keys, run_runs, run_texts, secret_keys, setup_keys, take_back_label,
         texts_label, typeback_line, typeback_mismatch, words_send,
     };
-    use super::asks::dir_url;
+    use super::asks::{dir_url, file_url};
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, RAIL, drawer_fits};
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
@@ -1765,6 +1765,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_image_for_a_linked_yard_is_put_and_then_mailed_with_its_hash() {
         let yard = Yard::start();
@@ -1785,6 +1786,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_that_carries_no_files_refuses_the_mail_in_the_yard_s_words() {
         let yard = Yard::start();
@@ -1808,6 +1810,7 @@ mod tests {
         assert_eq!(yard.calls(), ["Settings", "PutBlob", "MailPeer"]);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn images_are_attached_to_the_draft_and_sent_with_enter(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2108,6 +2111,7 @@ mod tests {
         assert_eq!(typed(&view, cx), "And this. Two\nlines.");
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_window_shows_the_yard_writes_to_it_and_says_when_it_is_away(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -2252,6 +2256,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn mail_from_the_yard_is_read_on_the_yard_row_and_leaves_no_badge_behind(
         cx: &mut TestAppContext,
@@ -2333,6 +2338,7 @@ mod tests {
         text_bounds(cx, 13);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn mail_of_the_user_to_themselves_and_of_another_user_is_read_and_written_in_their_rows(
         cx: &mut TestAppContext,
@@ -2447,6 +2453,7 @@ mod tests {
     /// What the yard says of mail over a link that carries none out.
     const NO_MAIL: &str = "peer north: the link does not carry mail out: the operator allows it with yardr peer allow north --send mail";
 
+    #[cfg(unix)]
     #[gpui::test]
     fn an_answer_to_a_trusted_name_goes_back_to_it_once_and_a_refusal_writes_nothing_instead(
         cx: &mut TestAppContext,
@@ -2660,6 +2667,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_letter_s_reactions_show_and_a_tap_puts_replaces_and_clears(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2716,6 +2724,7 @@ mod tests {
         assert_eq!(notice(&view, cx), "");
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_with_no_react_hides_the_row_and_says_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2807,6 +2816,7 @@ mod tests {
     /// first line of its body where it reads under another's. It takes no
     /// room: with the pointer on a letter, every row and every mail stands
     /// where it stood with the pointer elsewhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_of_reactions_floats_over_a_letter_and_moves_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2885,6 +2895,7 @@ mod tests {
     /// the pointer left and of the one it came to in no fixed order, and
     /// each of the pieces (the head, the body, the bar) keeps only its own
     /// mark.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_stays_while_the_pointer_goes_from_the_letter_onto_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2932,6 +2943,7 @@ mod tests {
     /// its text, through the space between them, and the bar never hides
     /// on the way. The head and the body touch, so every step stands on
     /// one of the two.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_letter_is_one_hover_target_from_its_head_to_its_text(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2970,6 +2982,7 @@ mod tests {
     /// mail hides it instead, and it is back when the overlay shuts, the
     /// pointer unmoved. (Read at `reacting`: the window's debug bounds
     /// keep every selector once it was drawn.)
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_hides_while_an_overlay_stands_over_the_mail(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3018,6 +3031,7 @@ mod tests {
 
     /// The bar's emoji stand in fixed squares: the pointer on one draws
     /// it larger, and no button's bounds nor the bar's move for it.
+    #[cfg(unix)]
     #[gpui::test]
     fn hovering_an_emoji_moves_no_button_and_no_bar(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3071,6 +3085,7 @@ mod tests {
 
     /// A press on the bar is no press on the text under it: it starts no
     /// selection there, as a press beside the bar does.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_press_on_the_bar_is_no_press_on_the_text_under_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3102,6 +3117,7 @@ mod tests {
     /// on it or by the keys. (The window's debug bounds keep every selector
     /// once it was drawn, so what is drawn is read where the window decides
     /// it, `reacting`.)
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_another_row_was_open(
         cx: &mut TestAppContext,
@@ -3160,6 +3176,7 @@ mod tests {
     /// told of no leave. The bar of reactions does not wait over that letter
     /// when the conversation shows again, nor does the zoom of the emoji the
     /// pointer stood on. (Read at `reacting`, as above.)
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_the_settings_were_open(
         cx: &mut TestAppContext,
@@ -3210,6 +3227,7 @@ mod tests {
     /// letter, so the other yard's mail of that number would stand under
     /// the mark the pointer left behind. The bar does not wait over it, in
     /// the other yard or when this one is shown again.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_another_yard_was_open(
         cx: &mut TestAppContext,
@@ -3259,6 +3277,7 @@ mod tests {
     /// that leaves the one it stood on when the question came is told of no
     /// leave. The bar does not wait over that letter once the question is
     /// answered.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_the_question_before_stopping_stood(
         cx: &mut TestAppContext,
@@ -3302,6 +3321,7 @@ mod tests {
     /// The yard row draws a mail's head and body in one element, with
     /// nothing between them: the bar floats over the head's line there
     /// too, and moves nothing.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_of_reactions_floats_over_a_mail_on_the_yard_row_too(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3353,6 +3373,7 @@ mod tests {
     /// No separator names a day on the yard row, where a mail stands among
     /// notices that say their dates: its head says the date with the time,
     /// not the time alone as the conversation's heads do.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_mail_on_the_yard_row_says_its_date_with_its_time(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3445,6 +3466,7 @@ mod tests {
         cx.read_from_clipboard().and_then(|item| item.text())
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_link_in_a_message_is_selected_with_the_mouse_and_copied(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3507,6 +3529,7 @@ mod tests {
         assert_eq!(selected(&view, cx), None);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_click_on_a_link_in_a_message_opens_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3558,6 +3581,7 @@ mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.org/b"));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_link_inside_a_list_item_still_opens(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3593,6 +3617,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_click_on_a_shortened_link_opens_the_whole_link(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3624,6 +3649,7 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some(url));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_correction_carries_its_label_and_the_header_names_the_state(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3659,6 +3685,7 @@ mod tests {
     /// to it says it cannot read it. The yard raises `crew_login` when the
     /// login changes, so the crew is read again, and the words go when the
     /// screen does.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_crew_member_at_its_login_screen_is_not_logged_in_and_the_mail_to_it_says_so(
         cx: &mut TestAppContext,
@@ -3732,6 +3759,7 @@ mod tests {
 
     /// A text that is the word alone draws the label and no body: the label
     /// says all of it.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_correction_that_is_its_word_alone_draws_the_label_and_no_text(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3742,6 +3770,7 @@ mod tests {
         assert!(!drawn(cx, "text 12"));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_click_on_an_ask_chip_opens_the_right_card(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3770,6 +3799,7 @@ mod tests {
         wait(cx, "bead-a read whole", |cx| has_bead(&view, cx, "bead-a"));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_click_on_a_bead_chip_opens_the_bead_in_the_drawer(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3807,6 +3837,7 @@ mod tests {
     /// The yard read again keeps the drawer's bead: the window reads
     /// it into the new model, and the drawer shows it again once the
     /// call answers, not "Reading the bead."
+    #[cfg(unix)]
     #[gpui::test]
     fn the_drawer_reads_its_bead_again_when_the_yard_is_read_again(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3846,6 +3877,7 @@ mod tests {
 
     /// A shut drawer reads no bead when the yard is read again: the bead
     /// it showed is asked for no more.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_shut_drawer_reads_no_bead_when_the_yard_is_read_again(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3888,6 +3920,7 @@ mod tests {
     /// id: once, whatever is drawn after. The chip opens the bead in the
     /// drawer, which the queue read again leaves open. A dash word that is
     /// no bead stays plain.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_closed_bead_named_in_mail_chips_and_opens_and_a_plain_word_does_not(
         cx: &mut TestAppContext,
@@ -3960,6 +3993,7 @@ mod tests {
     /// would wait its own while the yard is away. What got no answer says
     /// nothing of its id, which mail that comes into view asks again, and
     /// the chip is there once the yard answers.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_batch_the_yard_does_not_answer_ends_at_its_first_id_and_is_asked_again_with_mail(
         cx: &mut TestAppContext,
@@ -4015,6 +4049,7 @@ mod tests {
     /// A click on another bead's chip while the drawer is open shows that
     /// bead in it: one bead at a time, no stack. The conversation stays
     /// open throughout.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_second_bead_chip_replaces_the_drawer_s_bead(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4043,6 +4078,7 @@ mod tests {
 
     /// The drawer's Open shows its bead full width, as a chip did, and
     /// shuts the drawer.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_drawer_s_open_shows_the_bead_full_width_and_shuts_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4070,6 +4106,7 @@ mod tests {
     /// Esc shuts the drawer with the focus in the line or in the window's
     /// keys, on a conversation or a card, and so does its ×. What was
     /// open stays open.
+    #[cfg(unix)]
     #[gpui::test]
     fn esc_and_the_drawer_s_close_button_shut_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4130,6 +4167,7 @@ mod tests {
     /// The cheatsheet lists esc shutting the drawer where one is open, and
     /// the drawer carries the cheatsheet's hint, as the other views do.
     /// Esc shuts the cheatsheet above it first, and the drawer stands.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_cheatsheet_lists_the_drawer_s_key(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4198,6 +4236,7 @@ mod tests {
 
     /// Where the window holds no drawer beside the reading pane, a bead's
     /// chip opens the bead full width, as it did.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_bead_chip_opens_full_width_where_no_drawer_fits(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4221,6 +4260,7 @@ mod tests {
     /// The drawer holds the window's right at its grown width, and the
     /// reading pane narrows to make room: the mail stands wholly left of
     /// it. Its width grows with the text and never under 320.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_drawer_narrows_the_reading_pane_and_holds_its_width(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4282,6 +4322,7 @@ mod tests {
 
     /// The drawer shuts on a yard switch and on the settings, as the bar
     /// of reactions does.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_drawer_shuts_on_a_yard_switch_and_on_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -4326,6 +4367,7 @@ mod tests {
 
     /// The drawer scrolls on its own handle: moving it moves neither the
     /// reading pane's card nor the card it.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_drawer_scrolls_on_its_own_handle(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4383,6 +4425,7 @@ mod tests {
         assert!(drawer_fits(px(974.), 16. * 11. / 14.));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn an_open_ask_named_in_mail_stands_under_it_with_open_card(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4426,6 +4469,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_selection_across_a_code_block_is_copied_as_it_was_written(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4452,6 +4496,7 @@ mod tests {
         assert_eq!(selected(&view, cx).as_deref(), Some(copied));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_line_of_code_wider_than_the_window_is_wrapped(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4476,6 +4521,7 @@ mod tests {
         assert_eq!(selected(&view, cx).as_deref(), Some(code));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_code_block_s_copy_control_copies_it_exactly_and_changes_no_selection(
         cx: &mut TestAppContext,
@@ -4539,6 +4585,7 @@ mod tests {
         assert_eq!(copied(cx, 14), None);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_selection_in_a_second_message_drops_the_first(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4572,6 +4619,7 @@ mod tests {
     /// What is typed with line breaks is one mail, and the yard gets them:
     /// in the text of the call, and kept while another conversation is
     /// open.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_mail_with_line_breaks_arrives_with_them(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -4610,6 +4658,7 @@ mod tests {
     /// past a mail, and its parts are the separate mails it stored, none
     /// joined. One the yard refuses, past 16 parts, is said in its words
     /// where a send that did not go is, and stays in the line.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_long_text_goes_as_it_is_and_what_the_yard_refuses_of_one_stays_in_the_line(
         cx: &mut TestAppContext,
@@ -4679,6 +4728,7 @@ mod tests {
         assert_eq!(texts(&view, cx).len(), 4);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_line_still_copies_its_own_selection(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -5792,6 +5842,7 @@ yardr.dev
         })
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_card_picks_with_words_puts_aside_declines_and_expands(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -5932,6 +5983,7 @@ yardr.dev
         assert_eq!(typed(&view, cx), "tonight?");
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn an_expanded_card_shows_its_notes_pictures(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6013,6 +6065,7 @@ yardr.dev
         (view, cx)
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_s_page_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6042,6 +6095,7 @@ yardr.dev
         assert_eq!(opened.borrow().as_slice(), [format!("{base}/blobs/{page}")]);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_s_page_says_how_to_start_the_view_where_it_does_not_answer(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6066,6 +6120,7 @@ yardr.dev
     /// timer while a page's row is drawn: a view started after the first
     /// probe is found without a restart, and a "yes" is never asked
     /// again.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_s_page_finds_the_view_started_after_a_no(cx: &mut TestAppContext) {
         use std::sync::atomic::Ordering;
@@ -6147,6 +6202,7 @@ yardr.dev
         assert_eq!(run_answered(&view, cx), Some(true));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_mail_s_page_opens_in_the_browser_through_the_web_view(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6182,6 +6238,7 @@ yardr.dev
         assert_eq!(opened.borrow().as_slice(), [format!("{base}/blobs/{page}")]);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_mail_s_file_opens_under_its_name_through_the_web_view(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6233,6 +6290,7 @@ yardr.dev
     /// Two yards with different web views each open a file at their own
     /// address: Open goes by the shown yard's. A change of views alone
     /// follows no yard anew.
+    #[cfg(unix)]
     #[gpui::test]
     fn two_yards_with_different_web_views_each_open_a_file_at_their_own_address(
         cx: &mut TestAppContext,
@@ -6371,6 +6429,7 @@ yardr.dev
 
     /// Switching yards probes the shown yard's view again: no yard opens
     /// its files by another's answer.
+    #[cfg(unix)]
     #[gpui::test]
     fn switching_yards_probes_the_shown_yard_s_view_again(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -6410,6 +6469,7 @@ yardr.dev
 
     /// A yard with neither address has no probe to cache: returning to a
     /// yard whose view and run base were asked probes both again.
+    #[cfg(unix)]
     #[gpui::test]
     fn switching_through_a_yard_without_addresses_reprobes_both_origins(cx: &mut TestAppContext) {
         use std::sync::atomic::Ordering;
@@ -6465,6 +6525,7 @@ yardr.dev
         });
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_dropped_pdf_goes_with_its_name(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6506,6 +6567,7 @@ yardr.dev
         assert_eq!(attached(&view, cx), []);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_dropped_zip_goes_as_its_files(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6570,6 +6632,7 @@ yardr.dev
         assert_eq!(attached(&view, cx), []);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_mail_s_image_opens_full_size_over_the_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6652,6 +6715,7 @@ yardr.dev
         assert_eq!(yard.blobs_asked(), [image]);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_s_image_opens_full_size_over_the_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6704,6 +6768,7 @@ yardr.dev
         assert_eq!(yard.blobs_asked(), [image]);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_second_image_opens_over_the_first(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6745,6 +6810,7 @@ yardr.dev
         assert_eq!(yard.blobs_asked().len(), 2);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_overlay_shows_the_line_while_the_bytes_are_not_there(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6779,6 +6845,7 @@ yardr.dev
     /// PDF as a file, each under its base name. One that is marked holds
     /// the note, a file wants words, and Enter sends one note with the
     /// words and every file, in the order they came.
+    #[cfg(unix)]
     #[gpui::test]
     fn files_dropped_on_a_card_go_with_the_note(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -6906,6 +6973,7 @@ yardr.dev
     /// An answer carries no file: with a recommendation or a pick Enter
     /// says so and sends nothing, and a decline says so too. The file
     /// removed, the answer and the decline go.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_card_s_answer_and_decline_carry_no_file(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7008,6 +7076,7 @@ yardr.dev
     /// A note the yard refused is back with its files: the words in the
     /// line, the files with the ask, the file that kept it marked with the
     /// yard's words. A yard too old for files says so as what it is.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_the_yard_refused_is_back_with_its_files(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7106,6 +7175,7 @@ yardr.dev
 
     /// A drop on a secret ask attaches nothing: it takes no note, and the
     /// yard is not even asked its cap.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_drop_on_a_secret_ask_attaches_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7152,6 +7222,7 @@ yardr.dev
     }
 
     /// A drop on a run ask attaches nothing: it takes no note either.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_drop_on_a_run_ask_attaches_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7196,6 +7267,7 @@ yardr.dev
     /// A drop on an ask taken back attaches nothing: its card takes no
     /// note. Words with a file on a decided ask go nowhere: the ask takes
     /// no note either, and the file stays until it is removed.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_drop_on_a_taken_back_ask_attaches_nothing_and_a_decided_one_takes_no_note(
         cx: &mut TestAppContext,
@@ -7276,6 +7348,7 @@ yardr.dev
         assert_eq!(run_address_of("plantime", "http://127.0.0.1:8791/"), None);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_s_page_carries_run_beside_open(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7309,6 +7382,7 @@ yardr.dev
         assert_eq!(opened.borrow().as_slice(), [format!("{run}/blobs/{page}")]);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_note_s_page_says_why_run_is_not_reached(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7390,6 +7464,7 @@ yardr.dev
     /// The words of a card are typed in the same line as a mail: shift
     /// and Enter break the line, the words go with their line break, and
     /// the arrows are the words' while they have a row to go to.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_words_of_a_card_take_line_breaks_and_the_arrows_choose_at_their_ends(
         cx: &mut TestAppContext,
@@ -7640,6 +7715,7 @@ yardr.dev
     /// A put-aside ask whose return is past while the yard still lists it as
     /// put aside: the queue is read once more for it and no more. Read again
     /// for every answer that still lists it, the window asked without end.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_return_that_is_past_reads_the_queue_once(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7676,6 +7752,7 @@ yardr.dev
         });
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_decided_card_shows_what_was_decided_and_a_new_pick_replaces_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7837,6 +7914,7 @@ yardr.dev
     /// `/` opens the folded history with its filter typed in: what is typed
     /// narrows its rows, and esc leaves the filter with what is typed
     /// standing.
+    #[cfg(unix)]
     #[gpui::test]
     fn slash_types_in_the_history_s_filter_and_narrows_its_rows(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7880,6 +7958,7 @@ yardr.dev
 
     /// There is no filter to focus before the yard has decided any asks:
     /// it is not drawn until the history has a row.
+    #[cfg(unix)]
     #[gpui::test]
     fn slash_does_not_open_an_empty_history_filter(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7918,6 +7997,7 @@ yardr.dev
 
     /// A topic's head stands only where two asks or more share the topic: a
     /// topic above a single ask is not drawn.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_topic_head_shows_only_where_two_asks_share_the_topic(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7959,6 +8039,7 @@ yardr.dev
     }
 
     /// A chip narrows the history to its outcome, and All opens it again.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_chip_narrows_the_history_to_its_outcome(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -7988,6 +8069,7 @@ yardr.dev
     }
 
     /// A fold opens on a click to show its rows, and folds shut on another.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_fold_opens_on_a_click_to_show_its_rows(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8059,6 +8141,7 @@ yardr.dev
     /// short head's column is as wide as a long head's. Sized to its
     /// content instead, the head is measured full-width first, and
     /// truncate() then cuts it hard, with no ellipsis.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_long_decided_head_ends_before_the_bead_id_with_a_gap(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8082,6 +8165,7 @@ yardr.dev
 
     /// An open decision row has the same width constraint as a decided row:
     /// its head must be measured at the space left before the bead id.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_long_decision_head_ends_before_the_bead_id_with_a_gap(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8137,6 +8221,7 @@ yardr.dev
     /// row, so a short name's column is as wide as a long name's. Sized
     /// to its content instead, the name is measured full-width first, and
     /// truncate() then cuts it hard, with no ellipsis.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_long_conversation_name_ends_before_the_unread_badge_with_a_gap(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8200,6 +8285,7 @@ yardr.dev
     /// short path's column is as wide as a long path's. Sized to its
     /// content instead, the path is measured full-width first, and
     /// truncate() then cuts it hard, with no ellipsis.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_long_saved_path_ends_before_the_reveal_with_a_gap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -8252,10 +8338,27 @@ yardr.dev
             dir_url(std::path::Path::new("/home/jo/.config/footplate")),
             "file:///home/jo/.config/footplate"
         );
+        // On Windows the drive stands after three slashes, the backslashes
+        // are slashes, and a share is a host.
+        assert_eq!(
+            file_url(r"C:\Users\jo\AppData\Roaming\footplate", true),
+            "file:///C:/Users/jo/AppData/Roaming/footplate"
+        );
+        assert_eq!(
+            file_url(r"C:\Users\Jo Smith\footplate", true),
+            "file:///C:/Users/Jo%20Smith/footplate"
+        );
+        assert_eq!(
+            file_url(r"\\host\share\footplate", true),
+            "file://host/share/footplate"
+        );
+        // Elsewhere a backslash is a character of a name.
+        assert_eq!(file_url(r"/home/jo/a\b", false), "file:///home/jo/a%5Cb");
     }
 
     /// The footer's reveal opens the settings' directory: where the file
     /// it names is kept.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_footer_s_reveal_opens_the_settings_directory(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -8276,6 +8379,7 @@ yardr.dev
         );
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_pick_keeps_the_chat_draft_and_scroll_in_their_mode(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8354,6 +8458,7 @@ yardr.dev
 
     /// After a pick, returning to chat restores its row and puts focus in
     /// the conversation's line.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_pick_by_key_keeps_the_focus_with_the_active_mode(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8448,6 +8553,7 @@ yardr.dev
         })
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn ask_about_this_opens_the_asker_with_the_card_named_and_the_ask_stays_open(
         cx: &mut TestAppContext,
@@ -8539,6 +8645,7 @@ yardr.dev
         );
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_foreign_card_asks_its_asker_and_words_alone_are_the_yard_s_refusal(
         cx: &mut TestAppContext,
@@ -8636,6 +8743,7 @@ yardr.dev
         assert_eq!(current_ask_of(&view, cx), 3);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn an_asker_with_no_conversation_says_so_instead_of_opening_one(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8747,6 +8855,7 @@ yardr.dev
         .to_string()
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn options_are_chosen_with_a_click_and_a_button_sends_what_it_says(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -8891,6 +9000,7 @@ yardr.dev
         cx.run_until_parked();
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn an_ask_card_s_question_and_context_are_selected_with_the_mouse_and_copied(
         cx: &mut TestAppContext,
@@ -8969,6 +9079,7 @@ yardr.dev
     /// them as a note: no pick and none recommended. It is disabled while
     /// the line is empty; with a recommendation and no pick the button
     /// answers the recommendation with them instead. The look is untried.
+    #[cfg(unix)]
     #[gpui::test]
     fn words_alone_have_a_send_button_where_enter_sends_a_note(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -9059,6 +9170,7 @@ yardr.dev
 
     /// A words-wanted card sends the answer from its Send button, open and
     /// dealt with, as Enter does. The look is untried.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_words_wanted_card_sends_the_answer_from_its_send_button(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -9103,6 +9215,7 @@ yardr.dev
 
     /// A dealt-with words answer is sent again from its Send button, as
     /// Enter sends it. The look is untried.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_decided_words_answer_is_sent_again_from_its_send_button(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -9160,6 +9273,7 @@ yardr.dev
         (view, cx)
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn closing_the_window_hides_on_a_mac_while_the_menu_bar_item_is_on_and_else_closes(
         cx: &mut TestAppContext,
@@ -9246,6 +9360,7 @@ yardr.dev
         cx.update(|window, cx| Palette::now(window, cx))
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_settings_change_the_window_at_once_and_are_kept(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -9388,6 +9503,7 @@ yardr.dev
 
     /// A file that cannot be written keeps nothing, and says so; the window
     /// has the change all the same.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_change_that_cannot_be_kept_is_said_and_still_drawn(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -9409,6 +9525,7 @@ yardr.dev
         assert!(view.read_with(cx, |v, _| v.unkept.is_some()));
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_web_view_s_address_is_kept_from_the_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -9472,6 +9589,7 @@ yardr.dev
         );
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_run_base_is_kept_from_the_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -9532,6 +9650,7 @@ yardr.dev
         );
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_addresses_fields_hold_the_kept_ones_at_the_start(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -9562,6 +9681,7 @@ yardr.dev
     /// the yard has, and the line. Saving sets the chosen style and the
     /// line about the operator, and says the next session picks it up;
     /// an emptied line unsets the note.
+    #[cfg(unix)]
     #[gpui::test]
     fn agents_and_you_reads_and_saves_the_operator_s_settings(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -9655,6 +9775,7 @@ yardr.dev
     /// "Agents and you" at an address is read-only: the section says the
     /// settings are set by the operator on that yard, and nothing of
     /// yardr's runs for it.
+    #[cfg(unix)]
     #[gpui::test]
     fn agents_and_you_at_an_address_is_read_only(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -9695,6 +9816,7 @@ yardr.dev
 
     /// With the yard away the left column has its head and its foot: the
     /// settings are reached by the same key, and by the control there.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_settings_are_reached_while_the_yard_is_away(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -9740,6 +9862,7 @@ yardr.dev
 
     /// The settings show one section, picked from the side list: each
     /// section shows its controls, and the open section is kept.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_settings_show_one_section_picked_from_the_side_list(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -9895,6 +10018,7 @@ yardr.dev
     /// the bead's id (which is why it ends in an ellipsis, footplate-eryf),
     /// the column and its rows go with the text, and the rail stays 64
     /// pixels wide with its labelled tiles.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_layout_holds_at_the_smallest_and_the_largest_text(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10024,6 +10148,7 @@ yardr.dev
     /// to the tests, so a head's absence is said only where it was never
     /// drawn: the window opens in decisions, and the timetable's head is
     /// said away there.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_sections_stand_under_their_titles_with_their_counts(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10093,6 +10218,7 @@ yardr.dev
     /// With nothing to decide the Decisions head still stands, in
     /// decisions alone; in chat the groups stand under their heads with
     /// the yard row below them, and the arrivals row in timetable.
+    #[cfg(unix)]
     #[gpui::test]
     fn without_decisions_the_chat_groups_stand(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10133,6 +10259,7 @@ yardr.dev
     /// the operator's window alone: each call's own time and approver,
     /// the weighty words for update and `--as` rows, and each row's
     /// revoke line. Anywhere else the row stands nowhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_grants_view_lists_every_call_with_its_revoke_for_the_operator_alone(
         cx: &mut TestAppContext,
@@ -10289,6 +10416,7 @@ yardr.dev
     /// A yard from before the grants view has no SourceGrants call: no
     /// notice is raised in any mode, and the grants pane says the yard is
     /// too old instead, and nowhere else.
+    #[cfg(unix)]
     #[gpui::test]
     fn an_old_yard_says_so_in_the_grants_pane_and_nowhere_else(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10325,6 +10453,7 @@ yardr.dev
     /// yards' people with their peer suffixes drawn apart, this yard's
     /// people, and the yard row. Only the crew carries dots. The yard's
     /// count is a badge; the rows' counts stay quiet words.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_chat_groups_hold_their_rows_with_dots_and_peers(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10398,6 +10527,7 @@ yardr.dev
     /// the served rows flat in the served arrival order under their
     /// column head, each with its cells in the board's order and
     /// remarked as served.
+    #[cfg(unix)]
     #[gpui::test]
     fn departures_stands_flat_in_the_served_arrival_order(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10491,6 +10621,7 @@ yardr.dev
     /// no notice is raised in any mode, and the Lines pane says the yard
     /// is too old instead, on the panel and under Departures alike, and
     /// nowhere else.
+    #[cfg(unix)]
     #[gpui::test]
     fn an_old_yard_says_so_in_the_lines_pane_and_nowhere_else(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10532,6 +10663,7 @@ yardr.dev
     /// A Lines call read again past an old yard says the yard is too
     /// old, with no notice; any other failure of the re-read is a
     /// notice, as ever.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_lines_call_read_again_says_an_old_yard_and_notices_the_rest(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10607,6 +10739,7 @@ yardr.dev
 
     /// Against a yard that serves no platforms list the board still
     /// draws: its rows flat in the served order, as ever.
+    #[cfg(unix)]
     #[gpui::test]
     fn without_a_platforms_list_the_board_stands_flat_as_served(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10635,6 +10768,7 @@ yardr.dev
     /// the head alone above the table, no row per bead, and a click
     /// opens the decisions mode, as Enter does with the focus on it. The
     /// wait for several counts with an open ask on that bead.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_board_banners_how_many_wait_on_you(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10688,6 +10822,7 @@ yardr.dev
     /// A wait for several without an open ask banners nothing: the row
     /// stands as the yard printed it, and counts toward no "waiting on
     /// you".
+    #[cfg(unix)]
     #[gpui::test]
     fn a_wait_for_several_without_an_open_ask_banners_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -10709,6 +10844,7 @@ yardr.dev
     /// alone above the table, no row per bead, and a click opens the
     /// decisions mode. The arrivals row's wait for several counts with
     /// its open ask; the fifty-four flows rows name jo alone.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_banner_holds_fifty_five_waits_on_one_line(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11171,6 +11307,7 @@ yardr.dev
     /// `?` opens the cheatsheet of the open card's keys; esc and `?`
     /// again shut it, the hint opens it with a click, and in the
     /// switcher it names the switcher's keys.
+    #[cfg(unix)]
     #[gpui::test]
     fn question_opens_the_cheatsheet_and_esc_shuts_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11242,6 +11379,7 @@ yardr.dev
     /// first section. Esc and its button shut it, a click outside shuts it
     /// and goes no further, a click inside leaves it, and the cheatsheet
     /// stands over it, shut first.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_about_card_names_both_versions_and_two_doors_open_it(cx: &mut TestAppContext) {
         let home = tempfile::tempdir().unwrap();
@@ -11356,6 +11494,7 @@ yardr.dev
     /// A late overrun stands as words in the remark column: `late by
     /// 40m` where the yard prints it, last in the row, and the expected
     /// arrival alone in its own column.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_late_overrun_stands_as_words_in_the_remark_column(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11385,6 +11524,7 @@ yardr.dev
     /// the fold, and exactly one row of the list ever stands open. A
     /// quiet line opens from under the fold, and folding again takes
     /// its row away: a click where it stood opens nothing.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_quiet_lines_fold_under_quiet(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11450,6 +11590,7 @@ yardr.dev
     /// the labels, the body, then the notes newest last with their
     /// author and time. Its asks are one line that links nothing, and a
     /// quiet departures link leads back to the board.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_board_row_s_click_opens_the_bead_s_details(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11518,6 +11659,7 @@ yardr.dev
     /// A bead's details carry its route as a strip under the id line:
     /// one stop per stage of its served flow, with the bead's own among
     /// them. A bead in no served stage carries no strip.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_bead_s_details_carry_its_route_as_a_strip(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11566,6 +11708,7 @@ yardr.dev
     /// A worked bead's details carry who works it under the id line:
     /// the session with its group, kind and model, from the bead's
     /// flows row.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_worked_bead_s_details_carry_who_works_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11669,6 +11812,7 @@ yardr.dev
     /// travelling total, the lines in the served order with their own,
     /// every served line travelling or not, and No line last only while
     /// beads travel with none.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_timetable_lists_the_lines_with_their_travelling_totals(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11712,6 +11856,7 @@ yardr.dev
     /// With beads travelling with no line the No line row stands last,
     /// with how many travel; a click opens its plain list, newest change
     /// first, each row drawn as a flow's bead, with no stages or lamps.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_no_line_row_opens_its_plain_list(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11758,6 +11903,7 @@ yardr.dev
     /// group words and one card per bead. The backlog column lists its
     /// count, six titles and "+N more"; the terminal column reads
     /// terminal with the buffer stop.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_line_s_click_opens_its_stages_as_columns_with_cards(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11889,6 +12035,7 @@ yardr.dev
     /// them: one bead held by jo and one by ada, and only the first
     /// draws warn. A test reads no colours from the frame, so it reads
     /// the rows the window draws and the colours it draws them in.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_line_s_held_beads_read_red_only_where_the_reader_holds_them(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -11948,6 +12095,7 @@ yardr.dev
     /// An Elsewhere column stands under the line's flows for its beads
     /// in no stage of them, with its count and its cards. A card's click
     /// opens its bead, and back returns to the line.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_elsewhere_column_stands_under_the_flows(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12001,6 +12149,7 @@ yardr.dev
     /// A bead's details link back to where they were opened from: the
     /// board, a flow, Elsewhere or No line. The back link names the row,
     /// and a click opens it again.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_bead_s_details_link_back_to_where_they_came_from(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12049,6 +12198,7 @@ yardr.dev
 
     /// Where more travel than the board shows, a quiet last line says
     /// how many of them show; where all show, no line stands.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_board_says_how_many_of_the_travelling_show_where_capped(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12082,6 +12232,7 @@ yardr.dev
     }
 
     /// The bead's page opens through Open where the web view answers.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bead_s_page_opens_where_the_view_answers(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12116,6 +12267,7 @@ yardr.dev
     /// The bead has no Open where the web view does not answer, and the
     /// board's rows open the details all the same: they are no buttons
     /// to the browser anymore.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_bead_has_no_open_where_the_view_is_down(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12149,6 +12301,7 @@ yardr.dev
     /// its sender's group alone, a separator breaks over each day, and at
     /// 1920 pixels the mail stands 880 wide, centred in the pane, with the
     /// composer under it in the same column.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_conversation_reads_as_a_grouped_column_with_day_separators(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12244,6 +12397,7 @@ yardr.dev
     /// the time alone: the first group of a day, and a later group of the
     /// same day under the same separator. The mails are far enough apart
     /// to fall on two days in any zone.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_heads_under_a_day_s_separator_say_the_time_alone(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12289,6 +12443,7 @@ yardr.dev
     /// on a narrow one, where the column is the pane less the frame's side
     /// margins. It still wraps, and the composer stands below the last line
     /// of it.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_notice_stands_in_the_reading_column_with_the_composer(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12464,6 +12619,7 @@ yardr.dev
     /// after an older page loads. A row that stood `w_full` with
     /// `max_w` kept the height its text had at full width, and the
     /// mail below started inside it.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_wrapped_thread_overlaps_neither_on_open_nor_after_an_older_page(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12484,6 +12640,7 @@ yardr.dev
     /// "+N" past that, the Elsewhere stub, No line's own track, and the
     /// quiet tracks folded to one row. The head carries the summary and
     /// the toggle, on the panel.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_arrivals_row_opens_the_panel_of_tracks(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12613,6 +12770,7 @@ yardr.dev
 
     /// An unreadable quiet depot stays visible on the panel so its
     /// error is not folded away as a quiet line.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_keeps_an_unreadable_quiet_depot_visible(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12639,6 +12797,7 @@ yardr.dev
 
     /// A headcode's click opens the bead's details, and the quiet back
     /// link names the panel and returns to it.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_headcode_s_click_opens_the_bead_and_back_returns_to_the_panel(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12673,6 +12832,7 @@ yardr.dev
     /// The panel's quiet tracks fold and unfold with the list's Quiet:
     /// one row naming the quiet lines, unfolding to their tracks from
     /// either side.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_s_quiet_tracks_fold_with_the_list_s_quiet(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12714,6 +12874,7 @@ yardr.dev
 
     /// The panel's waiting words open the decisions mode, counting
     /// what waits as the board's banner does.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_s_waiting_words_open_decisions(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12850,6 +13011,7 @@ yardr.dev
     /// rules of a row stand level where a stage of people wraps its head
     /// beside one that does not. The summary's longer worked line, split
     /// by kind, holds inside the pane too.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_holds_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13005,6 +13167,7 @@ yardr.dev
     /// edge, and a flow too long to fit wraps: its later stages continue
     /// on a row below, starting under the first stage's column, with the
     /// rules of every row on one level.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_fits_its_tracks_and_wraps_a_long_flow(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13082,6 +13245,7 @@ yardr.dev
     /// squeezing them, so nothing draws over the row below. With the
     /// quiet depots unfolded the Quiet row still stands below the card,
     /// with the quiet tracks under it.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_no_line_card_holds_its_headcodes_above_the_quiet_row(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13188,6 +13352,7 @@ yardr.dev
     /// panel's tracks did. The rows carry none, so the board scrolls over
     /// them instead of squeezing them, and this test fails if that
     /// changes.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_board_holds_its_rows_one_under_another_at_the_cap(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13270,6 +13435,7 @@ yardr.dev
     /// scrolling column like the board, and its flows carry no minimum
     /// height of their own either, so it scrolls over them instead of
     /// squeezing them, and this test fails if that changes.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_line_view_holds_its_flows_one_under_another(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13348,6 +13514,7 @@ yardr.dev
     /// and hyphenated names wrap where `new` and `review` do not, every
     /// row of every track stands its rules at one height, as one straight
     /// track, and the headcodes under them start at one height too.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_s_rules_stand_level_in_every_row_at_every_window_width(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13392,6 +13559,7 @@ yardr.dev
     /// does at the narrowest cell, makes its own cell taller: its words
     /// stand whole between its cell's top and its rule, never up over the
     /// row above, and the headcode stands under the rule.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_head_of_three_lines_makes_its_cell_taller_and_runs_over_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13482,6 +13650,7 @@ yardr.dev
     /// Every card stands as wide as the pane, so the tracks stand one
     /// under another as bands, at the narrowest window and the widest,
     /// and never past the pane's edge.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_s_cards_stand_as_wide_as_the_pane(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13524,6 +13693,7 @@ yardr.dev
     /// second, never truncated. The cells are in rems, so they grow with
     /// the text as the words do; in pixels they cut the words at the
     /// larger sizes.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_panel_holds_this_yard_s_longest_names_at_every_text_size(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13626,6 +13796,7 @@ yardr.dev
     /// are in rems with their usual widths as the floor, so they grow
     /// with the text as the words do; in pixels they cut the words at
     /// the larger sizes.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_line_view_and_the_board_hold_their_words_at_every_text_size(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13784,6 +13955,7 @@ yardr.dev
     /// group stands on three lines puts its rule where a column of one
     /// line does, and a terminal column with them. Each head reserves
     /// three group lines with its words on the rule, bottom-aligned.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_line_view_s_rules_stand_level_with_wrapped_groups(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13932,6 +14104,7 @@ yardr.dev
     /// columns under the pointer, leaving the list where it stands.
     /// Over a flow's head a horizontal move meets no columns, so
     /// nothing moves.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_scroll_moves_the_line_view_along_its_axis(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14037,6 +14210,7 @@ yardr.dev
     /// inside the column, the departures board's rows one line high in
     /// the board's column order with the rest scrolling sideways, and
     /// the bead's head and asks line inside the pane too.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_arrivals_panes_hold_at_the_narrowest_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14126,6 +14300,7 @@ yardr.dev
     /// rail, so the pane beside the list keeps its size at the narrowest
     /// window. A click on a mode opens it, on the chip the switcher, on the
     /// gear the settings.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_rail_holds_the_yard_s_chip_the_modes_and_the_foot(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14248,6 +14423,7 @@ yardr.dev
     /// it, with the switcher level with that item. Where it does not, as
     /// on Linux and in a test window, there is no band and the rail is as
     /// it was. Full screen has no title bar of its own to leave room for.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_rail_leaves_the_traffic_lights_their_room_where_the_content_reaches_the_title_bar(
         cx: &mut TestAppContext,
@@ -14389,6 +14565,7 @@ yardr.dev
     /// on the window's top strip moves the window, and a double-click on it
     /// zooms it. A click that stays there is a click, on what it hits as
     /// ever, and a drag that starts below the strip moves nothing.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_drag_on_the_top_strip_moves_the_window_and_a_double_click_zooms_it(
         cx: &mut TestAppContext,
@@ -14480,6 +14657,7 @@ yardr.dev
     /// Where the title bar is the desktop's, which is everywhere but a Mac,
     /// the window listens for nothing on its top: a drag there waits for
     /// nothing, and no band stands over its rail and list.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_window_whose_title_bar_is_the_desktop_s_has_no_strip(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14499,6 +14677,7 @@ yardr.dev
     /// The rail's chat and decisions tiles carry what waits in the open
     /// yard: its unread mail and its open asks, each at its tile's top
     /// right. The timetable carries none.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_rail_s_chat_and_decisions_carry_what_waits(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14544,6 +14723,7 @@ yardr.dev
 
     /// A yard that answered and then went away keeps its rows as last
     /// seen, but its badges no longer imply that the counts are current.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_rail_carries_no_count_while_the_yard_reconnects(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14588,6 +14768,7 @@ yardr.dev
     /// beads were added or closed since they last had Timetable open: at
     /// its tile's top right corner, as the other badges. Another
     /// person's bead lights nothing, and opening Timetable clears it.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_rail_s_timetable_carries_a_badge_for_the_person_s_beads(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14641,6 +14822,7 @@ yardr.dev
     /// While the yard is away the rail carries no badge on the
     /// timetable, as it carries no count: the model keeps the news as
     /// last seen, but nothing shown implies it is current.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_rail_carries_no_badge_while_the_yard_is_away(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -14679,6 +14861,7 @@ yardr.dev
     /// A yard opened with Timetable last open behind its head badges
     /// where the gap added or closed one of the person's beads: what
     /// changed while the window was shut.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_badge_counts_what_changed_while_the_window_was_shut(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -14718,6 +14901,7 @@ yardr.dev
 
     /// The first read of a yard saves its baseline even when it opens in
     /// Chat, so a restart can catch a bead added while Timetable was shut.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_first_read_keeps_a_timetable_baseline_for_a_restart(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -14758,6 +14942,7 @@ yardr.dev
     /// Each yard reopens in its remembered mode, and each mode on the row
     /// it was left on: stepping modes keeps each mode's row, switching
     /// yards keeps each yard's mode, and the settings keep both.
+    #[cfg(unix)]
     #[gpui::test]
     fn each_yard_reopens_in_its_mode_and_each_mode_on_its_row(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -14907,6 +15092,7 @@ yardr.dev
         view.read_with(cx, |v, _| v.model.as_ref().unwrap().unread(from))
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn the_system_tells_of_what_arrives_where_the_window_does_not_show_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -15180,6 +15366,7 @@ yardr.dev
     /// burst of two yards says each yard's part. Activated, a notification
     /// opens its yard on its row, as the yard stands: it is not read from
     /// nothing.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_is_not_open_counts_what_arrives_and_its_notification_opens_it(
         cx: &mut TestAppContext,
@@ -15385,6 +15572,7 @@ yardr.dev
     /// changes. A yard's row shows the window on that yard, on the row it
     /// was left on, and "Show window" on whatever is open. Switched off in
     /// the settings, there is no item.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_menu_bar_item_says_what_waits_in_each_yard_and_a_yard_s_row_opens_it(
         cx: &mut TestAppContext,
@@ -15490,6 +15678,7 @@ yardr.dev
     /// The item's mark is the tray setting's choice, drawn without a
     /// restart: white, black, or as the system draws it. The settings'
     /// buttons choose it, and the file keeps it while it is not auto.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_menu_bar_item_s_mark_is_the_tray_setting_s_without_a_restart(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -15526,6 +15715,7 @@ yardr.dev
     /// not open is stopped, and that one is asked again by itself until it
     /// answers. The same the other way: a yard that is not open goes on
     /// counting while the open one is away.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_goes_away_leaves_the_others_as_they_are_and_is_asked_again(
         cx: &mut TestAppContext,
@@ -15614,6 +15804,7 @@ yardr.dev
     /// shows that yard: nothing is read by a restart. So it is of a far
     /// yard, of one that was open and left, and of one that was away when
     /// the ask was raised.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_raised_in_a_yard_that_is_not_open_is_counted_told_of_and_held_by_its_decisions(
         cx: &mut TestAppContext,
@@ -15780,6 +15971,7 @@ yardr.dev
     /// behind it went away, is counted by the switcher once the stream
     /// has said nothing for its watch's while: the yard is read again,
     /// with no restart.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_raised_behind_a_stream_that_says_nothing_is_counted_without_a_restart(
         cx: &mut TestAppContext,
@@ -15833,6 +16025,7 @@ yardr.dev
     /// The reload of the decisions a noted event makes in a yard that is
     /// not open fails: it is made again after a while, and the switcher
     /// counts the ask then, with no restart and no event more.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_reload_of_the_decisions_that_fails_is_made_again(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16038,6 +16231,7 @@ yardr.dev
         }
     }
 
+    #[cfg(unix)]
     fn mode_of(file: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(file).unwrap().permissions().mode() & 0o777
@@ -16226,6 +16420,7 @@ yardr.dev
     /// address that is added by a pairing's code. A wrong code and a
     /// refused address are said and change nothing; a removed device is
     /// said, not asked after, and paired again into the same file.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_settings_list_the_yards_and_a_code_pairs_a_new_one(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16434,6 +16629,7 @@ yardr.dev
     /// The settings file of a window paired before there were several
     /// yards, with `yard.token` beside it, opens paired as it was, as one
     /// yard called by its address's host; the next change keeps it so.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_settings_file_from_before_opens_paired_as_it_was(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16521,6 +16717,7 @@ yardr.dev
     /// now; a click on a row, Enter on the row the arrows are on, or a
     /// yard's own key from anywhere opens it, as it stands: every yard
     /// is followed from the start.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_chip_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16637,6 +16834,7 @@ yardr.dev
     /// waiting count in one column and its number key on the first, its
     /// address dimmer on the second. The footer's `+` adds a yard, by key
     /// or by click.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_switcher_s_rows_carry_kind_count_and_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16742,6 +16940,7 @@ yardr.dev
     /// text size and the largest, with four yards, one with a long Tailscale
     /// name. Names and addresses may truncate, but never past the badge, the
     /// count and the key.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_switcher_holds_its_hint_and_every_key_inside(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16855,6 +17054,7 @@ yardr.dev
     /// to the yard it was written in, and what of it does not go is back
     /// in that yard's draft, never in the open one's. Nothing typed of a
     /// secret outlasts a switch.
+    #[cfg(unix)]
     #[gpui::test]
     fn what_is_written_for_one_yard_is_untouched_by_a_switch_and_sent_only_there(
         cx: &mut TestAppContext,
@@ -17080,6 +17280,7 @@ yardr.dev
     /// opened, and that its yard refuses, are back with the ask they were
     /// typed for, in its own yard: never in the line of the open one.
     /// Why is on that ask's card when its yard is open again.
+    #[cfg(unix)]
     #[gpui::test]
     fn words_a_yard_refused_are_back_with_their_ask_and_not_in_another_yard_s_line(
         cx: &mut TestAppContext,
@@ -17163,6 +17364,7 @@ yardr.dev
     /// is one no other has; removing a yard deletes its token's file where
     /// it is footplate's alone, and says how the device is removed at the
     /// yard.
+    #[cfg(unix)]
     #[gpui::test]
     fn yards_are_added_and_removed_in_the_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17305,6 +17507,7 @@ yardr.dev
     /// A yard is renamed from its card's ⋯ menu: its reach stays, what
     /// was written for it stays written, and where it was the open one
     /// it still is, as it stands. A name another yard has is refused.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_is_renamed_from_its_card_s_menu(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17402,6 +17605,7 @@ yardr.dev
 
     /// A pairing writes the address the code went to under the token: the
     /// file is of that yard from the moment it is there.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_pairing_writes_the_yard_s_address_with_the_token(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17449,6 +17653,7 @@ yardr.dev
     /// A token file typed by hand that cannot be written is found before
     /// the code is sent: the yard is asked nothing, adds no device, and
     /// its pairing stays open for the code.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_token_file_that_cannot_be_written_keeps_the_code_from_the_yard(cx: &mut TestAppContext) {
         // No file mode holds root: the directory below that cannot be
@@ -17554,6 +17759,7 @@ yardr.dev
         assert_eq!(std::fs::read_dir(&tokens).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn pairing_keeps_settings_changed_while_the_code_is_away(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17599,6 +17805,7 @@ yardr.dev
     /// `FOOTPLATE_YARD` and `FOOTPLATE_TOKEN_FILE` name the one yard of a
     /// run: the window has no switcher and the settings no list, and a
     /// pairing there writes the environment's file.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_environment_s_yard_is_the_one_yard_of_the_window(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17668,6 +17875,7 @@ yardr.dev
     /// code is sent, saying which yard and file and that the environment
     /// names another: the listed yard stays paired, and without the
     /// environment it opens as it was.
+    #[cfg(unix)]
     #[gpui::test]
     fn pairing_under_the_environment_refuses_a_listed_yard_s_token_file(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17749,6 +17957,7 @@ yardr.dev
     /// A yard that cannot be opened is said why, and not tried: plain http
     /// off this machine, and a token file open to others. The settings
     /// are there to open another.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_is_refused_is_said_why_and_not_tried(cx: &mut TestAppContext) {
         use std::os::unix::fs::PermissionsExt;
@@ -17794,6 +18003,7 @@ yardr.dev
 
     /// A yard of the settings that cannot be opened leaves the others to
     /// open: its key and the settings' row do, from where it says why.
+    #[cfg(unix)]
     #[gpui::test]
     fn another_yard_is_opened_from_one_that_cannot_be(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17843,6 +18053,7 @@ yardr.dev
     /// away screen is for yards never reached. The rail stays with the
     /// switcher, so another yard is opened from there and never through
     /// the settings, and the yard that answers has all that was its.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_is_not_reached_says_why_and_the_switcher_leaves_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -18021,6 +18232,7 @@ yardr.dev
     /// A hosted yard whose session the edge stops letting in: the window
     /// says to sign in again, and does not ask again; pairing again is not
     /// offered, since the device is still paired.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_hosted_yard_whose_session_is_out_says_to_sign_in_again(cx: &mut TestAppContext) {
         use crate::fake::{Router, SESSION};
@@ -18109,6 +18321,7 @@ yardr.dev
 
     /// Pairing a hosted yard of the list again: the session rides beside
     /// the code, and the yard opens as the new device.
+    #[cfg(unix)]
     #[gpui::test]
     fn pairing_a_hosted_yard_again_sends_the_session_beside_the_code(cx: &mut TestAppContext) {
         use crate::fake::{Router, SESSION};
@@ -18185,6 +18398,7 @@ yardr.dev
     /// open, the pair-again row stands fully below the help text: with
     /// the short help and the long, at the window's size and a narrow
     /// one.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_away_screen_s_pair_again_stands_below_the_help(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -18265,6 +18479,7 @@ yardr.dev
     /// as the device's is, and the pair-by-code road comes next, with
     /// the signed-in account under the yard's name. No terminal, and no
     /// pasted token anywhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn opening_a_hosted_yard_signs_in_then_pairs_and_shows_its_conversations(
         cx: &mut TestAppContext,
@@ -18437,6 +18652,7 @@ yardr.dev
     /// A hosted yard whose session the edge no longer knows is signed in
     /// again from where it says so: the session file is renewed, and the
     /// yard opens with the new one.
+    #[cfg(unix)]
     #[gpui::test]
     fn signing_in_again_renews_the_session_and_reopens_the_yard(cx: &mut TestAppContext) {
         use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router, SESSION};
@@ -18524,6 +18740,7 @@ yardr.dev
     /// row is the one quiet line, and Send is held with
     /// the reason beside the line: the draft stays as typed, and goes
     /// on Enter once the yard answers. Nothing is queued meanwhile.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_answered_and_goes_away_keeps_its_view_and_holds_send(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -18587,6 +18804,7 @@ yardr.dev
     /// A yard whose arrivals board is garbage still comes back: after a
     /// stream end the state is read, the board stands empty with why as
     /// the notice, and the rest is drawn as usual.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_whose_arrivals_are_garbage_comes_back_with_a_notice(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -18622,6 +18840,7 @@ yardr.dev
     /// Answers on a decision card are held as a conversation's sends are:
     /// the words stay where they are typed, the Send button stands
     /// disabled with the reason beside it, and Enter holds them too.
+    #[cfg(unix)]
     #[gpui::test]
     fn answers_on_a_decision_card_are_held_while_the_yard_is_away(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -18834,7 +19053,8 @@ yardr.dev
     }
 
     /// A window with nothing at this run's socket and no settings kept:
-    /// the first screen, once it says there is no yard.
+    /// the first screen, once it says there is no yard. On Windows there is
+    /// no socket to look at, and it says so at once.
     fn no_yard<'a>(
         dir: &std::path::Path,
         cx: &'a mut TestAppContext,
@@ -18846,18 +19066,72 @@ yardr.dev
         let (view, cx) = opened_at(env, &dir.join("footplate/settings.json"), cx);
         wait(cx, "that there is no yard", |cx| {
             view.read_with(cx, |v, _| {
-                v.down
-                    .as_deref()
-                    .is_some_and(|why| why.starts_with("No yard: nothing answers"))
+                v.down.as_deref().is_some_and(|why| {
+                    why.starts_with("No yard: nothing answers")
+                        || why.starts_with("This system has no yard of its own")
+                })
             })
         });
         (view, cx)
+    }
+
+    /// Windows has no yard of this machine: the first screen says so, and
+    /// offers the ways to a yard at an address and none to one here. The
+    /// entry that is always listed is not tried again, there is no switch
+    /// to start it with, and the settings add a yard at an address alone.
+    #[cfg(not(unix))]
+    #[gpui::test]
+    fn on_windows_the_first_screen_offers_only_the_ways_to_a_yard_at_an_address(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = no_yard(dir.path(), cx);
+        assert_eq!(view.read_with(cx, |v, _| v.away), Away::Stopped);
+        assert!(!view.read_with(cx, |v, _| v.sets_up_here()));
+        assert!(view.read_with(cx, |v, _| matches!(v.switch_for(), SwitchFor::Far)));
+        assert!(drawn(cx, "away why") && drawn(cx, "away lead"));
+        assert!(drawn(cx, "way far") && drawn(cx, "way hosted"));
+        assert!(!drawn(cx, "way here") && !drawn(cx, "way near"));
+        assert_eq!(away_why(&view, cx), "this machine · cannot be opened");
+
+        // The settings open on this window: the text size, and no item
+        // in a tray, which Windows does not draw.
+        cx.simulate_keystrokes("secondary-,");
+        assert!(drawn(cx, "text size"));
+        assert!(!drawn(cx, "menu bar on") && !drawn(cx, "tray auto"));
+
+        // The About card is opened from the same section, there being no
+        // application menu, and names footplate alone: Windows fetches no
+        // yardr, even if an old file with its names is in this test's folder.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("yardr"), b"not a program").unwrap();
+        std::fs::write(bin.join("yardr.version"), "0.14.0\n").unwrap();
+        view.update(cx, |v, _| v.means.own = Some(bin));
+        click_on(cx, "about show");
+        wait(cx, "the card, told that none is kept", |cx| {
+            view.read_with(cx, |v, _| {
+                v.about
+                    .as_ref()
+                    .is_some_and(|about| about.kept == Some(Kept::Nothing))
+            })
+        });
+        assert!(drawn(cx, "about card") && drawn(cx, "about footplate"));
+        assert!(!drawn(cx, "about yardr"));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |v, _| v.about.is_none()));
+        assert!(settings_open(&view, cx));
+
+        click_on(cx, "settings section yards");
+        assert!(drawn(cx, "add far") && drawn(cx, "add hosted"));
+        assert!(!drawn(cx, "add near"));
     }
 
     /// With no yard the window offers the ways to one, which are the
     /// settings' entries: a yard of this machine by its socket, where this
     /// run's stands to begin with, is added and opened from there, with no
     /// settings shown. Esc leaves the fields.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_offers_a_yard_of_this_machine_by_its_socket(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -18941,6 +19215,7 @@ yardr.dev
     /// yardr in `dir`, which is not fetched from anywhere, a home under
     /// `dir`, and a list in place of the browser. The stand-in's path, and
     /// the pages that were opened.
+    #[cfg(unix)]
     fn stand_in_means(
         dir: &std::path::Path,
         apple: bool,
@@ -19031,6 +19306,7 @@ yardr.dev
     /// `doctor`: the window with no yard, "way here", and "go on" once
     /// the machine is ready. The stand-in's path, for its answers and
     /// its calls.
+    #[cfg(unix)]
     fn at_yard<'a>(
         dir: &tempfile::TempDir,
         doctor: &serde_json::Value,
@@ -19056,6 +19332,7 @@ yardr.dev
     /// width once the max clamped it, so the rows below started inside
     /// wrapped text above. Within a pixel, for gpui's rounding to
     /// device pixels.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_first_run_s_rows_tile_on_a_wide_window(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19116,6 +19393,7 @@ yardr.dev
 
     /// A fetch is a Mac road from yardr's data. Even if a doctor answer
     /// includes one on Linux, the row stays a list with the vendor's page.
+    #[cfg(unix)]
     #[gpui::test]
     fn linux_keeps_a_doctor_fetch_as_a_page_and_never_offers_install(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19144,6 +19422,7 @@ yardr.dev
     /// a folder becomes its depot with a first bead, and the yardmaster's
     /// conversation is open. Every step is a command of the stand-in for
     /// yardr, with a PATH made from doctor's data.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_offers_to_set_one_up_here_and_ends_talking_with_the_yardmaster(
         cx: &mut TestAppContext,
@@ -19392,6 +19671,7 @@ yardr.dev
     /// The second step names the providers and picks the yardmaster's
     /// model from the chosen one's offers: the recommended one stands
     /// picked, and creating the yard sends its id.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_second_step_picks_the_yardmaster_s_model_from_the_provider_s_offers(
         cx: &mut TestAppContext,
@@ -19454,6 +19734,7 @@ yardr.dev
     /// harness items: both where it carries both, the one where it
     /// carries one (an empty one counting as none carried), and the
     /// kind where it carries neither.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_provider_buttons_read_the_maker_and_the_program_or_the_kind(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -19491,6 +19772,7 @@ yardr.dev
 
     /// Choosing another provider moves the model pick to its recommended
     /// entry, and creating the yard sends that id.
+    #[cfg(unix)]
     #[gpui::test]
     fn choosing_another_provider_moves_the_model_pick(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19530,6 +19812,7 @@ yardr.dev
     }
 
     /// A typed model id wins over the pick: creating the yard sends it.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_typed_model_id_wins_over_the_pick(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19554,6 +19837,7 @@ yardr.dev
 
     /// The harness's own choice sends no model: creating the yard has no
     /// --model.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_harness_s_own_choice_sends_no_model(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19580,6 +19864,7 @@ yardr.dev
     /// creates nothing over it and asks nothing of it again. It starts the
     /// yard and opens its yardmaster's conversation, by the name the yard
     /// has for it.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_is_there_and_stopped_is_started_and_not_created_again(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19641,6 +19926,7 @@ yardr.dev
     /// on the yard's home: its socket minus `yard.sock`. Once the yard
     /// answers, the status row shows Running with Stop. Nothing of the
     /// switch acts as anyone: no `--actor` anywhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_status_row_shows_a_stopped_yard_and_start_runs_up_on_its_home(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19719,6 +20005,7 @@ yardr.dev
     /// The status row holds one line in the mode's list at the
     /// narrowest window, with its action on its row, inside the list's
     /// edge.
+    #[cfg(unix)]
     fn status_row_holds_in(mode: Mode, cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("second/yard.sock");
@@ -19818,6 +20105,7 @@ yardr.dev
 
     /// The status row holds at the narrowest window in chat: one line,
     /// with Stop inside the list's edge.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_status_row_holds_in_chat_at_the_narrowest_window(cx: &mut TestAppContext) {
         status_row_holds_in(Mode::Chat, cx);
@@ -19825,6 +20113,7 @@ yardr.dev
 
     /// The status row holds at the narrowest window in decisions: one
     /// line, with Stop inside the list's edge.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_status_row_holds_in_decisions_at_the_narrowest_window(cx: &mut TestAppContext) {
         status_row_holds_in(Mode::Decisions, cx);
@@ -19832,6 +20121,7 @@ yardr.dev
 
     /// The status row holds at the narrowest window in timetable: one
     /// line, with Stop inside the list's edge.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_status_row_holds_in_timetable_at_the_narrowest_window(cx: &mut TestAppContext) {
         status_row_holds_in(Mode::Timetable, cx);
@@ -19842,6 +20132,7 @@ yardr.dev
     /// the idle ones as a count, and that their work stays in worktrees.
     /// "Leave running" stops nothing; "Stop them" runs `down` with the
     /// flag, and the stopped yard shows Start.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_head_shows_a_running_yard_and_stop_asks_first(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19935,6 +20226,7 @@ yardr.dev
     /// while it reconnects, not Reconnecting: the last reading says
     /// nothing runs, and says what to start. Where the reading says
     /// something still runs, the row reads Reconnecting instead.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_status_row_reads_stopped_while_reconnecting_where_nothing_runs(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -19980,6 +20272,7 @@ yardr.dev
 
     /// A yard at an address has no switch, in the head or the settings:
     /// its processes are elsewhere, and nothing of yardr's runs for it.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_at_an_address_has_no_switch(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20021,6 +20314,7 @@ yardr.dev
     /// Start at login stands on the local yard's card alone: with a yard
     /// at an address open, the yards section has no switch, and opening
     /// the local yard puts it on its card.
+    #[cfg(unix)]
     #[gpui::test]
     fn start_at_login_stands_on_the_local_yard_s_card_alone(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20065,6 +20359,7 @@ yardr.dev
 
     /// The head for a socket that names no yard home: it says so, and
     /// starts nothing of yardr's.
+    #[cfg(unix)]
     fn no_home_says_so(socket: &str, cx: &mut TestAppContext) {
         use crate::setup::standin;
 
@@ -20099,12 +20394,14 @@ yardr.dev
     }
 
     /// A socket whose name is not `yard.sock` names no yard home.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_socket_of_another_name_says_so_and_starts_nothing(cx: &mut TestAppContext) {
         no_home_says_so("/tmp/does-not-exist.sock", cx);
     }
 
     /// A socket too short to have a home names none either.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_socket_of_no_home_at_all_says_so_and_starts_nothing(cx: &mut TestAppContext) {
         no_home_says_so("yard.sock", cx);
@@ -20112,6 +20409,7 @@ yardr.dev
 
     /// This run's yard takes no `--home` flag: the switch's yardr
     /// resolves it as footplate did.
+    #[cfg(unix)]
     #[gpui::test]
     fn this_run_s_yard_takes_no_home_flag(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20138,6 +20436,7 @@ yardr.dev
     /// "Start at login" installs the login services with `up --login`,
     /// and removes the daemon's with its uninstall. What a service could
     /// not do is said; unchecking says herdr's shared service is left.
+    #[cfg(unix)]
     #[gpui::test]
     fn start_at_login_installs_and_removes_the_daemon_s_service(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20277,6 +20576,7 @@ yardr.dev
     /// Where the yard is stopped, "start at login"'s help says switching
     /// on starts the yard now as well; where it runs, or the switch is
     /// on, it names only login.
+    #[cfg(unix)]
     #[gpui::test]
     fn start_at_login_says_it_starts_a_stopped_yard_now(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20333,6 +20633,7 @@ yardr.dev
     /// A yard that is only stopped says that, and offers Start instead of
     /// setting one up. A home with no yard offers the first screen, with
     /// setting one up first.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_stopped_yard_says_so_and_a_home_with_none_offers_to_set_one_up(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20379,6 +20680,7 @@ yardr.dev
     /// socket, the error and the hint hide under details, shut at first.
     /// "Set up a yard here" is the first way, and the screen names the
     /// yard with its short why.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_made_here_says_so_plainly_with_its_details_shut(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -20430,6 +20732,7 @@ yardr.dev
 
     /// Enter opens the details where no yard was made, and shuts them
     /// again: the line it is typed in is not drawn to take it.
+    #[cfg(unix)]
     #[gpui::test]
     fn enter_opens_the_details_where_no_yard_was_made(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -20444,6 +20747,7 @@ yardr.dev
 
     /// A yard that is only stopped keeps its words, and offers Start
     /// instead of setting one up.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_stopped_yard_keeps_its_words_and_offers_start_instead_of_setup(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20472,6 +20776,7 @@ yardr.dev
 
     /// What a start could not start is the head's, in yardr's words, with
     /// Start to try again. Once the yard answers, it is healed.
+    #[cfg(unix)]
     #[gpui::test]
     fn what_a_start_could_not_start_is_said_in_yardr_s_words(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20518,6 +20823,7 @@ yardr.dev
 
     /// Stop with no agent stops at once and asks nothing: down without
     /// the flag, and no second call with it.
+    #[cfg(unix)]
     #[gpui::test]
     fn stop_with_no_agent_stops_at_once_and_asks_nothing(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20560,6 +20866,7 @@ yardr.dev
 
     /// Switching "start at login" off where the yard runs starts the
     /// daemon again, which removing its service stopped: the yard runs on.
+    #[cfg(unix)]
     #[gpui::test]
     fn unchecking_start_at_login_starts_the_daemon_again_where_the_yard_runs(
         cx: &mut TestAppContext,
@@ -20626,6 +20933,7 @@ yardr.dev
     /// run says why, in the fetch's words, and tries again when asked. A
     /// program that cannot be fetched is said so, and Esc leaves the first
     /// run for the first screen.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yardr_that_failed_its_proof_is_never_run(cx: &mut TestAppContext) {
         use crate::setup::standin;
@@ -20795,6 +21103,7 @@ yardr.dev
     /// the screen stand until esc leaves them, and the screen says the
     /// yard answers again. What is typed stays in the field; esc opens
     /// the yard, and the line has the keys.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_is_tried_again_while_a_way_is_open(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -20846,6 +21155,7 @@ yardr.dev
     /// If the yard goes away again under the still-open form, the answer
     /// notice clears and retrying returns. A later answer still preserves
     /// the form and its focus.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_keeps_its_fields_through_a_flap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -20890,6 +21200,7 @@ yardr.dev
     /// A pairing's code typed while the yard is away stays the field's
     /// when the yard answers: its tail lands in no line, and the enter
     /// meant for pair sends no mail. The fields stay filled for the fix.
+    #[cfg(unix)]
     #[gpui::test]
     fn no_yard_keeps_a_pairing_s_code_while_the_yard_answers(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -21099,6 +21410,7 @@ yardr.dev
     /// call that ends without an answer says the value may be written; a
     /// yard without the call sends the person to a terminal. The value is
     /// in no draft, no setting, no notice and no refusal at any point.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_is_typed_as_marks_given_in_its_call_and_kept_nowhere(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -21277,6 +21589,7 @@ yardr.dev
     /// refusal of a secret giving, answered with a status, is the card's
     /// line under its field, and the field is empty after, the value
     /// kept nowhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_refused_answer_says_why_on_its_card_and_keeps_no_secret(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -21742,6 +22055,7 @@ yardr.dev
     /// calls `ApproveAsk` with the ask and nothing of the command. A call
     /// with no answer never says approved; a refusal is shown whole; an
     /// approved ask reads `approved, ran:` with the command and its result.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_s_card_shows_the_command_whole_and_is_approved_with_its_own_key(
         cx: &mut TestAppContext,
@@ -21916,6 +22230,7 @@ yardr.dev
     /// and the ask's own texts behind one tap, copied to the letter. The
     /// approval is live with the tap shut, and reads as being carried
     /// out until the yard says it ran.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_pack_apply_card_shows_every_sentence_whole_and_its_texts_behind_one_tap(
         cx: &mut TestAppContext,
@@ -22049,6 +22364,7 @@ yardr.dev
     /// words under the command; one the yard has not carried out yet reads
     /// as being carried out, with nothing printed under it. Neither takes
     /// a second approval.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_carrying_out_reads_failed_or_being_carried_out(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22097,6 +22413,7 @@ yardr.dev
     /// A depot re-apply's card: each object's action and changes with each
     /// file's hash whole, each wrapped and never cut, and each changed
     /// file's diff and new text behind the tap, copied to the letter.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_depot_re_apply_card_shows_its_objects_and_its_diffs_behind_the_tap(
         cx: &mut TestAppContext,
@@ -22154,6 +22471,7 @@ yardr.dev
     /// line as an old yard still serves it: no asker line stands where a
     /// yard line stands, each begins with who says it, and the only blocks
     /// with a copy control are the yard's two commands.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_forged_run_ask_s_card_marks_every_asker_line(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22209,6 +22527,7 @@ yardr.dev
     /// The same forged run ask in the decisions list: the row draws the
     /// question whole, wrapped to two lines, with whose it is beneath it,
     /// as a mail row draws its wrapped text with its sender.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_forged_run_ask_s_row_shows_its_question_with_whose(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22239,6 +22558,7 @@ yardr.dev
     /// The same forged run ask in the Decided list, put aside: the row
     /// draws one line of the question, its first, and neither the forged
     /// sentence nor the forged command.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_forged_run_ask_s_decided_row_shows_its_first_line(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22262,6 +22582,7 @@ yardr.dev
 
     /// Wrapped words stay under the asker's text, to the right of its
     /// label, in both the question and a context entry.
+    #[cfg(unix)]
     #[gpui::test]
     fn wrapped_run_ask_lines_stay_under_the_asker_label(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22312,6 +22633,7 @@ yardr.dev
     /// card names and to no
     /// other, after a switch too: each yard here holds the same ask on the
     /// same bead, so only the yard tells them apart.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_is_approved_in_the_yard_its_card_names_after_a_switch_too(
         cx: &mut TestAppContext,
@@ -22445,6 +22767,7 @@ yardr.dev
     /// approve at the yard's terminal, with that command in a block that
     /// copies it, and has no control that approves. Later works as on any
     /// card.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_takes_no_approval_from_the_window_sends_it_to_a_terminal(
         cx: &mut TestAppContext,
@@ -22519,6 +22842,7 @@ yardr.dev
     /// in a line the card has for nothing else, and Enter there sends the
     /// decline and approves nothing. One put aside is approved from its
     /// card among the decided, after the Mac's unlock.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_is_declined_with_words_and_approved_after_it_was_put_aside(
         cx: &mut TestAppContext,
@@ -22613,6 +22937,7 @@ yardr.dev
     /// A taken-back run ask keeps the proposal for the record but has no
     /// approval control or answer field, including on its card among the
     /// decided asks.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_taken_back_run_ask_shows_its_proposal_without_an_approval(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23076,6 +23401,7 @@ yardr.dev
     /// offered, the ask's number typed back where none is, and `weighed`
     /// with the pick. Anything else keeps the card and sends nothing.
     /// Words alone, later and decline stay ungated.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_mapping_pick_passes_the_weighty_gate_and_sends_weighed(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23222,6 +23548,7 @@ yardr.dev
     /// preset pick with it after its number is typed back where no unlock
     /// is offered; the ask reads as being carried out until the yard says
     /// it ran.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_card_shows_its_setup_and_is_approved_with_a_tap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23413,6 +23740,7 @@ yardr.dev
     /// The value is in the call's body and nowhere else in the window. An
     /// approval the yard refuses is shown whole, and a call that ends
     /// without an answer is never said to be approved or not.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_account_is_typed_unseen_and_approved_with_its_preset(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23519,6 +23847,7 @@ yardr.dev
     /// A call that ends without an answer is never said to be approved or
     /// not, and the queue is read again for what the yard says, since the
     /// call may have approved all the same.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_approval_the_yard_refuses_is_shown_whole(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23567,6 +23896,7 @@ yardr.dev
     /// A setup ask's approval wants the preset pick and the account
     /// together: with neither it says which is missing, and a chosen
     /// preset goes in place of the recommended one.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_preset_is_picked_and_its_account_is_wanted(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23608,6 +23938,7 @@ yardr.dev
 
     /// `d` on a setup ask's card, then words and Enter: `DeclineAsk`
     /// with the words, and no approval.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_decline_sends_its_words(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23630,6 +23961,7 @@ yardr.dev
 
     /// A setup ask with no recommended preset wants one picked before it
     /// is approved.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_without_a_recommendation_wants_its_preset_picked(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23648,6 +23980,7 @@ yardr.dev
     /// A setup ask of several names takes them one after the other, and
     /// the approval sends them together with the preset pick. With none
     /// listed it wants the account typed.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_of_several_names_takes_them_one_after_the_other(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23714,6 +24047,7 @@ yardr.dev
     /// candidate taken keeps it with the bare preset pick, and neither
     /// values nor a candidate go. What is typed instead changes the
     /// account, and is wanted whole.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_that_stands_is_kept_with_a_bare_preset_pick(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23785,6 +24119,7 @@ yardr.dev
     /// just the missing names, and the approval sends exactly those with
     /// the preset pick. A bare pick keeps nothing here: the account is
     /// wanted.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_missing_a_name_types_just_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23853,6 +24188,7 @@ yardr.dev
     /// A setup ask put aside is approved from its card among the decided,
     /// with its presets to pick, its account choice and its field. A
     /// refusal there is shown whole, as on an open card.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_is_approved_after_it_was_put_aside(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23962,6 +24298,7 @@ yardr.dev
     /// Against a yard that does not have the call, the setup card says to
     /// approve at the yard's terminal, with that command in a block that
     /// copies it, and has no control that approves.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_from_a_yard_that_takes_no_approval_is_approved_at_its_terminal(
         cx: &mut TestAppContext,
@@ -24004,6 +24341,7 @@ yardr.dev
 
     /// `d` on a run ask's card, then words and Enter: `DeclineAsk` with
     /// the words, and no approval.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_s_decline_sends_its_words(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24126,6 +24464,7 @@ yardr.dev
     /// the command that tells them, and the field that shows marks. The
     /// card leaves with the giving, so the notice ends with what the yard
     /// says is left to do.
+    #[cfg(unix)]
     #[gpui::test]
     fn an_address_given_ends_with_what_the_yard_says_is_next(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24237,6 +24576,7 @@ yardr.dev
 
     /// An ask of two names takes one after the other and sends them
     /// together; esc leaves and nothing is sent.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_of_two_names_goes_together_and_esc_forgets(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24295,6 +24635,7 @@ yardr.dev
 
     /// Decline on a secret ask goes at once and with no words, whatever is
     /// typed in the field, which is forgotten.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_ask_is_declined_at_once_with_no_words(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24324,6 +24665,7 @@ yardr.dev
 
     /// One that was given has the field to give it again, and no line for
     /// words; one that was declined has neither.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_given_is_given_again_from_its_card_and_a_declined_one_takes_none(
         cx: &mut TestAppContext,
@@ -24380,6 +24722,7 @@ yardr.dev
     /// A secret ask its asker took back says who took it back and why, as
     /// the yard serves it, and its card has no field: the yard would refuse
     /// the value. One another yard took back says where it ended.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_taken_back_secret_ask_says_who_and_why_and_offers_no_field(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -24445,6 +24788,7 @@ yardr.dev
     /// sends anything from it, since the yard refuses an answer to an ask
     /// that is asked no more. An answered or a declined one keeps its
     /// options and its line.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_taken_back_ask_reads_only_and_an_answered_or_declined_one_is_picked_again(
         cx: &mut TestAppContext,
@@ -24539,6 +24883,7 @@ yardr.dev
     /// empty: a click then sends nothing. The value is in no label, no
     /// notice and nothing kept; the footer still names Enter. The look is
     /// untried.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_card_s_give_button_gives_what_enter_gives(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24677,6 +25022,7 @@ yardr.dev
     /// or as marks again, and never changes the value: Give sends what
     /// was typed either way. It stands per card: a card left and opened
     /// again starts hidden.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_card_s_toggle_shows_what_is_typed_and_sends_it_as_ever(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24737,6 +25083,7 @@ yardr.dev
     /// A secret ask the yard marks no secret starts shown: what is typed
     /// is drawn as typed, until the toggle is pressed. It is still a
     /// secret: its value goes in its call, and nothing copies out.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_card_marked_no_secret_starts_shown(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24830,6 +25177,7 @@ yardr.dev
     /// while scrolled up does not move the view and marks the control.
     /// That the control is gone is the window's own word: gpui's test
     /// keeps the bounds of what an earlier frame drew.
+    #[cfg(unix)]
     #[gpui::test]
     fn scrolled_up_a_control_jumps_to_the_newest_and_marks_new_mail_below(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -24937,6 +25285,7 @@ yardr.dev
     /// A conversation at its newest stays there through a window resize,
     /// smaller then larger; one scrolled up keeps its offset through the
     /// same resizes, and the jump control stands throughout.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_conversation_at_its_newest_stays_there_through_a_resize(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25075,6 +25424,7 @@ yardr.dev
     /// top asks for the page before, and the mail that stood in view
     /// stands where it stood once the older mails are in above it; new
     /// mail still arrives below.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_long_conversation_loads_its_newest_page_and_older_ones_at_its_top(
         cx: &mut TestAppContext,
@@ -25173,6 +25523,7 @@ yardr.dev
 
     /// Loading an older page into the first message's sender group keeps
     /// that message in place as the new mail bodies arrive above it.
+    #[cfg(unix)]
     #[gpui::test]
     fn an_older_page_inside_a_sender_group_keeps_the_message_in_place(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25206,6 +25557,7 @@ yardr.dev
 
     /// At the oldest mail of a conversation its top says that it starts
     /// there, and standing there asks for nothing more.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_top_of_a_conversation_says_where_it_starts_and_asks_no_more(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25240,6 +25592,7 @@ yardr.dev
     /// it: one that refuses the page is asked for the conversation whole,
     /// one that answers everything to it is taken at that, and neither is
     /// asked again at the top.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_without_pages_shows_the_whole_conversation_and_is_not_asked_again(
         cx: &mut TestAppContext,
@@ -25261,6 +25614,7 @@ yardr.dev
         assert_eq!(texts(&view, cx).len(), 120);
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_answers_all_to_a_page_is_asked_once(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25290,6 +25644,7 @@ yardr.dev
     /// the focus in the line; with the modifier, Home and End go to the
     /// oldest loaded and the newest message. Typing is unchanged, and
     /// plain Home and End are still the caret's.
+    #[cfg(unix)]
     #[gpui::test]
     fn page_keys_move_the_conversation_by_a_page_and_stop_at_its_ends(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25409,6 +25764,7 @@ yardr.dev
     /// On a card the page keys move the card by a page and stop at its
     /// ends, with the focus in the line or in the window's keys; with
     /// the modifier, Home and End go to its top and its end.
+    #[cfg(unix)]
     #[gpui::test]
     fn page_keys_move_the_open_card_by_a_page(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25506,6 +25862,7 @@ yardr.dev
     /// On the yard row the page keys move the notices by a page and
     /// stop at their ends; with the modifier, Home and End go to the
     /// first notice and the newest.
+    #[cfg(unix)]
     #[gpui::test]
     fn page_keys_move_the_yard_row_by_a_page(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25591,6 +25948,7 @@ yardr.dev
 
     /// The yard row's head has a button that marks every notice read, only
     /// while one is unread: a click asks the yard once, through the newest.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_yard_row_has_a_button_that_marks_every_notice_read(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25610,6 +25968,7 @@ yardr.dev
     }
 
     /// Shift-x marks every notice read, as the button does.
+    #[cfg(unix)]
     #[gpui::test]
     fn shift_x_marks_every_notice_read(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25624,6 +25983,7 @@ yardr.dev
     }
 
     /// With no notice unread the head has no button.
+    #[cfg(unix)]
     #[gpui::test]
     fn the_yard_row_has_no_button_with_no_notice_unread(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -25750,6 +26110,7 @@ yardr.dev
     /// A yard opened again is on the row it was left on, and that row's
     /// conversation as far above its newest as it stood: not on the row a
     /// yard opens on, at its newest. Each yard has its own.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_is_on_its_row_where_its_conversation_stood(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -25834,6 +26195,7 @@ yardr.dev
     /// and as far down it as it stood. A row that is gone when the yard is opened again is not
     /// opened: the yard opens in its remembered mode with no row, as one opened for the
     /// first time.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_is_on_its_card_where_it_stood_or_as_new_when_the_row_is_gone(
         cx: &mut TestAppContext,
@@ -25921,6 +26283,7 @@ yardr.dev
 
     /// A dealt-with decision is a row too: its containing list must be
     /// open before the saved selection can be restored.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_restores_a_scrolled_decided_card(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -25986,6 +26349,7 @@ yardr.dev
     /// A saved conversation position can be older than the newest page
     /// loaded when the yard is reopened. Older pages are fetched until the
     /// same distance from the newest can be restored.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_loads_older_pages_to_restore_its_conversation_scroll(
         cx: &mut TestAppContext,

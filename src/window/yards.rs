@@ -125,7 +125,10 @@ impl Footplate {
     /// What the status row at the list's head is for the open yard: its
     /// state with Start/Stop, or none.
     pub(crate) fn switch_for(&self) -> SwitchFor {
-        if self.env.yard.is_some() {
+        // Windows has no yard of this machine, and no yardr to start or
+        // stop one with: a yard there is another machine's, whatever the
+        // settings list.
+        if self.env.yard.is_some() || !cfg!(unix) {
             return SwitchFor::Far;
         }
         let Some(entry) = self.settings.yard(&self.yard) else {
@@ -1067,15 +1070,17 @@ impl Footplate {
                         .flex_wrap()
                         .items_center()
                         .gap_2()
-                        .child(
+                        // A yard of this machine is reached by its socket,
+                        // which Windows has not.
+                        .children(cfg!(unix).then(|| {
                             small_button("add a yard of this machine".to_string(), palette)
                                 .id("add near")
                                 .debug_selector(|| "add near".to_string())
                                 .when(self.adding == Some(Adding::Near), |el| el.bg(palette.open))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.add_yard(Adding::Near, window, cx)
-                                })),
-                        )
+                                }))
+                        }))
                         .child(
                             small_button("add a yard at an address".to_string(), palette)
                                 .id("add far")
@@ -2108,11 +2113,15 @@ impl Footplate {
             // more. The environment's yard is the one there is, and has
             // none.
             .when(!alone, |el| {
+                // A yard on this machine is reached by its socket, which
+                // Windows has not: the first way is left out there.
                 let ways = [
                     ("way near", "open a yard on this machine", Adding::Near),
                     ("way far", "pair with a yard at an address", Adding::Far),
                     ("way hosted", "open a hosted yard", Adding::Hosted),
-                ];
+                ]
+                .into_iter()
+                .filter(|(_, _, adding)| cfg!(unix) || *adding != Adding::Near);
                 el.child(
                     // Three divs: the max stands on a block of its own, so
                     // the column under it has its width before its texts

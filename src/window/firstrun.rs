@@ -220,8 +220,9 @@ impl FirstRun {
 
     /// Step 2 posed for a screenshot: the yard's form with a provider
     /// chosen, its model offers to pick from, and the scale to pick from.
-    /// A debug build's alone: nothing is fetched, and no command runs.
-    #[cfg(debug_assertions)]
+    /// A debug build's alone, and a unix one's: nothing is fetched, and no
+    /// command runs.
+    #[cfg(all(debug_assertions, unix))]
     pub fn shot_step2(
         means: Means,
         socket: &Path,

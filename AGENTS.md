@@ -8,9 +8,11 @@ builders.
 
 ## Layout
 
-Top level: `src/` the program, `scripts/` release, screenshot and
-shell-test helpers, `assets/` icons, the Linux polkit action and the Linux
-desktop entry, `docs/design/` decision notes, `.yardr/` the yard's gate.
+Top level: `src/` the program, `build.rs` (the Windows stack size, nothing
+else), `scripts/` release, screenshot and shell-test helpers, `assets/`
+icons, the Linux polkit action and the Linux desktop entry, `docs/design/`
+decision notes, `.yardr/` the yard's gate, `.github/` the Windows job
+(build and test, which the gate does not try).
 
 The window, its state and the yard:
 
@@ -22,13 +24,14 @@ The window, its state and the yard:
   conversation, unread); never calls the yard, it answers an `Effect` the
   window performs.
 - `src/api.rs`: the yard's socket API (calls, event stream, their JSON), by
-  socket or at an address over TCP+TLS; HTTP hand-written, no client library.
+  socket (unix alone) or at an address over TCP+TLS; HTTP hand-written, no
+  client library.
 - `src/session.rs`: follows one yard on a thread: login, initial state,
   stream, retry.
 - `src/yard.rs`: picks which yard opens (socket or address, token files,
   hosted sessions); tokens live beside the settings, never in them.
 - `src/settings.rs`: what the window keeps between runs, one JSON file in the
-  platform config dir.
+  platform config dir (`%APPDATA%\footplate` on Windows).
 
 Text and drawing helpers:
 
@@ -124,9 +127,15 @@ Setup, release and tests:
   test platform. Fixtures live in `src/fixtures/`. Shell tests are
   `scripts/test-*.sh`, run directly. Ignored tests needing the net or a
   real yardr say so where they are defined.
+- Windows is remote only: it has no yard of its own, so the unix socket,
+  file modes, symlinks, the shell stand-in for yardr and the Linux
+  desktop's taskbar sit behind `cfg(unix)` (or the OS), and so do the tests
+  that need them. A call that exists on unix alone arrives with its `cfg`
+  and, where Windows would reach it, an arm that says so.
 - Gate: `.yardr/test` (`cargo fmt --check`, `clippy -D warnings`,
   `cargo test`, `cargo build`). Landing runs the base copy of that
-  script, not yours.
+  script, not yours. It runs on a Mac; `.github/workflows/windows.yml`
+  runs `cargo build` and `cargo test` on Windows.
 
 ## Do not touch
 

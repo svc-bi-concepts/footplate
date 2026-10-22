@@ -4060,12 +4060,35 @@ pub(crate) fn yard_help(text: String, palette: Palette) -> Div {
 /// reveal: what the opener is handed. A space in it (macOS's
 /// "Application Support") is encoded, so it still opens.
 pub(crate) fn dir_url(dir: &Path) -> String {
-    let mut url = "file://".to_string();
-    for byte in dir.to_string_lossy().bytes() {
+    file_url(&dir.to_string_lossy(), cfg!(windows))
+}
+
+/// `path` as a `file:` URL. On Windows, `windows`, a path is
+/// `C:\Users\jo` and its URL `file:///C:/Users/jo`: the backslashes are
+/// slashes and the drive stands after three of them, as a share's
+/// `\\host\share` is `file://host/share`. Elsewhere a backslash is a
+/// character of a name, and is encoded as any other.
+pub(crate) fn file_url(path: &str, windows: bool) -> String {
+    let drive =
+        windows && matches!(path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
+    let share = windows && path.starts_with(r"\\");
+    let path = match windows {
+        true => path.replace('\\', "/"),
+        false => path.to_string(),
+    };
+    let mut url = match (drive, share) {
+        (true, _) => "file:///",
+        (_, true) => "file:",
+        _ => "file://",
+    }
+    .to_string();
+    for (at, byte) in path.bytes().enumerate() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 url.push(byte as char)
             }
+            // The drive's colon stands as it is.
+            b':' if drive && at == 1 => url.push(':'),
             _ => url.push_str(&format!("%{byte:02X}")),
         }
     }

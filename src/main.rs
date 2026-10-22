@@ -2,10 +2,19 @@
 //! yardr's socket API, or over the same calls at a yard's address. Where
 //! this machine has no yard it sets one up, with the yardr it fetches
 //! (fetch.rs, setup.rs), and its head starts and stops the open yard with
-//! the same yardr; beside those two it starts nothing of yardr's. The first
-//! slice is the
+//! the same yardr; beside those two it starts nothing of yardr's. On Windows
+//! there is no yard of this machine to set up or reach, and the window is of
+//! a yard at an address alone. The first slice is the
 //! conversations a person has with this yard's crew and with the crew a
 //! linked yard exposes, as `yardr chat` shows them.
+
+// A release build on Windows is a window and no console; a debug build keeps
+// the console, where what it prints is read.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// The tests that start the socket fake, or a shell, are a unix system's and
+// are left out on Windows: what only they use, helpers and imports, is unused
+// there. Only that build allows it; the others still fail on dead code.
+#![cfg_attr(all(test, not(unix)), allow(dead_code, unused_imports))]
 
 mod api;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
@@ -23,9 +32,11 @@ mod select;
 mod session;
 mod settings;
 mod setup;
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, unix))]
 mod shot;
-#[cfg(any(target_os = "linux", test))]
+// A Linux desktop's: its tests name paths of a unix system's, so Windows
+// has neither.
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod taskbar;
 mod theme;
 mod titlebar;
@@ -56,8 +67,8 @@ fn main() {
     // In a debug build only, a screenshot state starts a fake yard of its
     // own and points this run's socket at it; held for the run, since
     // dropping it stops the yard. A release build does not read the
-    // variable at all.
-    #[cfg(debug_assertions)]
+    // variable at all, nor does Windows, which has no socket to point.
+    #[cfg(all(debug_assertions, unix))]
     let (env, _shot) = shot::start_if_asked(env);
     let name = session::login_name();
 
