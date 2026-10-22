@@ -21,10 +21,15 @@
 #     done, to sign. A run that died after tagging resumes: a tag at the
 #     base commit with no release on it is finished, not refused.
 #   verify: downloads the release, checks checksums.txt.minisig against the
-#     release key and the archives against checksums.txt. Then done, to
-#     publish; a missing or bad signature reports failed with what minisign
-#     said, so sign is asked again, and archives that do not match, or a
-#     check that could not run, report question, to decide.
+#     release key and the archives against checksums.txt, then unpacks each
+#     macOS archive and checks that its app is notarized (xcrun stapler
+#     validate, and spctl naming Notarized Developer ID as the source). Then
+#     done, to publish, the note saying which apps were checked, or that
+#     none was and why; a missing or bad signature reports failed with what
+#     minisign said, so sign is asked again, and archives that do not match,
+#     an app that is not notarized, or a required check that could not run,
+#     report question, to decide. A missing Mac tool skips just that check,
+#     and the done note says so.
 #   publish: files the yardr.dev sync bead and advances it to new, notes its
 #     id on the release bead. Then done, to published.
 #
@@ -34,7 +39,9 @@
 # the bead instead.
 #
 # Needs on PATH: jq and git always; gh for build and verify; minisign and
-# shasum (or sha256sum) for verify. gh acts as whoever it is logged in as.
+# shasum (or sha256sum) for verify, and xcrun, spctl and ditto, which a Mac
+# has, for verify's look at the macOS apps (off a Mac the note says that
+# look was skipped). gh acts as whoever it is logged in as.
 # The build runs scripts/release.sh, so on a Mac, where that builds. It also
 # signs and notarizes the macOS apps when FOOTPLATE_RELEASE_SIGN_IDENTITY and
 # FOOTPLATE_RELEASE_NOTARY_PROFILE are in the environment this runs in, which
@@ -287,6 +294,59 @@ gh release upload $v --repo $GHREPO $dir/checksums.txt.minisig --clobber
 Then Done: the verify stage checks the signature next."
 }
 
+# macs: the macOS apps of the downloaded release, looked at as a Mac that
+# takes them would. Each *_darwin_*.zip is unpacked with ditto, into a
+# directory of its own since every zip holds a Footplate.app, and the app
+# must have its ticket stapled (xcrun stapler validate) and be taken by
+# Gatekeeper as notarized (spctl names the source). A fault is a question,
+# as an archive that does not match is: the release is remade by hand. A
+# release built without the signing variables is signed ad hoc and fails
+# here, which is meant. Sets $mac to the sentence the done note carries: the
+# apps checked, or why none was, so that a skipped check is never silent.
+# xcrun, spctl and ditto are a Mac's; where one is missing, the check is
+# skipped.
+macs() {
+  set -- "$tmp"/*_darwin_*.zip
+  if [ ! -f "$1" ]; then
+    mac="The release holds no macOS archive, so no app was checked for notarization."
+    return
+  fi
+  missing=""
+  for tool in xcrun spctl ditto; do
+    command -v "$tool" >/dev/null 2>&1 || missing="${missing:+$missing, }$tool"
+  done
+  if [ -n "$missing" ]; then
+    mac="The macOS apps were not checked for notarization: PATH here lacks $missing, which a Mac has, so that check was skipped."
+    return
+  fi
+  remade="it is remade by hand (the release and the tag deleted, the bead back to build)"
+  checked=""
+  for zip in "$@"; do
+    b=${zip##*/}
+    dest=$tmp/mac-${b%.zip}
+    mkdir "$dest" || fail question "cannot make a working directory; the macOS apps were not checked"
+    ditto -x -k "$zip" "$dest" >"$tmp/mac.log" 2>&1 ||
+      fail question "unpacking $b of release $v failed; the macOS apps were not checked" "$(cat "$tmp/mac.log")"
+    found=""
+    for app in "$dest"/*.app; do
+      [ -d "$app" ] || continue
+      found=1
+      name=${app##*/}
+      out=$(xcrun stapler validate "$app" 2>&1) ||
+        fail question "the $name in $b of release $v does not pass xcrun stapler validate (a release built without the signing variables is signed ad hoc, with no ticket stapled); $remade" "$out"
+      out=$(spctl -a -vv -t exec "$app" 2>&1) ||
+        fail question "Gatekeeper refuses the $name in $b of release $v (spctl -a -vv -t exec failed); $remade" "$out"
+      case $out in
+      *"source=Notarized Developer ID"*) ;;
+      *) fail question "Gatekeeper does not take the $name in $b of release $v as notarized (spctl does not name source=Notarized Developer ID); $remade" "$out" ;;
+      esac
+      checked="${checked:+$checked, }$name in $b"
+    done
+    [ -n "$found" ] || fail question "$b of release $v holds no .app to check; $remade"
+  done
+  mac="The macOS apps are notarized (xcrun stapler validate passes and spctl names Notarized Developer ID as the source): $checked."
+}
+
 verify() {
   command -v gh >/dev/null 2>&1 || fail question "gh is not on PATH (and logged in); the release group runs where jq, gh and minisign are"
   command -v minisign >/dev/null 2>&1 || fail question "minisign is not on PATH; the release group runs where jq, gh and minisign are"
@@ -327,7 +387,8 @@ verify() {
   done
   [ -z "$extra" ] ||
     fail question "release $v holds files its checksums.txt does not name ($extra); it is remade by hand (the release and the tag deleted, the bead back to build)"
-  done_with publish "verify: the signature on $v is good ($minisign_out) and its $n archives match checksums.txt."
+  macs
+  done_with publish "verify: the signature on $v is good ($minisign_out) and its $n archives match checksums.txt. $mac"
 }
 
 publish() {

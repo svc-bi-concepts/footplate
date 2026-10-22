@@ -144,8 +144,12 @@ from there:
   Done. Each names the version, so a stale file or a wrong release shows
   itself.
 - `verify` downloads the release, checks the signature against the release
-  key and the archives against the checksums. A bad signature asks `sign`
-  again.
+  key and the archives against the checksums, then unpacks each macOS
+  archive and checks that its app is notarized (`xcrun stapler validate`,
+  and `spctl -a -vv -t exec` naming `Notarized Developer ID`). A bad
+  signature asks `sign` again; an app that is not notarized, as an ad hoc
+  release's is not, waits in `decide` for the release to be remade. Off a
+  Mac the apps are not checked, and the note says so.
 - `publish` files the yardr.dev sync bead
   (`scripts/sync-release footplate <version>`) and advances it to `new`;
   the release bead is `published`.

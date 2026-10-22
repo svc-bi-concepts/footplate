@@ -108,8 +108,9 @@ fn main() {
                 cx,
             ))),
             titlebar: Some(titlebar::options(cfg!(target_os = "macos"))),
-            // 560 plus the rail's 56: every pane keeps its size.
-            window_min_size: Some(size(px(616.), px(360.))),
+            // The 560 the list and the pane have between them, and the rail
+            // beside them: every pane keeps its size.
+            window_min_size: Some(size(px(window::WINDOW_MIN), px(360.))),
             // On Linux the taskbar's icon and name are those of the desktop
             // entry with this id, which dock_icon puts there.
             app_id: Some(NAME.into()),

@@ -151,6 +151,17 @@ case "$text" in
         exit 2
         ;;
 esac
+# Away and signedout write their own settings (src/shot.rs), which carry no
+# text size, so one asked of them would be dropped without a word: it is
+# refused here, before any container is touched.
+case "$state" in
+    away|signedout)
+        if [ -n "$text" ]; then
+            echo "shot-linux.sh: SHOT_TEXT is not read for the $state state, which writes its own settings: shoot it at the usual text size" >&2
+            exit 2
+        fi
+        ;;
+esac
 if ! command -v docker >/dev/null 2>&1; then
     echo "shot-linux.sh: docker is not on PATH" >&2
     exit 1
@@ -296,7 +307,10 @@ docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_
     # A yard at an address opens from the settings: one far yard, open.
     # The rename shot opens that same far yard, with its form open in
     # its card. A look or a text size for the shot rides in the same
-    # file where one is asked for.
+    # file where one is asked for. The switcher, away and signedout write
+    # their own settings (src/shot.rs) and refuse a file that stands, so
+    # none is written for them: the look is theirs to read from SHOT_LOOK
+    # in the window environment, and a text size was refused above.
     shot_settings=""
     if [ -n "$SHOT_LOOK" ]; then shot_settings="\"look\": \"$SHOT_LOOK\""; fi
     if [ -n "$SHOT_TEXT" ]; then
@@ -305,7 +319,7 @@ docker exec -e "SHOT_LOOK=$look" -e "SHOT_TEXT=$text" "$name" sh -c 'export XDG_
     fi
     if [ -n "$shot_settings" ]; then shot_json=", $shot_settings"; else shot_json=""; fi
     if [ "'"$state"'" = far ] || [ "'"$state"'" = settings-yards-rename ]; then printf "%s\n" "{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\"$shot_json}" > "$scratch/config/footplate/settings.json"; fi
-    if [ -n "$shot_settings" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != settings-yards-rename ] && [ "'"$state"'" != switcher ]; then printf "%s\n" "{$shot_settings}" > "$scratch/config/footplate/settings.json"; fi
+    if [ -n "$shot_settings" ] && [ "'"$state"'" != far ] && [ "'"$state"'" != settings-yards-rename ] && [ "'"$state"'" != switcher ] && [ "'"$state"'" != away ] && [ "'"$state"'" != signedout ]; then printf "%s\n" "{$shot_settings}" > "$scratch/config/footplate/settings.json"; fi
     chown -R shot:shot "$scratch"
     su shot -c "HOME=$scratch/home XDG_CONFIG_HOME=$scratch/config XDG_DATA_HOME=$scratch/data YARDR_HOME=$scratch/yard PATH=$scratch/home/.local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json SHOT_LOOK='$SHOT_LOOK' FOOTPLATE_SHOT='"$state"' dbus-run-session -- '"$target_dir"'/debug/footplate >$scratch/footplate.log 2>&1 & echo \$!" > /tmp/shots/footplate.pid' >&2
 

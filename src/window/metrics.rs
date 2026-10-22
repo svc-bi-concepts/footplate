@@ -23,6 +23,13 @@ pub(crate) const ATTACHMENT: f32 = 3.5;
 /// icon, as the review has it.
 pub(crate) const RAIL: f32 = 64.;
 
+/// The window's narrowest width in pixels, which main.rs sets as its
+/// minimum: the 560 the list (270 at the usual text size) and the pane
+/// beside it have between them, and the rail beside those, so that no pane
+/// gives up room for the rail. The tests of the narrowest window read this
+/// number too.
+pub(crate) const WINDOW_MIN: f32 = 560. + RAIL;
+
 /// A rail tile's width in pixels: the glyph with its label under it, in
 /// the rail with its padding on both sides, 6 + 52 + 6.
 pub(crate) const RAIL_TILE: f32 = 52.;

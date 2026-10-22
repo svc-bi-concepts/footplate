@@ -5,6 +5,8 @@
 # yardr first on PATH; what it asked of them is asserted from their shared
 # call log. The build step runs a stand-in build script (the real
 # scripts/release.sh is test-release.sh's), so no test compiles footplate.
+# Verify's look at the macOS apps has stand-ins for xcrun, spctl and ditto,
+# which only a Mac has, so it is tried the same on any system.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -145,7 +147,59 @@ fi
 # shellcheck disable=SC2086 # $FAKE_SUM is a list
 (cd "$2" && $FAKE_SUM Footplate_*_darwin_*.zip footplate_*_linux_*.tar.gz >checksums.txt)
 EOF
-chmod +x "$bin/yardr" "$bin/gh" "$bin/minisign" "$bin/fakebuild"
+# fake xcrun answers stapler's validate from a canned line and exit status.
+cat >"$bin/xcrun" <<'EOF'
+#!/bin/sh
+printf 'xcrun %s\n' "$*" >>"$FAKE_DIR/calls.log"
+printf '%s\n' "${FAKE_STAPLER_OUT:-The validate action worked!}"
+exit "${FAKE_STAPLER_RC:-0}"
+EOF
+
+# fake spctl assesses as its exit status says, printing on stderr as the real
+# one does: its canned text, else "accepted" from a notarized Developer ID
+# for the app it was given last.
+cat >"$bin/spctl" <<'EOF'
+#!/bin/sh
+printf 'spctl %s\n' "$*" >>"$FAKE_DIR/calls.log"
+for app; do :; done
+if [ -n "${FAKE_SPCTL_OUT:-}" ]; then
+  printf '%s\n' "$FAKE_SPCTL_OUT" >&2
+else
+  printf '%s: accepted\nsource=Notarized Developer ID\n' "$app" >&2
+fi
+exit "${FAKE_SPCTL_RC:-0}"
+EOF
+
+# fake ditto "unpacks" a zip into the directory it is given: the one app a
+# footplate zip holds, or none, or a failure, when it is told so.
+cat >"$bin/ditto" <<'EOF'
+#!/bin/sh
+printf 'ditto %s\n' "$*" >>"$FAKE_DIR/calls.log"
+# ditto -x -k <zip> <dest>
+dest=$4
+if [ "${FAKE_DITTO_RC:-0}" -ne 0 ]; then
+  echo "ditto: cannot unpack"
+  exit "$FAKE_DITTO_RC"
+fi
+if [ "${FAKE_DITTO_EMPTY:-}" != yes ]; then
+  mkdir -p "$dest/Footplate.app"
+fi
+EOF
+chmod +x "$bin/yardr" "$bin/gh" "$bin/minisign" "$bin/fakebuild" "$bin/xcrun" "$bin/spctl" "$bin/ditto"
+
+# nomac: a PATH with what verify needs but no xcrun, as a system that is no
+# Mac has it. These tests run on a Mac as well, where xcrun stands in
+# /usr/bin among everything else, so the dir is made of links to the tools
+# verify uses and to the stand-ins but xcrun.
+nomac=$tmp/nomac
+mkdir -p "$nomac"
+for tool in jq git sed grep mktemp rm cat mkdir cp env tail head date shasum sha256sum; do
+    found=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$found" "$nomac/$tool"
+done
+for tool in yardr gh minisign spctl ditto; do
+    ln -s "$bin/$tool" "$nomac/$tool"
+done
 
 # begin <name>: a fresh case with the flow's outcomes from here, in the
 # shape has_outcome greps.
@@ -208,15 +262,24 @@ real_release() {
     git -C "$checkout" push -q origin main
 }
 
-# fixture <sig|nosig> <ok|corrupt>: a release for verify to download, of
-# two archives with a checksums.txt over them.
+# fixture <sig|nosig> <ok|corrupt> [mac]: a release for verify to download, of
+# two archives with a checksums.txt over them, and with mac the two zips of
+# footplate's macOS apps as well (their bytes are no zips: ditto is a
+# stand-in).
 fixture() {
     rdir=$casedir/release
     mkdir -p "$rdir"
     printf 'a\n' >"$rdir/a.tar.gz"
     printf 'b\n' >"$rdir/b.tar.gz"
-    # shellcheck disable=SC2086 # $SUM is a list
-    (cd "$rdir" && $SUM a.tar.gz b.tar.gz >checksums.txt)
+    archives="a.tar.gz b.tar.gz"
+    if [ "${3:-}" = mac ]; then
+        for arch in arm64 amd64; do
+            printf 'footplate darwin %s\n' "$arch" >"$rdir/Footplate_0.3.0_darwin_$arch.zip"
+            archives="$archives Footplate_0.3.0_darwin_$arch.zip"
+        done
+    fi
+    # shellcheck disable=SC2086 # $SUM and $archives are lists
+    (cd "$rdir" && $SUM $archives >checksums.txt)
     if [ "$1" = sig ]; then printf 'sig\n' >"$rdir/checksums.txt.minisig"; fi
     if [ "$2" != ok ]; then printf 'corrupted\n' >>"$rdir/a.tar.gz"; fi
 }
@@ -245,6 +308,13 @@ want() {
 
 lack() {
     if log | grep -q -F -- "$1"; then fail "$name: want no [$1] in: $(log)"; fi
+}
+
+# count <n> <prefix>: exactly n logged calls begin with prefix, which stands
+# for text a call line starts with and a note does not.
+count() {
+    got=$(log | grep -c -- "^$2" || true)
+    [ "$got" -eq "$1" ] || fail "$name: want $1 calls of [$2], got $got in: $(log)"
 }
 
 # A bad title is questioned, and nothing is released.
@@ -431,6 +501,11 @@ want "yardr bead done footplate-rel1 --note -"
 lack "--outcome"
 want "the signature on v0.3.0 is good"
 want "2 archives match checksums.txt"
+# With no macOS archive among them there is no app to look at, and the note
+# says so; no Apple tool is asked.
+want "holds no macOS archive"
+lack "xcrun"
+lack "ditto"
 ok "verify checks a signed release"
 
 # A bad signature fails, so sign is asked again, with what minisign said.
@@ -461,6 +536,107 @@ run verify "FAKE_RELEASE_DIR=$rdir"
 want "--outcome question"
 want "do not match its checksums.txt"
 ok "verify questions mismatched archives"
+
+# The macOS archives are unpacked, each into a directory of its own (both
+# hold a Footplate.app), and each app passes stapler and Gatekeeper: done to
+# publish, and the note names the apps it looked at.
+begin verify-mac-ok
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+want "its 4 archives match checksums.txt"
+count 2 "ditto -x -k "
+want "mac-Footplate_0.3.0_darwin_arm64"
+want "mac-Footplate_0.3.0_darwin_amd64"
+count 2 "xcrun stapler validate "
+count 2 "spctl -a -vv -t exec "
+want "The macOS apps are notarized"
+want "Footplate.app in Footplate_0.3.0_darwin_arm64.zip"
+want "Footplate.app in Footplate_0.3.0_darwin_amd64.zip"
+ok "verify checks the macOS apps"
+
+# An app with no ticket stapled to it is questioned, with what stapler said,
+# and Gatekeeper is not asked.
+begin verify-mac-unstapled
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_STAPLER_RC=65" \
+    "FAKE_STAPLER_OUT=Footplate.app does not have a ticket stapled to it."
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "does not pass xcrun stapler validate"
+want "Footplate.app does not have a ticket stapled to it."
+want "it is remade by hand"
+lack "spctl -a"
+ok "verify questions an app with no ticket stapled"
+
+# Gatekeeper that takes the app from another source than a notarized
+# Developer ID is questioned, with what spctl said.
+begin verify-mac-not-notarized
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" \
+    "FAKE_SPCTL_OUT=Footplate.app: accepted
+source=Developer ID"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "does not name source=Notarized Developer ID"
+want "source=Developer ID"
+ok "verify questions an app Gatekeeper does not call notarized"
+
+# Gatekeeper that refuses the app outright is questioned too, and an
+# "Unnotarized Developer ID" source is no "Notarized Developer ID" one.
+begin verify-mac-rejected
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_SPCTL_RC=3" \
+    "FAKE_SPCTL_OUT=Footplate.app: rejected
+source=Unnotarized Developer ID"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "Gatekeeper refuses the Footplate.app"
+want "source=Unnotarized Developer ID"
+ok "verify questions an app Gatekeeper rejects"
+
+# A zip that cannot be unpacked leaves nothing to look at: questioned, not
+# passed.
+begin verify-mac-unpacking
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_DITTO_RC=1"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "unpacking Footplate_0.3.0_darwin_amd64.zip of release v0.3.0 failed"
+want "ditto: cannot unpack"
+lack "xcrun"
+ok "verify questions a zip it cannot unpack"
+
+# Nor does a zip with no app in it.
+begin verify-mac-no-app
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_DITTO_EMPTY=yes"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "holds no .app to check"
+lack "xcrun"
+ok "verify questions a zip that holds no app"
+
+# Off a Mac (no xcrun) the apps are not looked at, and the done note says
+# that: the release still goes to publish, with nothing unpacked.
+begin verify-mac-no-xcrun
+fixture sig ok mac
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "PATH=$nomac"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+want "its 4 archives match checksums.txt"
+want "were not checked for notarization: PATH here lacks xcrun, which a Mac has"
+lack "ditto -x -k"
+lack "spctl -a"
+ok "verify says it skipped the macOS apps off a Mac"
 
 # Publish files the footplate sync bead and advances it to new.
 begin publish-ok

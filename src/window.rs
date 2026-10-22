@@ -44,6 +44,8 @@ mod yards;
 use firstrun::{FirstRun, Means};
 use keys::{APPROVE_KEY, CONTEXT, NO_LINE_CONTEXT, SETUP_SECRET_CONTEXT, SWITCH_CONTEXT};
 use metrics::READING_WIDTH;
+// The window's floor, which main.rs sets as the window's minimum.
+pub(crate) use metrics::WINDOW_MIN;
 use rail::{ImageOpen, Picture, ViewUp};
 use state::{Adding, AgentsBusy, Anchor, Away, Held, Piece, Place, SwitchBusy, SwitchFor};
 use ui::small_button;
@@ -4185,7 +4187,7 @@ mod tests {
         let mail = "over in bead-a now";
         mails(&yard, &[mail]);
         let (view, cx) = opened(&yard, &[mail], cx);
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         assert!(drawn(cx, "text 12"));
 
         click(cx, 12, mail, 8, 1.);
@@ -8194,7 +8196,7 @@ yardr.dev
         assert!(settings_open(&view, cx));
         // The narrowest window the application opens (main.rs), and a wide
         // one: the path overflows the footer at both.
-        for (wide, high) in [(560., 360.), (1200., 800.)] {
+        for (wide, high) in [(WINDOW_MIN, 360.), (1200., 800.)] {
             cx.simulate_resize(gpui::size(px(wide), px(high)));
             view.update(cx, |v, cx| {
                 v.kept = Some(long.clone());
@@ -12750,7 +12752,7 @@ yardr.dev
         to_timetable(&view, cx);
         cx.run_until_parked();
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
         // The summary's longer worked line splits by kind, with each
@@ -12777,7 +12779,7 @@ yardr.dev
         });
         let summary = bounds_of(cx, "panel summary");
         assert!(
-            summary.right() <= px(616.),
+            summary.right() <= px(WINDOW_MIN),
             "the summary runs past the pane: {summary:?}"
         );
         // Down the pane: the head, the tracks, the stub, No line and
@@ -12819,7 +12821,7 @@ yardr.dev
         ] {
             let card = bounds_of(cx, &format!("panel track {depot} {flow}"));
             assert!(
-                card.right() <= px(616.),
+                card.right() <= px(WINDOW_MIN),
                 "the {depot} {flow} card runs past the pane: {card:?}"
             );
             for part in [
@@ -12827,12 +12829,15 @@ yardr.dev
                 format!("panel name {depot} {flow} backlog"),
             ] {
                 let at = bounds_of(cx, &part);
-                assert!(at.right() <= px(616.), "{part} runs past the pane: {at:?}");
+                assert!(
+                    at.right() <= px(WINDOW_MIN),
+                    "{part} runs past the pane: {at:?}"
+                );
             }
             for stage in stages {
                 let cell = bounds_of(cx, &format!("panel stage {depot} {flow} {stage}"));
                 assert!(
-                    cell.right() <= px(616.),
+                    cell.right() <= px(WINDOW_MIN),
                     "the {depot} {flow} {stage} cell runs past the pane: {cell:?}"
                 );
             }
@@ -12873,7 +12878,7 @@ yardr.dev
         to_timetable(&view, cx);
         cx.run_until_parked();
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel track yardr release"));
         let stages = [
@@ -12892,13 +12897,13 @@ yardr.dev
         for stage in stages {
             let cell = bounds_of(cx, &format!("panel stage yardr release {stage}"));
             assert!(
-                cell.right() <= px(616.),
+                cell.right() <= px(WINDOW_MIN),
                 "the {stage} cell runs past the pane: {cell:?}"
             );
         }
         let small = bounds_of(cx, "panel stage yardr default new");
         assert!(
-            small.right() <= px(616.),
+            small.right() <= px(WINDOW_MIN),
             "the short track runs past the pane: {small:?}"
         );
         // The long flow wraps: its last stage stands below its first,
@@ -12953,7 +12958,7 @@ yardr.dev
         // five tracks, the No line card and the Quiet row cannot all
         // fit its panel, so a column that shrinks its children
         // squeezes them and the headcodes spill over the next row.
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel noline"));
         // One frame, read whole: a redraw per headcode would draw the
@@ -13063,7 +13068,7 @@ yardr.dev
         // The narrowest window the application opens (main.rs): fifteen
         // rows cannot fit its board, so a column that shrinks its
         // children squeezes the rows under their cells.
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Arrivals, window, cx);
             v.set_departures(true, cx);
@@ -13141,7 +13146,7 @@ yardr.dev
         // flows cannot fit its list, so a column that shrinks its
         // children squeezes the flows and their cards spill over the
         // next.
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         view.update_in(cx, |v, window, cx| {
             v.select(Selected::Line("yardr".into()), window, cx)
         });
@@ -13229,7 +13234,7 @@ yardr.dev
         }
         // The narrowest window the application opens (main.rs), a
         // laptop's, and a wide one.
-        for (width, height) in [(616., 360.), (950., 700.), (1200., 800.)] {
+        for (width, height) in [(WINDOW_MIN, 360.), (950., 700.), (1200., 800.)] {
             cx.simulate_resize(gpui::size(px(width), px(height)));
             view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
             wait(cx, "the panel", |cx| {
@@ -13275,7 +13280,7 @@ yardr.dev
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         cx.run_until_parked();
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
         wait(cx, "the panel", |cx| drawn(cx, "panel track yardr default"));
         let rem = f32::from(settings_of(&view, cx).rem());
@@ -13349,7 +13354,7 @@ yardr.dev
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         cx.run_until_parked();
-        for width in [616., 1920.] {
+        for width in [WINDOW_MIN, 1920.] {
             cx.simulate_resize(gpui::size(px(width), px(900.)));
             view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
             wait(cx, "the panel", |cx| drawn(cx, "panel quiet"));
@@ -13906,7 +13911,7 @@ yardr.dev
         to_timetable(&view, cx);
         cx.run_until_parked();
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         // The list's edge: a row past that runs past the column.
         let rows = bounds_of(cx, "rows");
         let edge = rows.right() + px(1.);
@@ -13925,7 +13930,7 @@ yardr.dev
             v.set_departures(true, cx);
         });
         wait(cx, "the arrivals", |cx| drawn(cx, "arrival footplate-p512"));
-        let right = px(616.);
+        let right = px(WINDOW_MIN);
         assert!(drawn(cx, "departures head"));
         for bead in ["yd-zulu", "yd-alpha", "footplate-p512"] {
             let row = bounds_of(cx, &format!("arrival {bead}"));
@@ -13980,8 +13985,10 @@ yardr.dev
     /// The rail stands 64 pixels wide on the window's far left: the
     /// open yard's chip on top, the three modes under it in order, the
     /// settings' gear at the foot. Each mode's tile carries its glyph
-    /// over its label, as the gear does. A click on a mode opens it, on
-    /// the chip the switcher, on the gear the settings.
+    /// over its label, as the gear does, and the window's floor counts the
+    /// rail, so the pane beside the list keeps its size at the narrowest
+    /// window. A click on a mode opens it, on the chip the switcher, on the
+    /// gear the settings.
     #[gpui::test]
     fn the_rail_holds_the_yard_s_chip_the_modes_and_the_foot(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -13999,11 +14006,20 @@ yardr.dev
             view.read_with(cx, |v, _| v.model.is_some())
         });
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         let rail = bounds_of(cx, "rail");
         assert!(
             (rail.size.width - px(64.)).abs() < px(1.),
             "the rail is {rail:?}, not 64 wide"
+        );
+        // The list stands 270 wide here and its rows end a pixel inside its
+        // border; the pane keeps the 290 it had beside the list before the
+        // rail stood in the window.
+        let rows = bounds_of(cx, "rows");
+        let pane = px(WINDOW_MIN) - rows.right() - px(1.);
+        assert!(
+            pane >= px(289.),
+            "the pane is {pane:?} wide at the narrowest window, not the 290 it keeps"
         );
         // The chip, the modes in order, the gear: each under the
         // last, each within the rail. The chip is 40 a side; the tiles
@@ -18074,7 +18090,7 @@ yardr.dev
             );
         }
         // And at a narrow window, where the help wraps further.
-        cx.simulate_resize(gpui::size(px(616.), px(900.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(900.)));
         for way in ["way near", "way far"] {
             click_on(cx, way);
             assert!(drawn(cx, "yard help"), "{way}");
@@ -19585,7 +19601,7 @@ yardr.dev
             v.switch_note = None;
         });
         // The narrowest window the application opens (main.rs).
-        cx.simulate_resize(gpui::size(px(616.), px(360.)));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
         let holds = |cx: &mut VisualTestContext| {
             let state = bounds_of(cx, "switch state");
             let button = bounds_of(cx, "switch stop");
