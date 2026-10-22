@@ -30,10 +30,13 @@ alone.
 
 ## Installing
 
-A release is one download for each system, and none of it needs a terminal.
-The files are on yardr.dev. `https://yardr.dev/releases/footplate/latest.json`
-names the newest version and each of its files, and a file is at
-`https://yardr.dev/releases/footplate/v<version>/<file>`.
+A release is one download for each of macOS and Linux, and none of it needs a
+terminal. The files are on yardr.dev.
+`https://yardr.dev/releases/footplate/latest.json` names the newest version
+and each of its files, and a file is at
+`https://yardr.dev/releases/footplate/v<version>/<file>`. Windows has no
+download yet: it is built from source ([Building](#building)), and
+[Windows](#windows) says what it does and does not do.
 
 No download holds yardr. footplate fetches it the first time it opens, when it
 sets a yard up ([Setting up a yard here](#setting-up-a-yard-here)). The
