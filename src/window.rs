@@ -1485,7 +1485,9 @@ mod tests {
     }
 
     /// The yard is followed on a thread of its own, so the test waits for
-    /// what it expects of the window, and no longer than ten seconds.
+    /// what it expects of the window, and no longer than ten seconds. Each
+    /// turn sleeps three milliseconds: the sleep is pure overhead between
+    /// polls, and one open pays hundreds of turns.
     fn wait(
         cx: &mut VisualTestContext,
         what: &str,
@@ -1496,7 +1498,7 @@ mod tests {
             if is(cx) {
                 return;
             }
-            thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(3));
         }
         panic!("the window never showed: {what}");
     }
