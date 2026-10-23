@@ -1486,19 +1486,28 @@ mod tests {
 
     /// The yard is followed on a thread of its own, so the test waits for
     /// what it expects of the window, and no longer than ten seconds. Each
-    /// turn sleeps three milliseconds: the sleep is pure overhead between
-    /// polls, and one open pays hundreds of turns.
+    /// turn sleeps five milliseconds: the wait ends when the yard's threads
+    /// answer, not when the window polls, so a shorter sleep spends more
+    /// turns on the same wall time, and under three milliseconds the polling
+    /// starves those threads until the wait gives up. With FOOTPLATE_WAIT_LOG
+    /// set each wait names its turns and elapsed milliseconds, so a probe
+    /// can time the wait apart from the rest of its test.
     fn wait(
         cx: &mut VisualTestContext,
         what: &str,
         mut is: impl FnMut(&mut VisualTestContext) -> bool,
     ) {
-        for _ in 0..2000 {
+        let start = std::time::Instant::now();
+        let log = std::env::var_os("FOOTPLATE_WAIT_LOG").is_some();
+        for turn in 1..=2000 {
             cx.run_until_parked();
             if is(cx) {
+                if log {
+                    eprintln!("wait {what}: {turn} turns, {}ms", start.elapsed().as_millis());
+                }
                 return;
             }
-            thread::sleep(Duration::from_millis(3));
+            thread::sleep(Duration::from_millis(5));
         }
         panic!("the window never showed: {what}");
     }
