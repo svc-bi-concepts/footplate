@@ -12477,7 +12477,9 @@ yardr.dev
     /// No two of the open conversation's rows overlap: each of the
     /// scroll handle's children stands below the one before, and each
     /// mail's head and text stand below the text before. Within a
-    /// pixel, for gpui's rounding to device pixels.
+    /// pixel, for gpui's rounding to device pixels. Drawn once, and
+    /// the bounds read off that frame: a redraw per mail would lay
+    /// the whole conversation out again for each.
     fn rows_tile(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
         frames(cx);
         let rows: Vec<Bounds<Pixels>> = view.read_with(cx, |v, _| {
@@ -12509,9 +12511,9 @@ yardr.dev
         let mut below = px(0.);
         let mut first = true;
         for (seq, headed) in mails {
-            let text = bounds_of(cx, &format!("text {seq}"));
+            let text = bounds_now(cx, &format!("text {seq}"));
             if headed {
-                let head = bounds_of(cx, &format!("head {seq}"));
+                let head = bounds_now(cx, &format!("head {seq}"));
                 if !first {
                     assert!(
                         head.top() + px(1.) >= below,
@@ -25438,7 +25440,7 @@ yardr.dev
         let half: f32 = (view_height / 2.).into();
         scroll_to(&view, cx, half + 40.);
         assert_eq!(yard.asked("Conversation").len(), 1);
-        let far = [451, 452, 453].map(|seq| text_bounds(cx, seq));
+        let far = [451, 452, 453].map(|seq| bounds_now(cx, &format!("text {seq}")));
 
         // Near the top, with a mail cut by the top of the view, the page
         // before is asked for, and that mail and those below it stand
@@ -25458,7 +25460,10 @@ yardr.dev
                 json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 451})
             ]
         );
-        assert_eq!([451, 452, 453].map(|seq| text_bounds(cx, seq)), stood);
+        assert_eq!(
+            [451, 452, 453].map(|seq| bounds_now(cx, &format!("text {seq}"))),
+            stood
+        );
         assert!(!at_bottom(&view, cx));
         // The older mails are no mail that arrived below.
         assert_eq!(new_below(&view, cx), 0);
@@ -25475,7 +25480,7 @@ yardr.dev
         // pinned within that rounding, not to the pixel.
         let mut at_top = far[0];
         at_top.origin.y += px(half + 40.);
-        let stood = text_bounds(cx, 401);
+        let stood = bounds_now(cx, "text 401");
         assert_eq!(stood.origin.x, at_top.origin.x);
         assert_eq!(stood.size.width, at_top.size.width);
         assert!(
@@ -25568,7 +25573,7 @@ yardr.dev
             ]
         );
         assert_eq!(top_of(&view, cx), Top::Start);
-        scroll_to(&view, cx, 0.);
+        // Already at the top from the loop above: off it and back.
         scroll_to(&view, cx, 10.);
         scroll_to(&view, cx, 0.);
         assert_eq!(yard.asked("Conversation").len(), 3);
@@ -25656,6 +25661,9 @@ yardr.dev
             page > px(0.) && page < over,
             "no page to move by: {page:?} of {over:?}"
         );
+        // Enough keys to cross the whole overflow and stop: over/page
+        // to cross, and two more standing past the end.
+        let enough = (f32::from(over) / f32::from(page)).ceil() as usize + 2;
 
         // What is typed stays through the paging, and typing goes on.
         cx.simulate_input("hello");
@@ -25670,12 +25678,12 @@ yardr.dev
 
         // Up to the oldest loaded, where further keys stop; down to the
         // newest, where they stop too.
-        for _ in 0..20 {
+        for _ in 0..enough {
             cx.simulate_keystrokes("pageup");
         }
         cx.run_until_parked();
         assert_eq!(offset_of(&view, cx).y, px(0.));
-        for _ in 0..20 {
+        for _ in 0..enough {
             cx.simulate_keystrokes("pagedown");
         }
         cx.run_until_parked();
