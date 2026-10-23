@@ -15968,11 +15968,12 @@ yardr.dev
     /// of the list stands.
     fn env_on(yard: &Yard, file: &std::path::Path) -> Env {
         let set = Settings::read(file);
-        let here = set
-            .yards
-            .iter()
-            .find(|entry| !entry.is_far() && entry.socket.is_empty());
-        if let (true, Some(here)) = (yard.at_listener(), here) {
+        if yard.at_listener()
+            && let Some(here) = set
+                .yards
+                .iter()
+                .find(|entry| !entry.is_far() && entry.socket.is_empty())
+        {
             let name = here.name.clone();
             set.with_yard(Some(&name), listed(&name, yard, file), Some(file))
                 .unwrap()
@@ -15995,6 +15996,59 @@ yardr.dev
         let token = format!("yard-{}.token", name.replace(' ', "-"));
         yard::keep_token(&file.with_file_name(&token), crate::fake::TOKEN).unwrap();
         settings::Yard::far(name, yard.address(), &token)
+    }
+
+    /// Yards at their listeners alone, as every yard is where there is no
+    /// socket (Windows), stand in the settings as this machine's and a
+    /// second home's: [`env_on`] and [`listed`] list them at their
+    /// addresses, with their tokens beside the settings, under the names a
+    /// yard of the socket has. The window reads each at the first try (the
+    /// socket's road alone is answered that the login name is no user), shows
+    /// the first, and switches to the second. The other tests start the
+    /// yard `Yard::start()` makes, which is a socket off Windows, so this
+    /// is what keeps the helpers' listener road in the gate of a Mac.
+    #[gpui::test]
+    fn yards_at_their_listeners_stand_in_the_settings_as_this_machine_s_and_a_second_home_s(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start_tcp();
+        a_yard_of_jo(&near);
+        let second = Yard::start_tcp();
+        a_second_yard_of_jo(&second);
+        let file = two_yards(dir.path(), &second);
+        let env = env_on(&near, &file);
+        assert_eq!(env.socket, PathBuf::new(), "no socket to reach it by");
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        assert_eq!(open_yard(&view, cx), settings::HERE);
+        assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
+        assert_eq!(
+            Settings::read(&file).yards,
+            [
+                settings::Yard::far(settings::HERE, near.address(), "yard-this-machine.token"),
+                settings::Yard::far("second home", second.address(), "yard-second-home.token"),
+            ]
+        );
+        assert_eq!(
+            yard::read_token(&dir.path().join("footplate/yard-this-machine.token")).unwrap(),
+            crate::fake::TOKEN
+        );
+        // Each was read once: the user the token names is asked after, and
+        // not the login name, whose answer the socket's road queues.
+        assert_eq!(near.asked("GetUser").len(), 1);
+        assert_eq!(second.asked("GetUser").len(), 1);
+
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(open_yard(&view, cx), "second home");
     }
 
     /// Puts a yard's name, its address and a code where they are typed.
