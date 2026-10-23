@@ -4226,7 +4226,14 @@ mod tests {
     /// the yard is reached.
     #[test]
     fn a_call_an_image_and_the_stream_by_the_socket_and_at_an_address() {
-        for yard in [Yard::start(), Yard::start_tcp()] {
+        // On Windows Yard::start() is the TCP yard, so both arms would be
+        // the same yard twice; the stopped-yard tail below is three refused
+        // connects, two seconds each there, and is covered once.
+        #[cfg(unix)]
+        let yards = vec![Yard::start(), Yard::start_tcp()];
+        #[cfg(not(unix))]
+        let yards = vec![Yard::start()];
+        for yard in yards {
             let client = yard.client();
             let way = client.place();
             // A call, its result and what it was asked with.
