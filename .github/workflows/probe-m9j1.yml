@@ -31,7 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 637c39b
+          # The full SHA: a short one is read as a branch pattern and fails.
+          ref: 637c39b72f4910c6390f943fa294b2473f80f168
 
       - name: Rust
         run: |
