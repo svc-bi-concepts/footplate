@@ -59,13 +59,26 @@ bin=$tmp/bin
 mkdir -p "$bin"
 
 # fake yardr answers bead show and prime from canned files, logs every call
-# with the note it was given on stdin (--note -), and mints one sync bead id.
-# Like the real one it reads stdin only where it is asked to: publish advances
-# a bead without a note, and a stand-in that read anyway would wait for ever
-# on a stdin that stands open.
+# with the note or body it was given on stdin, and mints one sync bead id.
+# Like the real one it reads stdin only where an argument asks it to: "-" after
+# --note (bead done, bead advance) or after -b or --body (bead create).
+# Publish advances a bead without a note, and a stand-in that read anyway
+# would wait for ever on a stdin that stands open. The arguments are scanned,
+# not the line they make: a note whose text holds the words is no request.
 cat >"$bin/yardr" <<'EOF'
 #!/bin/sh
 printf 'yardr %s\n' "$*" >>"$FAKE_DIR/calls.log"
+# asked <flag> <argument>...: whether "-" follows flag among the arguments.
+asked() {
+  flag=$1
+  shift
+  prev=
+  for a in "$@"; do
+    if [ "$prev" = "$flag" ] && [ "$a" = - ]; then return 0; fi
+    prev=$a
+  done
+  return 1
+}
 case "$1 $2" in
 "bead show")
   cat "$FAKE_DIR/show.json"
@@ -74,12 +87,10 @@ case "$1 $2" in
   cat "$FAKE_DIR/prime.json"
   ;;
 "bead done" | "bead advance")
-  case " $* " in
-  *" --note - "*) { echo "--note--"; cat; echo "--end--"; } >>"$FAKE_DIR/calls.log" ;;
-  esac
+  { echo "--note--"; if asked --note "$@"; then cat; fi; echo "--end--"; } >>"$FAKE_DIR/calls.log"
   ;;
 "bead create")
-  { echo "--create--"; cat; echo "--end--"; } >>"$FAKE_DIR/calls.log"
+  { echo "--create--"; if asked -b "$@" || asked --body "$@"; then cat; fi; echo "--end--"; } >>"$FAKE_DIR/calls.log"
   printf '{"id": "%s"}\n' "${FAKE_CREATE_ID:-yardr.dev-t1st}"
   ;;
 esac
@@ -221,27 +232,54 @@ for tool in yardr gh minisign spctl ditto; do
     ln -s "$bin/$tool" "$nomac/$tool"
 done
 
-# The fake reads no note for a call that gives none, however stdin stands: a
-# fifo that this shell holds a write end of stands open until it is closed,
-# and the call must end at once. A fake that blocks fails the test after five
-# seconds, and gets its end of file when this shell exits.
+# The fake reads nothing for a call that asks for nothing, however stdin
+# stands: a fifo that this shell holds a write end of stands open until it is
+# closed, and the call must end at once. A fake that blocks fails the test
+# after five seconds, and gets its end of file when this shell exits.
 mkfifo "$tmp/open-stdin"
 exec 3<>"$tmp/open-stdin"
-mkdir "$tmp/no-note"
-(
-    exec 3>&-
-    FAKE_DIR=$tmp/no-note "$bin/yardr" bead advance footplate-rel1 --to new <"$tmp/open-stdin"
-    { : >"$tmp/no-note/ended"; } 2>/dev/null
-) &
-tenths=0
-while [ ! -e "$tmp/no-note/ended" ] && [ "$tenths" -lt 50 ]; do
-    sleep 0.1
-    tenths=$((tenths + 1))
-done
-[ -e "$tmp/no-note/ended" ] ||
-    fail "the fake yardr waits on stdin for a call that gives no note"
+mkdir "$tmp/no-read"
+# ends_at_once <yardr argument>...: the fake, called so, ends on the open stdin.
+ends_at_once() {
+    rm -f "$tmp/no-read/ended"
+    (
+        exec 3>&-
+        FAKE_DIR=$tmp/no-read "$bin/yardr" "$@" <"$tmp/open-stdin" >/dev/null
+        { : >"$tmp/no-read/ended"; } 2>/dev/null
+    ) &
+    tenths=0
+    while [ ! -e "$tmp/no-read/ended" ] && [ "$tenths" -lt 50 ]; do
+        sleep 0.1
+        tenths=$((tenths + 1))
+    done
+    [ -e "$tmp/no-read/ended" ] ||
+        fail "the fake yardr waits on stdin for: yardr $*"
+}
+# The first start of a script this Mac has not run takes seconds at a high load,
+# and the five seconds allowed below must not pay for it: the fake is started
+# once first, on a stdin that ends.
+FAKE_DIR=$tmp/no-read "$bin/yardr" bead advance footplate-rel1 --to new </dev/null
+# The advance publish makes, which gives no note; a note whose text holds the
+# words that ask for one, which is one argument; a body given in the call.
+ends_at_once bead advance footplate-rel1 --to new
+ends_at_once bead advance footplate-rel1 --to new --note "see --note - below"
+ends_at_once bead create Title -b "a body"
 exec 3>&-
-ok "the fake yardr reads a note only where it is asked for"
+ok "the fake yardr reads a note or a body only where it is asked for"
+
+# Where it is asked to read, what it read lands between the markers: a note
+# after --note -, and a body after -b - or --body -.
+mkdir "$tmp/reads"
+printf 'a note\n' | FAKE_DIR=$tmp/reads "$bin/yardr" bead advance footplate-rel1 --to new --note -
+printf 'a body\n' | FAKE_DIR=$tmp/reads "$bin/yardr" bead create Short -b - >/dev/null
+printf 'another body\n' | FAKE_DIR=$tmp/reads "$bin/yardr" bead create Long --body - >/dev/null
+printf '%s\n' \
+    "yardr bead advance footplate-rel1 --to new --note -" "--note--" "a note" "--end--" \
+    "yardr bead create Short -b -" "--create--" "a body" "--end--" \
+    "yardr bead create Long --body -" "--create--" "another body" "--end--" |
+    cmp -s - "$tmp/reads/calls.log" ||
+    fail "the fake yardr does not log what it is asked to read: $(cat "$tmp/reads/calls.log")"
+ok "the fake yardr logs a note or a body it is asked to read"
 
 # begin <name>: a fresh case with the flow's outcomes from here, in the
 # shape has_outcome greps.
