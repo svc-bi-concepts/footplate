@@ -1513,16 +1513,22 @@ mod tests {
             "Users",
             r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0}]}"#,
         );
-        // The login name is no user of the yard; its operator is.
         yard.answer(
             "GetUser",
             r#"{"result": {"name": "jo", "cursor": 5, "notification_cursor": 0}}"#,
         );
-        yard.answer_once_status(
-            "GetUser",
-            200,
-            r#"{"error": {"code": "not-found", "message": "user mac-login: not found"}}"#,
-        );
+        // The login name is no user of the yard; its operator is. Only a
+        // client of the socket asks after the login name: at an address the
+        // token says who the window is for, and this answer would fall on
+        // the first read of that user, which fails, and is made again after
+        // the follower's pause.
+        if !yard.at_listener() {
+            yard.answer_once_status(
+                "GetUser",
+                200,
+                r#"{"error": {"code": "not-found", "message": "user mac-login: not found"}}"#,
+            );
+        }
         yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
         yard.answer(
             "UserInbox",
@@ -3211,7 +3217,6 @@ mod tests {
     /// letter, so the other yard's mail of that number would stand under
     /// the mark the pointer left behind. The bar does not wait over it, in
     /// the other yard or when this one is shown again.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_bar_does_not_wait_over_a_letter_the_pointer_left_while_another_yard_was_open(
         cx: &mut TestAppContext,
@@ -4290,7 +4295,6 @@ mod tests {
 
     /// The drawer shuts on a yard switch and on the settings, as the bar
     /// of reactions does.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_drawer_shuts_on_a_yard_switch_and_on_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -6242,7 +6246,6 @@ yardr.dev
     /// Two yards with different web views each open a file at their own
     /// address: Open goes by the shown yard's. A change of views alone
     /// follows no yard anew.
-    #[cfg(unix)]
     #[gpui::test]
     fn two_yards_with_different_web_views_each_open_a_file_at_their_own_address(
         cx: &mut TestAppContext,
@@ -6381,7 +6384,6 @@ yardr.dev
 
     /// Switching yards probes the shown yard's view again: no yard opens
     /// its files by another's answer.
-    #[cfg(unix)]
     #[gpui::test]
     fn switching_yards_probes_the_shown_yard_s_view_again(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -6421,7 +6423,6 @@ yardr.dev
 
     /// A yard with neither address has no probe to cache: returning to a
     /// yard whose view and run base were asked probes both again.
-    #[cfg(unix)]
     #[gpui::test]
     fn switching_through_a_yard_without_addresses_reprobes_both_origins(cx: &mut TestAppContext) {
         use std::sync::atomic::Ordering;
@@ -14715,7 +14716,6 @@ yardr.dev
     /// A yard opened with Timetable last open behind its head badges
     /// where the gap added or closed one of the person's beads: what
     /// changed while the window was shut.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_badge_counts_what_changed_while_the_window_was_shut(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -14730,10 +14730,7 @@ yardr.dev
             .with_timetable_seen("this machine", 18)
             .write(&file)
             .unwrap();
-        let env = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&yard, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "the timetable's badge", |cx| {
             drawn(cx, "rail badge timetable")
@@ -14755,17 +14752,13 @@ yardr.dev
 
     /// The first read of a yard saves its baseline even when it opens in
     /// Chat, so a restart can catch a bead added while Timetable was shut.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_first_read_keeps_a_timetable_baseline_for_a_restart(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let file = dir.path().join("footplate/settings.json");
-        let env = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&yard, &file);
         let (first, cx) = opened_at(env.clone(), &file, cx);
         wait(cx, "the first yard read", |cx| {
             first.read_with(cx, |v, _| v.model.is_some())
@@ -14796,7 +14789,6 @@ yardr.dev
     /// Each yard reopens in its remembered mode, and each mode on the row
     /// it was left on: stepping modes keeps each mode's row, switching
     /// yards keeps each yard's mode, and the settings keep both.
-    #[cfg(unix)]
     #[gpui::test]
     fn each_yard_reopens_in_its_mode_and_each_mode_on_its_row(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -14816,18 +14808,11 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let file = dir.path().join("footplate/settings.json");
         Settings::default()
-            .with_yard(
-                None,
-                settings::Yard::near("second home", second.socket().to_str().unwrap()),
-                None,
-            )
+            .with_yard(None, listed("second home", &second, &file), Some(&file))
             .unwrap()
             .write(&file)
             .unwrap();
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
@@ -15174,11 +15159,7 @@ yardr.dev
     ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
         let file = dir.join("footplate/settings.json");
         let mut set = Settings::default()
-            .with_yard(
-                None,
-                settings::Yard::near("second home", second.socket().to_str().unwrap()),
-                None,
-            )
+            .with_yard(None, listed("second home", second, &file), Some(&file))
             .unwrap();
         set.notifications.on = true;
         set.notifications.notices = notices;
@@ -15187,10 +15168,7 @@ yardr.dev
             input::bind_keys(cx);
             bind_keys(cx);
         });
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(near, &file);
         let told = told.clone();
         let (view, cx) = cx.add_window_view(|window, cx| {
             let view = Footplate::opened(env, "jo".into(), Some(file.clone()), window, cx)
@@ -15219,7 +15197,6 @@ yardr.dev
     /// burst of two yards says each yard's part. Activated, a notification
     /// opens its yard on its row, as the yard stands: it is not read from
     /// nothing.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_is_not_open_counts_what_arrives_and_its_notification_opens_it(
         cx: &mut TestAppContext,
@@ -15425,7 +15402,6 @@ yardr.dev
     /// changes. A yard's row shows the window on that yard, on the row it
     /// was left on, and "Show window" on whatever is open. Switched off in
     /// the settings, there is no item.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_menu_bar_item_says_what_waits_in_each_yard_and_a_yard_s_row_opens_it(
         cx: &mut TestAppContext,
@@ -15568,6 +15544,8 @@ yardr.dev
     /// not open is stopped, and that one is asked again by itself until it
     /// answers. The same the other way: a yard that is not open goes on
     /// counting while the open one is away.
+    // Unix: stops a yard and starts another at the same socket path (`start_at`): a yard at
+    // its listener cannot come back at its address.
     #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_goes_away_leaves_the_others_as_they_are_and_is_asked_again(
@@ -15657,6 +15635,8 @@ yardr.dev
     /// shows that yard: nothing is read by a restart. So it is of a far
     /// yard, of one that was open and left, and of one that was away when
     /// the ask was raised.
+    // Unix: stops a yard and starts another at the same socket path (`start_at`): a yard at
+    // its listener cannot come back at its address.
     #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_raised_in_a_yard_that_is_not_open_is_counted_told_of_and_held_by_its_decisions(
@@ -15780,15 +15760,12 @@ yardr.dev
     }
 
     /// Two yards kept with the settings: this machine's, and a second
-    /// home's by its socket. Their settings file.
+    /// home's, by its socket or at its address ([`listed`]). Their settings
+    /// file. This machine's is [`env_on`]'s to put in place.
     fn two_yards(dir: &std::path::Path, second: &Yard) -> PathBuf {
         let file = dir.join("footplate/settings.json");
         Settings::default()
-            .with_yard(
-                None,
-                settings::Yard::near("second home", second.socket().to_str().unwrap()),
-                None,
-            )
+            .with_yard(None, listed("second home", second, &file), Some(&file))
             .unwrap()
             .write(&file)
             .unwrap();
@@ -15807,10 +15784,7 @@ yardr.dev
             input::bind_keys(cx);
             bind_keys(cx);
         });
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(near, file);
         let file = file.to_path_buf();
         cx.add_window_view(|window, cx| {
             let view = Footplate::watching(env, "jo".into(), Some(file), watch, window, cx);
@@ -15824,7 +15798,6 @@ yardr.dev
     /// behind it went away, is counted by the switcher once the stream
     /// has said nothing for its watch's while: the yard is read again,
     /// with no restart.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_raised_behind_a_stream_that_says_nothing_is_counted_without_a_restart(
         cx: &mut TestAppContext,
@@ -15878,7 +15851,6 @@ yardr.dev
     /// The reload of the decisions a noted event makes in a yard that is
     /// not open fails: it is made again after a while, and the switcher
     /// counts the ask then, with no restart and no event more.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_reload_of_the_decisions_that_fails_is_made_again(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -15981,6 +15953,102 @@ yardr.dev
             window.focus(&view.line.focus_handle(cx));
             view
         })
+    }
+
+    /// The environment a window is opened on `yard` with, as this machine's
+    /// yard, the settings kept in `file`. A yard of a test is at this run's
+    /// socket, as this machine's is; or at its listener alone, as every
+    /// yard is where there is no socket to reach one by (Windows). Then the
+    /// settings list it in place of this machine's, which is the near
+    /// entry that names no socket of its own: under the name that entry
+    /// has, at the yard's address, with its token in a file beside the
+    /// settings. So the window shows it as it shows the one by the socket,
+    /// and a test says "this machine" of both. Called once the test has
+    /// written its settings, and again after it renamed the yard; the rest
+    /// of the list stands.
+    fn env_on(yard: &Yard, file: &std::path::Path) -> Env {
+        let set = Settings::read(file);
+        if yard.at_listener()
+            && let Some(here) = set
+                .yards
+                .iter()
+                .find(|entry| !entry.is_far() && entry.socket.is_empty())
+        {
+            let name = here.name.clone();
+            set.with_yard(Some(&name), listed(&name, yard, file), Some(file))
+                .unwrap()
+                .write(file)
+                .unwrap();
+        }
+        Env {
+            socket: yard.socket().to_path_buf(),
+            ..Env::default()
+        }
+    }
+
+    /// The settings' entry for `yard`, called `name`: by its socket where it
+    /// has one, else at its address, with the token of the device it starts
+    /// with kept beside `file` as a pairing keeps one.
+    fn listed(name: &str, yard: &Yard, file: &std::path::Path) -> settings::Yard {
+        if !yard.at_listener() {
+            return settings::Yard::near(name, yard.socket().to_str().unwrap());
+        }
+        let token = format!("yard-{}.token", name.replace(' ', "-"));
+        yard::keep_token(&file.with_file_name(&token), crate::fake::TOKEN).unwrap();
+        settings::Yard::far(name, yard.address(), &token)
+    }
+
+    /// Yards at their listeners alone, as every yard is where there is no
+    /// socket (Windows), stand in the settings as this machine's and a
+    /// second home's: [`env_on`] and [`listed`] list them at their
+    /// addresses, with their tokens beside the settings, under the names a
+    /// yard of the socket has. The window reads each at the first try (the
+    /// socket's road alone is answered that the login name is no user), shows
+    /// the first, and switches to the second. The other tests start the
+    /// yard `Yard::start()` makes, which is a socket off Windows, so this
+    /// is what keeps the helpers' listener road in the gate of a Mac.
+    #[gpui::test]
+    fn yards_at_their_listeners_stand_in_the_settings_as_this_machine_s_and_a_second_home_s(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start_tcp();
+        a_yard_of_jo(&near);
+        let second = Yard::start_tcp();
+        a_second_yard_of_jo(&second);
+        let file = two_yards(dir.path(), &second);
+        let env = env_on(&near, &file);
+        assert_eq!(env.socket, PathBuf::new(), "no socket to reach it by");
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        assert_eq!(open_yard(&view, cx), settings::HERE);
+        assert!(which_yard(&view, cx).starts_with("the yard south at http://127.0.0.1"));
+        assert_eq!(
+            Settings::read(&file).yards,
+            [
+                settings::Yard::far(settings::HERE, near.address(), "yard-this-machine.token"),
+                settings::Yard::far("second home", second.address(), "yard-second-home.token"),
+            ]
+        );
+        assert_eq!(
+            yard::read_token(&dir.path().join("footplate/yard-this-machine.token")).unwrap(),
+            crate::fake::TOKEN
+        );
+        // Each was read once: the user the token names is asked after, and
+        // not the login name, whose answer the socket's road queues.
+        assert_eq!(near.asked("GetUser").len(), 1);
+        assert_eq!(second.asked("GetUser").len(), 1);
+
+        cx.simulate_keystrokes("secondary-2");
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+        assert_eq!(open_yard(&view, cx), "second home");
     }
 
     /// Puts a yard's name, its address and a code where they are typed.
@@ -16273,6 +16341,8 @@ yardr.dev
     /// address that is added by a pairing's code. A wrong code and a
     /// refused address are said and change nothing; a removed device is
     /// said, not asked after, and paired again into the same file.
+    // Unix: its point is this machine's yard by the run's socket (the default list, `which_yard`),
+    // and it reads the token file's mode, which Windows has none of.
     #[cfg(unix)]
     #[gpui::test]
     fn the_settings_list_the_yards_and_a_code_pairs_a_new_one(cx: &mut TestAppContext) {
@@ -16541,16 +16611,13 @@ yardr.dev
     }
 
     /// Three yards kept with the settings: this machine's, a second
-    /// home's by its socket, and a paired one. Their settings file, and the
-    /// paired one's token beside it.
+    /// home's by its socket or at its address ([`listed`]), and a paired
+    /// one. Their settings file, and the paired one's token beside it.
+    /// This machine's is [`env_on`]'s to put in place.
     fn three_yards(dir: &std::path::Path, second: &Yard, far: &Yard) -> PathBuf {
         let file = dir.join("footplate/settings.json");
         let set = Settings::default()
-            .with_yard(
-                None,
-                settings::Yard::near("second home", second.socket().to_str().unwrap()),
-                None,
-            )
+            .with_yard(None, listed("second home", second, &file), Some(&file))
             .unwrap()
             .with_yard(
                 None,
@@ -16569,7 +16636,6 @@ yardr.dev
     /// now; a click on a row, Enter on the row the arrows are on, or a
     /// yard's own key from anywhere opens it, as it stands: every yard
     /// is followed from the start.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_chip_switches_between_the_yards_by_click_and_by_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16580,10 +16646,7 @@ yardr.dev
         let far = Yard::start_tcp();
         a_far_yard_of_jo(&far);
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         // The first of the list, where none was open before. The others
         // are read too, and say what waits in them.
@@ -16619,7 +16682,16 @@ yardr.dev
         let kinds: Vec<&str> = view.read_with(cx, |v, _| {
             v.settings.yards.iter().map(|y| y.kind()).collect()
         });
-        assert_eq!(kinds, ["local", "local", "paired"]);
+        // A yard at its listener is paired, as every yard is where there is
+        // no socket to reach one of this machine by.
+        let kind = |yard: &Yard| {
+            if yard.at_listener() {
+                "paired"
+            } else {
+                "local"
+            }
+        };
+        assert_eq!(kinds, [kind(&near), kind(&second), "paired"]);
         // A click on a row opens that yard, and it is the one to open at
         // the next start.
         click_on(cx, "switch second home");
@@ -16686,7 +16758,6 @@ yardr.dev
     /// waiting count in one column and its number key on the first, its
     /// address dimmer on the second. The footer's `+` adds a yard, by key
     /// or by click.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_switcher_s_rows_carry_kind_count_and_key(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16710,10 +16781,7 @@ yardr.dev
                 .to_string(),
         );
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
@@ -16792,7 +16860,6 @@ yardr.dev
     /// text size and the largest, with four yards, one with a long Tailscale
     /// name. Names and addresses may truncate, but never past the badge, the
     /// count and the key.
-    #[cfg(unix)]
     #[gpui::test]
     fn the_switcher_holds_its_hint_and_every_key_inside(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -16818,17 +16885,9 @@ yardr.dev
                 Some(&file),
             )
             .unwrap()
-            .with_yard(
-                None,
-                settings::Yard::near("droplet", droplet.socket().to_str().unwrap()),
-                None,
-            )
+            .with_yard(None, listed("droplet", &droplet, &file), Some(&file))
             .unwrap()
-            .with_yard(
-                None,
-                settings::Yard::near("plantime", plantime.socket().to_str().unwrap()),
-                None,
-            )
+            .with_yard(None, listed("plantime", &plantime, &file), Some(&file))
             .unwrap();
         set.write(&file).unwrap();
         yard::keep_token(
@@ -16836,10 +16895,7 @@ yardr.dev
             crate::fake::TOKEN,
         )
         .unwrap();
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
@@ -16906,7 +16962,6 @@ yardr.dev
     /// to the yard it was written in, and what of it does not go is back
     /// in that yard's draft, never in the open one's. Nothing typed of a
     /// secret outlasts a switch.
-    #[cfg(unix)]
     #[gpui::test]
     fn what_is_written_for_one_yard_is_untouched_by_a_switch_and_sent_only_there(
         cx: &mut TestAppContext,
@@ -16922,10 +16977,7 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let far = Yard::start_tcp();
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
@@ -17132,7 +17184,6 @@ yardr.dev
     /// opened, and that its yard refuses, are back with the ask they were
     /// typed for, in its own yard: never in the line of the open one.
     /// Why is on that ask's card when its yard is open again.
-    #[cfg(unix)]
     #[gpui::test]
     fn words_a_yard_refused_are_back_with_their_ask_and_not_in_another_yard_s_line(
         cx: &mut TestAppContext,
@@ -17150,10 +17201,7 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let far = Yard::start_tcp();
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         let on_the_card = |cx: &mut VisualTestContext| {
             to_decisions(&view, cx);
@@ -17216,6 +17264,7 @@ yardr.dev
     /// is one no other has; removing a yard deletes its token's file where
     /// it is footplate's alone, and says how the device is removed at the
     /// yard.
+    // Unix: adds a yard of this machine by its socket ("add near"), which Windows does not offer.
     #[cfg(unix)]
     #[gpui::test]
     fn yards_are_added_and_removed_in_the_settings(cx: &mut TestAppContext) {
@@ -17359,7 +17408,6 @@ yardr.dev
     /// A yard is renamed from its card's ⋯ menu: its reach stays, what
     /// was written for it stays written, and where it was the open one
     /// it still is, as it stands. A name another yard has is refused.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_is_renamed_from_its_card_s_menu(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17444,10 +17492,7 @@ yardr.dev
         );
         // And a restart opens it under its new name.
         cx.simulate_keystrokes("escape");
-        let env = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&yard, &file);
         let (again, cx) = opened_at(env, &file, cx);
         wait(cx, "the yardmaster's conversation", |cx| {
             texts(&again, cx) == ["Shall I land it?"]
@@ -17457,6 +17502,7 @@ yardr.dev
 
     /// A pairing writes the address the code went to under the token: the
     /// file is of that yard from the moment it is there.
+    // Unix: reads the token file's mode (`mode_of`), which Windows has none of.
     #[cfg(unix)]
     #[gpui::test]
     fn a_pairing_writes_the_yard_s_address_with_the_token(cx: &mut TestAppContext) {
@@ -17505,6 +17551,7 @@ yardr.dev
     /// A token file typed by hand that cannot be written is found before
     /// the code is sent: the yard is asked nothing, adds no device, and
     /// its pairing stays open for the code.
+    // Unix: makes a directory unwritable by its mode, which Windows has none of.
     #[cfg(unix)]
     #[gpui::test]
     fn a_token_file_that_cannot_be_written_keeps_the_code_from_the_yard(cx: &mut TestAppContext) {
@@ -17611,7 +17658,6 @@ yardr.dev
         assert_eq!(std::fs::read_dir(&tokens).unwrap().count(), 1);
     }
 
-    #[cfg(unix)]
     #[gpui::test]
     fn pairing_keeps_settings_changed_while_the_code_is_away(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17621,10 +17667,7 @@ yardr.dev
         let far = Yard::start_tcp();
         a_far_yard_of_jo(&far);
         far.pair("K7QM-2XPD");
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "this machine's yard", |cx| {
             texts(&view, cx) == ["Shall I land it?"]
@@ -17853,7 +17896,6 @@ yardr.dev
 
     /// A yard of the settings that cannot be opened leaves the others to
     /// open: its key and the settings' row do, from where it says why.
-    #[cfg(unix)]
     #[gpui::test]
     fn another_yard_is_opened_from_one_that_cannot_be(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -17867,10 +17909,7 @@ yardr.dev
         // The paired yard was open last, and its token is gone.
         Settings::read(&file).opening("far").write(&file).unwrap();
         std::fs::remove_file(dir.path().join("footplate/yard-far.token")).unwrap();
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         cx.run_until_parked();
         let (why, away) = view.read_with(cx, |v, _| (v.down.clone().unwrap(), v.away));
@@ -17903,6 +17942,8 @@ yardr.dev
     /// away screen is for yards never reached. The rail stays with the
     /// switcher, so another yard is opened from there and never through
     /// the settings, and the yard that answers has all that was its.
+    // Unix: stops a yard and starts another at the same socket path (`start_at`): a yard at
+    // its listener cannot come back at its address.
     #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_is_not_reached_says_why_and_the_switcher_leaves_it(cx: &mut TestAppContext) {
@@ -18082,7 +18123,6 @@ yardr.dev
     /// A hosted yard whose session the edge stops letting in: the window
     /// says to sign in again, and does not ask again; pairing again is not
     /// offered, since the device is still paired.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_hosted_yard_whose_session_is_out_says_to_sign_in_again(cx: &mut TestAppContext) {
         use crate::fake::{Router, SESSION};
@@ -18115,10 +18155,7 @@ yardr.dev
         .unwrap();
         yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
             .unwrap();
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         // This machine's yard is open; the hosted one is followed too, and
         // read through the edge.
@@ -18166,7 +18203,12 @@ yardr.dev
         assert_eq!(open_yard(&view, cx), "south");
         assert_eq!(away_why(&view, cx), "south · sign in again");
         assert!(drawn(cx, "away why"));
-        assert!(!drawn(cx, "pair again"));
+        // Pairing again is not offered: that is what the away screen reads
+        // to offer it. And it was not drawn, where no frame before drew it:
+        // a yard at an address draws it while it is looked for first, and
+        // the bounds of a frame stay.
+        assert_eq!(view.read_with(cx, |v, _| v.away), Away::SignedOut);
+        assert!(near.at_listener() || !drawn(cx, "pair again"));
     }
 
     /// Pairing a hosted yard of the list again: the session rides beside
@@ -18590,6 +18632,8 @@ yardr.dev
     /// row is the one quiet line, and Send is held with
     /// the reason beside the line: the draft stays as typed, and goes
     /// on Enter once the yard answers. Nothing is queued meanwhile.
+    // Unix: stops a yard and starts another at the same socket path (`start_at`): a yard at
+    // its listener cannot come back at its address.
     #[cfg(unix)]
     #[gpui::test]
     fn a_yard_that_answered_and_goes_away_keeps_its_view_and_holds_send(cx: &mut TestAppContext) {
@@ -18654,6 +18698,8 @@ yardr.dev
     /// A yard whose arrivals board is garbage still comes back: after a
     /// stream end the state is read, the board stands empty with why as
     /// the notice, and the rest is drawn as usual.
+    // Unix: stops a yard and starts another at the same socket path (`start_at`): a yard at
+    // its listener cannot come back at its address.
     #[cfg(unix)]
     #[gpui::test]
     fn a_yard_whose_arrivals_are_garbage_comes_back_with_a_notice(cx: &mut TestAppContext) {
@@ -18690,6 +18736,8 @@ yardr.dev
     /// Answers on a decision card are held as a conversation's sends are:
     /// the words stay where they are typed, the Send button stands
     /// disabled with the reason beside it, and Enter holds them too.
+    // Unix: stops a yard and starts another at the same socket path (`start_at`): a yard at
+    // its listener cannot come back at its address.
     #[cfg(unix)]
     #[gpui::test]
     fn answers_on_a_decision_card_are_held_while_the_yard_is_away(cx: &mut TestAppContext) {
@@ -18981,6 +19029,8 @@ yardr.dev
     /// settings' entries: a yard of this machine by its socket, where this
     /// run's stands to begin with, is added and opened from there, with no
     /// settings shown. Esc leaves the fields.
+    // Unix: Windows offers no way to a yard of this machine by its socket; its twin
+    // `on_windows_the_first_screen_offers_only_the_ways_to_a_yard_at_an_address` says so.
     #[cfg(unix)]
     #[gpui::test]
     fn no_yard_offers_a_yard_of_this_machine_by_its_socket(cx: &mut TestAppContext) {
@@ -21148,10 +21198,7 @@ yardr.dev
                 .to_string(),
         );
         yard.answer("Bead", &bead_secret(env, &[7]));
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -21172,10 +21219,7 @@ yardr.dev
             &json!({"result": {"open": [open], "decided": []}}).to_string(),
         );
         yard.answer("Bead", &bead_secret(env, &[7]));
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -21260,7 +21304,6 @@ yardr.dev
     /// call that ends without an answer says the value may be written; a
     /// yard without the call sends the person to a terminal. The value is
     /// in no draft, no setting, no notice and no refusal at any point.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_is_typed_as_marks_given_in_its_call_and_kept_nowhere(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -21439,7 +21482,6 @@ yardr.dev
     /// refusal of a secret giving, answered with a status, is the card's
     /// line under its field, and the field is empty after, the value
     /// kept nowhere.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_refused_answer_says_why_on_its_card_and_keeps_no_secret(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -21584,10 +21626,7 @@ yardr.dev
         yard.answer("Bead", &bead_run_about(question, context));
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -21607,10 +21646,7 @@ yardr.dev
                 .to_string(),
         );
         yard.answer("Bead", &bead_run_about(question, context));
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         let (view, cx) = opened_at(at, file, cx);
         wait(cx, "the decided", |cx| {
             view.read_with(cx, |v, _| {
@@ -21647,6 +21683,16 @@ yardr.dev
     /// Whether the open card's ask takes an approval.
     fn approvable(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
         view.read_with(cx, |v, _| v.approvable().is_some())
+    }
+
+    /// The arguments `ApproveAsk` is asked with when bead-s's ask 7 is
+    /// approved past a card's gate, as the client puts them for `yard`: in
+    /// their order at a socket, by name at a listener (api.rs, approve_ask).
+    fn weighed_approval(yard: &Yard) -> Value {
+        match yard.at_listener() {
+            true => json!({"bead": "bead-s", "ask": 7, "actor": "jo", "weighed": true}),
+            false => json!(["bead-s", 7, "jo", true]),
+        }
     }
 
     /// What was asked of the yard that answers an ask in any way but an
@@ -21753,10 +21799,7 @@ yardr.dev
         yard.answer("Bead", &bead_pack());
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -21775,10 +21818,7 @@ yardr.dev
                 .to_string(),
         );
         yard.answer("Bead", &bead_pack());
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         let (view, cx) = opened_at(at, file, cx);
         wait(cx, "the decided", |cx| {
             view.read_with(cx, |v, _| {
@@ -21838,10 +21878,7 @@ yardr.dev
         yard.answer("Bead", &bead_depot());
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -21905,7 +21942,6 @@ yardr.dev
     /// calls `ApproveAsk` with the ask and nothing of the command. A call
     /// with no answer never says approved; a refusal is shown whole; an
     /// approved ask reads `approved, ran:` with the command and its result.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_s_card_shows_the_command_whole_and_is_approved_with_its_own_key(
         cx: &mut TestAppContext,
@@ -22011,7 +22047,7 @@ yardr.dev
         });
         assert!(drawn(cx, "refused bead-s 7"));
         assert_eq!(notice(&view, cx), "");
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
+        assert_eq!(yard.asked("ApproveAsk"), [weighed_approval(&yard)]);
         assert!(drawn(cx, "approve bead-s 7"));
 
         // The yard refuses, since it changed after the ask was written:
@@ -22080,7 +22116,6 @@ yardr.dev
     /// and the ask's own texts behind one tap, copied to the letter. The
     /// approval is live with the tap shut, and reads as being carried
     /// out until the yard says it ran.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_pack_apply_card_shows_every_sentence_whole_and_its_texts_behind_one_tap(
         cx: &mut TestAppContext,
@@ -22214,7 +22249,6 @@ yardr.dev
     /// words under the command; one the yard has not carried out yet reads
     /// as being carried out, with nothing printed under it. Neither takes
     /// a second approval.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_carrying_out_reads_failed_or_being_carried_out(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22263,7 +22297,6 @@ yardr.dev
     /// A depot re-apply's card: each object's action and changes with each
     /// file's hash whole, each wrapped and never cut, and each changed
     /// file's diff and new text behind the tap, copied to the letter.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_depot_re_apply_card_shows_its_objects_and_its_diffs_behind_the_tap(
         cx: &mut TestAppContext,
@@ -22321,7 +22354,6 @@ yardr.dev
     /// line as an old yard still serves it: no asker line stands where a
     /// yard line stands, each begins with who says it, and the only blocks
     /// with a copy control are the yard's two commands.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_forged_run_ask_s_card_marks_every_asker_line(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22377,7 +22409,6 @@ yardr.dev
     /// The same forged run ask in the decisions list: the row draws the
     /// question whole, wrapped to two lines, with whose it is beneath it,
     /// as a mail row draws its wrapped text with its sender.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_forged_run_ask_s_row_shows_its_question_with_whose(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22408,7 +22439,6 @@ yardr.dev
     /// The same forged run ask in the Decided list, put aside: the row
     /// draws one line of the question, its first, and neither the forged
     /// sentence nor the forged command.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_forged_run_ask_s_decided_row_shows_its_first_line(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22432,7 +22462,6 @@ yardr.dev
 
     /// Wrapped words stay under the asker's text, to the right of its
     /// label, in both the question and a context entry.
-    #[cfg(unix)]
     #[gpui::test]
     fn wrapped_run_ask_lines_stay_under_the_asker_label(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22483,7 +22512,6 @@ yardr.dev
     /// card names and to no
     /// other, after a switch too: each yard here holds the same ask on the
     /// same bead, so only the yard tells them apart.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_is_approved_in_the_yard_its_card_names_after_a_switch_too(
         cx: &mut TestAppContext,
@@ -22544,11 +22572,8 @@ yardr.dev
 
         // One yard in the settings: its name is on the card all the same.
         let alone = dir.path().join("alone/settings.json");
-        let at = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
-        let (view, cx) = opened_on_the_ask(at.clone(), &alone, cx);
+        let at = env_on(&near, &alone);
+        let (view, cx) = opened_on_the_ask(at, &alone, cx);
         assert_eq!(settings_of(&view, cx).yards.len(), 1);
         assert!(names(&view, cx, "this machine"));
         assert!(drawn(cx, "approve bead-s 7"));
@@ -22556,6 +22581,7 @@ yardr.dev
 
         // Several: the approval goes to the yard on the card.
         let file = three_yards(dir.path(), &second, &far);
+        let at = env_on(&near, &file);
         let (view, cx) = opened_on_the_ask(at, &file, cx);
         assert!(names(&view, cx, "this machine"));
         cx.simulate_keystrokes("secondary-enter");
@@ -22691,7 +22717,6 @@ yardr.dev
     /// in a line the card has for nothing else, and Enter there sends the
     /// decline and approves nothing. One put aside is approved from its
     /// card among the decided, after the Mac's unlock.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_is_declined_with_words_and_approved_after_it_was_put_aside(
         cx: &mut TestAppContext,
@@ -22780,13 +22805,12 @@ yardr.dev
         wait(cx, "approved", |cx| {
             notice(&view, cx).starts_with("approved, ran: yardr source grant crm send")
         });
-        assert_eq!(yard.asked("ApproveAsk"), [json!(["bead-s", 7, "jo", true])]);
+        assert_eq!(yard.asked("ApproveAsk"), [weighed_approval(&yard)]);
     }
 
     /// A taken-back run ask keeps the proposal for the record but has no
     /// approval control or answer field, including on its card among the
     /// decided asks.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_taken_back_run_ask_shows_its_proposal_without_an_approval(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -22801,10 +22825,7 @@ yardr.dev
         let mut bead: Value = serde_json::from_str(&bead_run()).unwrap();
         bead["result"]["asks"][0]["state"] = json!("taken back");
         yard.answer("Bead", &bead.to_string());
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(&yard, &file);
         let (view, cx) = opened_at(at, &file, cx);
         wait(cx, "the taken-back ask", |cx| {
             view.read_with(cx, |v, _| {
@@ -22890,10 +22911,7 @@ yardr.dev
         yard.answer("Bead", &bead_run_weighed(question, &context, weight));
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -22918,10 +22936,7 @@ yardr.dev
         let mut bead: Value = serde_json::from_str(&bead_secret(&["BOOKS_TOKEN"], &[7])).unwrap();
         bead["result"]["asks"][0]["weight"] = weight;
         yard.answer("Bead", &bead.to_string());
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -22949,10 +22964,7 @@ yardr.dev
         yard.answer("Bead", &bead.to_string());
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -23097,10 +23109,7 @@ yardr.dev
         yard.answer("Bead", &bead_setup(account, candidates, recommend));
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -23169,10 +23178,7 @@ yardr.dev
         yard.answer("Bead", &bead_drift(account, given, missing, recommend));
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -23238,10 +23244,7 @@ yardr.dev
         yard.answer("AddNote", "{}");
         yard.answer("DeferAsk", "{}");
         yard.answer("DeclineAsk", "{}");
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(yard, file);
         opened_on_the_ask(at, file, cx)
     }
 
@@ -23250,7 +23253,6 @@ yardr.dev
     /// offered, the ask's number typed back where none is, and `weighed`
     /// with the pick. Anything else keeps the card and sends nothing.
     /// Words alone, later and decline stay ungated.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_mapping_pick_passes_the_weighty_gate_and_sends_weighed(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23397,7 +23399,6 @@ yardr.dev
     /// preset pick with it after its number is typed back where no unlock
     /// is offered; the ask reads as being carried out until the yard says
     /// it ran.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_card_shows_its_setup_and_is_approved_with_a_tap(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23589,7 +23590,6 @@ yardr.dev
     /// The value is in the call's body and nowhere else in the window. An
     /// approval the yard refuses is shown whole, and a call that ends
     /// without an answer is never said to be approved or not.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_account_is_typed_unseen_and_approved_with_its_preset(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23696,7 +23696,6 @@ yardr.dev
     /// A call that ends without an answer is never said to be approved or
     /// not, and the queue is read again for what the yard says, since the
     /// call may have approved all the same.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_approval_the_yard_refuses_is_shown_whole(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23745,7 +23744,6 @@ yardr.dev
     /// A setup ask's approval wants the preset pick and the account
     /// together: with neither it says which is missing, and a chosen
     /// preset goes in place of the recommended one.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_preset_is_picked_and_its_account_is_wanted(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23787,7 +23785,6 @@ yardr.dev
 
     /// `d` on a setup ask's card, then words and Enter: `DeclineAsk`
     /// with the words, and no approval.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_s_decline_sends_its_words(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23810,7 +23807,6 @@ yardr.dev
 
     /// A setup ask with no recommended preset wants one picked before it
     /// is approved.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_without_a_recommendation_wants_its_preset_picked(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23829,7 +23825,6 @@ yardr.dev
     /// A setup ask of several names takes them one after the other, and
     /// the approval sends them together with the preset pick. With none
     /// listed it wants the account typed.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_of_several_names_takes_them_one_after_the_other(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23896,7 +23891,6 @@ yardr.dev
     /// candidate taken keeps it with the bare preset pick, and neither
     /// values nor a candidate go. What is typed instead changes the
     /// account, and is wanted whole.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_that_stands_is_kept_with_a_bare_preset_pick(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -23968,7 +23962,6 @@ yardr.dev
     /// just the missing names, and the approval sends exactly those with
     /// the preset pick. A bare pick keeps nothing here: the account is
     /// wanted.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_missing_a_name_types_just_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24037,7 +24030,6 @@ yardr.dev
     /// A setup ask put aside is approved from its card among the decided,
     /// with its presets to pick, its account choice and its field. A
     /// refusal there is shown whole, as on an open card.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_is_approved_after_it_was_put_aside(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24147,7 +24139,6 @@ yardr.dev
     /// Against a yard that does not have the call, the setup card says to
     /// approve at the yard's terminal, with that command in a block that
     /// copies it, and has no control that approves.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_setup_ask_from_a_yard_that_takes_no_approval_is_approved_at_its_terminal(
         cx: &mut TestAppContext,
@@ -24190,7 +24181,6 @@ yardr.dev
 
     /// `d` on a run ask's card, then words and Enter: `DeclineAsk` with
     /// the words, and no approval.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_run_ask_s_decline_sends_its_words(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24313,7 +24303,6 @@ yardr.dev
     /// the command that tells them, and the field that shows marks. The
     /// card leaves with the giving, so the notice ends with what the yard
     /// says is left to do.
-    #[cfg(unix)]
     #[gpui::test]
     fn an_address_given_ends_with_what_the_yard_says_is_next(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24326,10 +24315,7 @@ yardr.dev
             &json!({"result": {"open": [queued], "decided": []}}).to_string(),
         );
         yard.answer("Bead", &bead);
-        let at = Env {
-            socket: yard.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let at = env_on(&yard, &file);
         let (view, cx) = opened_on_the_ask(at, &file, cx);
 
         assert!(drawn(cx, ADDRESS_LINE));
@@ -24425,7 +24411,6 @@ yardr.dev
 
     /// An ask of two names takes one after the other and sends them
     /// together; esc leaves and nothing is sent.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_of_two_names_goes_together_and_esc_forgets(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24484,7 +24469,6 @@ yardr.dev
 
     /// Decline on a secret ask goes at once and with no words, whatever is
     /// typed in the field, which is forgotten.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_ask_is_declined_at_once_with_no_words(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24729,7 +24713,6 @@ yardr.dev
     /// empty: a click then sends nothing. The value is in no label, no
     /// notice and nothing kept; the footer still names Enter. The look is
     /// untried.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_card_s_give_button_gives_what_enter_gives(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24868,7 +24851,6 @@ yardr.dev
     /// or as marks again, and never changes the value: Give sends what
     /// was typed either way. It stands per card: a card left and opened
     /// again starts hidden.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_card_s_toggle_shows_what_is_typed_and_sends_it_as_ever(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -24929,7 +24911,6 @@ yardr.dev
     /// A secret ask the yard marks no secret starts shown: what is typed
     /// is drawn as typed, until the toggle is pressed. It is still a
     /// secret: its value goes in its call, and nothing copies out.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_secret_card_marked_no_secret_starts_shown(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -25943,7 +25924,6 @@ yardr.dev
     /// A yard opened again is on the row it was left on, and that row's
     /// conversation as far above its newest as it stood: not on the row a
     /// yard opens on, at its newest. Each yard has its own.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_is_on_its_row_where_its_conversation_stood(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -25955,10 +25935,7 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let far = Yard::start_tcp();
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "this machine's yard", |cx| texts(&view, cx) == full);
         let yardmaster = Some(Selected::Conversation("yardmaster".into()));
@@ -26028,7 +26005,6 @@ yardr.dev
     /// and as far down it as it stood. A row that is gone when the yard is opened again is not
     /// opened: the yard opens in its remembered mode with no row, as one opened for the
     /// first time.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_is_on_its_card_where_it_stood_or_as_new_when_the_row_is_gone(
         cx: &mut TestAppContext,
@@ -26042,10 +26018,7 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let far = Yard::start_tcp();
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         let card = Some(Selected::Decision("bead-a".into()));
         wait(cx, "the decision", |cx| {
@@ -26116,7 +26089,6 @@ yardr.dev
 
     /// A dealt-with decision is a row too: its containing list must be
     /// open before the saved selection can be restored.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_restores_a_scrolled_decided_card(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -26138,10 +26110,7 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let far = Yard::start_tcp();
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "the dealt-with ask", |cx| {
             view.read_with(cx, |v, _| {
@@ -26182,7 +26151,6 @@ yardr.dev
     /// A saved conversation position can be older than the newest page
     /// loaded when the yard is reopened. Older pages are fetched until the
     /// same distance from the newest can be restored.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_yard_opened_again_loads_older_pages_to_restore_its_conversation_scroll(
         cx: &mut TestAppContext,
@@ -26195,10 +26163,7 @@ yardr.dev
         a_second_yard_of_jo(&second);
         let far = Yard::start_tcp();
         let file = three_yards(dir.path(), &second, &far);
-        let env = Env {
-            socket: near.socket().to_path_buf(),
-            ..Env::default()
-        };
+        let env = env_on(&near, &file);
         let (view, cx) = opened_at(env, &file, cx);
         wait(cx, "the newest page", |cx| texts(&view, cx).len() == 50);
         let newest_page = view.read_with(cx, |v, _| v.conversation.max_offset().height);

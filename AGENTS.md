@@ -134,10 +134,16 @@ Setup, release and tests:
   that need them. A call that exists on unix alone arrives with its `cfg`
   and, where Windows would reach it, an arm that says so. A test that
   starts `Yard::start()` needs no gate: on Windows that yard is the TCP one
-  and `client()` reaches either. One that names the socket (`socket()`,
-  `start_at`, `Env { socket }` for "this machine"), asserts what only the
-  socket does (its request text, `is_remote()`), or checks what the window
-  offers on one system alone, is `#[cfg(unix)]`.
+  and `client()` reaches either. A window test opens that yard as "this
+  machine's" with `env_on` (the tests of `src/window.rs`), which keeps the
+  socket where the yard has one and, where it has none, lists the yard at
+  its address under the same name; `listed` does the same for the other
+  yards of a list, and `Yard::at_listener()` is what a test asks to expect
+  the one kind or the other. One that names the socket (`socket()` written
+  out, `start_at`, a yard stopped and started again at its path), asserts
+  what only the socket does (its request text, `is_remote()`), or checks
+  what the window offers on one system alone, is `#[cfg(unix)]`, with the
+  reason in a comment above the gate.
 - Gate: `.yardr/test` (`cargo fmt --check`, `clippy -D warnings`,
   `cargo test`, `cargo build`). Landing runs the base copy of that
   script, not yours. It runs on a Mac; `.github/workflows/windows.yml`
