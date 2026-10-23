@@ -127,7 +127,13 @@ Setup, release and tests:
   no screen: the client against `src/fake.rs`, the window on gpui's
   test platform. Fixtures live in `src/fixtures/`. Shell tests are
   `scripts/test-*.sh`, run directly. Ignored tests needing the net or a
-  real yardr say so where they are defined.
+  real yardr say so where they are defined. A test probes no port of its
+  machine that it did not open itself: the usual web view and sandbox
+  origin are not asked in a test (`rail::reaches`), since the person's own
+  may answer there, and Windows refuses a connection to a closed port only
+  after two seconds, on the test's own thread. A view a test needs it
+  stands up (`view_up`); `view_down` costs those two seconds for each
+  probe, so use it only where down is the point.
 - Windows is remote only: it has no yard of its own, so the unix socket,
   file modes, symlinks, the shell stand-in for yardr and the Linux
   desktop's taskbar sit behind `cfg(unix)` (or the OS), and so do the tests

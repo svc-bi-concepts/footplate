@@ -40,7 +40,7 @@ use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, grown};
-use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, run_address_of};
+use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
 use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
@@ -1807,7 +1807,7 @@ impl Footplate {
             let up = cx
                 .background_executor()
                 .spawn(async move {
-                    api::Address::parse_view(&base).is_ok_and(|address| address.answers())
+                    api::Address::parse_view(&base).is_ok_and(|address| reaches(&address))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -1900,7 +1900,7 @@ impl Footplate {
                 .background_executor()
                 .spawn(async move {
                     run_address_of(&run_setting, &view_setting)
-                        .is_some_and(|address| address.answers())
+                        .is_some_and(|address| reaches(&address))
                 })
                 .await;
             this.update(cx, |this, cx| {

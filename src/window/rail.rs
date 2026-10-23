@@ -132,6 +132,28 @@ pub(crate) fn run_address_of(run_base: &str, web_view: &str) -> Option<api::Addr
     }
 }
 
+/// Whether the web view or the sandbox origin answers at `address`. A test
+/// asks none of the usual ones, the web view's and the sandbox origin's on
+/// this machine: the person's own may be running there, and where none is,
+/// Windows refuses the connection only after two seconds (it sends the
+/// first packet again). A test's executor runs the probe on the test's own
+/// thread, and a window that lists this machine's yard with no view of its
+/// own, as `Footplate::new` makes every one, asks both: four seconds. What
+/// a test stands up itself is asked as ever.
+pub(crate) fn reaches(address: &api::Address) -> bool {
+    reaches_with(address, api::Address::answers)
+}
+
+fn reaches_with(address: &api::Address, answer: impl FnOnce(&api::Address) -> bool) -> bool {
+    #[cfg(test)]
+    if let Ok(view) = api::Address::parse_view(crate::settings::WEB_VIEW)
+        && (address.is(&view) || address.is(&view.run_base()))
+    {
+        return false;
+    }
+    answer(address)
+}
+
 /// A draft that did not go: all of it, to be put back, with the attachment
 /// that kept it, if it was one, and why.
 pub(crate) struct Unsent {
@@ -259,4 +281,30 @@ pub(crate) fn post_note(
         }
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_only_the_usual_test_addresses() {
+        let view = api::Address::parse_view(crate::settings::WEB_VIEW).unwrap();
+        for address in [view.clone(), view.run_base()] {
+            let mut asked = false;
+            assert!(!reaches_with(&address, |_| {
+                asked = true;
+                true
+            }));
+            assert!(!asked);
+        }
+
+        let other = api::Address::parse_view("http://127.0.0.1:8792/").unwrap();
+        let mut asked = false;
+        assert!(reaches_with(&other, |_| {
+            asked = true;
+            true
+        }));
+        assert!(asked);
+    }
 }

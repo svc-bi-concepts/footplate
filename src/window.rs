@@ -9458,6 +9458,11 @@ yardr.dev
             view.read_with(cx, |v, _| v.view_base()),
             Some(settings::WEB_VIEW.to_string())
         );
+        // The usual address is this machine's own: a test does not ask it,
+        // so it is down here, whatever runs where the test does.
+        wait(cx, "the usual view asked", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         click_on(cx, "settings section connection");
@@ -9516,8 +9521,12 @@ yardr.dev
         let (view, cx) = opened_kept(&yard, &file, cx);
         // The field holds nothing, from the file that keeps nothing of
         // the yard's: then the yard's view on the sandbox port is the
-        // run base.
+        // run base. It is this machine's own too, and a test does not ask
+        // it: it is down here, whatever runs where the test does.
         assert_eq!(entry_of(&view, cx).run_base, "");
+        wait(cx, "the usual run base asked", |cx| {
+            run_answered(&view, cx) == Some(false)
+        });
         cx.simulate_keystrokes("secondary-,");
         assert!(settings_open(&view, cx));
         click_on(cx, "settings section connection");
