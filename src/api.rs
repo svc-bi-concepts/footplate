@@ -1806,6 +1806,11 @@ enum EventSocket {
 /// A handle that shuts down an event stream while its reader is blocked.
 /// Calls use their own connections and are not affected. It holds the
 /// stream's own socket, so what is set on it is set on the stream.
+///
+/// The reader is woken whatever the yard does about it: a socket shut down
+/// from another thread ends the read that waits on it on macOS and Linux,
+/// and on Windows the read is cancelled besides, since the shutdown only
+/// sends the FIN there and the read waits for the yard to answer it.
 #[derive(Clone)]
 pub struct EventStop(Arc<EventSocket>);
 
@@ -1820,8 +1825,31 @@ impl EventStop {
             }
             EventSocket::Tcp(socket) => {
                 let _ = socket.shutdown(Shutdown::Both);
+                #[cfg(windows)]
+                cancel_reads(socket);
             }
         }
+    }
+}
+
+/// Cancels the read that waits on `socket`, whichever thread began it. The
+/// stream's reader holds another handle of the socket than this one, since a
+/// stop handle is a copy ([`Conn::event_stop`]); the cancel names the socket
+/// and not the handle it was begun on. It runs after the shutdown, so that a
+/// read begun after the cancel meets a socket that is shut down. A socket
+/// with no read waiting is left as it was.
+#[cfg(windows)]
+fn cancel_reads(socket: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::CancelIoEx;
+
+    // SAFETY: the socket is open for as long as the borrow lasts. With no
+    // OVERLAPPED named, CancelIoEx marks every I/O still pending on the
+    // socket in this process, whichever thread began it, and does nothing
+    // when none is.
+    unsafe {
+        CancelIoEx(socket.as_raw_socket() as HANDLE, std::ptr::null());
     }
 }
 
@@ -4283,21 +4311,83 @@ mod tests {
         }
     }
 
+    /// Windows: what stopping a stream rests on. A read already waiting on
+    /// a socket is ended by cancelling the reads of another handle of it,
+    /// which is what a stream's stop handle holds (a copy of the socket
+    /// the reader reads), and a cancel that finds nothing waiting leaves
+    /// the socket as it was. The peer here neither writes nor closes while
+    /// the read waits, so nothing but the cancel can end the wait.
+    #[cfg(windows)]
+    #[test]
+    fn cancelling_the_reads_of_a_socket_ends_a_read_waiting_on_another_handle_of_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let handle = client.try_clone().unwrap();
+
+        // With no read waiting the cancel has nothing to end, and the socket
+        // reads on as before.
+        cancel_reads(&handle);
+        peer.write_all(b"x").unwrap();
+        let mut byte = [0u8];
+        assert_eq!(client.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, *b"x");
+
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || sent.send(client.read(&mut byte)).unwrap());
+        // The cancel is made again until the reader answers: one that came
+        // before the reader waits finds nothing, which is harmless, and the
+        // test then fails for want of a wait to end, not for the cancel.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let waited = loop {
+            thread::sleep(Duration::from_millis(50));
+            cancel_reads(&handle);
+            match received.try_recv() {
+                Ok(waited) => break waited,
+                Err(_) if Instant::now() < deadline => {}
+                Err(_) => panic!("the cancel ends the wait of a read on another handle"),
+            }
+        };
+        assert!(waited.is_err(), "{waited:?}");
+        reader.join().unwrap();
+    }
+
+    /// The reader that waits for the next event of a quiet stream is woken
+    /// by stopping it, whatever the yard does about that: these yards keep
+    /// the stream open when their client hangs up, as a proxy that takes
+    /// the FIN for a half-close does. Stopped before the reader waits, its
+    /// read would fail at once on any system, so it has read an event first.
     #[test]
     fn stopping_an_idle_event_stream_unblocks_its_reader() {
-        let yard = Yard::start();
-        let events = yard.client().events(0, QUIET).unwrap();
-        let stop = events.stop_handle();
-        let (sent, received) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let _ = events.into_iter().next();
-            sent.send(()).unwrap();
-        });
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            yard.hold_streams();
+            yard.emit(r#"{"seq": 1, "kind": "crew_started"}"#);
+            let way = yard.client().place();
+            let mut events = yard.client().events(0, QUIET).unwrap();
+            let stop = events.stop_handle();
+            let (read, first) = std::sync::mpsc::channel();
+            let (sent, received) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                // The event that is there, and then the wait for another.
+                let event = events.next();
+                read.send(event).unwrap();
+                sent.send(events.next()).unwrap();
+            });
+            let event = first.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(event.unwrap().unwrap().seq, 1, "{way}");
+            // Nothing says that the read is waiting. A little time makes it
+            // so; a stop that came earlier still ends the reader, and the
+            // test is then no proof, but never a failure.
+            std::thread::sleep(Duration::from_millis(100));
 
-        stop.stop();
+            stop.stop();
 
-        received.recv_timeout(Duration::from_secs(1)).unwrap();
-        reader.join().unwrap();
+            let ended = received
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap_or_else(|_| panic!("{way}: stopping the stream wakes its reader"));
+            assert!(!matches!(ended, Some(Ok(_))), "{way}: {ended:?}");
+            reader.join().unwrap();
+        }
     }
 
     #[cfg(unix)]

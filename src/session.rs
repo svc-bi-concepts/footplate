@@ -894,43 +894,69 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// A follower that is stopped while its read waits on a quiet stream
+    /// ends at once, whatever the yard does about the stop. These yards keep
+    /// the stream open when their client hangs up, as a proxy that takes
+    /// the FIN for a half-close does, so that the yard's closing cannot be
+    /// what wakes the read: on Windows, shutting a socket down does not.
     #[test]
     fn stopping_a_follower_closes_its_idle_stream() {
-        let yard = Yard::start();
-        a_yard_of_jo(&yard);
-        let stop = FollowControl::default();
-        let cancel = stop.clone();
-        let (updates, received) = mpsc::channel();
-        let (finished, done) = mpsc::channel();
-        let follower = thread::spawn({
-            let client = yard.client();
-            move || {
-                follow_with_control(
-                    &client,
-                    "jo",
-                    Duration::from_secs(10),
-                    WATCH,
-                    stop,
-                    |update| updates.send(update).is_ok(),
-                );
-                finished.send(()).unwrap();
+        for yard in [Yard::start(), Yard::start_tcp()] {
+            a_yard_of_jo(&yard);
+            yard.hold_streams();
+            let way = yard.client().place();
+            let stop = FollowControl::default();
+            let cancel = stop.clone();
+            let (updates, received) = mpsc::channel();
+            let (finished, done) = mpsc::channel();
+            let follower = thread::spawn({
+                let client = yard.client();
+                move || {
+                    follow_with_control(
+                        &client,
+                        "jo",
+                        Duration::from_secs(10),
+                        WATCH,
+                        stop,
+                        |update| updates.send(update).is_ok(),
+                    );
+                    finished.send(()).unwrap();
+                }
+            });
+            assert!(
+                matches!(
+                    received.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    Update::Up(_)
+                ),
+                "{way}"
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while yard.streams_asked().is_empty() && std::time::Instant::now() < deadline {
+                thread::yield_now();
             }
-        });
-        assert!(matches!(
-            received.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Update::Up(_)
-        ));
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while yard.streams_asked().is_empty() && std::time::Instant::now() < deadline {
-            thread::yield_now();
+            assert!(!yard.streams_asked().is_empty(), "{way}: the stream opened");
+            // An event read and told: the follower goes on to wait for the
+            // next. Stopped before it waits, its read would fail at once on
+            // any system, and the test would show nothing.
+            yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+            assert!(
+                matches!(
+                    received.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    Update::Event(_)
+                ),
+                "{way}"
+            );
+            // Nothing says that the read is waiting. A little time makes it
+            // so; a stop that came earlier still ends the follower, and the
+            // test is then no proof, but never a failure.
+            thread::sleep(Duration::from_millis(100));
+
+            cancel.stop();
+
+            done.recv_timeout(Duration::from_secs(1))
+                .unwrap_or_else(|_| panic!("{way}: stopping the follower ends its blocked read"));
+            follower.join().unwrap();
         }
-        assert!(!yard.streams_asked().is_empty(), "the event stream opened");
-
-        cancel.stop();
-
-        done.recv_timeout(Duration::from_secs(1))
-            .expect("stopping the follower ends its blocked read");
-        follower.join().unwrap();
     }
 
     /// A follower of `yard` for jo, trying again after 20 milliseconds and
