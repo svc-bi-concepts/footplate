@@ -42,6 +42,23 @@ warm_unlock() {
 warm_copy() {
     cp -cR "$1" "$2" 2>/dev/null || cp -pR "$1" "$2"
 }
+# Cleans footplate out of the build directory $1 of the target: target/debug
+# or target/release, or either under a directory named for a triple. Cargo
+# finds a directory by the flags that built it, so they are made from the path.
+clean_footplate() {
+    profile=${1##*/}
+    triple=${1%/*}
+    triple=${triple#target}
+    triple=${triple#/}
+    set -- clean --locked -p footplate
+    if [ "$profile" = release ]; then
+        set -- "$@" --release
+    fi
+    if [ -n "$triple" ]; then
+        set -- "$@" --target "$triple"
+    fi
+    cargo "$@"
+}
 seeded=
 if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_info.json ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
     if warm_lock; then
@@ -81,14 +98,31 @@ fi
 # held for days) would pass the gate as the copy's tree and not as itself.
 # Cleaning the package leaves cargo no build of it to trust, so it compiles
 # footplate from these sources whatever their times; the dependencies stay
-# cached. This target is the worktree's own, so no lock is held. Only a seed
-# is cleaned: a target built here is fresh by its own sources, and cleaning
-# it would compile footplate at every run. --locked as in the steps below:
-# cargo clean would otherwise write a stale Cargo.lock out and hide it from
-# them. A clean that fails drops the seed, as a failed rewrite does.
+# cached. The steps below build the host's debug alone, but the copy is the
+# whole target of a worktree that passed, with the other builds of footplate
+# that worktree left: a release (before scripts/bundle-mac.sh) and builds for
+# a target (the Windows cross-check, the release's two Macs), each in a
+# directory of its own. A build of those outside the steps below would finish
+# at once on that tree's, so each directory the copy has is cleaned. Cargo is
+# asked to clean each, and no find deletes their fingerprints: a layout cargo
+# does not know is an error that shows, where a pattern that stopped matching
+# would keep the stale builds quietly. This target is the worktree's own, so
+# no lock is held. Only a seed is cleaned: a target built here is fresh by its
+# own sources, and cleaning it would compile footplate at every run. --locked
+# as in the steps below: cargo clean would otherwise write a stale Cargo.lock
+# out and hide it from them. A clean that fails drops the seed, as a failed
+# rewrite does, and the directories after it are not asked.
 # scripts/test-gate.sh holds the gate to all of this.
 if [ -n "$seeded" ]; then
-    cargo clean --locked -p footplate || rm -rf target
+    for dir in target/debug target/release target/*/debug target/*/release; do
+        # A profile never built, and the glob's own pattern where nothing
+        # matched it, have no fingerprints: cargo is not asked.
+        [ -d "$dir/.fingerprint" ] || continue
+        clean_footplate "$dir" || {
+            rm -rf target
+            break
+        }
+    done
 fi
 # From the lockfile, so this builds what a clean checkout builds.
 cargo fmt --all -- --check

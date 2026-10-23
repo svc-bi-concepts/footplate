@@ -1,11 +1,12 @@
 #!/bin/sh
 # Tests for the warm cache of .yardr/test, the gate: a worktree seeded from
 # the cache compiles footplate from its own sources, whatever their times,
-# and takes nothing but its dependencies from the seed. The gate is run for
-# real in worktrees of a throwaway crate named footplate (the package the
-# gate cleans) with a dependency of its own to stand for gpui's tree, and in
-# a home of its own: nothing here compiles gpui, and the machine's own cache
-# is neither read nor written.
+# in every build directory the seed holds (the debug one the gate builds, a
+# release, a target's), and takes nothing but its dependencies from the seed.
+# The gate is run for real in worktrees of a throwaway crate named footplate
+# (the package the gate cleans) with a dependency of its own to stand for
+# gpui's tree, and in a home of its own: nothing here compiles gpui, and the
+# machine's own cache is neither read nor written.
 set -eu
 
 root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
@@ -40,7 +41,8 @@ mkdir "$tmp/home"
 HOME=$tmp/home
 export HOME
 
-# A crate named footplate, with a dependency on a path.
+# A crate named footplate, with a dependency on a path. It prints the name of
+# its directory, so that a binary says which tree built it.
 make_tree() {
     mkdir -p "$1/src" "$1/dep/src"
     cat > "$1/Cargo.toml" <<'EOF'
@@ -63,9 +65,9 @@ pub fn answer() -> u32 {
     42
 }
 EOF
-    cat > "$1/src/main.rs" <<'EOF'
+    sed "s/@name@/${1##*/}/" > "$1/src/main.rs" <<'EOF'
 fn main() {
-    println!("{}", dep::answer());
+    println!("@name@");
 }
 
 #[cfg(test)]
@@ -105,9 +107,37 @@ gate_in() {
     }
 }
 
+# Runs cargo with the arguments after the second in the worktree $1 and keeps
+# what it said in $tmp/$2.log. Its input is closed: it is run in a loop that
+# reads its lines from a here-document, which a program reading its input
+# would take them from.
+cargo_in() {
+    dir=$1
+    log=$2
+    shift 2
+    (cd "$tmp/$dir" && cargo "$@") < /dev/null > "$tmp/$log.log" 2>&1 || {
+        tail -n 40 "$tmp/$log.log" >&2
+        fail "cargo $* failed in $dir"
+    }
+}
+
 # Whether the log $1 has the line $2 in it.
 said() {
     grep -q -F -- "$2" "$tmp/$1.log"
+}
+
+# A cargo in $tmp/bin, for the front of PATH, that fails a clean whose
+# arguments match the case pattern $1 and is the real one for anything else.
+refusing_cargo() {
+    mkdir -p "$tmp/bin"
+    cat > "$tmp/bin/cargo" <<EOF
+#!/bin/sh
+if [ "\$1" = clean ]; then
+    case "\$*" in $1) exit 1 ;; esac
+fi
+exec "$real_cargo" "\$@"
+EOF
+    chmod +x "$tmp/bin/cargo"
 }
 
 n=0
@@ -140,17 +170,49 @@ gate_in b b-again
 ok "a worktree with a target of its own keeps it"
 
 # A clean that fails drops the seed, so the build is from nothing.
-mkdir "$tmp/bin"
-cat > "$tmp/bin/cargo" <<EOF
-#!/bin/sh
-[ "\$1" = clean ] && exit 1
-exec "$real_cargo" "\$@"
-EOF
-chmod +x "$tmp/bin/cargo"
+refusing_cargo '*'
 make_tree "$tmp/c"
 age "$tmp/c"
 (PATH=$tmp/bin:$PATH && gate_in c c)
 said c "Compiling dep " || fail "a failed clean kept the seed"
 ok "a clean that fails drops the seed"
+
+# The seed holds builds of footplate besides the debug one the gate makes: a
+# release (what scripts/bundle-mac.sh is run after) and builds for a target
+# (the Windows cross-check, the release's Macs), each in a directory of its
+# own; the host stands for the target here. Cargo goes by the same rule for
+# each, so a build of them outside the gate would hand on the seed's binary.
+# The first tree makes them before its gate, which leaves its whole target in
+# the cache; the second is older than all of that and has no target.
+host=$(rustc -vV | sed -n 's/^host: //p')
+make_tree "$tmp/d"
+cargo_in d d-release build --release --locked
+cargo_in d d-target build --target "$host" --locked
+cargo_in d d-target-release build --release --target "$host" --locked
+gate_in d d
+make_tree "$tmp/e"
+age "$tmp/e"
+gate_in e e
+while read -r binary args; do
+    # $args is several words.
+    cargo_in e e-build build --locked $args
+    says=$("$tmp/e/target/$binary" 2>&1 || true)
+    [ "$says" = e ] || fail "a seeded worktree's build for '$args' is not its own: it says '$says'"
+    ! said e-build "Compiling dep " || fail "a seeded worktree compiled the dependency of the seed again for '$args'"
+done <<EOF
+release/footplate --release
+$host/debug/footplate --target $host
+$host/release/footplate --release --target $host
+EOF
+ok "a seeded worktree's release and target builds are its own"
+
+# The cache is now the second tree's, with all of those directories: a clean
+# that fails after the first, here the release's, drops the seed as well.
+refusing_cargo '*--release*'
+make_tree "$tmp/f"
+age "$tmp/f"
+(PATH=$tmp/bin:$PATH && gate_in f f)
+said f "Compiling dep " || fail "a clean that failed after the first kept the seed"
+ok "a clean that fails after the first drops the seed"
 
 echo "test-gate.sh: pass ($n cases)"
