@@ -1826,6 +1826,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
  "x11rb",
  "zbus",
  "zip",

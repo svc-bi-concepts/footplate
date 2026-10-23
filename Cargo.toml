@@ -99,6 +99,13 @@ ksni = { version = "0.3.6", default-features = false, features = ["async-io", "b
 zbus = { version = "5", default-features = false, features = ["async-io"] }
 async-io = "2"
 
+# Stopping an event stream (api.rs) cancels the read that waits on it, since
+# shutting the socket down does not wake that read on Windows. The one call,
+# CancelIoEx, of the crate that is in gpui's tree already, with the two
+# features it needs: no crate more.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_System_IO"] }
+
 [dev-dependencies]
 # The window's own test opens it on gpui's test platform, without a screen.
 gpui = { version = "=0.2.2", features = ["test-support"] }

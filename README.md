@@ -1664,7 +1664,9 @@ tried against the
 fake yard for each call, and through a stand-in edge for Kratos sign-in,
 including wrong passwords and expired flows; an image and the stream, by
 its socket and at an address, with a pairing, a wrong code and a removed
-device, the model as it is, and
+device, and a stream stopped while it waits, against a yard that keeps it
+open when its client hangs up (the fake ends it by default, as a real yard
+does, and Windows needs a stop of the client's own), the model as it is, and
 the window itself on gpui's test platform, where an image on its clipboard
 is pasted and the draft sent with Enter. gpui gives a test no way to make
 the paths of a file drop, so the window's test hands the files to what a
