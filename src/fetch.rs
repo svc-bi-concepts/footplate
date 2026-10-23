@@ -1605,9 +1605,18 @@ mod tests {
 
         // The program is asked, whatever the file beside it says. One
         // stand-in answers every row with the shell the row writes to
-        // `how`: a fresh program costs a Mac a third of a second to start
-        // the first time, and a rewritten one costs it again.
+        // `how`: the system assesses a program the first time it starts,
+        // which takes a Mac a second or two, and 5 s and more while other
+        // programs are being started for the first time too. The next
+        // start takes a few hundredths of a second; a rewritten program
+        // is assessed again.
         let program = keep(&dir, PROGRAM, b"#!/bin/sh\n. \"$(dirname \"$0\")/how\"\n").unwrap();
+        // Start it once, and wait for it to end (a minute at the most),
+        // before a row measures anything. Not through `ask`: `kept` stops
+        // a start at VERSION_WITHIN, the assessment goes on after the
+        // stop, and the first row would pay what is left of it.
+        fs::write(dir.join("how"), "exit 0").unwrap();
+        let _ = version_of(&program, Duration::from_secs(60));
         let ask = |how: &str| {
             fs::write(dir.join("how"), how).unwrap();
             kept(Some(&dir))
