@@ -138,6 +138,8 @@ struct State {
     /// is emitted meanwhile is the yard's all the same, its calls answer
     /// as they did, and a stream opened since brings what it asks for.
     muted: usize,
+    /// The streams stay open when their client hangs up ([`Yard::hold_streams`]).
+    held: bool,
     /// The images the yard holds, by hash, and every hash asked for.
     blobs: HashMap<String, Vec<u8>>,
     blobs_asked: Vec<String>,
@@ -430,6 +432,15 @@ impl Yard {
     pub fn mute(&self) {
         let mut state = self.shared.state.lock().unwrap();
         state.muted = state.streams.len();
+    }
+
+    /// The streams stay open when their client hangs up, from here on: the
+    /// yard of a proxy or a tunnel that takes a client's FIN for a half-close
+    /// and goes on serving it. A real yard ends its stream then, and the
+    /// fake does by default; a test of what a client does to stop its own
+    /// stream asks for this one, or the yard's closing does the stopping.
+    pub fn hold_streams(&self) {
+        self.shared.state.lock().unwrap().held = true;
     }
 
     /// An image the yard holds: `GET /blobs/<hash>` answers the bytes.
@@ -780,9 +791,10 @@ const LOOK: Duration = Duration::from_millis(50);
 /// The stream: the events with a seq after `after`, then every one as the
 /// test emits it, until the yard stops or the client hangs up. A real yard
 /// sees the hang-up and ends the stream, and a client that stops its own
-/// stream by shutting its end down relies on that: where shutting down
+/// stream by shutting its end down could rely on that: where shutting down
 /// wakes no reader blocked on the same socket (Windows) it is the yard's
-/// closing that does.
+/// closing that does. A client may not rely on it, so a test of stopping
+/// has [`Yard::hold_streams`] keep the stream open.
 fn stream(
     mut conn: Wire,
     shared: &Shared,
@@ -819,7 +831,7 @@ fn stream(
             return Ok(());
         }
         state = shared.changed.wait_timeout(state, LOOK).unwrap().0;
-        if conn.hung_up() {
+        if !state.held && conn.hung_up() {
             return Ok(());
         }
     }
@@ -1227,16 +1239,13 @@ mod tests {
     use super::*;
     use std::net::Shutdown;
 
-    /// A client that hangs up its end of a stream has the stream ended by
-    /// the yard, as a real yard ends it. That is what wakes a follower
-    /// stopped while it waits for an event on a system where shutting down
-    /// one's own end wakes nothing that reads (Windows).
-    #[test]
-    fn a_stream_whose_client_hung_up_is_ended_by_the_yard() {
-        let yard = Yard::start_tcp();
+    /// Opens the stream of `yard` as a client does, reads its head, hangs
+    /// up on the client's side only (it still reads) and gives what the
+    /// yard sends from then on, for as long as `wait`.
+    fn hang_up_on(yard: &Yard, wait: Duration) -> io::Result<Vec<u8>> {
         let host = yard.address().strip_prefix("http://").unwrap();
         let mut conn = TcpStream::connect(host).unwrap();
-        // Not waited for for ever where the yard does not end it.
+        // The head is waited for as long as a slow machine needs.
         conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         // In one write, as the client sends it.
         let request = format!(
@@ -1252,12 +1261,34 @@ mod tests {
                 break;
             }
         }
-        // Hung up on the client's side only: it still reads.
         conn.shutdown(Shutdown::Write).unwrap();
+        // Not waited for for ever where the yard does not end it.
+        conn.set_read_timeout(Some(wait)).unwrap();
         let mut rest = Vec::new();
-        reader
-            .read_to_end(&mut rest)
-            .expect("the yard ended the stream");
+        reader.read_to_end(&mut rest)?;
+        Ok(rest)
+    }
+
+    /// A client that hangs up its end of a stream has the stream ended by
+    /// the yard, as a real yard ends it: that wakes a follower stopped
+    /// while it waits for an event on a system where shutting down one's
+    /// own end wakes nothing that reads (Windows). A test that must not be
+    /// helped so holds the streams, and then the yard leaves them open.
+    #[test]
+    fn a_stream_whose_client_hung_up_is_ended_by_the_yard_unless_it_is_held() {
+        let yard = Yard::start_tcp();
+        let rest = hang_up_on(&yard, Duration::from_secs(5)).expect("the yard ended the stream");
         assert!(rest.is_empty());
+
+        yard.hold_streams();
+        // Several of the yard's looks at its connection go by.
+        let err = hang_up_on(&yard, 5 * LOOK).expect_err("the yard held the stream open");
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "{err}"
+        );
     }
 }
