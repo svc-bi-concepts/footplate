@@ -1,7 +1,7 @@
 //! The window against a fake yard, for the screenshots. `FOOTPLATE_SHOT`
-//! names the state to open at; scripts/shot-linux.sh passes it through, and
-//! the README names the states. This module is a debug build's alone: a
-//! release build neither compiles it nor reads the variable.
+//! names the state to open at; scripts/shot-linux.sh and scripts/shot-mac.sh
+//! pass it through, and the README names the states. This module is a debug
+//! build's alone: a release build neither compiles it nor reads the variable.
 
 use std::fs;
 use std::io;
@@ -335,12 +335,30 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     (env, Some(shot))
 }
 
+/// The look the shot script asks for in `SHOT_LOOK`, `light` or `dark`, for
+/// the states that write their own settings, so that none is left at the
+/// system's own where one was asked.
+fn look_asked() -> crate::theme::Look {
+    look_named(&std::env::var("SHOT_LOOK").unwrap_or_default())
+}
+
+/// The look a name asks for; none, or another, is the system's own, as the
+/// settings have it by default.
+fn look_named(name: &str) -> crate::theme::Look {
+    match name {
+        "light" => crate::theme::Look::Light,
+        "dark" => crate::theme::Look::Dark,
+        _ => crate::theme::Look::Auto,
+    }
+}
+
 /// The settings the `signedout` shot opens: the hosted yard south at the
 /// edge's address, with the account it was signed in as, its device token
 /// and the session in files beside them, as the sign-in-again test keeps
 /// them. The shot script runs against a throwaway config, which keeps no
 /// settings; where a settings file already stands, the state is refused
-/// rather than overwrite it.
+/// rather than overwrite it. The window opens in the look the script asked
+/// for.
 fn write_signedout_settings(address: &str) {
     let Some(file) = crate::settings::file() else {
         eprintln!("footplate: the signedout shot keeps no settings without a home");
@@ -348,25 +366,34 @@ fn write_signedout_settings(address: &str) {
     };
     if file.exists() {
         eprintln!(
-            "footplate: the signedout shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh does",
+            "footplate: the signedout shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
             file.display()
         );
         std::process::exit(2);
     }
+    keep_signedout_settings(&file, address, look_asked());
+}
+
+/// The `signedout` shot's settings, device token and session, in `file`'s
+/// directory, with the window in `look`.
+fn keep_signedout_settings(file: &Path, address: &str, look: crate::theme::Look) {
     let mut south =
         crate::settings::Yard::hosted("south", address, "yard-south.token", "yard-south.session");
     south.account = crate::fake::KRATOS_EMAIL.to_string();
-    crate::settings::Settings::default()
-        .with_yard(None, south, Some(&file))
-        .and_then(|set| {
-            set.opening("south")
-                .write(&file)
-                .map_err(|error| error.to_string())
-        })
-        .unwrap_or_else(|error| {
-            eprintln!("footplate: the signedout shot keeps no settings: {error}");
-            std::process::exit(1);
-        });
+    crate::settings::Settings {
+        look,
+        ..Default::default()
+    }
+    .with_yard(None, south, Some(file))
+    .and_then(|set| {
+        set.opening("south")
+            .write(file)
+            .map_err(|error| error.to_string())
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("footplate: the signedout shot keeps no settings: {error}");
+        std::process::exit(1);
+    });
     let edge = crate::api::Address::parse(address).unwrap_or_else(|error| {
         eprintln!("footplate: the signedout shot's edge has no address: {error}");
         std::process::exit(1);
@@ -389,7 +416,8 @@ fn write_signedout_settings(address: &str) {
 /// open, with its device token in a file beside them, as the
 /// pair-again test keeps them. The shot script runs against a
 /// throwaway config, which keeps no settings; where a settings file
-/// already stands, the state is refused rather than overwrite it.
+/// already stands, the state is refused rather than overwrite it. The
+/// window opens in the look the script asked for.
 fn write_away_settings(address: &str) {
     let Some(file) = crate::settings::file() else {
         eprintln!("footplate: the away shot keeps no settings without a home");
@@ -397,26 +425,35 @@ fn write_away_settings(address: &str) {
     };
     if file.exists() {
         eprintln!(
-            "footplate: the away shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh does",
+            "footplate: the away shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
             file.display()
         );
         std::process::exit(2);
     }
-    crate::settings::Settings::default()
-        .with_yard(
-            None,
-            crate::settings::Yard::far("far", address, "yard-far.token"),
-            Some(&file),
-        )
-        .and_then(|set| {
-            set.opening("far")
-                .write(&file)
-                .map_err(|error| error.to_string())
-        })
-        .unwrap_or_else(|error| {
-            eprintln!("footplate: the away shot keeps no settings: {error}");
-            std::process::exit(1);
-        });
+    keep_away_settings(&file, address, look_asked());
+}
+
+/// The `away` shot's settings and device token, in `file`'s directory, with
+/// the window in `look`.
+fn keep_away_settings(file: &Path, address: &str, look: crate::theme::Look) {
+    crate::settings::Settings {
+        look,
+        ..Default::default()
+    }
+    .with_yard(
+        None,
+        crate::settings::Yard::far("far", address, "yard-far.token"),
+        Some(file),
+    )
+    .and_then(|set| {
+        set.opening("far")
+            .write(file)
+            .map_err(|error| error.to_string())
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("footplate: the away shot keeps no settings: {error}");
+        std::process::exit(1);
+    });
     let edge = crate::api::Address::parse(address).unwrap_or_else(|error| {
         eprintln!("footplate: the away shot's yard has no address: {error}");
         std::process::exit(1);
@@ -436,7 +473,8 @@ fn write_away_settings(address: &str) {
 /// keeps no token, so it is never reached: the window asks nothing of the
 /// network for it. The shot script runs against a throwaway config, which
 /// keeps no settings; where a settings file already stands, the state is
-/// refused rather than overwrite it.
+/// refused rather than overwrite it. The window opens in the look the script
+/// asked for.
 fn write_switcher_settings(adventuretime_at: &str, plantime_at: &str) {
     let Some(file) = crate::settings::file() else {
         eprintln!("footplate: the switcher shot keeps no settings without a home");
@@ -444,7 +482,7 @@ fn write_switcher_settings(adventuretime_at: &str, plantime_at: &str) {
     };
     if file.exists() {
         eprintln!(
-            "footplate: the switcher shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh does",
+            "footplate: the switcher shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
             file.display()
         );
         std::process::exit(2);
@@ -460,11 +498,7 @@ fn write_switcher_settings(adventuretime_at: &str, plantime_at: &str) {
     let droplet =
         crate::settings::Yard::far("droplet", "https://droplet.example.net", "droplet.token");
     crate::settings::Settings {
-        look: match std::env::var("SHOT_LOOK").as_deref() {
-            Ok("light") => crate::theme::Look::Light,
-            Ok("dark") => crate::theme::Look::Dark,
-            _ => crate::theme::Look::Auto,
-        },
+        look: look_asked(),
         ..Default::default()
     }
     .with_yard(Some(crate::settings::HERE), adventuretime, Some(&file))
@@ -2587,5 +2621,57 @@ mod tests {
         assert_eq!(loaded.me, "jo");
         assert_eq!(loaded.unread.len(), 12);
         assert!(loaded.asks.open.is_empty());
+    }
+
+    /// The states that write their own settings open in the look the script
+    /// asked for in `SHOT_LOOK`: the Mac's script leaves them no settings
+    /// file to carry it, since they refuse one that stands.
+    #[test]
+    fn the_shots_that_write_their_own_settings_open_in_the_look_asked() {
+        use crate::settings::Settings;
+        use crate::theme::Look;
+
+        assert_eq!(look_named("light"), Look::Light);
+        assert_eq!(look_named("dark"), Look::Dark);
+        assert_eq!(look_named(""), Look::Auto);
+        assert_eq!(look_named("sepia"), Look::Auto);
+
+        for look in [Look::Light, Look::Dark] {
+            let away = tempfile::tempdir().unwrap();
+            let file = away.path().join("settings.json");
+            keep_away_settings(&file, "https://yard.example.net", look);
+            let kept = Settings::read(&file);
+            assert_eq!(kept.look, look, "away");
+            assert_eq!(kept.opened().name, "far", "away");
+            assert!(away.path().join("yard-far.token").is_file());
+
+            let signedout = tempfile::tempdir().unwrap();
+            let file = signedout.path().join("settings.json");
+            keep_signedout_settings(&file, "https://edge.example.net", look);
+            let kept = Settings::read(&file);
+            assert_eq!(kept.look, look, "signedout");
+            assert_eq!(kept.opened().name, "south", "signedout");
+            assert!(signedout.path().join("yard-south.token").is_file());
+            assert!(signedout.path().join("yard-south.session").is_file());
+        }
+    }
+
+    /// Each shot script keeps the list of states served here, as the
+    /// README has it: a state that is not in a script's list is refused
+    /// there, as `weighty-mapping` was on the Mac.
+    #[test]
+    fn the_shot_scripts_list_the_states_served_here() {
+        for (name, script) in [
+            ("shot-linux.sh", include_str!("../scripts/shot-linux.sh")),
+            ("shot-mac.sh", include_str!("../scripts/shot-mac.sh")),
+        ] {
+            let listed: Vec<&str> = script
+                .lines()
+                .find_map(|line| line.strip_prefix("states=\"")?.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("{name} keeps no states list"))
+                .split(' ')
+                .collect();
+            assert_eq!(listed, STATES, "{name}");
+        }
     }
 }

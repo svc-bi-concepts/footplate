@@ -370,12 +370,18 @@ It opens the real window on this Mac against a fake yard serving the
 state, isolated from the session it is run from (its own home and temp,
 the canned yardr), takes the picture with `screencapture` and quits it;
 the states are the same ones below. `hold` in place of the file leaves
-the window up to try by hand (quit it with cmd+q). Three pitfalls: the
-screen must be unlocked (locked reads occluded and the picture is the
-window's first frame); a window started from a shell is not the key
-window, so its traffic lights are grey; and a builder session cannot
-post input (no Accessibility permission), so no click or drag tries —
-hold mode is for a hand at the Mac.
+the window up to try by hand (quit it with cmd+q). The script wakes the
+display if it sleeps and holds it awake while it runs (`caffeinate -d
+-u`): on a Mac that asks for no password, a sleeping display is what
+reads as a locked screen, and waking it unlocks. It brings the window to
+the front before the picture, so that it is the key window and its
+traffic lights are coloured (a window started from a shell is not):
+shoot one at a time, since a second shot takes the key window from the
+first. Two pitfalls: a session still locked once the display is awake
+(one that asks for a password) reads every window as occluded and lets
+nothing come forward, so the script stops and says so; and a builder
+session cannot post input (no Accessibility permission), so no click or
+drag tries — hold mode is for a hand at the Mac.
 
 A state opens the window against a fake yard serving it, instead of the
 first screen, or with no yard where the state says none:

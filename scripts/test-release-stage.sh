@@ -59,7 +59,10 @@ bin=$tmp/bin
 mkdir -p "$bin"
 
 # fake yardr answers bead show and prime from canned files, logs every call
-# with the note it carried on stdin, and mints one sync bead id.
+# with the note it was given on stdin (--note -), and mints one sync bead id.
+# Like the real one it reads stdin only where it is asked to: publish advances
+# a bead without a note, and a stand-in that read anyway would wait for ever
+# on a stdin that stands open.
 cat >"$bin/yardr" <<'EOF'
 #!/bin/sh
 printf 'yardr %s\n' "$*" >>"$FAKE_DIR/calls.log"
@@ -71,7 +74,9 @@ case "$1 $2" in
   cat "$FAKE_DIR/prime.json"
   ;;
 "bead done" | "bead advance")
-  { echo "--note--"; cat; echo "--end--"; } >>"$FAKE_DIR/calls.log"
+  case " $* " in
+  *" --note - "*) { echo "--note--"; cat; echo "--end--"; } >>"$FAKE_DIR/calls.log" ;;
+  esac
   ;;
 "bead create")
   { echo "--create--"; cat; echo "--end--"; } >>"$FAKE_DIR/calls.log"
@@ -215,6 +220,28 @@ done
 for tool in yardr gh minisign spctl ditto; do
     ln -s "$bin/$tool" "$nomac/$tool"
 done
+
+# The fake reads no note for a call that gives none, however stdin stands: a
+# fifo that this shell holds a write end of stands open until it is closed,
+# and the call must end at once. A fake that blocks fails the test after five
+# seconds, and gets its end of file when this shell exits.
+mkfifo "$tmp/open-stdin"
+exec 3<>"$tmp/open-stdin"
+mkdir "$tmp/no-note"
+(
+    exec 3>&-
+    FAKE_DIR=$tmp/no-note "$bin/yardr" bead advance footplate-rel1 --to new <"$tmp/open-stdin"
+    { : >"$tmp/no-note/ended"; } 2>/dev/null
+) &
+tenths=0
+while [ ! -e "$tmp/no-note/ended" ] && [ "$tenths" -lt 50 ]; do
+    sleep 0.1
+    tenths=$((tenths + 1))
+done
+[ -e "$tmp/no-note/ended" ] ||
+    fail "the fake yardr waits on stdin for a call that gives no note"
+exec 3>&-
+ok "the fake yardr reads a note only where it is asked for"
 
 # begin <name>: a fresh case with the flow's outcomes from here, in the
 # shape has_outcome greps.

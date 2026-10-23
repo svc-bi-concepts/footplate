@@ -19,17 +19,24 @@
 #   binary   default: target/debug/footplate under the checkout
 #   seconds  how long the window stands before the picture (default 4)
 #
-# The Mac's screen must be unlocked. While it is locked every window is
-# occluded, gpui stops painting one, and the picture is the first frame the
-# window drew (the away screen), with the traffic lights grey, since a window
-# started from a shell is not the key window.
+# The display is woken if it sleeps and held awake for as long as this runs
+# (caffeinate -d -u). On a Mac that asks for no password a sleeping display is
+# what reads as a locked screen: the session says it is locked, with
+# loginwindow in front, while the display is off, and says so no longer once
+# it wakes. Where the session is still locked with the display awake (one that
+# asks for a password), every window is occluded and gpui stops painting one,
+# and no process can be brought forward, so the script stops with that said:
+# the picture would be the first frame the window drew (the away screen), with
+# the traffic lights grey. The window is brought to the front before the
+# picture, key, so that its traffic lights are coloured: shoot one at a time,
+# since a second shot would take the key window from the first.
 set -eu
 
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is. The same
 # list as scripts/shot-linux.sh keeps.
-states="yardmaster crew thread column plain plain-select lines run weighty stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery"
+states="yardmaster crew thread column plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -65,14 +72,25 @@ bin=${want_bin:-$root/target/debug/footplate}
 
 T=$(mktemp -d /tmp/fp-shot.XXXXXX)
 pid=""
+awake=""
 cleanup() {
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     fi
+    if [ -n "$awake" ]; then
+        kill "$awake" 2>/dev/null || true
+        wait "$awake" 2>/dev/null || true
+    fi
     rm -rf "${T:?}"
 }
 trap cleanup EXIT INT TERM
+
+# The display is woken if it sleeps and kept awake for as long as this runs:
+# -u wakes it, -d keeps it from going to sleep again in the middle of a wait,
+# and -w ends both with this script where the trap cannot run (kill -9).
+caffeinate -d -u -w $$ &
+awake=$!
 
 mkdir -p "$T/home/.local/bin" "$T/config/footplate/bin" "$T/data" "$T/tmp" "$T/yard"
 bin_dir="$T/config/footplate/bin"
@@ -97,8 +115,20 @@ printf '%s\n' '{"yard": false, "machine": []}' > "$bin_dir/doctor.json"
 printf '%s\n' '[{"key": "operator_style", "value": "show", "from": "set"}, {"key": "operator_note", "value": "I review every merge myself", "from": "set"}]' > "$bin_dir/settings-get.json"
 printf '%s\n' '{"home": "/tmp/shot-yard", "name": "shot", "operator": "Jo", "server": {"running": true, "cli_build": "shot"}, "daemon": {"running": true, "pid": 0, "service": {"supported": true, "manager": "launchd", "name": "dev.yardr.shot", "file": "/tmp/shot.plist", "installed": false, "loaded": false}}, "herdr_login_service": {"supported": true, "manager": "launchd", "name": "dev.herdr.shot", "file": "/tmp/shot-herdr.plist", "installed": false, "loaded": false}, "web": {"views": [], "service": {"supported": true, "manager": "launchd", "name": "dev.yardr.shot-web", "file": "/tmp/shot-web.plist", "installed": false, "loaded": false}}}' > "$bin_dir/status.json"
 # The look is the window's own setting, so the system's stays as it is. An
-# absolute XDG_CONFIG_HOME wins over ~/Library on macOS.
-printf '{"look": "%s"}\n' "$look" > "$T/config/footplate/settings.json"
+# absolute XDG_CONFIG_HOME wins over ~/Library on macOS. A yard at an address
+# opens from the settings: one far yard, open, with the look in the same file,
+# as scripts/shot-linux.sh writes it. A state that writes its own settings
+# (src/shot.rs) gets no file here, since it refuses one that stands; it reads
+# the look from SHOT_LOOK instead.
+case "$state" in
+    far|settings-yards-rename)
+        printf '{"yards": [{"name": "far", "address": "https://yard.example.net", "token_file": "far.token"}], "open": "far", "look": "%s"}\n' "$look" > "$T/config/footplate/settings.json"
+        ;;
+    away|switcher|signedout) ;;
+    *)
+        printf '{"look": "%s"}\n' "$look" > "$T/config/footplate/settings.json"
+        ;;
+esac
 
 # The run sees nothing of the caller's: no YARDR_*, no agent socket, a PATH of
 # its own directory and the system's. The fake yard knows the login "shot".
@@ -111,6 +141,7 @@ env -i \
     YARDR_HOME="$T/yard" \
     TMPDIR="$T/tmp" \
     PATH="$T/home/.local/bin:/usr/bin:/bin" \
+    SHOT_LOOK="$look" \
     FOOTPLATE_SHOT="$state" \
     "$bin" > "$T/footplate.log" 2>&1 &
 pid=$!
@@ -123,10 +154,26 @@ if [ "$out" = hold ]; then
 fi
 
 # The window's number: its process's windows, which CoreGraphics lists
-# without any permission. Onscreen reads 1.
+# without any permission. Onscreen reads 1. With "front" after the process it
+# brings that process forward instead, which needs no permission either, so
+# that its window is the key one: a window started from a shell is not, and a
+# window that is not draws its traffic lights grey. Since macOS 14 a request
+# to bring another process forward is dropped, though the call answers true,
+# unless an application makes it, so the tool becomes one first. It exits 1
+# when the process is not frontmost two seconds after.
 cat > "$T/winid.swift" <<'EOF'
 import Cocoa
 guard CommandLine.arguments.count > 1, let pid = Int32(CommandLine.arguments[1]) else { exit(2) }
+if CommandLine.arguments.count > 2 && CommandLine.arguments[2] == "front" {
+    _ = NSApplication.shared
+    guard let app = NSRunningApplication(processIdentifier: pid) else { exit(1) }
+    _ = app.activate(options: [])
+    for _ in 0..<20 {
+        if app.isActive { exit(0) }
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+    exit(1)
+}
 let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
 for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
     print("\(w[kCGWindowNumber as String] ?? "?")\t\(w[kCGWindowLayer as String] ?? "?")\t\(w[kCGWindowIsOnscreen as String] ?? false)")
@@ -153,6 +200,13 @@ done
 if [ -z "$num" ]; then
     echo "shot-mac.sh: no window in 60 seconds; its log:" >&2
     cat "$T/footplate.log" >&2
+    exit 1
+fi
+# Forward before the wait, so the window has drawn itself as the key one by
+# the picture. Where it cannot be brought forward the picture would show its
+# traffic lights grey, so there is none.
+if ! "$T/winid" "$pid" front; then
+    echo "shot-mac.sh: footplate did not come to the front, so its window is not the key one (is the screen locked?)" >&2
     exit 1
 fi
 sleep "$wait_s"
