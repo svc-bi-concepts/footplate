@@ -281,6 +281,13 @@ impl Yard {
         self.address.as_deref().expect("a yard at its listener")
     }
 
+    /// Whether the yard is at its listener, with no socket: the kind that
+    /// [`Yard::client`] tells apart, for a test that sets up or expects
+    /// something of the one kind and not the other.
+    pub fn at_listener(&self) -> bool {
+        self.address.is_some()
+    }
+
     /// The operator opens a pairing: the next right code is answered with
     /// a token, once.
     pub fn pair(&self, code: &str) {
