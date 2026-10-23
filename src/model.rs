@@ -262,6 +262,15 @@ pub enum Dot {
     Failed,
 }
 
+/// The session a worker names, as `SessionScreen` takes it: the worker
+/// without its runner word where the runner is herdr, since the yard
+/// resolves a session id or a crew member's name, and neither carries
+/// one. Any other worker stays whole: the yard refuses what is no
+/// session, naming it.
+pub fn worker_session(worker: &str) -> &str {
+    worker.strip_prefix("herdr ").unwrap_or(worker)
+}
+
 /// What dot a crew member's session carries, from the same state and
 /// status [`state_of`] words. A running session whose status the daemon
 /// has not looked at yet still runs.
@@ -2377,6 +2386,31 @@ impl Model {
             .iter()
             .find(|b| b.bead == bead)
             .map(|found| (found, None))
+    }
+
+    /// The session whose screen opens for the bead: the one working it.
+    /// The operator's alone to open: none where the window is not the
+    /// operator's, where no session works the bead, or where the yard
+    /// names none.
+    pub fn screen_for_bead(&self, bead: &str) -> Option<String> {
+        if !self.is_operator() {
+            return None;
+        }
+        let (found, _) = self.flow_bead(bead)?;
+        match found.worker.is_empty() {
+            true => None,
+            false => Some(worker_session(&found.worker).to_string()),
+        }
+    }
+
+    /// The session whose screen opens for the crew member: their own.
+    /// The operator's alone to open: none where the window is not the
+    /// operator's, or where the name is none of this yard's crew.
+    pub fn screen_for_crew(&self, name: &str) -> Option<String> {
+        if !self.is_operator() {
+            return None;
+        }
+        self.member(name).map(|member| member.name.clone())
     }
 
     /// One travelling bead whole, as the details pane shows it: what the
@@ -11080,6 +11114,53 @@ mod tests {
         };
         assert!(m.event(&changed).contains(&Effect::Grants));
         assert!(m.is_operator());
+    }
+
+    /// A session's screen opens for the operator alone: the session
+    /// working a bead, without its runner word, and a crew member's
+    /// own. Anyone else is offered none, as is an unworked bead, an
+    /// unknown bead, and a name that is none of the crew.
+    #[test]
+    fn the_screen_opens_for_the_operator_alone() {
+        use crate::api::FlowBead;
+        let mut flows = flow_view();
+        flows.depots[0].flows[0].stages[0].beads = vec![
+            FlowBead {
+                bead: "yd-zulu".into(),
+                working: true,
+                worker: "herdr yd-zulu-new".into(),
+                ..FlowBead::default()
+            },
+            FlowBead {
+                bead: "yd-idle".into(),
+                ..FlowBead::default()
+            },
+        ];
+        // Not the operator's: no bead and no member opens.
+        let mut state = yard(&[]);
+        state.flows = flows.clone();
+        let (m, _) = Model::new(state, Mode::Timetable, None);
+        assert!(!m.is_operator());
+        assert_eq!(m.screen_for_bead("yd-zulu"), None);
+        assert_eq!(m.screen_for_crew("yardmaster"), None);
+        // The operator's: the worked bead opens its session, and a
+        // member their own.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.flows = flows;
+        let (m, _) = Model::new(state, Mode::Timetable, None);
+        assert!(m.is_operator());
+        assert_eq!(
+            m.screen_for_bead("yd-zulu"),
+            Some("yd-zulu-new".to_string())
+        );
+        assert_eq!(m.screen_for_bead("yd-idle"), None);
+        assert_eq!(m.screen_for_bead("yd-else"), None);
+        assert_eq!(
+            m.screen_for_crew("yardmaster"),
+            Some("yardmaster".to_string())
+        );
+        assert_eq!(m.screen_for_crew("ada"), None);
     }
 
     /// The grants view lists what `yardr source grants` prints: who holds

@@ -42,6 +42,7 @@ use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, grown};
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
+use super::screen::screen_control;
 use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
@@ -1047,6 +1048,21 @@ impl Footplate {
                             bytes,
                             back: None,
                         });
+                    }
+                    // The screen shot opens the session's screen over
+                    // the window, as its Screen control does: the yard
+                    // holds the shot's bytes, and they show when they
+                    // come. A debug build's alone, as above, and a unix
+                    // one's.
+                    #[cfg(all(debug_assertions, unix))]
+                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("screen") {
+                        self.screen_open = Some(super::screen::ScreenOpen {
+                            session: crate::shot::SCREEN_OPEN.to_string(),
+                            shown: super::screen::Shown::Asked,
+                            back: None,
+                            request: 0,
+                        });
+                        self.read_screen(cx);
                     }
                     // The drawer shot opens the bead beside the
                     // yardmaster's conversation, as a click on its chip
@@ -2798,6 +2814,9 @@ impl Footplate {
         if self.about.is_some() {
             return self.shut_about(cx);
         }
+        if self.screen_open.is_some() {
+            return self.shut_screen(window, cx);
+        }
         if self.image_open.is_some() {
             return self.shut_image(window, cx);
         }
@@ -3204,7 +3223,11 @@ impl Footplate {
         if self.settings_open {
             return KeysView::Settings;
         }
-        if self.image_open.is_some() || self.first_run.is_some() || self.switch_question.is_some() {
+        if self.image_open.is_some()
+            || self.screen_open.is_some()
+            || self.first_run.is_some()
+            || self.switch_question.is_some()
+        {
             return KeysView::Away;
         }
         if self.down.is_some() && !self.reconnecting() {
@@ -5045,13 +5068,14 @@ impl Footplate {
                 body = body.child(group_head(title));
                 for row in rows {
                     let sel = Selected::Conversation(row.name.clone());
-                    body = body.child(self.row(row, sel, palette, cx));
+                    let screen = model.screen_for_crew(&row.name);
+                    body = body.child(self.row(row, sel, screen, palette, cx));
                 }
             }
         }
         body = body.child(group_head("Yard"));
         let yard = model.yard_row();
-        body = body.child(self.row(yard, Selected::Yard, palette, cx));
+        body = body.child(self.row(yard, Selected::Yard, None, palette, cx));
         self.column(body, palette, top, cx)
     }
 
@@ -5130,11 +5154,14 @@ impl Footplate {
     /// badge; every other count is quiet words, never a numeral badge.
     /// The open row keeps its fill, and a row under the pointer a
     /// hairline instead: hover drawn apart from selection, so exactly
-    /// one row ever reads open.
+    /// one row ever reads open. A crew row carries Screen past the
+    /// unread, which opens the `screen` session's screen over the
+    /// window instead of the conversation; any other row carries none.
     pub(crate) fn row(
         &self,
         row: Row,
         sel: Selected,
+        screen: Option<String>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -5253,6 +5280,11 @@ impl Footplate {
                         .child(unread_words(row.unread)),
                 ),
             })
+            .children(
+                screen.map(|session| {
+                    screen_control(session, format!("row screen {name}"), palette, cx)
+                }),
+            )
     }
 
     pub(crate) fn talk(

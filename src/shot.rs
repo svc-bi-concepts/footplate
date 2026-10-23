@@ -61,9 +61,10 @@ use crate::yard::Env;
 /// mails, with the bar of reactions to tap floating over one of them, the
 /// yardmaster's conversation with the notice a flows view that did not
 /// answer leaves under the mail, the yardmaster's conversation with
-/// the bead its chip names open in the drawer beside it, and the yard row
+/// the bead its chip names open in the drawer beside it, the yard row
 /// open on a hook delivery whose photo the yard holds, with a document it
-/// did not take under the photo.
+/// did not take under the photo, and the yardmaster's screen open over
+/// the window, as its Screen control opens it.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -143,6 +144,7 @@ pub const STATES: &[&str] = &[
     "notice",
     "drawer",
     "delivery",
+    "screen",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -153,6 +155,14 @@ const IMAGE_HASH: &str = "ca2421063b23c6ff5739c2000b22125bea109764fff6e643eccea0
 /// The overlay the `image` state opens with: the hash it shows, and its
 /// bytes for the line while they are not there yet.
 pub(crate) const IMAGE_OPEN: (&str, u64) = (IMAGE_HASH, IMAGE.len() as u64);
+
+/// The screen the `screen` state opens with: a real Claude Code pane,
+/// captured with the `SessionScreen` form, served as the call's answer.
+const SCREEN_SHOT: &str = include_str!("fixtures/screen-claude.ansi");
+
+/// The overlay the `screen` state opens with: the session it reads, one
+/// of the shot yard's crew.
+pub(crate) const SCREEN_OPEN: &str = "yardmaster";
 
 /// The pages in the `page` and `mail` states: the note's, which Open
 /// takes to the browser, and a mail's, which Open takes there too, with
@@ -735,7 +745,8 @@ fn populate(yard: &Yard, state: &str) {
         // opens on the panel, the board, the bead and the flow, the
         // switcher's, which the window opens with the switcher's list
         // standing, as it does for the one that shuts it by a click
-        // outside, and the notice's, whose flows view does not answer.
+        // outside, the notice's, whose flows view does not answer, and
+        // the screen's, whose session's screen opens over it.
         "yardmaster"
         | "far"
         | "settings"
@@ -758,7 +769,8 @@ fn populate(yard: &Yard, state: &str) {
         | "switcher-shut"
         | "about"
         | "about-unfetched"
-        | "notice" => {
+        | "notice"
+        | "screen" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
             // grouping and the separators.
@@ -801,6 +813,13 @@ fn populate(yard: &Yard, state: &str) {
             // stands under the mail.
             if state == "notice" {
                 yard.answer_nothing("Flows");
+            }
+            // The captured pane the screen shot opens with.
+            if state == "screen" {
+                yard.answer(
+                    "SessionScreen",
+                    &json!({"result": {"screen": SCREEN_SHOT}}).to_string(),
+                );
             }
         }
         "grants" => {
@@ -2587,6 +2606,15 @@ mod tests {
                     assert_eq!(loaded.grants[3].kinds["note"], "update", "{state}");
                     assert_eq!(loaded.grants_notice, None, "{state}");
                     assert!(!loaded.grants_too_old, "{state}");
+                }
+                "screen" => {
+                    // The captured pane the overlay opens with: the call
+                    // answers it, and it parses into styled lines.
+                    let screen = yard.client().session_screen(SCREEN_OPEN).unwrap();
+                    assert!(!screen.screen.is_empty(), "{state}");
+                    let parsed = crate::ansi::parse(&screen.screen);
+                    assert_eq!(parsed.lines.len(), 51, "{state}");
+                    assert!(parsed.width > 0, "{state}");
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }

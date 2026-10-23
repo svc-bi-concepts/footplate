@@ -18,6 +18,7 @@ use super::panel::{
     panel_quiet_head, panel_stage_name, panel_track_line, quiet_head, waits_head,
 };
 use super::rail::RailTip;
+use super::screen::screen_control;
 use super::words::{
     bead_words, flow_words, headcode_color, lamp_dot, remark_color, stage_group_words, stage_lamp,
     waiting_words, waits_for_seat, worker_words, working_tip, working_words,
@@ -58,13 +59,13 @@ impl Footplate {
         let mut body = self.list_body();
         let arrivals = model.arrivals_row();
         body = body.child(section_head("Timetable", arrivals.line.clone(), palette));
-        body = body.child(self.row(arrivals, Selected::Arrivals, palette, cx));
+        body = body.child(self.row(arrivals, Selected::Arrivals, None, palette, cx));
         for row in model.active_line_rows() {
             let sel = Selected::Line(row.name.clone());
-            body = body.child(self.row(row, sel, palette, cx));
+            body = body.child(self.row(row, sel, None, palette, cx));
         }
         if let Some(row) = model.no_line_row() {
-            body = body.child(self.row(row, Selected::NoLine, palette, cx));
+            body = body.child(self.row(row, Selected::NoLine, None, palette, cx));
         }
         let quiet = model.quiet_rows();
         if !quiet.is_empty() {
@@ -94,7 +95,7 @@ impl Footplate {
             if open {
                 for row in quiet {
                     let sel = Selected::Line(row.name.clone());
-                    body = body.child(self.row(row, sel, palette, cx));
+                    body = body.child(self.row(row, sel, None, palette, cx));
                 }
             }
         }
@@ -107,7 +108,9 @@ impl Footplate {
     /// tone. The rows stand flat in the served arrival order, a late
     /// mark as words among the remarks. A click opens the details.
     /// Hovering a worked row says which session works it, from the
-    /// bead's flows row, which is where the yard says so.
+    /// bead's flows row, which is where the yard says so. Where the
+    /// window is the operator's a worked row carries Screen, which opens
+    /// that session's screen over the window instead of the details.
     pub(crate) fn arrival_row(
         &self,
         model: &Model,
@@ -227,6 +230,9 @@ impl Footplate {
                     })
                     .child(remark),
             )
+            .children(model.screen_for_bead(&row.bead).map(|session| {
+                screen_control(session, format!("arrival screen {bead}"), palette, cx)
+            }))
     }
 
     /// What the arrivals pane's tooltip says, in one line.

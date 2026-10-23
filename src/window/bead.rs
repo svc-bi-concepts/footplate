@@ -17,6 +17,7 @@ use super::expanded_text_key;
 use super::metrics::{ATTACHMENT, IMAGE_HEIGHT, IMAGE_MARGIN, READING_WIDTH, drawer_fits};
 use super::panel::{day_break, reading_column, reading_row};
 use super::rail::{ImageOpen, OpenTip, Picture, Unsent, post};
+use super::screen::screen_control;
 use super::state::Piece;
 use super::ui::{keys_hint, send_held, small_button};
 use super::words::{ask_words, bead_back_name, bead_sub, remark_color, worker_words};
@@ -965,13 +966,14 @@ impl Footplate {
     /// Whether the bar of reactions floats over the mail `seq`: the
     /// pointer stands on it, the yard takes reactions, and no overlay
     /// stands over the mail. The bar paints after the whole window, so
-    /// without this it would float over the switcher, an image, the About
-    /// card or the cheatsheet too.
+    /// without this it would float over the switcher, an image, a
+    /// screen, the About card or the cheatsheet too.
     pub(crate) fn reacting(&self, seq: u64) -> bool {
         self.react_hover.is_some_and(|(at, _)| at == seq)
             && self.model.as_ref().is_some_and(|m| !m.react_too_old())
             && self.switching.is_none()
             && self.image_open.is_none()
+            && self.screen_open.is_none()
             && self.about.is_none()
             && !self.show_keys
     }
@@ -1561,10 +1563,13 @@ impl Footplate {
         let route = model.route_for(&detail.bead);
         let sub = bead_sub(&detail, route.as_ref());
         // Who works it, from the bead's flows row, which is where the
-        // yard says so; nothing where no session does.
+        // yard says so; nothing where no session does. Where the window
+        // is the operator's the line carries Screen, which opens that
+        // session's screen over the window.
         let worked = model
             .flow_bead(&detail.bead)
             .and_then(|(found, _)| worker_words(found).map(|(_, line)| line));
+        let screen = model.screen_for_bead(&detail.bead);
         let head = div()
             .p_3()
             .border_b_1()
@@ -1627,13 +1632,23 @@ impl Footplate {
             )
             .children(worked.map(|line| {
                 div()
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .debug_selector({
-                        let bead = detail.bead.clone();
-                        move || format!("bead worker {bead}")
-                    })
-                    .child(line)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .debug_selector({
+                                let bead = detail.bead.clone();
+                                move || format!("bead worker {bead}")
+                            })
+                            .child(line),
+                    )
+                    .children(screen.clone().map(|session| {
+                        screen_control(session, format!("bead screen {}", detail.bead), palette, cx)
+                    }))
             }))
             .children(
                 route

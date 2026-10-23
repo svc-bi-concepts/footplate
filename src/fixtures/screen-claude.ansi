@@ -1,0 +1,51 @@
+[0m[38;5;15m⏺ [0mvvy2 (yardtest runs kept away from the real yard) landed at
+  22:56, 8 minutes in the refinery, no follow-ups. The
+  refinery took 88nb next, ahead of the P3s. Inbox acked
+  through 76118. Load 10, three builders and the 8tjj review
+  still running, 15 approved behind the refinery.
+
+[0m[38;5;7m✻ Cooked for 8s · done 10:56 PM[0m
+
+[0m[38;5;7m[48;5;8m❯ [0m[38;5;15m[48;5;8myardr: 1 new in your inbox (session_idle). Run yardr inbox [0m[48;5;8m [0m
+[0m[48;5;8m  [0m[38;5;15m[48;5;8mto read them, and yardr inbox --ack <seq> through the last [0m[48;5;8m [0m
+[0m[48;5;8m  [0m[38;5;15m[48;5;8myou handled.[0m[48;5;8m                                                [0m
+ 
+  [0m[38;5;7mRan [0m[1m[38;5;7m2[0m[38;5;7m shell commands [0m
+
+[0m[38;5;15m⏺ [0mThe 918g builder is idle on purpose: its first probe push
+  (e9685bf) is out and both Windows runs are still compiling
+  on GitHub, with a monitor set to wake it. Local numbers
+  already show the wrapped test down from 24 s to under 4 s.
+  Inbox acked through 76150. Nothing to do until the runs
+  finish.
+
+[0m[38;5;7m✻ Worked for 11s · done 11:01 PM[0m
+
+[0m[38;5;7m[48;5;8m❯ [0m[38;5;15m[48;5;8myardr: 1 new in your inbox (closed). Run yardr inbox to [0m[48;5;8m    [0m
+[0m[48;5;8m  [0m[38;5;15m[48;5;8mread them, and yardr inbox --ack <seq> through the last you[0m[48;5;8m [0m
+[0m[48;5;8m  [0m[38;5;15m[48;5;8mhandled.[0m[48;5;8m                                                    [0m
+  
+  [0m[38;5;7mRan [0m[1m[38;5;7m4[0m[38;5;7m shell commands [0m
+
+[0m[38;5;15m⏺ [0mfootplate-x2yk (retry injection in the Windows window tests)
+  landed at 23:04, no follow-ups. Inbox acked through 76160.
+ 
+  Two moves since the last nudge:
+  - [0m[1m8tjj[0m (region bases for sources) passed codex review and
+    security review and is approved, behind the refinery.
+  - [0m[1m88nb[0m (persist crew trust answers) failed its landing in
+    seconds: a real rebase conflict in trust.go with gkyy,
+    which landed just before it. The flow sent it back to new
+    with the refinery's note to rebase and keep both intents.
+    It waits for a Muse slot behind 2t2m, 918g and 6ekv.
+
+  hp18 is landing now, 15 approved behind it. Load 34 with the
+  landing and three builders. footplate-m9j1 still waits for
+  918g to land.
+
+[0m[38;5;7m✻[0m [0m[38;5;7mCooked for 26s · done 11:04 PM[0m
+      [0m[38;5;11mUpdate available! Run: [0m[1m[38;5;11mbrew upgrade claude-code@latest[0m
+[0m[38;5;7m──────────────────────────────────────────────────────────────[0m
+❯ 
+[0m[38;5;7m──────────────────────────────────────────────────────────────[0m
+  [0m[38;5;9m⏵⏵ bypass permissions on[0m[38;5;7m (shift+tab to cycle) · ← 1 agent[0m

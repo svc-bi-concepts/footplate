@@ -39,6 +39,12 @@ socket2 = "0.6"
 minisign-verify = "0.3"
 sha2 = "0.10"
 flate2 = "1"
+# A session's screen arrives with the terminal's ANSI styling, which is
+# untrusted bytes (anything an agent printed, including malformed
+# escapes): parsed by vte (ansi.rs), the standard robust part, and not by
+# hand. Pinned exactly, as what it feeds must not shift under it. Its one
+# dependency is memchr, which is in the tree already, so it adds no weight.
+vte = "=0.15.0"
 # A dropped zip is unpacked on this machine into its files (draft.rs).
 # Pinned exactly: the crate's API moves between major releases. Read-only,
 # and deflate alone: what the usual tools write is stored or deflated, and

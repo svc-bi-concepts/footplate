@@ -16,6 +16,7 @@
 // there. Only that build allows it; the others still fail on dead code.
 #![cfg_attr(all(test, not(unix)), allow(dead_code, unused_imports))]
 
+mod ansi;
 mod api;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod dock;

@@ -648,6 +648,14 @@ pub struct Secret {
     pub line: String,
 }
 
+/// What `SessionScreen` answers: a running session's visible screen,
+/// with the terminal's ANSI styling.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SessionScreen {
+    #[serde(default)]
+    pub screen: String,
+}
+
 /// What `GiveSecret` answers: the names that were written and where, never
 /// a value.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -2613,6 +2621,18 @@ impl Client {
     /// to a caller on the yard's machine. No answer at all reads as none.
     pub fn source_grants(&self) -> Result<Vec<SourceGrant>> {
         self.list("SourceGrants", json!({}))
+    }
+
+    /// What a running session's pane shows: its visible screen with the
+    /// terminal's ANSI styling. `session` is a session id or a crew
+    /// member's name, the id first; a crew member's is its own session's
+    /// screen. The read is passive: it moves nothing in the pane. The
+    /// operator's to read: on the socket the operator's alone, and over
+    /// the listener a device of the operator's. A screen can show what an
+    /// agent printed, a secret among it: it is drawn, and never written
+    /// anywhere.
+    pub fn session_screen(&self, session: &str) -> Result<SessionScreen> {
+        self.answer("SessionScreen", json!({ "session": session }))
     }
 
     /// One bead whole: body, stage, labels, notes, its asks with their
@@ -5350,6 +5370,21 @@ mod tests {
         // No answer at all is none.
         yard.answer("SourceGrants", r#"{"result": null}"#);
         assert!(yard.client().source_grants().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_screen_asks_by_session_and_answers_the_styled_screen() {
+        let yard = Yard::start();
+        yard.answer(
+            "SessionScreen",
+            r#"{"result": {"screen": "\u001b[1mYardr yardmaster\u001b[0m\n❯ "}}"#,
+        );
+        let screen = yard.client().session_screen("yardmaster").unwrap();
+        assert_eq!(
+            yard.asked("SessionScreen"),
+            vec![json!({"session": "yardmaster"})]
+        );
+        assert_eq!(screen.screen, "\x1b[1mYardr yardmaster\x1b[0m\n❯ ");
     }
 
     #[test]

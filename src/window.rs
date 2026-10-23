@@ -37,6 +37,7 @@ mod keys;
 mod metrics;
 mod panel;
 mod rail;
+mod screen;
 mod state;
 mod ui;
 mod words;
@@ -48,6 +49,7 @@ use metrics::READING_WIDTH;
 // The window's floor, which main.rs sets as the window's minimum.
 pub(crate) use metrics::WINDOW_MIN;
 use rail::{ImageOpen, Picture, ViewUp};
+use screen::ScreenOpen;
 use state::{About, Adding, AgentsBusy, Anchor, Away, Held, Piece, Place, SwitchBusy, SwitchFor};
 use ui::small_button;
 use words::count_words;
@@ -337,6 +339,13 @@ pub struct Footplate {
     /// on a thumbnail opens it, and Esc, a click outside or its × shuts
     /// it again.
     image_open: Option<ImageOpen>,
+    /// The session's screen shown over the window, while one is: a
+    /// Screen control opens it, and Esc, a click outside or its × shuts
+    /// it again.
+    screen_open: Option<ScreenOpen>,
+    /// The newest read of a session's screen, so a slower earlier answer
+    /// cannot replace a refresh.
+    screen_read: u64,
     /// Whether the web view answers at the setting's address: what a
     /// note's page is drawn with.
     view_up: ViewUp,
@@ -808,6 +817,8 @@ impl Footplate {
             selection,
             images: HashMap::new(),
             image_open: None,
+            screen_open: None,
+            screen_read: 0,
             view_up: ViewUp::Unknown,
             run_up: ViewUp::Unknown,
             rows_shown: Cell::new(false),
@@ -986,6 +997,8 @@ impl Render for Footplate {
             // Nor are they for the window with an image over it: the
             // window holds the keys until it shuts.
             _ if self.image_open.is_some() => CONTEXT,
+            // Nor with a session's screen over it, as above.
+            _ if self.screen_open.is_some() => CONTEXT,
             // Nor are they for the first run, whose fields take names.
             _ if self.first_run.is_some() => CONTEXT,
             // Nor for the question before stopping, which stands where
@@ -1157,6 +1170,12 @@ impl Render for Footplate {
         );
         let shown = match &self.image_open {
             Some(open) => shown.child(self.image_layer(open, window, cx)),
+            None => shown,
+        };
+        // A session's screen over the image, where one is: Esc shuts
+        // the top one first.
+        let shown = match &self.screen_open {
+            Some(open) => shown.child(self.screen_layer(open, window, cx)),
             None => shown,
         };
         // The About card over that, and the cheatsheet over everything
@@ -1676,6 +1695,29 @@ mod tests {
     fn overlay_image(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
         view.read_with(cx, |v, _| {
             v.image_open.as_ref().map(|open| open.hash.clone())
+        })
+    }
+
+    /// The session of the screen open over the window, if one is: as
+    /// above, what shuts is said here.
+    fn overlay_screen(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Option<String> {
+        view.read_with(cx, |v, _| {
+            v.screen_open.as_ref().map(|open| open.session.clone())
+        })
+    }
+
+    /// What the window has of the open screen: `asked`, the parsed
+    /// lines' count, the line that says why there is none, or nothing.
+    fn screen_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| {
+            match v.screen_open.as_ref().map(|open| &open.shown) {
+                Some(super::screen::Shown::Asked) => "asked".to_string(),
+                Some(super::screen::Shown::Here(screen)) => {
+                    format!("{} lines", screen.lines.len())
+                }
+                Some(super::screen::Shown::Not(why)) => why.clone(),
+                None => String::new(),
+            }
         })
     }
 
@@ -6760,6 +6802,167 @@ yardr.dev
         assert_eq!(overlay_image(&view, cx), None);
         assert!(line_focused(&view, cx));
         assert_eq!(yard.blobs_asked().len(), 2);
+    }
+
+    #[gpui::test]
+    fn a_crew_member_s_screen_opens_over_the_window(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "SessionScreen",
+            &json!({"result": {"screen": "\u{1b}[1myardmaster\u{1b}[0m\n❯ "}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The operator's window offers the crew's screens on their rows.
+        assert!(drawn(cx, "row screen yardmaster"));
+        assert!(drawn(cx, "row screen assembly"));
+        assert!(!drawn(cx, "screen overlay"));
+        // A click opens it over the window: the overlay, the card with
+        // the session's name, the refresh and the ×. The row's
+        // conversation is not opened instead.
+        click_on(cx, "row screen assembly");
+        wait(cx, "assembly's screen", |cx| {
+            screen_of(&view, cx) == "2 lines"
+        });
+        assert_eq!(
+            yard.asked("SessionScreen"),
+            [json!({"session": "assembly"})]
+        );
+        assert_eq!(overlay_screen(&view, cx), Some("assembly".to_string()));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Conversation("yardmaster".into()))
+            );
+        });
+        assert!(drawn(cx, "screen overlay"));
+        assert!(drawn(cx, "screen card assembly"));
+        assert!(drawn(cx, "screen head assembly"));
+        assert!(drawn(cx, "screen body assembly"));
+        assert!(drawn(cx, "screen refresh"));
+        assert!(drawn(cx, "screen close"));
+        // While it shows, the window holds the keys.
+        assert!(!line_focused(&view, cx));
+        // The refresh reads again.
+        let first_request = view.read_with(cx, |v, _| v.screen_open.as_ref().unwrap().request);
+        click_on(cx, "screen refresh");
+        wait(cx, "the screen read again", |_| {
+            yard.asked("SessionScreen").len() == 2
+        });
+        let refreshed_request = view.read_with(cx, |v, _| v.screen_open.as_ref().unwrap().request);
+        assert!(refreshed_request > first_request);
+        wait(cx, "assembly's screen again", |cx| {
+            screen_of(&view, cx) == "2 lines"
+        });
+        // Esc shuts it, and the line has the keys again.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(overlay_screen(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        // A click outside shuts it too.
+        click_on(cx, "row screen assembly");
+        wait(cx, "assembly's screen", |cx| {
+            screen_of(&view, cx) == "2 lines"
+        });
+        let over = bounds_of(cx, "screen overlay");
+        let outside = gpui::point(over.origin.x + px(4.), over.origin.y + px(4.));
+        cx.simulate_click(outside, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(overlay_screen(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        // And the × in the corner. A yard that refuses the read says so
+        // in the card, in its own words.
+        yard.answer(
+            "SessionScreen",
+            r#"{"error": {"code": "unknown-method", "message": "no such method: SessionScreen"}}"#,
+        );
+        click_on(cx, "row screen assembly");
+        wait(cx, "the refusal", |cx| {
+            screen_of(&view, cx).starts_with("the screen could not be read: ")
+        });
+        assert!(drawn(cx, "screen body assembly"));
+        click_on(cx, "screen close");
+        cx.run_until_parked();
+        assert_eq!(overlay_screen(&view, cx), None);
+        assert!(line_focused(&view, cx));
+    }
+
+    #[gpui::test]
+    fn a_worked_bead_s_screen_opens_from_its_rows(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Arrivals",
+            &json!({"result": {"rows": [
+                {"bead": "yd-zulu", "title": "Zulu's late turn",
+                 "platform": "new", "line": "yardr", "expected": "5h–8h",
+                 "remark": "", "tone": "none"},
+            ], "platforms": ["new"]}})
+            .to_string(),
+        );
+        yard.answer(
+            "Flows",
+            &json!({"result": {"travelling": 1, "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 1, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        {"stage": "new", "group": "muse-builders", "human": false,
+                         "lamp": "turn", "beads": [
+                            {"bead": "yd-zulu", "title": "Zulu's late turn",
+                             "expected": "5h–8h", "remark": "", "tone": "none",
+                             "working": true, "worker": "herdr yd-zulu-new"}]},
+                    ]},
+                ], "elsewhere": []},
+            ], "unassigned": []}})
+            .to_string(),
+        );
+        yard.answer("SessionScreen", r#"{"result": {"screen": "hi"}}"#);
+        yard.answer("Bead", &bead_zulu());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        to_departures(cx);
+        wait(cx, "the arrivals", |cx| drawn(cx, "arrival yd-zulu"));
+        // The worked row carries Screen, which opens the session's
+        // screen instead of the details.
+        assert!(drawn(cx, "arrival screen yd-zulu"));
+        click_on(cx, "arrival screen yd-zulu");
+        wait(cx, "the session's screen", |cx| {
+            overlay_screen(&view, cx) == Some("yd-zulu-new".into())
+        });
+        assert_eq!(
+            yard.asked("SessionScreen"),
+            [json!({"session": "yd-zulu-new"})]
+        );
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().selected(),
+                Some(&Selected::Arrivals)
+            );
+        });
+        // Esc shuts it; the bead's head carries Screen too.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(overlay_screen(&view, cx), None);
+        click_on(cx, "arrival yd-zulu");
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "yd-zulu"));
+        assert!(drawn(cx, "bead worker yd-zulu"));
+        assert!(drawn(cx, "bead screen yd-zulu"));
+        click_on(cx, "bead screen yd-zulu");
+        wait(cx, "the session's screen again", |cx| {
+            overlay_screen(&view, cx) == Some("yd-zulu-new".into())
+        });
+        assert_eq!(yard.asked("SessionScreen").len(), 2);
+    }
+
+    #[gpui::test]
+    fn no_screen_opens_where_the_window_is_not_the_operator_s(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The yard's operator is mckean, and the window runs as jo.
+        yard.answer("Settings", r#"{"result": {"operator": "mckean"}}"#);
+        let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        assert!(!drawn(cx, "row screen yardmaster"));
+        assert!(!drawn(cx, "row screen assembly"));
     }
 
     #[gpui::test]

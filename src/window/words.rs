@@ -127,7 +127,7 @@ pub(crate) fn worker_words(bead: &FlowBead) -> Option<(String, String)> {
     if bead.worker.is_empty() {
         return None;
     }
-    let session = bead.worker.strip_prefix("herdr ").unwrap_or(&bead.worker);
+    let session = model::worker_session(&bead.worker);
     let rest = [bead.group.as_str(), bead.kind.as_str(), bead.model.as_str()]
         .into_iter()
         .filter(|part| !part.is_empty())

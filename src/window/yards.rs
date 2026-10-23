@@ -101,8 +101,9 @@ impl Footplate {
     /// stands under it. A press let through would reach the chip, whose
     /// click toggles: the list would open again as the press shut it. It
     /// would also reach the window's own press, which takes the focus off
-    /// the line. The cheatsheet, the About card and an open image stand
-    /// over the list, and a press on one of them is theirs.
+    /// the line. The cheatsheet, the About card, an open image and an
+    /// open screen stand over the list, and a press on one of them is
+    /// theirs.
     pub(crate) fn press_outside_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The listener is the frame's, drawn while the list stood: a press
         // that comes before the next frame finds the list shut, and must
@@ -111,6 +112,7 @@ impl Footplate {
             || self.show_keys
             || self.about.is_some()
             || self.image_open.is_some()
+            || self.screen_open.is_some()
         {
             return;
         }

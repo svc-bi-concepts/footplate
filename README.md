@@ -451,9 +451,11 @@ mail), `reactions-zoom`
 (that bar with the pointer on one emoji), `notice` (the
 conversation with the notice a flows view that did not answer
 leaves under the mail), `drawer` (the conversation with the
-bead its chip names open in the drawer beside it) and `delivery`
+bead its chip names open in the drawer beside it), `delivery`
 (the yard row open on a hook delivery whose photo the yard holds,
-with a document it did not take under the photo).
+with a document it did not take under the photo) and `screen`
+(the yardmaster's screen open over the window, as its Screen
+control opens it).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
