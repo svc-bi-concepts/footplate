@@ -1,0 +1,106 @@
+# THROWAWAY probe for footplate-m9j1 review follow-up: per-open wait
+# turns + elapsed for the five control tests, alone and single-threaded,
+# at 5ms (this branch as-is) and 3ms (the wait line patched on the runner).
+# Both jobs check out this branch, so the base is the same either way; the
+# wait log (FOOTPLATE_WAIT_LOG) is the branch's own. Read with gh, removed
+# before the bead is done. One build per job; each step runs one test twice.
+name: probe-m9j1
+
+on:
+  workflow_dispatch:
+  # Dispatch needs the file on main, which a throwaway never reaches, so
+  # the push itself runs it; the branch scope keeps it off every push but
+  # this bead's.
+  push:
+    branches: [yard/footplate-m9j1]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FOOTPLATE_WAIT_LOG: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  before:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Sleep value
+        run: |
+          sed -n '1510p' src/window.rs
+          [ "$(grep -c 'from_millis(3)' src/window.rs)" = 0 ]
+
+      - name: control
+        run: |
+          for i in 1 2; do echo "== before control trial $i =="; cargo test --locked window::tests::without_decisions_the_chat_groups_stand -- --exact --test-threads=1 --nocapture; done
+
+      - name: wrapped
+        run: |
+          for i in 1 2; do echo "== before wrapped trial $i =="; cargo test --locked window::tests::a_wrapped_thread_overlaps_neither_on_open_nor_after_an_older_page -- --exact --test-threads=1 --nocapture; done
+
+      - name: long
+        run: |
+          for i in 1 2; do echo "== before long trial $i =="; cargo test --locked window::tests::a_long_conversation_loads_its_newest_page_and_older_ones_at_its_top -- --exact --test-threads=1 --nocapture; done
+
+      - name: top
+        run: |
+          for i in 1 2; do echo "== before top trial $i =="; cargo test --locked window::tests::the_top_of_a_conversation_says_where_it_starts_and_asks_no_more -- --exact --test-threads=1 --nocapture; done
+
+      - name: pagekeys
+        run: |
+          for i in 1 2; do echo "== before pagekeys trial $i =="; cargo test --locked window::tests::page_keys_move_the_conversation_by_a_page_and_stop_at_its_ends -- --exact --test-threads=1 --nocapture; done
+
+  after:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Sleep value
+        run: |
+          sed -i '1510s/from_millis(5)/from_millis(3)/' src/window.rs
+          sed -n '1510p' src/window.rs
+          [ "$(grep -c 'from_millis(3)' src/window.rs)" = 1 ]
+          sed -n '7699p' src/window.rs
+
+      - name: control
+        run: |
+          for i in 1 2; do echo "== after control trial $i =="; cargo test --locked window::tests::without_decisions_the_chat_groups_stand -- --exact --test-threads=1 --nocapture; done
+
+      - name: wrapped
+        run: |
+          for i in 1 2; do echo "== after wrapped trial $i =="; cargo test --locked window::tests::a_wrapped_thread_overlaps_neither_on_open_nor_after_an_older_page -- --exact --test-threads=1 --nocapture; done
+
+      - name: long
+        run: |
+          for i in 1 2; do echo "== after long trial $i =="; cargo test --locked window::tests::a_long_conversation_loads_its_newest_page_and_older_ones_at_its_top -- --exact --test-threads=1 --nocapture; done
+
+      - name: top
+        run: |
+          for i in 1 2; do echo "== after top trial $i =="; cargo test --locked window::tests::the_top_of_a_conversation_says_where_it_starts_and_asks_no_more -- --exact --test-threads=1 --nocapture; done
+
+      - name: pagekeys
+        run: |
+          for i in 1 2; do echo "== after pagekeys trial $i =="; cargo test --locked window::tests::page_keys_move_the_conversation_by_a_page_and_stop_at_its_ends -- --exact --test-threads=1 --nocapture; done
