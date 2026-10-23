@@ -1,0 +1,59 @@
+# THROWAWAY (footplate-918g): the four lightened window tests, each
+# alone on a Windows runner, with wall time per trial. Removed by the
+# commit after the run.
+name: probe-918g
+
+on:
+  push:
+    branches: ["yard/footplate-918g"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-918g-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  window-times:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Build the tests
+        run: cargo test --locked --no-run
+
+      - name: Four tests alone
+        run: |
+          BIN=$(ls -t target/debug/deps/footplate-*.exe | head -1)
+          echo "commit: $(git rev-parse --short HEAD)"
+          for t in \
+            window::tests::a_wrapped_thread_overlaps_neither_on_open_nor_after_an_older_page \
+            window::tests::a_long_conversation_loads_its_newest_page_and_older_ones_at_its_top \
+            window::tests::the_top_of_a_conversation_says_where_it_starts_and_asks_no_more \
+            window::tests::page_keys_move_the_conversation_by_a_page_and_stop_at_its_ends \
+          ; do
+            for n in 1 2; do
+              echo "=== $t trial $n ==="
+              s=$(date +%s.%N)
+              "$BIN" --exact "$t" --test-threads=1 2>&1 | grep -E "^test |test result"
+              e=$(date +%s.%N)
+              awk -v s="$s" -v e="$e" 'BEGIN { printf "WALL %.2f s\n", e - s }'
+            done
+          done
