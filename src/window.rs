@@ -1556,13 +1556,16 @@ mod tests {
         );
         // The login name is no user of the yard; its operator is. Only a
         // client of the socket asks after the login name: at an address the
-        // token says who the window is for, and this answer would fall on
-        // the first read of that user, which fails, and is made again after
-        // the follower's pause.
+        // token says who the window is for. The refusal is the login name's
+        // alone: a read of any other user is answered as ever, so a window
+        // for one opens on its first load instead of after the follower's
+        // pause, and a window for the login name still falls back to the
+        // operator.
         if !yard.at_listener() {
-            yard.answer_once_status(
+            yard.answer_for(
                 "GetUser",
-                200,
+                "name",
+                "mac-login",
                 r#"{"error": {"code": "not-found", "message": "user mac-login: not found"}}"#,
             );
         }
@@ -2218,6 +2221,10 @@ mod tests {
         wait(cx, "the mail acknowledged", |_| {
             yard.asked("AckUserInbox") == [json!({"name": "jo", "through": 12})]
         });
+        assert_eq!(
+            yard.asked("GetUser"),
+            [json!({"name": "mac-login"}), json!({"name": "jo"})]
+        );
         assert_eq!(
             yard.asked("Conversation")[0],
             json!({"a": "jo", "b": "yardmaster", "limit": 50})
@@ -10366,6 +10373,9 @@ yardr.dev
         wait(cx, "the yard", |cx| {
             view.read_with(cx, |v, _| v.model.is_some())
         });
+        // The window is for jo, who the yard has: one read, on the first
+        // load, and no failed load before it.
+        assert_eq!(yard.asked("GetUser"), [json!({"name": "jo"})]);
         assert!(!drawn(cx, "section Decisions"));
         assert!(!drawn(cx, "section Decisions count"));
         assert!(drawn(cx, "group This yard's crew"));
