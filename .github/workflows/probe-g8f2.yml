@@ -1,0 +1,94 @@
+# THROWAWAY (footplate-g8f2): step times of the api test on a Windows
+# runner, and what a connection to a closed port of the machine costs
+# there. Removed by the commit after the run.
+name: probe-g8f2
+
+on:
+  push:
+    branches: ["yard/footplate-g8f2"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # No build: a connect to a port nothing listens on, and to one that does.
+  ports:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Machine
+        run: |
+          echo "NUMBER_OF_PROCESSORS=$NUMBER_OF_PROCESSORS"
+          python --version
+      - name: Connect
+        run: |
+          python - <<'EOF'
+          import socket, time
+
+          def closed_port():
+              s = socket.socket()
+              s.bind(("127.0.0.1", 0))
+              port = s.getsockname()[1]
+              s.close()
+              return port
+
+          def try_connect(port, timeout):
+              c = socket.socket()
+              c.settimeout(timeout)
+              t = time.perf_counter()
+              try:
+                  c.connect(("127.0.0.1", port))
+                  r = "connected"
+              except OSError as e:
+                  r = f"{type(e).__name__}"
+              ms = (time.perf_counter() - t) * 1000
+              c.close()
+              return r, ms
+
+          for n in range(5):
+              r, ms = try_connect(closed_port(), 30)
+              print(f"closed port, timeout 30 s, trial {n}: {r} after {ms:.0f} ms")
+          listener = socket.socket()
+          listener.bind(("127.0.0.1", 0))
+          listener.listen(5)
+          for n in range(3):
+              r, ms = try_connect(listener.getsockname()[1], 30)
+              print(f"listening port, trial {n}: {r} after {ms:.0f} ms")
+          EOF
+
+  # The instrumented api test, alone, with its step marks.
+  api-steps:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Build the tests
+        run: cargo test --locked --no-run
+
+      - name: Api test alone
+        run: |
+          BIN=$(ls -t target/debug/deps/footplate-*.exe | head -1)
+          echo "commit: $(git rev-parse --short HEAD)"
+          for n in 1 2 3; do
+            echo "=== trial $n ==="
+            s=$(date +%s.%N)
+            "$BIN" --exact "api::tests::a_call_an_image_and_the_stream_by_the_socket_and_at_an_address" --test-threads=1 --nocapture 2>&1 | grep -E "g8f2|^test |test result"
+            e=$(date +%s.%N)
+            awk -v s="$s" -v e="$e" 'BEGIN { printf "WALL %.2f s\n", e - s }'
+          done
