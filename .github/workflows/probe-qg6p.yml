@@ -1,0 +1,122 @@
+# THROWAWAY (footplate-qg6p): what a window test costs on a Windows runner,
+# alone, before and after the change; and what a connection to a closed
+# port of the machine costs there. Removed by the commit after the run.
+name: probe-qg6p
+
+on:
+  push:
+    branches: ["yard/footplate-qg6p"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # No build: a connect to a port nothing listens on, and to one that does.
+  ports:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Machine
+        run: |
+          echo "NUMBER_OF_PROCESSORS=$NUMBER_OF_PROCESSORS"
+          powershell -NoProfile -Command "Get-CimInstance Win32_Processor | Format-List Name,NumberOfCores,NumberOfLogicalProcessors"
+          python --version
+      - name: Connect
+        run: |
+          python - <<'EOF'
+          import socket, time
+
+          def closed_port():
+              s = socket.socket()
+              s.bind(("127.0.0.1", 0))
+              port = s.getsockname()[1]
+              s.close()
+              return port
+
+          def try_connect(port, timeout):
+              c = socket.socket()
+              c.settimeout(timeout)
+              t = time.perf_counter()
+              try:
+                  c.connect(("127.0.0.1", port))
+                  r = "connected"
+              except OSError as e:
+                  r = f"{type(e).__name__}"
+              ms = (time.perf_counter() - t) * 1000
+              c.close()
+              return r, ms
+
+          for n in range(5):
+              r, ms = try_connect(closed_port(), 30)
+              print(f"closed port, timeout 30 s, trial {n}: {r} after {ms:.0f} ms")
+          for n in range(3):
+              r, ms = try_connect(closed_port(), 0.25)
+              print(f"closed port, timeout 0.25 s, trial {n}: {r} after {ms:.0f} ms")
+          listener = socket.socket()
+          listener.bind(("127.0.0.1", 0))
+          listener.listen(5)
+          for n in range(3):
+              r, ms = try_connect(listener.getsockname()[1], 30)
+              print(f"listening port, trial {n}: {r} after {ms:.0f} ms")
+          EOF
+
+  # The same tests, alone, on the code before the change and after it.
+  single:
+    name: single ${{ matrix.which }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { which: before, ref: fa443bf0a594bfe0edd016b57df21ba8f48969e6 }
+          - { which: after, ref: "" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Build the tests
+        run: cargo test --locked --no-run
+
+      - name: Tests alone
+        run: |
+          BIN=$(ls -t target/debug/deps/footplate-*.exe | head -1)
+          echo "commit: $(git rev-parse --short HEAD)"
+          now() { date +%s.%N; }
+          one() {
+            s=$(now)
+            "$BIN" --exact "window::tests::$1" --test-threads=1 2>&1 | grep -E "^test |test result"
+            e=$(now)
+            awk -v s="$s" -v e="$e" -v n="$1" 'BEGIN { printf "WALL %.2f s  %s\n", e - s, n }'
+          }
+          # no window at all: what the process and the harness cost
+          one the_answer_button_names_the_option_it_answers
+          # a window opened with Footplate::new on a yard of the fake: the usual view is probed
+          for n in 1 2 3; do one a_long_conversation_name_ends_before_the_unread_badge_with_a_gap; done
+          one shift_x_marks_every_notice_read
+          # a window opened on a far entry, as the settings list it: nothing is probed
+          for n in 1 2 3; do one a_secret_card_marked_no_secret_starts_shown; done
+          # a refused connection to a dead yard, in the product's own path
+          for n in 1 2; do one the_environment_s_yard_away_has_no_switcher; done
+
+      - name: Every test, with its time
+        if: matrix.which == 'after'
+        run: |
+          BIN=$(ls -t target/debug/deps/footplate-*.exe | head -1)
+          RUSTC_BOOTSTRAP=1 "$BIN" -Z unstable-options --report-time 2>&1 | tail -n +1
