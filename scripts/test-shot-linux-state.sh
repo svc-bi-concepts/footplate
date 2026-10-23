@@ -201,8 +201,9 @@ esac
 
 # The states that write their own settings (src/shot.rs refuses a file that
 # stands, with exit 2) are given none, with a look asked for or not: the
-# switcher, which has long been so, and now away and signedout.
-for st in switcher away signedout; do
+# switcher and the state that shuts it, which have long been so, and now
+# away and signedout.
+for st in switcher switcher-shut away signedout; do
     got=$(settings_given "$st" dark "")
     [ -z "$got" ] || fail "$st at a look was given a settings file: $got"
     got=$(settings_given "$st" "" "")

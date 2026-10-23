@@ -96,6 +96,27 @@ impl Footplate {
         self.switching = Some(open.unwrap_or(0));
         window.focus(&self.focus.clone());
     }
+    /// A press outside the switcher's list shuts it by the path esc takes,
+    /// so the focus lands where esc lands it, and is no press on what
+    /// stands under it. A press let through would reach the chip, whose
+    /// click toggles: the list would open again as the press shut it. It
+    /// would also reach the window's own press, which takes the focus off
+    /// the line. The cheatsheet, the About card and an open image stand
+    /// over the list, and a press on one of them is theirs.
+    pub(crate) fn press_outside_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The listener is the frame's, drawn while the list stood: a press
+        // that comes before the next frame finds the list shut, and must
+        // not open it again.
+        if self.switching.is_none()
+            || self.show_keys
+            || self.about.is_some()
+            || self.image_open.is_some()
+        {
+            return;
+        }
+        cx.stop_propagation();
+        self.toggle_switcher(window, cx);
+    }
     /// Opens the yard at place `n` of the settings' list, counted from
     /// nought: the switcher's row, and its key from anywhere.
     pub(crate) fn switch_nth(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1655,8 +1676,9 @@ impl Footplate {
     /// its address, dimmer. A yard that is not reached carries no count:
     /// the second line says why in red, with the button that rights it
     /// beside it. A click opens a yard, as Enter does on the row the
-    /// arrows are on; the footer's key opens the settings' yards. It
-    /// stands over whatever the window shows.
+    /// arrows are on; the footer's key opens the settings' yards. A press
+    /// outside it shuts it, as esc does. It stands over whatever the
+    /// window shows.
     pub(crate) fn switcher(
         &self,
         at: usize,
@@ -1912,6 +1934,22 @@ impl Footplate {
         // Level with the chip, which stands below the title bar's room
         // where the content reaches up into it.
         let top = titlebar::inset(self.means.titlebar.is_some(), window.is_fullscreen());
+        // The switcher-shut shot shuts the list as a press outside it
+        // does, a breath after it was drawn, for the shot script to see
+        // it stand first. A debug build's alone, as the states are.
+        #[cfg(all(debug_assertions, unix))]
+        if crate::shot::shuts_once() {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    this.press_outside_switcher(window, cx)
+                })
+                .ok();
+            })
+            .detach();
+        }
         div()
             .absolute()
             .left(px(RAIL + 8.))
@@ -1928,6 +1966,9 @@ impl Footplate {
             .border_1()
             .border_color(palette.line)
             .bg(palette.ground)
+            .on_mouse_down_out(
+                cx.listener(|this, _, window, cx| this.press_outside_switcher(window, cx)),
+            )
             .child(list)
     }
     /// The away screen's first line where the yard was reached before and

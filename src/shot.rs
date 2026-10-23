@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Duration, Local};
 use serde_json::json;
@@ -51,8 +52,9 @@ use crate::yard::Env;
 /// secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
-/// of them away, the yardmaster's conversation naming an ask and two
-/// bead ids, the cheatsheet open over an open card, the About card open
+/// of them away, that list shut a second after it drew, as a click
+/// outside it shuts it, the yardmaster's conversation naming an ask and
+/// two bead ids, the cheatsheet open over an open card, the About card open
 /// over the yardmaster's conversation, with the yardr the shot script
 /// keeps and with none kept, and the
 /// yardmaster's conversation with the parties' reactions under three
@@ -71,9 +73,9 @@ use crate::yard::Env;
 /// throwaway config, with a session the edge no longer knows; the away
 /// yard from settings the state writes itself, against a throwaway
 /// config, with a device the yard no longer knows; the
-/// switcher's four yards from settings the state writes itself, with
-/// adventuretime open, this machine second, plantime live at its listener,
-/// and droplet away; the
+/// switcher's four yards, in both its states, from settings the state
+/// writes itself, with adventuretime open, this machine second, plantime
+/// live at its listener, and droplet away; the
 /// settings open over a running yard, each state on its section;
 /// the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
@@ -128,6 +130,7 @@ pub const STATES: &[&str] = &[
     "secret-shown",
     "secret-refused",
     "switcher",
+    "switcher-shut",
     "refs",
     "decisions",
     "decisions-filtered",
@@ -170,9 +173,9 @@ pub(super) struct ShotYard {
     /// the window opens the hosted yard through the edge, whose session
     /// is none the edge knows.
     edge: Option<(Yard, Router)>,
-    /// The switcher's other live yards, for `switcher` alone: adventuretime
-    /// and plantime at their listeners, held from the start beside this
-    /// machine.
+    /// The switcher's other live yards, for `switcher` and `switcher-shut`
+    /// alone: adventuretime and plantime at their listeners, held from the
+    /// start beside this machine.
     extra: Vec<std::sync::Arc<Yard>>,
 }
 
@@ -291,7 +294,7 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         write_away_settings(far.address());
         shot.extra = vec![std::sync::Arc::new(far)];
     }
-    if state == "switcher" {
+    if state == "switcher" || state == "switcher-shut" {
         // The switcher's other live yards, held from the start: adventuretime
         // with two mails and one decision, plantime with twelve mails, so
         // the counts stand one and two figures in their column.
@@ -467,7 +470,7 @@ fn keep_away_settings(file: &Path, address: &str, look: crate::theme::Look) {
         });
 }
 
-/// The settings the `switcher` shot opens: four yards in the screenshot's
+/// The settings the switcher shots open: four yards in the screenshot's
 /// order, adventuretime at its listener and open, this machine at the
 /// shot's socket, droplet away, then plantime at its listener. Droplet
 /// keeps no token, so it is never reached: the window asks nothing of the
@@ -731,7 +734,8 @@ fn populate(yard: &Yard, state: &str) {
         // past the edge, the timetable states', which the window
         // opens on the panel, the board, the bead and the flow, the
         // switcher's, which the window opens with the switcher's list
-        // standing, and the notice's, whose flows view does not answer.
+        // standing, as it does for the one that shuts it by a click
+        // outside, and the notice's, whose flows view does not answer.
         "yardmaster"
         | "far"
         | "settings"
@@ -751,6 +755,7 @@ fn populate(yard: &Yard, state: &str) {
         | "flow"
         | "old-lines"
         | "switcher"
+        | "switcher-shut"
         | "about"
         | "about-unfetched"
         | "notice" => {
@@ -1961,6 +1966,18 @@ fn decided_history() -> serde_json::Value {
     json!(decided)
 }
 
+/// Whether the list just drawn is the one the `switcher-shut` state shuts:
+/// true for the first call in that state, false after it and in every
+/// other. The state opens as `switcher` does, and the window then calls
+/// what the list's listener calls for a press outside it. The shot scripts
+/// drive no pointer, and gpui hands a window a mouse event only from its
+/// platform, so the press itself is the window test's.
+pub(crate) fn shuts_once() -> bool {
+    static SHUT: AtomicBool = AtomicBool::new(false);
+    std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("switcher-shut")
+        && !SHUT.swap(true, Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2029,6 +2046,7 @@ mod tests {
                 | "signedout"
                 | "away"
                 | "switcher"
+                | "switcher-shut"
                 | "about"
                 | "about-unfetched" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

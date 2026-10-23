@@ -11278,6 +11278,17 @@ yardr.dev
         });
         assert!(drawn(cx, "keys row +"));
         assert_eq!(view.read_with(cx, |v, _| v.keys_view()), KeysView::Switcher);
+        // It stands over the list: a click on it, outside the list, shuts
+        // the cheatsheet and not the list, as esc does.
+        let keys = bounds_of(cx, "keys");
+        cx.simulate_click(
+            gpui::point(keys.right() - px(4.), keys.bottom() - px(4.)),
+            gpui::Modifiers::default(),
+        );
+        assert!(!view.read_with(cx, |v, _| v.show_keys));
+        assert!(switching(&view, cx).is_some());
+        cx.simulate_keystrokes("escape");
+        assert_eq!(switching(&view, cx), None);
     }
 
     /// The About card names this footplate and the yardr it keeps, which
@@ -16764,6 +16775,69 @@ yardr.dev
         cx.simulate_keystrokes("escape");
         assert_eq!(switching(&view, cx), None);
         assert_eq!(texts(&view, cx), ["From the second home."]);
+        // Esc gave the keys back to the line. A press outside the list
+        // shuts it by the same path, the line has the keys as esc left
+        // them, and the release that follows is no click on anything.
+        assert!(line_focused(&view, cx));
+        click_on(cx, "yard chip");
+        assert_eq!(switching(&view, cx), Some(1));
+        assert!(!line_focused(&view, cx));
+        let popover = bounds_of(cx, "switcher");
+        let outside = gpui::point(popover.right() + px(24.), popover.top() + px(100.));
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_down(outside, MouseButton::Left, none);
+        assert_eq!(switching(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        cx.simulate_mouse_up(outside, MouseButton::Left, none);
+        assert_eq!(switching(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        // That press is the list's alone: the gear under it opens no
+        // settings.
+        click_on(cx, "yard chip");
+        assert_eq!(switching(&view, cx), Some(1));
+        click_on(cx, "settings");
+        assert_eq!(switching(&view, cx), None);
+        assert!(!settings_open(&view, cx));
+        assert!(line_focused(&view, cx));
+        // So is a press on the chip, which is outside the list too: it
+        // shuts the list, and its click does not open it again.
+        click_on(cx, "yard chip");
+        assert_eq!(switching(&view, cx), Some(1));
+        click_on(cx, "yard chip");
+        assert_eq!(switching(&view, cx), None);
+        assert!(line_focused(&view, cx));
+        // A press inside the list, off its rows, shuts nothing.
+        click_on(cx, "yard chip");
+        let popover = bounds_of(cx, "switcher");
+        cx.simulate_click(
+            gpui::point(popover.left() + px(2.), popover.top() + px(40.)),
+            none,
+        );
+        assert_eq!(switching(&view, cx), Some(1));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(switching(&view, cx), None);
+        // Where the settings stand there is no line to give the keys back
+        // to: the window has them, after a press outside as after esc.
+        click_on(cx, "settings");
+        assert!(settings_open(&view, cx));
+        let held = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).focus.is_focused(window))
+        };
+        cx.simulate_keystrokes("secondary-y escape");
+        assert_eq!(switching(&view, cx), None);
+        let by_esc = held(&view, cx);
+        assert!(by_esc && !line_focused(&view, cx));
+        cx.simulate_keystrokes("secondary-y");
+        assert_eq!(switching(&view, cx), Some(1));
+        let popover = bounds_of(cx, "switcher");
+        let outside = gpui::point(popover.right() + px(24.), popover.top() + px(100.));
+        cx.simulate_mouse_down(outside, MouseButton::Left, none);
+        cx.simulate_mouse_up(outside, MouseButton::Left, none);
+        assert_eq!(switching(&view, cx), None);
+        assert!(settings_open(&view, cx));
+        assert_eq!(held(&view, cx), by_esc);
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
         cx.simulate_keystrokes("secondary-y down down down");
         assert_eq!(switching(&view, cx), Some(2));
         // No key is a card's or the line's while the list has them.

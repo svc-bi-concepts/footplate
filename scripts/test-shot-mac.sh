@@ -215,7 +215,7 @@ expect_launch() {
         far|settings-yards-rename)
             settings="{\"yards\": [{\"name\": \"far\", \"address\": \"https://yard.example.net\", \"token_file\": \"far.token\"}], \"open\": \"far\", \"look\": \"$look\"}"
             ;;
-        away|switcher|signedout) settings="(none)" ;;
+        away|switcher|switcher-shut|signedout) settings="(none)" ;;
         *) settings="{\"look\": \"$look\"}" ;;
     esac
     grep -F -q "settings: $settings" "$log" \
@@ -343,7 +343,7 @@ set -e
 # is a state like the others, and the states that write their own settings
 # are shot like them: they find no file standing, and take the look from
 # SHOT_LOOK.
-for state in yardmaster weighty-mapping far settings-yards-rename away switcher signedout; do
+for state in yardmaster weighty-mapping far settings-yards-rename away switcher switcher-shut signedout; do
     for look in light dark; do
         export MOCK_LOG="$tmp/log-$state-$look"
         set +e

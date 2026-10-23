@@ -162,11 +162,16 @@ impl Footplate {
             });
             this.first_run = Some(first_run);
         }
-        // The switcher shot opens with the switcher's list standing, on
+        // The switcher shots open with the switcher's list standing, on
         // the open yard's row: four yards are paired, one of them away,
-        // and the shot is the list. A debug build's alone, as above.
+        // and the shot is the list; the second shuts it a second after it
+        // drew, as a press outside it does (yards.rs). A debug build's
+        // alone, as above.
         #[cfg(debug_assertions)]
-        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("switcher") {
+        if matches!(
+            std::env::var("FOOTPLATE_SHOT").as_deref(),
+            Ok("switcher") | Ok("switcher-shut")
+        ) {
             let open = this
                 .settings
                 .yards

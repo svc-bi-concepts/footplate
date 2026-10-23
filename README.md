@@ -434,7 +434,9 @@ secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
 its answer), `switcher` (the switcher's list open over four
-yards, one of them away), `refs` (the conversation with the
+yards, one of them away), `switcher-shut` (that list, shut a second after
+it drew as a click outside it shuts it: the scripts drive no pointer, so
+the state asks the window for what the click asks), `refs` (the conversation with the
 yardmaster, naming an ask and two bead ids: the ask's chip with its
 preview under the mail), `decisions` (the decisions list with one
 open ask and the 156-item history open: day groups and a folded
@@ -758,8 +760,9 @@ own, with a token of its own.
 click on it, or `cmd+y` (`ctrl+y` on Linux), lists the yards under it, each
 with its kind and its state: `open`, what waits in it now (`2 mail, 1
 decision`, or `nothing waiting`), or that it is not reached and why.
-The arrows move, Enter opens, esc leaves, a click on a row opens it, and
-`cmd+1` to `cmd+9` open the yards in the list's order from anywhere. Every
+The arrows move, Enter opens, esc leaves, a click on a row opens it, a click
+outside the list shuts it and goes no further, and `cmd+1` to `cmd+9` open
+the yards in the list's order from anywhere. Every
 yard of the list is followed from the start, each by a connection of its
 own: its counts change as its mail, asks and notices arrive, and a switch
 shows it as it stands, with nothing read anew. Nothing of a yard that is
@@ -1434,7 +1437,7 @@ its card under "Decided".
 | `?`, on a card, the yard row, Lines or the switcher; a click on "? all keys" | opens the cheatsheet of the open view's keys; `esc` closes it |
 | a click on an option, on "decide this one" | chooses it; makes the ask current |
 | `cmd+[` · `cmd+]` (`ctrl` on Linux) | the modes back, forth |
-| `cmd+y` (`ctrl+y` on Linux), a click on the line under your name | lists the yards under the head: the arrows move, Enter opens the yard they are on, `esc` leaves |
+| `cmd+y` (`ctrl+y` on Linux), a click on the line under your name | lists the yards under the head: the arrows move, Enter opens the yard they are on, `esc` or a click outside the list leaves |
 | `cmd+1`–`cmd+9` (`ctrl` on Linux) | opens the yard at that place in the list, from anywhere |
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
 | `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |
