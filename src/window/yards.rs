@@ -1919,6 +1919,11 @@ impl Footplate {
             .min_w(rems(min))
             .max_w(rems(max))
             .debug_selector(|| "switcher".to_string())
+            // The list's blank spots, its margin and its padding, are the
+            // list's: a press there is no press on the row of the column
+            // under it. The rows and buttons stand in front of this, and
+            // keep their clicks, their hover and their tooltips.
+            .occlude()
             .rounded_lg()
             .border_1()
             .border_color(palette.line)

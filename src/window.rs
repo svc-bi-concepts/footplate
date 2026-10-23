@@ -16715,6 +16715,31 @@ yardr.dev
             }
         };
         assert_eq!(kinds, [kind(&near), kind(&second), "paired"]);
+        // A press on the list's blank margin, between its edge and its
+        // rows, is the list's: the row of the column that stands under it
+        // is not opened, and the list stays. The yardmaster's conversation
+        // is the open one, so the crew member above it is the row to miss.
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+        let first = bounds_of(cx, "switch this machine");
+        let under = bounds_of(cx, "row assembly");
+        let blank = gpui::point(
+            popover.left() + (first.left() - popover.left()) / 2.,
+            under.center().y,
+        );
+        assert!(
+            popover.contains(&blank) && blank.x < first.left() && under.contains(&blank),
+            "the margin stands over a row of the column: {blank:?} {popover:?} {first:?} {under:?}"
+        );
+        cx.simulate_click(blank, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            open_row(&view, cx),
+            Some(Selected::Conversation("yardmaster".into()))
+        );
+        assert_eq!(switching(&view, cx), Some(0));
         // A click on a row opens that yard, and it is the one to open at
         // the next start.
         click_on(cx, "switch second home");
