@@ -42,6 +42,7 @@ warm_unlock() {
 warm_copy() {
     cp -cR "$1" "$2" 2>/dev/null || cp -pR "$1" "$2"
 }
+seeded=
 if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_info.json ] && [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
     if warm_lock; then
         if [ -f "$warm/target/.rustc_info.json" ] && [ -f "$warm/from" ]; then
@@ -64,12 +65,30 @@ if [ -z "$CARGO_TARGET_DIR$CARGO_BUILD_TARGET_DIR" ] && [ ! -e target/.rustc_inf
                     touch -r "$tmp" "$f"
                     rm -f "$tmp" "$tmp.out"
                 done || rm -rf target
+                if [ -e target ]; then
+                    seeded=1
+                fi
             else
                 rm -rf target
             fi
         fi
         warm_unlock
     fi
+fi
+# The copy holds footplate as the worktree it came from built it, and cargo
+# takes a package as fresh when no source file is newer than its build: a
+# worktree whose files are older than the copy (a branch behind main, a bead
+# held for days) would pass the gate as the copy's tree and not as itself.
+# Cleaning the package leaves cargo no build of it to trust, so it compiles
+# footplate from these sources whatever their times; the dependencies stay
+# cached. This target is the worktree's own, so no lock is held. Only a seed
+# is cleaned: a target built here is fresh by its own sources, and cleaning
+# it would compile footplate at every run. --locked as in the steps below:
+# cargo clean would otherwise write a stale Cargo.lock out and hide it from
+# them. A clean that fails drops the seed, as a failed rewrite does.
+# scripts/test-gate.sh holds the gate to all of this.
+if [ -n "$seeded" ]; then
+    cargo clean --locked -p footplate || rm -rf target
 fi
 # From the lockfile, so this builds what a clean checkout builds.
 cargo fmt --all -- --check
