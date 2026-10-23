@@ -4227,8 +4227,15 @@ mod tests {
     #[test]
     fn a_call_an_image_and_the_stream_by_the_socket_and_at_an_address() {
         for yard in [Yard::start(), Yard::start_tcp()] {
+            // THROWAWAY (footplate-g8f2): step times for the Windows probe;
+            // the fix commit takes these marks out again.
+            let t0 = Instant::now();
+            let mark = |t0: Instant, what: &str| {
+                eprintln!("g8f2 {:>10} {:>14}: {:>6} ms", what, "", t0.elapsed().as_millis());
+            };
             let client = yard.client();
             let way = client.place();
+            mark(t0, "open");
             // A call, its result and what it was asked with.
             yard.answer(
                 "GetUser",
@@ -4236,11 +4243,13 @@ mod tests {
             );
             assert_eq!(client.get_user("jo").unwrap().cursor, 3, "{way}");
             assert_eq!(yard.asked("GetUser"), vec![json!({"name": "jo"})], "{way}");
+            mark(t0, "get_user");
             // One that answers nothing, a list, and null for a list.
             yard.answer("AckUserInbox", "{}");
             client.ack_user_inbox("jo", 12).unwrap();
             yard.answer("Crew", r#"{"result": null}"#);
             assert_eq!(client.crew().unwrap(), vec![], "{way}");
+            mark(t0, "ack_crew");
             // The yard says no, in its words.
             yard.answer(
                 "Mail",
@@ -4248,9 +4257,11 @@ mod tests {
             );
             let err = client.mail("yardmaster", "", "jo", &[]).unwrap_err();
             assert_eq!(err.to_string(), "mail is 1 to 4096 bytes", "{way}");
+            mark(t0, "mail_err");
             // What is no reply.
             yard.answer_status("Head", 500, "{}");
             assert!(matches!(client.head(), Err(Error::Protocol(_))), "{way}");
+            mark(t0, "head_500");
             // A server that replaces itself is asked again.
             yard.answer("Head", r#"{"result": 4}"#);
             yard.answer_once_status(
@@ -4260,6 +4271,7 @@ mod tests {
             );
             assert_eq!(client.head().unwrap(), 4, "{way}");
             assert_eq!(yard.asked("Head").len(), 3, "{way}");
+            mark(t0, "head_503");
             // A long reply in chunks.
             let text = "x".repeat(4000);
             let letters: Vec<Value> = (1..=20)
@@ -4272,11 +4284,13 @@ mod tests {
             );
             let got = client.conversation("jo", "yardmaster", 0).unwrap();
             assert_eq!((got.len(), got[19].text.as_str()), (20, text.as_str()));
+            mark(t0, "chunked");
             // An image: bytes that are no text, and the one that is gone.
             let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
             yard.blob(HASH, &bytes);
             assert_eq!(client.blob(HASH).unwrap(), Some(bytes), "{way}");
             assert_eq!(client.blob(&"00".repeat(32)).unwrap(), None, "{way}");
+            mark(t0, "blob_read");
             // An image to the yard, larger than one write.
             yard.answer(
                 "PutBlob",
@@ -4289,6 +4303,7 @@ mod tests {
                 vec![json!({"data": BASE64.encode(&large)})],
                 "{way}"
             );
+            mark(t0, "put_blob");
             // The stream: what is after the seq, then what happens, until
             // the server goes away.
             yard.emit(r#"{"seq": 3, "kind": "mail"}"#);
@@ -4300,14 +4315,19 @@ mod tests {
             assert_eq!(yard.streams_asked(), vec![3], "{way}");
             yard.stop();
             assert!(events.next().is_none(), "{way}");
+            mark(t0, "stream");
             // And nothing listens.
             let head = client.head();
             assert!(matches!(head, Err(Error::Down(_))), "{way}: {head:?}");
+            mark(t0, "tail_head");
             assert!(
                 matches!(client.events(0, QUIET), Err(Error::Down(_))),
                 "{way}"
             );
+            mark(t0, "tail_events");
             assert!(matches!(client.blob(HASH), Err(Error::Down(_))), "{way}");
+            mark(t0, "tail_blob");
+            eprintln!("g8f2 {way}: arm done in {} ms", t0.elapsed().as_millis());
         }
     }
 
