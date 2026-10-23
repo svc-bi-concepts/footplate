@@ -7,6 +7,11 @@ name: probe-m9j1
 
 on:
   workflow_dispatch:
+  # Dispatch needs the file on main, which a throwaway never reaches, so
+  # the push itself runs it; the branch scope keeps it off every push but
+  # this bead's.
+  push:
+    branches: [yard/footplate-m9j1]
 
 permissions:
   contents: read
