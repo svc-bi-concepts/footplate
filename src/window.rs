@@ -11327,6 +11327,20 @@ yardr.dev
         .unwrap();
         std::fs::write(bin.join("yardr.version"), "v0.14.0\n").unwrap();
         std::fs::write(bin.join("says"), "v0.14.0 (cbceebd22919)\n").unwrap();
+        // Start it once and let it end before the card asks it. The system
+        // assesses a program the first time it starts: a second or two on
+        // a busy Mac, 5 s and more while other programs are being started
+        // for the first time too, and the card stops a start at 5 s
+        // (`fetch::kept`). Not through `kept` here either: the assessment
+        // goes on after a stop, and the first ask would pay what is left
+        // of it. The program is not rewritten below, only `says`: a
+        // rewritten program is assessed again, a rewritten data file is not.
+        // Its answer is dropped: the harness does not catch a child's output.
+        let _ = std::process::Command::new(bin.join("yardr"))
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status();
         cx.dispatch_action(OpenAbout);
         wait(cx, "the card, told which yardr is kept", |cx| {
             kept_of(&view, cx) == Some(Some(Kept::Says("v0.14.0 (cbceebd22919)".into())))
