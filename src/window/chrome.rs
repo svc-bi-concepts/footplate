@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Div, Focusable, FontWeight, MouseButton,
@@ -53,17 +54,20 @@ use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 
 impl Footplate {
     /// As [`Footplate::opened`], with each yard's stream watched as
-    /// `watch` says: the tests wait less for a stuck one.
+    /// `watch` says and each yard tried again after `retry`: the tests
+    /// wait less for a stuck one and for one that went away.
     pub(crate) fn watching(
         env: Env,
         name: String,
         file: Option<PathBuf>,
         watch: session::Watch,
+        retry: Duration,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::bare(env, name, window, cx).kept_in(file, cx);
         this.watch = watch;
+        this.retry = retry;
         this.reopen(cx);
         // A screenshot state that opens the settings (shot.rs): a debug
         // build's alone, on the section the state names.
@@ -596,16 +600,12 @@ impl Footplate {
         let stop = session::FollowControl::default();
         held.following_stop = Some(stop.clone());
         let follower = thread::Builder::new().name("yard".into()).spawn({
-            let (client, name, watch) = (client.clone(), self.name.clone(), self.watch);
+            let (client, name, watch, retry) =
+                (client.clone(), self.name.clone(), self.watch, self.retry);
             move || {
-                session::follow_with_control(
-                    &client,
-                    &name,
-                    session::RETRY,
-                    watch,
-                    stop,
-                    |update| tell.send_blocking(update).is_ok(),
-                )
+                session::follow_with_control(&client, &name, retry, watch, stop, |update| {
+                    tell.send_blocking(update).is_ok()
+                })
             }
         });
         held.following = Some(cx.spawn(async move |this, cx| {
@@ -2141,7 +2141,7 @@ impl Footplate {
 
     /// The read of `read` stamped `stamp` failed, in the yard of the
     /// following `session`: if it is still current, says so and, where
-    /// `retryable`, makes it again after [`session::RETRY`] while the yard
+    /// `retryable`, makes it again after the window's retry while the yard
     /// is up. A yard that is down is its follower's: what it reads when it
     /// is up again has all of it.
     pub(crate) fn read_failed_in(
@@ -2163,8 +2163,9 @@ impl Footplate {
         if !retry {
             return true;
         }
+        let again_in = self.retry;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(session::RETRY).await;
+            cx.background_executor().timer(again_in).await;
             this.update(cx, |this, cx| {
                 let up = this.up_in(session);
                 let again = this

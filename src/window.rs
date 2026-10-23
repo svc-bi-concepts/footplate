@@ -6,6 +6,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     AnyWindowHandle, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, Image,
@@ -261,6 +262,8 @@ pub struct Footplate {
     sessions: u64,
     /// How each follower watches a stream that says nothing.
     watch: session::Watch,
+    /// How long until a follower tries the yard again.
+    retry: Duration,
     /// The yard of the settings the open one was opened as, or none of
     /// the one yard the environment names.
     entry: Option<settings::Yard>,
@@ -574,7 +577,7 @@ impl Footplate {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::watching(env, name, file, session::WATCH, window, cx)
+        Self::watching(env, name, file, session::WATCH, session::RETRY, window, cx)
     }
 
     /// The window before it has a yard.
@@ -779,6 +782,7 @@ impl Footplate {
             session: 0,
             sessions: 0,
             watch: session::WATCH,
+            retry: session::RETRY,
             entry: None,
             held: HashMap::new(),
             following: None,
@@ -14617,10 +14621,14 @@ yardr.dev
     /// seen, but its badges no longer imply that the counts are current.
     #[gpui::test]
     fn the_rail_carries_no_count_while_the_yard_reconnects(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
         let yard = Yard::start();
         a_second_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_words_only());
-        let (view, cx) = opened(&yard, &["From the second home."], cx);
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default().write(&file).unwrap();
+        let env = env_on(&yard, &file);
+        let (view, cx) = watching_at(env, &file, cx);
         wait(cx, "what waits in the open yard", |cx| {
             view.read_with(cx, |v, _| {
                 v.model.as_ref().is_some_and(|m| {
@@ -15821,7 +15829,15 @@ yardr.dev
         let env = env_on(near, file);
         let file = file.to_path_buf();
         cx.add_window_view(|window, cx| {
-            let view = Footplate::watching(env, "jo".into(), Some(file), watch, window, cx);
+            let view = Footplate::watching(
+                env,
+                "jo".into(),
+                Some(file),
+                watch,
+                session::RETRY,
+                window,
+                cx,
+            );
             window.focus(&view.line.focus_handle(cx));
             view
         })
@@ -15984,6 +16000,34 @@ yardr.dev
         });
         cx.add_window_view(|window, cx| {
             let view = Footplate::opened(env, "jo".into(), Some(file), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        })
+    }
+
+    /// As [`opened_at`], with each yard tried again after a breath: the
+    /// tests wait no retry for one that went away, and still pin it, since
+    /// what they wait for comes only past the pause.
+    fn watching_at<'a>(
+        env: Env,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        let file = file.to_path_buf();
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        cx.add_window_view(|window, cx| {
+            let view = Footplate::watching(
+                env,
+                "jo".into(),
+                Some(file),
+                session::WATCH,
+                Duration::from_millis(20),
+                window,
+                cx,
+            );
             window.focus(&view.line.focus_handle(cx));
             view
         })
@@ -18278,7 +18322,7 @@ yardr.dev
         yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
             .unwrap();
         let env = env_on(&near, &file);
-        let (view, cx) = opened_at(env, &file, cx);
+        let (view, cx) = watching_at(env, &file, cx);
         // This machine's yard is open; the hosted one is followed too, and
         // read through the edge.
         wait(cx, "this machine's yard", |cx| {
@@ -18953,7 +18997,7 @@ yardr.dev
             socket: dir.path().join("yard.sock"),
             ..Env::default()
         };
-        let (view, cx) = opened_at(env, &file, cx);
+        let (view, cx) = watching_at(env, &file, cx);
         wait(cx, "the yard's conversation", |cx| {
             texts(&view, cx) == ["From afar."]
         });
@@ -19010,7 +19054,7 @@ yardr.dev
             socket: dir.path().join("yard.sock"),
             ..Env::default()
         };
-        let (view, cx) = opened_at(env, &file, cx);
+        let (view, cx) = watching_at(env, &file, cx);
         wait(cx, "the far yard's conversation", |cx| {
             texts(&view, cx) == ["From afar."]
         });
