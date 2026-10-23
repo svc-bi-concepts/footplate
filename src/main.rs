@@ -47,6 +47,7 @@ mod window;
 mod yard;
 
 use std::cell::Cell;
+use std::ffi::OsString;
 use std::rc::Rc;
 
 use gpui::{
@@ -62,7 +63,28 @@ const NAME: &str = "footplate";
 
 actions!(footplate, [Quit]);
 
+/// Whether the program was run only to say its version. It reads no other
+/// argument, since the window takes none.
+fn asks_version(args: impl IntoIterator<Item = OsString>) -> bool {
+    args.into_iter().any(|arg| arg == "--version")
+}
+
+/// What `--version` says: the name and Cargo.toml's version, the one a release
+/// is tagged with (scripts/release.sh). The Windows workflow runs the exe it
+/// zips for this line (.github/workflows/windows.yml), since a Mac cannot run
+/// that build.
+fn version_line() -> String {
+    format!("{NAME} {}", env!("CARGO_PKG_VERSION"))
+}
+
 fn main() {
+    // Before the environment is read or anything is drawn. A Windows release
+    // has no console (windows_subsystem, above), so there the line reaches a
+    // pipe or a file, which is how the workflow reads it, and not a console.
+    if asks_version(std::env::args_os().skip(1)) {
+        println!("{}", version_line());
+        return;
+    }
     let env = yard::Env::read();
     // In a debug build only, a screenshot state starts a fake yard of its
     // own and points this run's socket at it; held for the run, since
@@ -194,3 +216,34 @@ fn dock_icon() {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn dock_icon() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_version_is_asked_by_its_flag_alone() {
+        assert!(asks_version(args(&["--version"])));
+        assert!(asks_version(args(&["--other", "--version"])));
+        assert!(!asks_version(args(&[])));
+        for near in ["version", "-V", "--versions", "--version=1"] {
+            assert!(!asks_version(args(&[near])), "{near}");
+        }
+    }
+
+    /// The Windows workflow holds the line to the version it reads from
+    /// Cargo.toml as scripts/release.sh reads it (the first `version = "..."`
+    /// line), so the line is the name and that version.
+    #[test]
+    fn the_version_line_is_the_name_and_the_version_a_release_reads() {
+        let version = include_str!("../Cargo.toml")
+            .lines()
+            .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+            .expect("Cargo.toml has a version line");
+        assert_eq!(version_line(), format!("footplate {version}"));
+    }
+}

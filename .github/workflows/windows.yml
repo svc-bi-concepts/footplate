@@ -1,8 +1,11 @@
 # footplate on Windows: it builds, and its tests pass, with a yard on another
 # machine as the only yard there is (no socket, no yard of its own). The
 # yard's own gate (.yardr/test) runs on a Mac, where there is no Windows to
-# try; this is that try. It is the debug build, as the gate's: a release
-# build also compiles gpui's shaders, with fxc.exe of the Windows SDK.
+# try; this is that try. The first job is the debug build, as the gate's. A
+# release build also compiles gpui's shaders, with fxc.exe of the Windows
+# SDK, and a Mac does not have that. So the second job builds the Windows zip
+# of a release here, and scripts/release.sh takes it from the run of the
+# commit it releases.
 name: windows
 
 on:
@@ -48,3 +51,63 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # The Windows zip a release carries. It is built for every commit that is
+  # pushed, released or not.
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      # fxc.exe compiles the shaders. gpui finds it in the Windows SDK of the
+      # runner's image (GPUI_FXC_PATH names another).
+      - name: Build
+        run: cargo build --locked --release
+
+      # The four files at the root of the zip, named for the version of
+      # Cargo.toml as scripts/release.sh reads it. A checkout on Windows may
+      # end its lines with CR LF, which the pattern does not match, so the CRs
+      # go first.
+      - name: Zip
+        run: |
+          version=$(tr -d '\r' < Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          echo "version=$version" >> "$GITHUB_ENV"
+          mkdir dist
+          cp target/release/footplate.exe README.md LICENSE NOTICE dist
+          (cd dist && 7z a -tzip "../footplate_${version}_windows_amd64.zip" footplate.exe README.md LICENSE NOTICE)
+
+      # The footplate.exe that runs is the one in the zip, unpacked as a
+      # person would. It has no console, so its line reaches this step only
+      # because the shell captures it.
+      - name: Smoke
+        run: |
+          mkdir smoke
+          7z x -osmoke "footplate_${version}_windows_amd64.zip"
+          said=$(smoke/footplate.exe --version)
+          echo "footplate.exe --version said: $said"
+          [ "$said" = "footplate $version" ] || {
+            echo "footplate.exe --version said [$said], not [footplate $version]" >&2
+            exit 1
+          }
+
+      # scripts/release.sh takes the zip of the commit it releases from the
+      # artifacts of its run, a day or weeks after the push. Every push leaves
+      # one, and they count against the account's storage, so they are kept 30
+      # days and not the default 90. A job that is run again replaces its
+      # artifact, since a name that is taken would fail the upload.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: footplate-windows-amd64
+          path: footplate_${{ env.version }}_windows_amd64.zip
+          retention-days: 30
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true

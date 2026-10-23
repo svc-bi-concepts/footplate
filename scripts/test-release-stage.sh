@@ -121,7 +121,7 @@ printf '%s\n' "${FAKE_MINISIGN_OUT:-Signature and comment signature verified}"
 exit "${FAKE_MINISIGN_RC:-0}"
 EOF
 
-# fakebuild stands in for scripts/release.sh: the six footplate archives
+# fakebuild stands in for scripts/release.sh: the seven footplate archives
 # and a checksums.txt over them, and a log of where it ran, with what cache
 # and with which of the signing variables the group's environment gave it.
 cat >"$bin/fakebuild" <<'EOF'
@@ -145,11 +145,22 @@ if [ "${FAKE_BUILD_OMIT:-}" != "Footplate_${number}_darwin_amd64.dmg" ]; then
 fi
 printf 'fake footplate linux arm64 for %s\n' "$1" >"$2/footplate_${number}_linux_arm64.tar.gz"
 printf 'fake footplate linux amd64 for %s\n' "$1" >"$2/footplate_${number}_linux_amd64.tar.gz"
+if [ "${FAKE_BUILD_OMIT:-}" != "footplate_${number}_windows_amd64.zip" ]; then
+    printf 'fake footplate windows amd64 for %s\n' "$1" >"$2/footplate_${number}_windows_amd64.zip"
+fi
 if [ "${FAKE_BUILD_EXTRA:-}" = yes ]; then
     printf 'unexpected release asset\n' >"$2/unexpected.txt"
 fi
-# shellcheck disable=SC2086 # $FAKE_SUM is a list
-(cd "$2" && $FAKE_SUM Footplate_*_darwin_*.zip Footplate_*_darwin_*.dmg footplate_*_linux_*.tar.gz >checksums.txt)
+# The checksums are over the archives that were made, whichever one a case left out.
+(
+    cd "$2"
+    files=""
+    for f in Footplate_*_darwin_*.zip Footplate_*_darwin_*.dmg footplate_*_linux_*.tar.gz footplate_*_windows_*.zip; do
+        [ ! -f "$f" ] || files="$files $f"
+    done
+    # shellcheck disable=SC2086 # $FAKE_SUM and $files are lists
+    $FAKE_SUM $files >checksums.txt
+)
 EOF
 # fake xcrun answers stapler's validate from a canned line and exit status.
 cat >"$bin/xcrun" <<'EOF'
@@ -348,8 +359,8 @@ lack "gh release create"
 ok "build refuses a version that is not Cargo.toml's"
 
 # A partial archive set is refused before the tag or release is created,
-# whether it lacks a zip or a disk image.
-for omitted in Footplate_0.3.0_darwin_amd64.zip Footplate_0.3.0_darwin_amd64.dmg; do
+# whether it lacks a zip, a disk image or the Windows zip.
+for omitted in Footplate_0.3.0_darwin_amd64.zip Footplate_0.3.0_darwin_amd64.dmg footplate_0.3.0_windows_amd64.zip; do
     begin "missing-$omitted"
     repo
     show "footplate v0.3.0" "notes"
@@ -445,8 +456,9 @@ want "Footplate_0.3.0_darwin_arm64.dmg"
 want "Footplate_0.3.0_darwin_amd64.dmg"
 want "footplate_0.3.0_linux_arm64.tar.gz"
 want "footplate_0.3.0_linux_amd64.tar.gz"
+want "footplate_0.3.0_windows_amd64.zip"
 want "checksums.txt"
-want "6 archives and checksums.txt"
+want "7 archives and checksums.txt"
 printf '%s\n' "$body" | cmp -s - "$casedir/notes.md" ||
     fail "releases: the notes file is not the body's bytes"
 want "yardr bead done footplate-rel1 --note -"

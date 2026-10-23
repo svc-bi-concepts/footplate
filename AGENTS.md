@@ -11,12 +11,14 @@ builders.
 Top level: `src/` the program, `build.rs` (the Windows stack size, nothing
 else), `scripts/` release, screenshot and shell-test helpers, `assets/`
 icons, the Linux polkit action and the Linux desktop entry, `docs/design/`
-decision notes, `.yardr/` the yard's gate, `.github/` the Windows job
-(build and test, which the gate does not try).
+decision notes, `.yardr/` the yard's gate, `.github/` the Windows jobs
+(build and test, which the gate does not try, and the release's Windows zip).
 
 The window, its state and the yard:
 
 - `src/main.rs`: opens the one window, owns the app lifecycle; draws nothing.
+  `--version` is answered before any of it (the Windows build's smoke test
+  runs it).
 - `src/window.rs`: draws the window and makes the calls the model asks for;
   no protocol, no state of its own. `src/window/firstrun.rs` draws the
   first run where the yard will be.
@@ -103,10 +105,14 @@ Setup, release and tests:
   the states are named in `README.md`.
 - Releases: `scripts/release.sh` builds and lists each archive, stopping at
   a yardr in one, `scripts/bundle-mac.sh` bundles, `scripts/release-stage`
-  drives the yard's release flow. A new file in the Linux archive is packed
-  in `scripts/release.sh`, listed in `scripts/test-release.sh`, and added to
-  yardr.dev's `scripts/sync-release` (another repository), which refuses a
-  member it does not know.
+  drives the yard's release flow. The Windows zip is not built there: the
+  `release` job of `.github/workflows/windows.yml` builds it, and
+  `scripts/release.sh` takes the zip of the run for `HEAD` with `gh`. A new
+  file in the Linux archive is packed in `scripts/release.sh`, listed in
+  `scripts/test-release.sh`, and added to yardr.dev's `scripts/sync-release`
+  (another repository), which refuses a member it does not know; one in the
+  Windows zip is zipped in the workflow, checked in `scripts/release.sh` and
+  `scripts/test-release.sh`, and added to `sync-release` the same way.
 
 ## Conventions
 
@@ -153,7 +159,8 @@ Setup, release and tests:
 - Gate: `.yardr/test` (`cargo fmt --check`, `clippy -D warnings`,
   `cargo test`, `cargo build`). Landing runs the base copy of that
   script, not yours. It runs on a Mac; `.github/workflows/windows.yml`
-  runs `cargo build` and `cargo test` on Windows.
+  runs `cargo build` and `cargo test` on Windows, and builds the release's
+  Windows zip there.
 
 ## Do not touch
 

@@ -30,18 +30,17 @@ alone.
 
 ## Installing
 
-A release is one download for each of macOS and Linux, and none of it needs a
-terminal. The files are on yardr.dev.
+A release is one download for each of macOS, Linux and Windows, and none of
+it needs a terminal. The files are on yardr.dev.
 `https://yardr.dev/releases/footplate/latest.json` names the newest version
 and each of its files, and a file is at
-`https://yardr.dev/releases/footplate/v<version>/<file>`. Windows has no
-download yet: it is built from source ([Building](#building)), and
-[Windows](#windows) says what it does and does not do.
+`https://yardr.dev/releases/footplate/v<version>/<file>`.
 
-No download holds yardr. footplate fetches it the first time it opens, when it
-sets a yard up ([Setting up a yard here](#setting-up-a-yard-here)). The
-release script checks this for every archive it makes, and stops if a
-member's name has yardr in it ([Building](#building)).
+No download holds yardr. On macOS and Linux footplate fetches it the first
+time it opens, when it sets a yard up
+([Setting up a yard here](#setting-up-a-yard-here)). Windows sets none up and
+fetches nothing. The release script checks this for every archive it makes,
+and stops if a member's name has yardr in it ([Building](#building)).
 
 ### macOS
 
@@ -100,6 +99,27 @@ To update, copy the new `footplate` over the old one. To remove it, delete
 `.local/share/applications` and `footplate.png` from
 `.local/share/icons/hicolor/512x512/apps`.
 
+### Windows PC
+
+Take `footplate_<version>_windows_amd64.zip` for a PC with an Intel or AMD
+processor. Windows on ARM is not built. footplate on Windows has no yard of
+its own and sets none up. It opens a yard on another machine, at its address
+over TLS, with the code that yard's operator gives you ([Windows](#windows)
+has the rest, a yard in WSL2 included).
+
+1. Extract the zip. A right click offers Extract All. It holds `footplate.exe`,
+   the program, beside README.md, LICENSE and NOTICE.
+2. Open `footplate.exe`. It needs no installing, so the folder can go where
+   you like.
+3. The first time, Windows shows "Windows protected your PC". footplate's
+   Windows release is not signed, and SmartScreen warns about a program it
+   has no signature to check. Choose More info, then Run anyway. Windows asks
+   once for that file.
+
+To update, replace `footplate.exe` with the new one. To remove it, delete the
+folder you extracted, and `%APPDATA%\footplate`, where footplate keeps its
+settings and the token of each yard it is paired with.
+
 ## Building
 
 Rust, stable (`rustup default stable`), and what gpui needs of the system:
@@ -118,9 +138,10 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   linker and the Windows SDK (gpui embeds a manifest with its resource
   compiler). A debug build compiles gpui's shaders when the window opens; a
   release build compiles them with the SDK's `fxc.exe`, which
-  `GPUI_FXC_PATH` names if the build does not find it. The job in
-  `.github/workflows/windows.yml` runs `cargo build` and `cargo test` on a
-  `windows-latest` runner; the gate runs on a Mac and tries no Windows.
+  `GPUI_FXC_PATH` names if the build does not find it. The jobs in
+  `.github/workflows/windows.yml` run `cargo build` and `cargo test` on a
+  `windows-latest` runner, and build the release's zip there (below); the
+  gate runs on a Mac and tries no Windows.
 
 gpui is the release on crates.io, pinned exactly in `Cargo.toml`, and
 `Cargo.lock` is committed: the gate builds with `--locked`. `Cargo.toml`
@@ -171,23 +192,47 @@ makes a disk image of it, then builds both Linux targets in the shot's
 Debian container (arm64 natively, amd64 emulated, which takes a while the
 first time) and packs each binary with `footplate.desktop`, its entry for the
 menu of applications (`assets/linux`), `footplate.png`, its icon
-(`assets/icon-512.png`), README.md, LICENSE and NOTICE, with one
-`checksums.txt` over the six archives. The archives go to out-dir, else to
-`dist/`. The disk image is a compressed read-only HFS+ volume named
-Footplate, made with `hdiutil create`. It holds the bundle beside a link to
-`/Applications`, so installing is a drag. The zip stays as it was. The
-Linux binaries link Debian 13's glibc and loaders, so they run on
-distributions as new as that.
+(`assets/icon-512.png`), README.md, LICENSE and NOTICE, and takes the
+Windows zip from GitHub (below), with one `checksums.txt` over the seven
+archives. The archives go to out-dir, else to `dist/`. The disk image is a
+compressed read-only HFS+ volume named Footplate, made with `hdiutil create`.
+It holds the bundle beside a link to `/Applications`, so installing is a
+drag. The zip stays as it was. The Linux binaries link Debian 13's glibc and
+loaders, so they run on distributions as new as that.
 
-Each archive is listed as it will ship, the zip and the tarball with
+Each archive is listed as it will ship, the zips and the tarballs with
 `tar -tf` and the disk image mounted read-only with `hdiutil attach`. The
 release stops if a member's path has yardr in it, in any case, since
 footplate fetches yardr the first time it opens
 ([yardr, fetched](#yardr-fetched)) and carries none. An image that will not
 mount cannot be listed, and stops the release too. Nothing reaches out-dir
-until all six pass. yardr.dev's `scripts/sync-release` checks the members of
-a Linux archive against a list of its own, so a member added here is added
-there before the release is cut.
+until all seven pass. yardr.dev's `scripts/sync-release` checks the members of
+a Linux archive and of the Windows zip against lists of its own, so a member
+added here is added there before the release is cut.
+
+The Windows zip is not built on the Mac. A release build of gpui compiles its
+shaders with `fxc.exe` of the Windows SDK, which a Mac does not have. The
+`release` job of `.github/workflows/windows.yml` builds the zip on a
+`windows-latest` runner instead, on every push. It runs `cargo build
+--release`, zips `footplate.exe`, README.md, LICENSE and NOTICE as
+`footplate_<version>_windows_amd64.zip`, unpacks that zip and checks that its
+`footplate.exe --version` says Cargo.toml's version, and keeps the zip as an
+artifact of the run for 30 days. Every push leaves one, and they count against
+the account's storage.
+
+`scripts/release.sh` takes the zip of the run for the commit it releases
+(`HEAD`) with `gh`, which must be logged in, and starts no run. Before it
+builds anything it stops if GitHub has no run of the workflow for that commit,
+or if the run ended in anything but success, a cancelled run included. For the
+first, push the commit, since the workflow runs on every push. For the second,
+run its failed jobs again with `gh run rerun --failed`, or fix Windows and
+push the fix. After the builds it waits for a run that is still going, 75
+minutes at most, since GitHub stops a run at 60. The zip must hold
+`footplate.exe`, README.md, LICENSE and NOTICE at its root and nothing else,
+and its `footplate.exe` must be a Windows program for x86-64. As in
+`scripts/release-stage`, `YARDR_RELEASE_REPO` names the repository the run is
+in (default `yardr-dev/footplate`). The zip is not signed, so Windows asks once
+before it opens ([Installing](#windows-pc)).
 
 The macOS apps are signed ad hoc and not notarized, and the disk images not
 signed, unless the release is asked for more, and says so. With both
@@ -237,7 +282,7 @@ from there:
 
 - `build` refuses a bad title, a version that is not `Cargo.toml`'s, an
   existing release or tag, a dirty tree, or a checkout that is not the
-  remote's `main`; builds the six archives and `checksums.txt` with
+  remote's `main`; builds the seven archives and `checksums.txt` with
   `scripts/release.sh`; tags the base commit, pushes the tag, and makes
   the GitHub release; notes on the bead whether the macOS apps and disk
   images came out signed and notarized or ad hoc and unsigned, and the five
@@ -905,7 +950,9 @@ approval: the card asks for the ask's number typed back, as it does where a
 system offers none. System notifications, which the settings say there are
 none of; the item in the tray, whose settings are not shown; the number on
 the taskbar. The title bar is the system's. An installer, and signing, are
-for later; a release build is a console-less `footplate.exe`.
+for later. The release's zip is not signed, and [Installing](#windows-pc) says
+what Windows shows for that. A release build is a console-less
+`footplate.exe`.
 
 ## yardr, fetched
 

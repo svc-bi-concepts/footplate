@@ -2,13 +2,28 @@
 # Builds everything a footplate release carries, on this Mac: the two macOS
 # zips, one per darwin target, each holding the Footplate.app bundle, the two
 # disk images (dmg) of the same apps, each holding the bundle and a link to
-# /Applications to drag it onto, and the two Linux archives, one per arch,
-# each holding the binary, its desktop entry and icon (footplate.desktop,
-# footplate.png), README.md, LICENSE and NOTICE, with one checksums.txt
-# (sha256) over the six.
+# /Applications to drag it onto, the two Linux archives, one per arch, each
+# holding the binary, its desktop entry and icon (footplate.desktop,
+# footplate.png), README.md, LICENSE and NOTICE, and the Windows zip, holding
+# footplate.exe, README.md, LICENSE and NOTICE, with one checksums.txt
+# (sha256) over the seven.
 # No archive holds yardr, which footplate fetches itself at its first run:
 # each is listed as it is made, the disk image mounted read-only for it, and
 # a member whose path names yardr fails the release.
+#
+# The Windows zip is not built here. gpui compiles its shaders for Windows
+# with fxc.exe of the Windows SDK, which a Mac does not have, so the release
+# job of .github/workflows/windows.yml builds the zip on a Windows runner for
+# every commit that is pushed, and keeps it as an artifact of the run. This
+# script takes the zip of the run for the commit it releases (HEAD) with gh,
+# logged in, and starts no run itself. Before it builds anything it refuses a
+# commit that has no run, or whose run ended in anything but success. After
+# the builds it waits for a run that is still going, 75 minutes at most
+# (GitHub stops a run at 60). It lists the zip and checks its footplate.exe as
+# it does the other archives. YARDR_RELEASE_REPO names the repository the run
+# is in, owner/name, as it does for scripts/release-stage (default
+# yardr-dev/footplate).
+#
 # Run it from anywhere: `scripts/release.sh <version> [out-dir]`.
 # <version> is the tag (v0.4.0) and must equal Cargo.toml's version, and the
 # tree must be clean, else the script refuses. The archives go to out-dir,
@@ -76,7 +91,7 @@ if [ "$(uname -s)" != Darwin ]; then
     echo "release.sh: a release is built on macOS" >&2
     exit 1
 fi
-for tool in cargo docker ditto hdiutil shasum file; do
+for tool in cargo docker ditto hdiutil shasum file gh; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "release.sh: $tool is not on PATH" >&2
         exit 1
@@ -86,13 +101,20 @@ if [ -z "$identity" ]; then
     echo "release.sh: the macOS apps are signed ad hoc and not notarized; the disk images are neither signed nor notarized (FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are not set)" >&2
 fi
 
+# The Windows zip, and the artifact of the workflow's run that holds it.
+windows_zip=footplate_${number}_windows_amd64.zip
+windows_artifact=footplate-windows-amd64
+repo=${YARDR_RELEASE_REPO:-yardr-dev/footplate}
+commit=$(git rev-parse HEAD)
+
 # What a release carries, in the order checksums.txt lists it.
 archives="Footplate_${number}_darwin_arm64.zip
 Footplate_${number}_darwin_amd64.zip
 Footplate_${number}_darwin_arm64.dmg
 Footplate_${number}_darwin_amd64.dmg
 footplate_${number}_linux_arm64.tar.gz
-footplate_${number}_linux_amd64.tar.gz"
+footplate_${number}_linux_amd64.tar.gz
+$windows_zip"
 
 work=$(mktemp -d)
 stage_out=$work/out
@@ -237,6 +259,88 @@ notarize() {
     xcrun stapler staple "$3" >&2
 }
 
+# The field $1, a string or a number, of the JSON $2 that gh prints.
+gh_field() {
+    printf '%s\n' "$2" | sed -n 's/.*"'"$1"'": *"\{0,1\}\([^",}]*\).*/\1/p' | head -n 1
+}
+
+# The newest run of the Windows workflow for the commit that is released, as
+# $run_id, $run_status and $run_conclusion: all three are empty when GitHub
+# knows no run of it, and the conclusion is empty while the run is going.
+windows_look() {
+    if ! runs=$(gh run list --repo "$repo" --workflow windows.yml --commit "$commit" --limit 1 \
+        --json databaseId,status,conclusion 2>"$work/gh.err"); then
+        echo "release.sh: could not ask GitHub for the Windows run of $commit (gh, logged in, is needed): $(cat "$work/gh.err")" >&2
+        exit 1
+    fi
+    run_id=$(gh_field databaseId "$runs")
+    run_status=$(gh_field status "$runs")
+    run_conclusion=$(gh_field conclusion "$runs")
+    run_url=https://github.com/$repo/actions/runs/$run_id
+}
+
+# Refuses the release for a commit without a Windows run, and for a run that is
+# over and did not succeed. A run that is going passes: windows_fetch waits for
+# it.
+windows_check() {
+    windows_look
+    if [ -z "$run_id" ]; then
+        echo "release.sh: GitHub has no run of windows.yml for $commit, so there is no Windows zip to release; push the commit (the workflow runs on every push), then release again" >&2
+        exit 1
+    fi
+    if [ "$run_status" = completed ] && [ "$run_conclusion" != success ]; then
+        echo "release.sh: the Windows run for $commit ended $run_conclusion ($run_url); fix Windows and push the fix, or run its failed jobs again (gh run rerun $run_id --failed), then release again" >&2
+        exit 1
+    fi
+}
+
+# Takes the Windows zip of the run into the stage dir, waiting for the run if it
+# is going, and checks the zip as it will ship. It is named for this version,
+# holds the four files yardr.dev's sync-release allows and nothing of yardr,
+# and its footplate.exe is a Windows program for x86-64.
+windows_fetch() {
+    waited=0
+    windows_check
+    while [ "$run_status" != completed ]; do
+        if [ "$waited" -ge 4500 ]; then
+            echo "release.sh: the Windows run for $commit is still $run_status after 75 minutes ($run_url); look at it, then release again" >&2
+            exit 1
+        fi
+        if [ "$waited" -eq 0 ]; then
+            echo "release.sh: Windows: the run for $commit is $run_status ($run_url); waiting for it" >&2
+        fi
+        sleep 60
+        waited=$((waited + 60))
+        windows_check
+    done
+    echo "release.sh: Windows: taking $windows_zip from run $run_id" >&2
+    mkdir -p "$work/windows"
+    if ! gh run download "$run_id" --repo "$repo" --name "$windows_artifact" --dir "$work/windows" >"$work/gh.out" 2>&1; then
+        echo "release.sh: could not take the Windows zip from run $run_id ($run_url); its artifact is kept for 30 days, and gh run rerun $run_id builds it again: $(cat "$work/gh.out")" >&2
+        exit 1
+    fi
+    if [ ! -f "$work/windows/$windows_zip" ]; then
+        echo "release.sh: the artifact of run $run_id ($run_url) holds no $windows_zip; it holds: $(find "$work/windows" -type f | sed 's|.*/||' | tr '\n' ' ')" >&2
+        exit 1
+    fi
+    mv "$work/windows/$windows_zip" "$stage_out/$windows_zip"
+    assert_no_yardr "$stage_out/$windows_zip" "Windows archive"
+    held=$(tar -tf "$stage_out/$windows_zip" | LC_ALL=C sort | paste -s -d ' ' -)
+    if [ "$held" != "LICENSE NOTICE README.md footplate.exe" ]; then
+        echo "release.sh: the Windows archive holds: $held; it should hold LICENSE NOTICE README.md footplate.exe and nothing else" >&2
+        exit 1
+    fi
+    tar -xf "$stage_out/$windows_zip" -C "$work/windows" footplate.exe
+    expect_binary "$work/windows/footplate.exe" "PE32+ executable"
+    expect_binary "$work/windows/footplate.exe" "x86-64"
+}
+
+# The zip is taken at the end, but its run is looked at now. A commit with no
+# run, or whose run failed, is refused before the builds below, which take the
+# better part of an hour, and not after them.
+windows_check
+echo "release.sh: Windows: run $run_id for $commit: $run_status${run_conclusion:+, $run_conclusion} ($run_url); its zip is taken after the builds" >&2
+
 # Both darwin targets are installed: a release builds each.
 if command -v rustup >/dev/null 2>&1; then
     for triple in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -358,6 +462,8 @@ done
 # warns and the release still stands.
 docker pull -q debian:13 >&2 \
     || echo "release.sh: could not restore the native debian:13 image" >&2
+
+windows_fetch
 
 # The names have no spaces, so the list splits on its lines.
 # shellcheck disable=SC2086

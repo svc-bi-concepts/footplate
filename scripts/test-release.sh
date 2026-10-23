@@ -6,7 +6,11 @@
 # neither signing variable set, both signed, notarized and stapled with both,
 # refused with one. The Linux archive's launcher is the repository's own, run
 # as a desktop runs it; and every archive is listed as it ships, a yardr in
-# the zip, the image or the Linux archive refused.
+# the zip, the image, the Linux archive or the Windows zip refused. The Windows
+# zip comes from the run of the Windows workflow for the commit, against a
+# stand-in for gh. A run that succeeded gives it, a run that is going is waited
+# for, and a run that is missing, failed or cancelled refuses the release,
+# before any build when that is known by then.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -107,6 +111,14 @@ esac
 #                         cannot open
 #   STANDIN_DETACH_FAILS  hdiutil cannot let go of a mounted image
 #   STANDIN_FIND_FAILS    find returns an incomplete image listing
+#   STANDIN_RUNS          what gh says of the Windows run on each ask, one word
+#                         for each, the last for those after: status:conclusion
+#                         (completed:success, in_progress:), or none
+#   STANDIN_GH_FAILS      gh cannot ask, as when it is not logged in
+#   STANDIN_NO_ARTIFACT   the run holds no artifact, as one that has expired
+#   STANDIN_ZIP_VERSION   the version in the name of the zip the artifact holds
+#   STANDIN_ZIP_STRAY     a file of that name in the Windows zip, besides its four
+#   STANDIN_EXE           what the zip's footplate.exe is, as file below reads it
 bin=$tmp/bin
 mkdir -p "$bin"
 REAL_FIND=$(command -v find)
@@ -151,6 +163,7 @@ case "$(cat "$1")" in
     x86_64-apple-darwin) echo "$1: Mach-O 64-bit executable x86_64" ;;
     linux-arm64) echo "$1: ELF 64-bit LSB pie executable, ARM aarch64" ;;
     linux-amd64) echo "$1: ELF 64-bit LSB pie executable, x86-64" ;;
+    windows-amd64) echo "$1: PE32+ executable (GUI) x86-64, for MS Windows" ;;
     *) echo "$1: data" ;;
 esac
 EOF
@@ -343,6 +356,58 @@ for a; do
 done
 tar -cf "$zip" "$app"
 EOF
+# The Windows run is gh's to say. `run list` answers as gh does with --json:
+# the state in STANDIN_RUNS for this ask, the number of asks kept beside the
+# calls, or none (an empty list). `run download` leaves the artifact's zip in
+# --dir, a tar of the four files standing in for it as ditto's does for the
+# Mac's zips. sleep only says it was asked, so that a wait costs no time.
+cat >"$bin/gh" <<'EOF'
+#!/bin/sh
+echo "gh $*" >>"$CALLS"
+case "$1 $2" in
+    "run list")
+        [ -z "${STANDIN_GH_FAILS:-}" ] || {
+            echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+            exit 1
+        }
+        asked=$(($(cat "$CALLS.asked" 2>/dev/null || echo 0) + 1))
+        echo "$asked" >"$CALLS.asked"
+        i=0
+        for state in ${STANDIN_RUNS:-completed:success}; do
+            i=$((i + 1))
+            [ "$i" -lt "$asked" ] || break
+        done
+        if [ "$state" = none ]; then
+            echo '[]'
+        else
+            printf '[{"conclusion":"%s","databaseId":4242,"status":"%s"}]\n' "${state#*:}" "${state%%:*}"
+        fi
+        ;;
+    "run download")
+        [ -z "${STANDIN_NO_ARTIFACT:-}" ] || {
+            echo "no valid artifacts found to download" >&2
+            exit 1
+        }
+        prev=""
+        for a; do
+            if [ "$prev" = --dir ]; then dir=$a; fi
+            prev=$a
+        done
+        held=$(dirname "$CALLS")/zip-held
+        mkdir -p "$held"
+        echo "${STANDIN_EXE:-windows-amd64}" >"$held/footplate.exe"
+        for f in README.md LICENSE NOTICE ${STANDIN_ZIP_STRAY:-}; do
+            echo "$f" >"$held/$f"
+        done
+        (cd "$held" && tar -cf "$dir/footplate_${STANDIN_ZIP_VERSION:-0.3.0}_windows_amd64.zip" \
+            footplate.exe README.md LICENSE NOTICE ${STANDIN_ZIP_STRAY:-})
+        ;;
+esac
+EOF
+cat >"$bin/sleep" <<'EOF'
+#!/bin/sh
+echo "sleep $*" >>"$CALLS"
+EOF
 # Apple is sent a signed app that has no ticket yet, in its zip, and answers
 # with one: the ticket is the file a stapled app holds. It is sent a signed
 # image of the stapled app and the link to drag it onto, with no ticket of its
@@ -483,18 +548,19 @@ in_dmg() {
     grep -q -x -F -- "$2" "$1"
 }
 
-# archives_in_out: the six archives and the checksums of a release, and
+# archives_in_out: the seven archives and the checksums of a release, and
 # nothing else, and the checksums are of what is there.
 archives_in_out() {
     for f in Footplate_0.3.0_darwin_arm64.zip Footplate_0.3.0_darwin_amd64.zip \
         Footplate_0.3.0_darwin_arm64.dmg Footplate_0.3.0_darwin_amd64.dmg \
-        footplate_0.3.0_linux_arm64.tar.gz footplate_0.3.0_linux_amd64.tar.gz checksums.txt; do
+        footplate_0.3.0_linux_arm64.tar.gz footplate_0.3.0_linux_amd64.tar.gz \
+        footplate_0.3.0_windows_amd64.zip checksums.txt; do
         [ -f "$out/$f" ] || fail "$name: no $f in the out dir: $(find "$out" -mindepth 1)"
     done
-    [ "$(find "$out" -mindepth 1 | wc -l | tr -d ' ')" = 7 ] || fail "$name: the out dir holds: $(find "$out" -mindepth 1)"
+    [ "$(find "$out" -mindepth 1 | wc -l | tr -d ' ')" = 8 ] || fail "$name: the out dir holds: $(find "$out" -mindepth 1)"
     (cd "$out" && shasum -a 256 -c checksums.txt >/dev/null) || fail "$name: checksums.txt is not of the archives"
-    # And the checksums are of all six: none is left out of them.
-    [ "$(wc -l <"$out/checksums.txt" | tr -d ' ')" = 6 ] || fail "$name: checksums.txt is: $(cat "$out/checksums.txt")"
+    # And the checksums are of all seven: none is left out of them.
+    [ "$(wc -l <"$out/checksums.txt" | tr -d ' ')" = 7 ] || fail "$name: checksums.txt is: $(cat "$out/checksums.txt")"
 }
 
 # refused <case> <exit> <says> <identity> <profile> [VAR=value ...]: the
@@ -535,11 +601,12 @@ image_holds() {
     done
 }
 
-# listed_clean: the release said of each of its six archives that it listed it
+# listed_clean: the release said of each of its seven archives that it listed it
 # and found no yardr in it, and let go of each image it mounted to do so.
 listed_clean() {
     for what in "macOS arm64 zip" "macOS amd64 zip" "macOS arm64 disk image" \
-        "macOS amd64 disk image" "Linux arm64 archive" "Linux amd64 archive"; do
+        "macOS amd64 disk image" "Linux arm64 archive" "Linux amd64 archive" \
+        "Windows archive"; do
         case "$text" in
             *"$what: lists "*" members, none of yardr"*) ;;
             *) fail "$name: it did not say that the $what holds no yardr: $text" ;;
@@ -587,6 +654,39 @@ linux_archive_holds() {
         fail "$name: the Exec in $1 failed: $command"
     [ "$(cat "$home/started" 2>/dev/null)" = started ] ||
         fail "$name: the Exec in $1 did not start the footplate in ~/.local/bin: $command"
+}
+
+# windows_archive_holds <zip>: the archive holds the program and the three
+# texts, at its root, and nothing else.
+windows_archive_holds() {
+    members=$(tar -tf "$1" | LC_ALL=C sort | tr '\n' ' ')
+    [ "$members" = "LICENSE NOTICE README.md footplate.exe " ] ||
+        fail "$name: the archive $1 holds: $members"
+}
+
+# windows_refused <case> <says> <built> [VAR=value ...]: the release is refused
+# over the Windows zip or its run, with those words and nothing written to the
+# out dir. With built no the refusal comes before the first build, which the
+# calls show; with yes it comes after the builds, for a run that was going
+# when they began.
+windows_refused() {
+    case_name=$1
+    says=$2
+    built=$3
+    shift 3
+    release_run "windows-$case_name" "" "" "$@"
+    [ "$rc" = 1 ] || fail "$name: exited $rc, not 1: $text"
+    case "$text" in
+        *"$says"*) ;;
+        *) fail "$name: it did not say [$says]: $text" ;;
+    esac
+    [ ! -e "$out" ] || fail "$name: a refused release wrote its out dir"
+    if [ "$built" = yes ]; then
+        want "cargo build --release --locked --target x86_64-apple-darwin"
+    else
+        lack "cargo"
+        lack "hdiutil"
+    fi
 }
 
 # stray_refused <case> <VAR=value> <archive> <member>: the knob puts a member
@@ -646,6 +746,15 @@ for arch in arm64 amd64; do
     linux_archive_holds "$out/footplate_0.3.0_linux_$arch.tar.gz"
 done
 archives_in_out
+# The Windows zip is the run's for this commit, asked for before the builds and
+# again after them, and downloaded from the run that succeeded; a run that is
+# over is not waited for.
+commit=$(git -C "$tmp/adhoc/checkout" rev-parse HEAD)
+want_line "^gh run list --repo yardr-dev/footplate --workflow windows.yml --commit $commit --limit 1 --json databaseId,status,conclusion\$"
+[ "$(grep -c '^gh run list ' "$calls")" = 2 ] || fail "adhoc: gh run list was asked: $(grep '^gh ' "$calls")"
+want_line "^gh run download 4242 --repo yardr-dev/footplate --name footplate-windows-amd64 --dir /"
+lack "sleep"
+windows_archive_holds "$out/footplate_0.3.0_windows_amd64.zip"
 
 # With both, each app is signed with the identity, hardened and timestamped,
 # and the signature is checked; sent to Apple in a zip, waited for; stapled;
@@ -713,6 +822,7 @@ stray_refused zip STANDIN_STRAY=Yardr-helper "macOS arm64 zip" \
 stray_refused image STANDIN_DMG_STRAY=Footplate.app/Contents/Resources/yardr "macOS arm64 disk image" \
     Footplate.app/Contents/Resources/yardr
 stray_refused linux STANDIN_TAR_STRAY=yardr "Linux arm64 archive" yardr
+stray_refused windows STANDIN_ZIP_STRAY=Yardr.txt "Windows archive" Yardr.txt
 release_run no-mount "" "" STANDIN_ATTACH_FAILS=1
 [ "$rc" = 1 ] || fail "no-mount: a release whose image could not be opened exited $rc: $text"
 case "$text" in
@@ -735,6 +845,38 @@ case "$text" in
 esac
 grep -q '^hdiutil detach -force ' "$calls" || fail "no-detach: cleanup did not retry with force: $(cat "$calls")"
 [ ! -e "$out" ] || fail "no-detach: a release with a mounted image wrote its out dir"
+
+# A commit without a run of the Windows workflow, and a run that ended without
+# success, cancelled or not, are refused before anything is built, saying what
+# to do; so is a gh that cannot ask. A run that is going is waited for, a
+# stretch at a time, and then is taken or refused as one that is over; one that
+# never ends is given up after 75 minutes. The artifact must be there, be this
+# version's, hold what a Windows archive holds, and hold a Windows program.
+windows_refused missing "GitHub has no run of windows.yml for" no STANDIN_RUNS=none
+windows_refused red "ended failure" no STANDIN_RUNS=completed:failure
+windows_refused cancelled "ended cancelled" no STANDIN_RUNS=completed:cancelled
+windows_refused gh "could not ask GitHub for the Windows run" no STANDIN_GH_FAILS=1
+case "$text" in
+    *"gh auth login"*) ;;
+    *) fail "windows-gh: it did not pass on what gh said: $text" ;;
+esac
+release_run windows-waits "" "" "STANDIN_RUNS=queued: in_progress: in_progress: completed:success"
+[ "$rc" = 0 ] || fail "windows-waits: a run that finished green while waited for failed the release: $text"
+case "$text" in
+    *"is in_progress"*"waiting for it"*) ;;
+    *) fail "windows-waits: it did not say it waited: $text" ;;
+esac
+[ "$(grep -c '^gh run list ' "$calls")" = 4 ] || fail "windows-waits: gh run list was asked: $(grep '^gh ' "$calls")"
+[ "$(grep -c '^sleep 60$' "$calls")" = 2 ] || fail "windows-waits: slept: $(grep '^sleep' "$calls")"
+archives_in_out
+windows_archive_holds "$out/footplate_0.3.0_windows_amd64.zip"
+windows_refused waits-red "ended failure" yes "STANDIN_RUNS=in_progress: in_progress: completed:failure"
+windows_refused never "still in_progress after 75 minutes" yes STANDIN_RUNS=in_progress:
+[ "$(grep -c '^sleep 60$' "$calls")" = 75 ] || fail "windows-never: slept $(grep -c '^sleep' "$calls") times"
+windows_refused no-artifact "could not take the Windows zip from run 4242" yes STANDIN_NO_ARTIFACT=1
+windows_refused other-version "holds no footplate_0.3.0_windows_amd64.zip" yes STANDIN_ZIP_VERSION=0.2.0
+windows_refused more-members "the Windows archive holds: LICENSE NOTICE README.md footplate.exe notes.txt;" yes STANDIN_ZIP_STRAY=notes.txt
+windows_refused not-windows "is no PE32+ executable binary" yes STANDIN_EXE=linux-amd64
 
 # A submission Apple does not accept fails the release with the notary
 # service's log of it, whether or not notarytool's own exit status says so,
