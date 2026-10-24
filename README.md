@@ -140,8 +140,8 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   release build compiles them with the SDK's `fxc.exe`, which
   `GPUI_FXC_PATH` names if the build does not find it. The jobs in
   `.github/workflows/windows.yml` run `cargo build` and `cargo test` on a
-  `windows-latest` runner, and build the release's zip there (below); the
-  gate runs on a Mac and tries no Windows.
+  `windows-latest` runner when a release asks, or by hand, and build the
+  release's zip there (below); the gate runs on a Mac and tries no Windows.
 
 gpui is the release on crates.io, pinned exactly in `Cargo.toml`, and
 `Cargo.lock` is committed: the gate builds with `--locked`. `Cargo.toml`
@@ -213,21 +213,23 @@ added here is added there before the release is cut.
 The Windows zip is not built on the Mac. A release build of gpui compiles its
 shaders with `fxc.exe` of the Windows SDK, which a Mac does not have. The
 `release` job of `.github/workflows/windows.yml` builds the zip on a
-`windows-latest` runner instead, on every push. It runs `cargo build
+`windows-latest` runner instead, when a release asks, or by hand: the workflow
+runs on no push. A builder on a Windows bead starts a run on its branch with
+`gh workflow run windows.yml --ref yard/<bead>`. It runs `cargo build
 --release`, zips `footplate.exe`, README.md, LICENSE and NOTICE as
 `footplate_<version>_windows_amd64.zip`, unpacks that zip and checks that its
 `footplate.exe --version` says Cargo.toml's version, and keeps the zip as an
-artifact of the run for 30 days. Every push leaves one, and they count against
-the account's storage.
+artifact of a successful run for 30 days. Each successful run leaves one, and
+they count against the account's storage.
 
 `scripts/release.sh` takes the zip of the run for the commit it releases
-(`HEAD`) with `gh`, which must be logged in, and starts no run. Before it
-builds anything it stops if GitHub has no run of the workflow for that commit,
-or if the run ended in anything but success, a cancelled run included. For the
-first, push the commit, since the workflow runs on every push. For the second,
-run its failed jobs again with `gh run rerun --failed`, or fix Windows and
-push the fix. After the builds it waits for a run that is still going, 75
-minutes at most, since GitHub stops a run at 60. The zip must hold
+(`HEAD`) with `gh`, which must be logged in, starting the run itself when the
+commit has none, on its branch (or on `main` from a detached checkout). Before
+it builds anything it stops if the run ended in anything but success, a
+cancelled run included: run its failed
+jobs again with `gh run rerun --failed`, or fix Windows and release again,
+which starts a fresh run. After the builds it waits for a run that is still
+going, 75 minutes at most, since GitHub stops a run at 60. The zip must hold
 `footplate.exe`, README.md, LICENSE and NOTICE at its root and nothing else,
 and its `footplate.exe` must be a Windows program for x86-64. As in
 `scripts/release-stage`, `YARDR_RELEASE_REPO` names the repository the run is

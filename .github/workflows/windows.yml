@@ -5,11 +5,12 @@
 # release build also compiles gpui's shaders, with fxc.exe of the Windows
 # SDK, and a Mac does not have that. So the second job builds the Windows zip
 # of a release here, and scripts/release.sh takes it from the run of the
-# commit it releases.
+# commit it releases. It runs when a release asks, or by hand, and on no
+# push. A builder on a Windows bead starts a run on its branch by hand: gh
+# workflow run windows.yml --ref yard/<bead>.
 name: windows
 
 on:
-  push:
   workflow_dispatch:
 
 permissions:
@@ -52,8 +53,8 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  # The Windows zip a release carries. It is built for every commit that is
-  # pushed, released or not.
+  # The Windows zip a release carries. It is built when a release asks for
+  # it, or by hand, and never on a push.
   release:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -99,10 +100,10 @@ jobs:
           }
 
       # scripts/release.sh takes the zip of the commit it releases from the
-      # artifacts of its run, a day or weeks after the push. Every push leaves
-      # one, and they count against the account's storage, so they are kept 30
-      # days and not the default 90. A job that is run again replaces its
-      # artifact, since a name that is taken would fail the upload.
+      # artifacts after the run finishes. Each successful run leaves one, and
+      # they count against the account's storage, so they are kept 30 days and
+      # not the default 90. A job that is run again replaces its artifact,
+      # since a name that is taken would fail the upload.
       - uses: actions/upload-artifact@v7
         with:
           name: footplate-windows-amd64

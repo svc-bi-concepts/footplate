@@ -13,16 +13,16 @@
 #
 # The Windows zip is not built here. gpui compiles its shaders for Windows
 # with fxc.exe of the Windows SDK, which a Mac does not have, so the release
-# job of .github/workflows/windows.yml builds the zip on a Windows runner for
-# every commit that is pushed, and keeps it as an artifact of the run. This
+# job of .github/workflows/windows.yml builds the zip on a Windows runner when
+# a release asks, or by hand, and keeps it as an artifact of the run. This
 # script takes the zip of the run for the commit it releases (HEAD) with gh,
-# logged in, and starts no run itself. Before it builds anything it refuses a
-# commit that has no run, or whose run ended in anything but success. After
-# the builds it waits for a run that is still going, 75 minutes at most
-# (GitHub stops a run at 60). It lists the zip and checks its footplate.exe as
-# it does the other archives. YARDR_RELEASE_REPO names the repository the run
-# is in, owner/name, as it does for scripts/release-stage (default
-# yardr-dev/footplate).
+# logged in, starting the run itself when the commit has none: the workflow
+# runs on no push. Before it builds anything it refuses a commit whose run
+# ended in anything but success. After the builds it waits for a run that is
+# still going, 75 minutes at most (GitHub stops a run at 60). It lists the zip
+# and checks its footplate.exe as it does the other archives.
+# YARDR_RELEASE_REPO names the repository the run is in, owner/name, as it
+# does for scripts/release-stage (default yardr-dev/footplate).
 #
 # Run it from anywhere: `scripts/release.sh <version> [out-dir]`.
 # <version> is the tag (v0.4.0) and must equal Cargo.toml's version, and the
@@ -279,17 +279,45 @@ windows_look() {
     run_url=https://github.com/$repo/actions/runs/$run_id
 }
 
-# Refuses the release for a commit without a Windows run, and for a run that is
-# over and did not succeed. A run that is going passes: windows_fetch waits for
-# it.
+# Starts a run of the Windows workflow for the commit that is released, when
+# GitHub knows none: the workflow runs on no push, so a release is what starts
+# a run, and a builder on a Windows bead starts one by hand. --ref is the
+# commit's branch where it has one, else main: the file is on main, so a
+# dispatch runs for any ref. Then the run is looked at until GitHub shows it,
+# five minutes at most; windows_fetch waits for the run itself.
+windows_start() {
+    ref=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    case "$ref" in
+        "" | HEAD) ref=main ;;
+    esac
+    echo "release.sh: Windows: no run for $commit; starting one on $ref" >&2
+    if ! gh workflow run windows.yml --ref "$ref" --repo "$repo" >"$work/gh.out" 2>&1; then
+        echo "release.sh: could not start a Windows run for $commit: $(cat "$work/gh.out")" >&2
+        exit 1
+    fi
+    windows_look
+    waited=0
+    while [ -z "$run_id" ]; do
+        if [ "$waited" -ge 300 ]; then
+            echo "release.sh: a Windows run was started for $commit but GitHub shows none after 5 minutes; look at the workflow's runs, then release again" >&2
+            exit 1
+        fi
+        sleep 10
+        waited=$((waited + 10))
+        windows_look
+    done
+}
+
+# Refuses the release for a run that is over and did not succeed. A commit
+# with no run gets one started instead (windows_start); a run that is going
+# passes: windows_fetch waits for it.
 windows_check() {
     windows_look
     if [ -z "$run_id" ]; then
-        echo "release.sh: GitHub has no run of windows.yml for $commit, so there is no Windows zip to release; push the commit (the workflow runs on every push), then release again" >&2
-        exit 1
+        windows_start
     fi
     if [ "$run_status" = completed ] && [ "$run_conclusion" != success ]; then
-        echo "release.sh: the Windows run for $commit ended $run_conclusion ($run_url); fix Windows and push the fix, or run its failed jobs again (gh run rerun $run_id --failed), then release again" >&2
+        echo "release.sh: the Windows run for $commit ended $run_conclusion ($run_url); fix Windows and release again, which starts a fresh run, or run its failed jobs again (gh run rerun $run_id --failed), then release again" >&2
         exit 1
     fi
 }
@@ -336,8 +364,8 @@ windows_fetch() {
 }
 
 # The zip is taken at the end, but its run is looked at now. A commit with no
-# run, or whose run failed, is refused before the builds below, which take the
-# better part of an hour, and not after them.
+# run gets one started now, and one whose run failed is refused, before the
+# builds below, which take the better part of an hour, and not after them.
 windows_check
 echo "release.sh: Windows: run $run_id for $commit: $run_status${run_conclusion:+, $run_conclusion} ($run_url); its zip is taken after the builds" >&2
 

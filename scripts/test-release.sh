@@ -9,8 +9,8 @@
 # the zip, the image, the Linux archive or the Windows zip refused. The Windows
 # zip comes from the run of the Windows workflow for the commit, against a
 # stand-in for gh. A run that succeeded gives it, a run that is going is waited
-# for, and a run that is missing, failed or cancelled refuses the release,
-# before any build when that is known by then.
+# for, a commit with no run gets one started, and a run that failed or was
+# cancelled refuses the release, before any build when that is known by then.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -115,6 +115,7 @@ esac
 #                         for each, the last for those after: status:conclusion
 #                         (completed:success, in_progress:), or none
 #   STANDIN_GH_FAILS      gh cannot ask, as when it is not logged in
+#   STANDIN_WORKFLOW_FAILS gh cannot start a run, as for a ref it refuses
 #   STANDIN_NO_ARTIFACT   the run holds no artifact, as one that has expired
 #   STANDIN_ZIP_VERSION   the version in the name of the zip the artifact holds
 #   STANDIN_ZIP_STRAY     a file of that name in the Windows zip, besides its four
@@ -358,9 +359,11 @@ tar -cf "$zip" "$app"
 EOF
 # The Windows run is gh's to say. `run list` answers as gh does with --json:
 # the state in STANDIN_RUNS for this ask, the number of asks kept beside the
-# calls, or none (an empty list). `run download` leaves the artifact's zip in
-# --dir, a tar of the four files standing in for it as ditto's does for the
-# Mac's zips. sleep only says it was asked, so that a wait costs no time.
+# calls, or none (an empty list). `workflow run` starts a run that the asks
+# after it answer with, failing only as STANDIN_WORKFLOW_FAILS asks.
+# `run download` leaves the artifact's zip in --dir, a tar of the four files
+# standing in for it as ditto's does for the Mac's zips. sleep only says it
+# was asked, so that a wait costs no time.
 cat >"$bin/gh" <<'EOF'
 #!/bin/sh
 echo "gh $*" >>"$CALLS"
@@ -382,6 +385,12 @@ case "$1 $2" in
         else
             printf '[{"conclusion":"%s","databaseId":4242,"status":"%s"}]\n' "${state#*:}" "${state%%:*}"
         fi
+        ;;
+    "workflow run")
+        [ -z "${STANDIN_WORKFLOW_FAILS:-}" ] || {
+            echo "could not create workflow dispatch event" >&2
+            exit 1
+        }
         ;;
     "run download")
         [ -z "${STANDIN_NO_ARTIFACT:-}" ] || {
@@ -483,13 +492,18 @@ fi
 # whole, in a checkout and with an out dir of the case's own, the stand-ins
 # first on PATH. $rc is its exit status, $text what it said, $out its out
 # dir and $calls the stand-ins' log. The two signing variables are always
-# given, empty for none, so that the caller's own never reach it.
+# given, empty for none, so that the caller's own never reach it. With
+# DETACH_HEAD set the checkout is left on no branch, for a release from a
+# detached HEAD.
 release_run() {
     name=$1
     sign_with=$2
     notary_with=$3
     shift 3
     make_checkout "$tmp/$name/checkout" "0.3.0"
+    if [ -n "${DETACH_HEAD:-}" ]; then
+        (cd "$tmp/$name/checkout" && git checkout -q --detach)
+    fi
     out=$tmp/$name/out
     calls=$tmp/$name/calls
     if text=$(env PATH="$bin:$PATH" CALLS="$calls" \
@@ -846,13 +860,41 @@ esac
 grep -q '^hdiutil detach -force ' "$calls" || fail "no-detach: cleanup did not retry with force: $(cat "$calls")"
 [ ! -e "$out" ] || fail "no-detach: a release with a mounted image wrote its out dir"
 
-# A commit without a run of the Windows workflow, and a run that ended without
-# success, cancelled or not, are refused before anything is built, saying what
-# to do; so is a gh that cannot ask. A run that is going is waited for, a
-# stretch at a time, and then is taken or refused as one that is over; one that
-# never ends is given up after 75 minutes. The artifact must be there, be this
-# version's, hold what a Windows archive holds, and hold a Windows program.
-windows_refused missing "GitHub has no run of windows.yml for" no STANDIN_RUNS=none
+# A commit with no run of the Windows workflow gets one started, on its
+# branch, and the run is taken as one that was going; from a detached HEAD the
+# run starts on main. A gh that cannot start refuses the release before
+# anything is built, as does a run that never shows after it was started, five
+# minutes at most; so does a run that ended without success, cancelled or not,
+# and a gh that cannot ask. A run that is going is waited for, a stretch at a
+# time, and then is taken or refused as one that is over; one that never ends
+# is given up after 75 minutes. The artifact must be there, be this version's,
+# hold what a Windows archive holds, and hold a Windows program.
+release_run windows-dispatched "" "" "STANDIN_RUNS=none queued: completed:success"
+[ "$rc" = 0 ] || fail "windows-dispatched: a release that started its run failed: $text"
+branch=$(git -C "$tmp/windows-dispatched/checkout" rev-parse --abbrev-ref HEAD)
+case "$text" in
+    *"no run for"*"; starting one on $branch"*) ;;
+    *) fail "windows-dispatched: it did not say it started a run on $branch: $text" ;;
+esac
+want_line "^gh workflow run windows\\.yml --ref $branch --repo yardr-dev/footplate\$"
+[ "$(grep -c '^gh run list ' "$calls")" = 3 ] || fail "windows-dispatched: gh run list was asked: $(grep '^gh ' "$calls")"
+lack "sleep"
+archives_in_out
+windows_archive_holds "$out/footplate_0.3.0_windows_amd64.zip"
+DETACH_HEAD=1
+release_run windows-detached "" "" "STANDIN_RUNS=none completed:success"
+DETACH_HEAD=
+[ "$rc" = 0 ] || fail "windows-detached: a release from a detached HEAD failed: $text"
+want_line "^gh workflow run windows\\.yml --ref main --repo yardr-dev/footplate\$"
+archives_in_out
+windows_archive_holds "$out/footplate_0.3.0_windows_amd64.zip"
+windows_refused start-fails "could not start a Windows run" no STANDIN_RUNS=none STANDIN_WORKFLOW_FAILS=1
+case "$text" in
+    *"could not create workflow dispatch event"*) ;;
+    *) fail "windows-start-fails: it did not pass on what gh said: $text" ;;
+esac
+windows_refused start-missing "shows none after 5 minutes" no STANDIN_RUNS=none
+[ "$(grep -c '^sleep 10$' "$calls")" = 30 ] || fail "windows-start-missing: slept: $(grep '^sleep' "$calls")"
 windows_refused red "ended failure" no STANDIN_RUNS=completed:failure
 windows_refused cancelled "ended cancelled" no STANDIN_RUNS=completed:cancelled
 windows_refused gh "could not ask GitHub for the Windows run" no STANDIN_GH_FAILS=1
