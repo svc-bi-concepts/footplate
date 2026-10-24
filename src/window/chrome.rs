@@ -4483,6 +4483,9 @@ impl Footplate {
         div()
             .id("keys overlay")
             .debug_selector(|| "keys".to_string())
+            // A click outside the card shuts it and is no click on what
+            // stands under it.
+            .block_mouse_except_scroll()
             .absolute()
             .top(px(0.))
             .left(px(0.))

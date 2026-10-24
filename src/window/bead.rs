@@ -517,6 +517,9 @@ impl Footplate {
         div()
             .id("image overlay")
             .debug_selector(|| "image overlay".to_string())
+            // A click outside the image shuts it and is no click on what
+            // stands under it.
+            .block_mouse_except_scroll()
             .absolute()
             .top(px(0.))
             .left(px(0.))

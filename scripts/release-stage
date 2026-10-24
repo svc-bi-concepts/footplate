@@ -21,15 +21,18 @@
 #     done, to sign. A run that died after tagging resumes: a tag at the
 #     base commit with no release on it is finished, not refused.
 #   verify: downloads the release, checks checksums.txt.minisig against the
-#     release key and the archives against checksums.txt, then unpacks each
-#     macOS archive and checks that its app is notarized (xcrun stapler
-#     validate, and spctl naming Notarized Developer ID as the source). Then
-#     done, to publish, the note saying which apps were checked, or that
-#     none was and why; a missing or bad signature reports failed with what
-#     minisign said, so sign is asked again, and archives that do not match,
-#     an app that is not notarized, or a required check that could not run,
-#     report question, to decide. A missing Mac tool skips just that check,
-#     and the done note says so.
+#     release key and the archives against checksums.txt, then checks each
+#     macOS archive: each zip is unpacked and its app must be notarized
+#     (xcrun stapler validate, and spctl naming Notarized Developer ID as
+#     the source), and each disk image must be stapled and notarized
+#     itself, mount read-only holding the app and the Applications link,
+#     and hold a notarized app. Then done, to publish, the note saying
+#     what was checked, or that none was and why; a missing or bad
+#     signature reports failed with what minisign said, so sign is asked
+#     again, and archives that do not match, an app or image that is not
+#     notarized, or a required check that could not run, report question,
+#     to decide. A missing Mac tool skips just that check, and the done
+#     note says so.
 #   publish: files the yardr.dev sync bead and advances it to new, notes its
 #     id on the release bead. Then done, to published.
 #
@@ -39,9 +42,9 @@
 # the bead instead.
 #
 # Needs on PATH: jq and git always; gh for build and verify; minisign and
-# shasum (or sha256sum) for verify, and xcrun, spctl and ditto, which a Mac
-# has, for verify's look at the macOS apps (off a Mac the note says that
-# look was skipped). gh acts as whoever it is logged in as.
+# shasum (or sha256sum) for verify, and xcrun, spctl, ditto and hdiutil,
+# which a Mac has, for verify's look at the macOS archives (off a Mac the
+# note says that look was skipped). gh acts as whoever it is logged in as.
 # The build runs scripts/release.sh, so on a Mac, where that builds. That takes
 # the Windows zip from the run of the Windows workflow for the base commit with
 # the gh above, waiting for the run if it is going. It also signs and
@@ -303,34 +306,124 @@ gh release upload $v --repo $GHREPO $dir/checksums.txt.minisig --clobber
 Then Done: the verify stage checks the signature next."
 }
 
-# macs: the macOS apps of the downloaded release, looked at as a Mac that
-# takes them would. Each *_darwin_*.zip is unpacked with ditto, into a
-# directory of its own since every zip holds a Footplate.app, and the app
-# must have its ticket stapled (xcrun stapler validate) and be taken by
-# Gatekeeper as notarized (spctl names the source). A fault is a question,
-# as an archive that does not match is: the release is remade by hand. A
-# release built without the signing variables is signed ad hoc and fails
-# here, which is meant. Sets $mac to the sentence the done note carries: the
-# apps checked, or why none was, so that a skipped check is never silent.
-# xcrun, spctl and ditto are a Mac's; where one is missing, the check is
-# skipped.
+# dmg_detach: let go of the disk image macs() has mounted, if one is;
+# the EXIT trap's half, so a check that fails with an image attached
+# still detaches it. An attached image outlives the script.
+dmg_detach() {
+  if [ -n "${dmg_mounted:-}" ]; then
+    hdiutil detach "$dmg_mounted" >/dev/null 2>&1 || true
+    dmg_mounted=""
+  fi
+}
+
+# macs: the macOS archives of the downloaded release, looked at as a Mac
+# that takes them would. Each *_darwin_*.dmg must have its ticket stapled
+# (xcrun stapler validate) and be taken by Gatekeeper as notarized (spctl
+# -a -vv -t open names the source), then mounts read-only at a mount
+# point of its own, since both images are named Footplate, and must hold
+# exactly Footplate.app and the Applications link to /Applications (a
+# .DS_Store may ride along); the mounted app passes stapler and spctl
+# -a -vv -t exec in turn. Each *_darwin_*.zip is unpacked with ditto,
+# into a directory of its own since every zip holds a Footplate.app, and
+# the app must have its ticket stapled and be taken by Gatekeeper as
+# notarized. A fault is a question, as an archive that does not match
+# is: the release is remade by hand. A release built without the signing
+# variables is signed ad hoc and fails here, which is meant. Sets $mac
+# to the sentence the done note carries: what was checked, or why none
+# was, so that a skipped check is never silent. xcrun, spctl, ditto and
+# hdiutil are a Mac's; where one the release needs is missing, the check
+# is skipped. The download carries no quarantine, so mounting its images
+# opens nothing flagged; no check clears any.
 macs() {
-  set -- "$tmp"/*_darwin_*.zip
-  if [ ! -f "$1" ]; then
+  have_zips=""
+  have_dmgs=""
+  for f in "$tmp"/*_darwin_*.zip; do
+    [ -f "$f" ] && have_zips=1 && break
+  done
+  for f in "$tmp"/*_darwin_*.dmg; do
+    [ -f "$f" ] && have_dmgs=1 && break
+  done
+  if [ -z "$have_zips$have_dmgs" ]; then
     mac="The release holds no macOS archive, so no app was checked for notarization."
     return
   fi
   missing=""
-  for tool in xcrun spctl ditto; do
+  for tool in xcrun spctl; do
     command -v "$tool" >/dev/null 2>&1 || missing="${missing:+$missing, }$tool"
   done
+  if [ -n "$have_zips" ]; then
+    command -v ditto >/dev/null 2>&1 || missing="${missing:+$missing, }ditto"
+  fi
+  if [ -n "$have_dmgs" ]; then
+    command -v hdiutil >/dev/null 2>&1 || missing="${missing:+$missing, }hdiutil"
+  fi
   if [ -n "$missing" ]; then
-    mac="The macOS apps were not checked for notarization: PATH here lacks $missing, which a Mac has, so that check was skipped."
+    if [ -n "$have_zips" ] && [ -n "$have_dmgs" ]; then
+      what="The macOS apps and disk images were not checked for notarization"
+    elif [ -n "$have_dmgs" ]; then
+      what="The macOS disk images were not checked for notarization"
+    else
+      what="The macOS apps were not checked for notarization"
+    fi
+    mac="$what: PATH here lacks $missing, which a Mac has, so that check was skipped."
     return
   fi
   remade="it is remade by hand (the release and the tag deleted, the bead back to build)"
+  # The images first, so a release whose images fail is questioned on
+  # them; each mount is let go of on the way out, whatever happened in
+  # between, and each image's own detach clears the mount the trap
+  # would let go of.
+  dmg_mounted=""
+  trap 'dmg_detach; cleanup' EXIT
+  dchecked=""
+  for dmg in "$tmp"/*_darwin_*.dmg; do
+    [ -f "$dmg" ] || continue
+    b=${dmg##*/}
+    out=$(xcrun stapler validate "$dmg" 2>&1) ||
+      fail question "the disk image $b of release $v does not pass xcrun stapler validate (a release built without the signing variables leaves its images unsigned, with no ticket stapled); $remade" "$out"
+    out=$(spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1) ||
+      fail question "Gatekeeper refuses the disk image $b of release $v (spctl -a -vv -t open failed); $remade" "$out"
+    case $out in
+    *"source=Notarized Developer ID"*) ;;
+    *) fail question "Gatekeeper does not take the disk image $b of release $v as notarized (spctl does not name source=Notarized Developer ID); $remade" "$out" ;;
+    esac
+    mount=$tmp/mount-${b%.dmg}
+    mkdir "$mount" || fail question "cannot make a working directory; the macOS disk images were not checked"
+    hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount" "$dmg" >"$tmp/mac.log" 2>&1 ||
+      fail question "mounting $b of release $v failed; the macOS disk images were not checked" "$(cat "$tmp/mac.log")"
+    dmg_mounted=$mount
+    [ -d "$mount/Footplate.app" ] ||
+      fail question "the disk image $b of release $v holds no Footplate.app; $remade"
+    link=$(readlink "$mount/Applications" 2>/dev/null) || link=""
+    [ "$link" = "/Applications" ] ||
+      fail question "the disk image $b of release $v holds no Applications link to /Applications; $remade"
+    extra=""
+    for entry in "$mount"/* "$mount"/.[!.]* "$mount"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      e=${entry##*/}
+      case $e in
+      Footplate.app | Applications | .DS_Store) ;;
+      *) extra="${extra:+$extra, }$e" ;;
+      esac
+    done
+    [ -z "$extra" ] ||
+      fail question "the disk image $b of release $v holds more than the app and the Applications link ($extra); $remade"
+    out=$(xcrun stapler validate "$mount/Footplate.app" 2>&1) ||
+      fail question "the Footplate.app in $b of release $v does not pass xcrun stapler validate; $remade" "$out"
+    out=$(spctl -a -vv -t exec "$mount/Footplate.app" 2>&1) ||
+      fail question "Gatekeeper refuses the Footplate.app in $b of release $v (spctl -a -vv -t exec failed); $remade" "$out"
+    case $out in
+    *"source=Notarized Developer ID"*) ;;
+    *) fail question "Gatekeeper does not take the Footplate.app in $b of release $v as notarized (spctl does not name source=Notarized Developer ID); $remade" "$out" ;;
+    esac
+    hdiutil detach "$mount" >/dev/null 2>&1 ||
+      fail question "letting go of $b of release $v after checking it failed"
+    dmg_mounted=""
+    dchecked="${dchecked:+$dchecked, }$b"
+  done
   checked=""
-  for zip in "$@"; do
+  for zip in "$tmp"/*_darwin_*.zip; do
+    [ -f "$zip" ] || continue
     b=${zip##*/}
     dest=$tmp/mac-${b%.zip}
     mkdir "$dest" || fail question "cannot make a working directory; the macOS apps were not checked"
@@ -353,7 +446,13 @@ macs() {
     done
     [ -n "$found" ] || fail question "$b of release $v holds no .app to check; $remade"
   done
-  mac="The macOS apps are notarized (xcrun stapler validate passes and spctl names Notarized Developer ID as the source): $checked."
+  if [ -n "$checked" ] && [ -n "$dchecked" ]; then
+    mac="The macOS apps and disk images are notarized (xcrun stapler validate passes and spctl names Notarized Developer ID as the source): $checked; $dchecked."
+  elif [ -n "$dchecked" ]; then
+    mac="The macOS disk images are notarized (xcrun stapler validate passes and spctl names Notarized Developer ID as the source): $dchecked."
+  else
+    mac="The macOS apps are notarized (xcrun stapler validate passes and spctl names Notarized Developer ID as the source): $checked."
+  fi
 }
 
 verify() {

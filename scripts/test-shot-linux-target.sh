@@ -133,6 +133,22 @@ if grep -F -q -- '-- /target/debug/footplate' "$tmp/log-t1" "$tmp/log-t2"; then
     fail "a shot launched the shared root's binary"
 fi
 
+# The run pins the host's own platform, whatever variant the local tag
+# holds; on a host uname -m says nothing known of, it keeps no flag.
+case "$(uname -m)" in
+    aarch64 | arm64) want_platform=linux/arm64 ;;
+    x86_64 | amd64) want_platform=linux/amd64 ;;
+    *) want_platform="" ;;
+esac
+if [ -n "$want_platform" ]; then
+    for log in "$tmp/log-t1" "$tmp/log-t1-again" "$tmp/log-t2"; do
+        grep -F -q -- "run --platform $want_platform " "$log" \
+            || fail "a run names no --platform $want_platform: $(cat "$log")"
+    done
+elif grep -F -q -- "run --platform " "$tmp/log-t1" "$tmp/log-t2"; then
+    fail "a run on an unknown host names a platform"
+fi
+
 # Stale trees are pruned before the build, never after.
 prune=$(grep -n -F 'shot-linux-prune.sh' "$tmp/log-t1" | cut -d: -f1 | head -n 1)
 build=$(grep -n -F 'cargo build' "$tmp/log-t1" | cut -d: -f1 | head -n 1)

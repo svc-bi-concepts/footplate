@@ -6720,6 +6720,13 @@ yardr.dev
         cx.run_until_parked();
         assert_eq!(overlay_image(&view, cx), None);
         assert!(line_focused(&view, cx));
+        // A click outside on a control shuts it and clicks nothing
+        // under it: the rail's chip opens no switcher.
+        click_on(cx, &format!("image open {image}"));
+        assert_eq!(overlay_image(&view, cx), Some(image.clone()));
+        click_on(cx, "yard chip");
+        assert_eq!(overlay_image(&view, cx), None);
+        assert_eq!(switching(&view, cx), None);
         // And the × in the corner.
         click_on(cx, &format!("image open {image}"));
         assert_eq!(overlay_image(&view, cx), Some(image.clone()));
@@ -11500,6 +11507,15 @@ yardr.dev
             view.read_with(cx, |v, _| v.show_keys)
         });
         cx.simulate_keystrokes("escape");
+        // A click outside shuts it and reaches nothing under it: the
+        // rail's chip under the click opens no switcher.
+        click_on(cx, "keys hint card");
+        wait(cx, "the cheatsheet", |cx| {
+            view.read_with(cx, |v, _| v.show_keys)
+        });
+        click_on(cx, "yard chip");
+        assert!(!view.read_with(cx, |v, _| v.show_keys));
+        assert_eq!(switching(&view, cx), None);
         // In the switcher it names the switcher's keys.
         cx.simulate_keystrokes("secondary-y");
         wait(cx, "the switcher", |cx| drawn(cx, "switcher"));

@@ -6,9 +6,10 @@
 # cargo's homes), target_vol (the volume holding the build trees),
 # cargo_home (cargo's home in the container), target_dir
 # (CARGO_TARGET_DIR), platform (docker's --platform, empty for the host's
-# own), extra_bins (binaries beyond cc and cargo that must answer before
-# the provisioning is skipped) and extra_pkgs (the apt packages beyond
-# the build's own that provide them).
+# own, which the provisioning passes explicitly), extra_bins (binaries
+# beyond cc and cargo that must answer before the provisioning is
+# skipped) and extra_pkgs (the apt packages beyond the build's own that
+# provide them).
 
 have() {
     docker exec "$1" sh -c "command -v $2" >/dev/null 2>&1
@@ -20,6 +21,16 @@ linux_provision() {
     # before a new one starts.
     if docker inspect "$name" >/dev/null 2>&1; then
         docker rm -f "$name" >/dev/null
+    fi
+    # An empty platform is the host's own, passed explicitly: without the
+    # flag docker starts whatever variant the local tag happens to hold
+    # (an emulated leg leaves debian:13 as amd64), over volumes whose
+    # binaries are the host's arch. An unknown host keeps no flag.
+    if [ -z "$platform" ]; then
+        case "$(uname -m)" in
+            aarch64 | arm64) platform=linux/arm64 ;;
+            x86_64 | amd64) platform=linux/amd64 ;;
+        esac
     fi
     if [ -n "$platform" ]; then
         set -- --platform "$platform"

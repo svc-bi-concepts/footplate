@@ -216,7 +216,33 @@ if [ "${FAKE_DITTO_EMPTY:-}" != yes ]; then
   mkdir -p "$dest/Footplate.app"
 fi
 EOF
-chmod +x "$bin/yardr" "$bin/gh" "$bin/minisign" "$bin/fakebuild" "$bin/xcrun" "$bin/spctl" "$bin/ditto"
+
+# fake hdiutil "mounts" a disk image at the mountpoint it is given: the app
+# and the Applications link a footplate image holds (with the .DS_Store a
+# real image may carry), or a volume with junk / without the link, when it
+# is told so. Detaching only logs.
+cat >"$bin/hdiutil" <<'EOF'
+#!/bin/sh
+printf 'hdiutil %s\n' "$*" >>"$FAKE_DIR/calls.log"
+# hdiutil attach -readonly -nobrowse -noautoopen -mountpoint <dir> <dmg>
+if [ "$1" = attach ]; then
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "-mountpoint" ]; then dir="$a"; fi
+    prev="$a"
+  done
+  mkdir -p "$dir/Footplate.app"
+  printf 'finder\n' >"$dir/.DS_Store"
+  if [ "${FAKE_HDIUTIL_NOLINK:-}" != yes ]; then
+    ln -s /Applications "$dir/Applications"
+  fi
+  if [ "${FAKE_HDIUTIL_EXTRA:-}" = yes ]; then
+    # A name beginning with two dots must still count as an extra entry.
+    printf 'junk\n' >"$dir/..junk.txt"
+  fi
+fi
+EOF
+chmod +x "$bin/yardr" "$bin/gh" "$bin/minisign" "$bin/fakebuild" "$bin/xcrun" "$bin/spctl" "$bin/ditto" "$bin/hdiutil"
 
 # nomac: a PATH with what verify needs but no xcrun, as a system that is no
 # Mac has it. These tests run on a Mac as well, where xcrun stands in
@@ -230,6 +256,19 @@ for tool in jq git sed grep mktemp rm cat mkdir cp env tail head date shasum sha
 done
 for tool in yardr gh minisign spctl ditto; do
     ln -s "$bin/$tool" "$nomac/$tool"
+done
+
+# nohdiutil: a PATH with what verify needs but no hdiutil, as a system
+# without the mounter has it. Made of links like nomac, since a Mac's
+# /usr/bin holds the real one.
+nohdiutil=$tmp/nohdiutil
+mkdir -p "$nohdiutil"
+for tool in jq git sed grep mktemp rm cat mkdir cp env tail head date shasum sha256sum; do
+    found=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$found" "$nohdiutil/$tool"
+done
+for tool in yardr gh minisign xcrun spctl ditto; do
+    ln -s "$bin/$tool" "$nohdiutil/$tool"
 done
 
 # The fake reads nothing for a call that asks for nothing, however stdin
@@ -342,9 +381,11 @@ real_release() {
     git -C "$checkout" push -q origin main
 }
 
-# fixture <sig|nosig> <ok|corrupt> [mac]: a release for verify to download, of
-# two archives with a checksums.txt over them, and with mac the two zips of
-# footplate's macOS apps as well (their bytes are no zips: ditto is a
+# fixture <sig|nosig> <ok|corrupt> [mac] [dmg]: a release for verify to
+# download, of two archives with a checksums.txt over them, and with mac
+# the two zips of footplate's macOS apps as well (their bytes are no
+# zips: ditto is a stand-in), and with dmg the two disk images beside
+# whatever else was asked for (their bytes are no images: hdiutil is a
 # stand-in).
 fixture() {
     rdir=$casedir/release
@@ -356,6 +397,12 @@ fixture() {
         for arch in arm64 amd64; do
             printf 'footplate darwin %s\n' "$arch" >"$rdir/Footplate_0.3.0_darwin_$arch.zip"
             archives="$archives Footplate_0.3.0_darwin_$arch.zip"
+        done
+    fi
+    if [ "${4:-}" = dmg ]; then
+        for arch in arm64 amd64; do
+            printf 'footplate darwin %s image\n' "$arch" >"$rdir/Footplate_0.3.0_darwin_$arch.dmg"
+            archives="$archives Footplate_0.3.0_darwin_$arch.dmg"
         done
     fi
     # shellcheck disable=SC2086 # $SUM and $archives are lists
@@ -724,6 +771,105 @@ want "were not checked for notarization: PATH here lacks xcrun, which a Mac has"
 lack "ditto -x -k"
 lack "spctl -a"
 ok "verify says it skipped the macOS apps off a Mac"
+
+# The disk images beside the zips are checked too: each is stapled and
+# notarized itself, mounts read-only at a mount point of its own, holds
+# the app and the Applications link (a .DS_Store may ride along), and
+# holds a notarized app; then each is detached. Done to publish, and the
+# note names the images beside the apps.
+begin verify-mac-dmg-ok
+fixture sig ok mac dmg
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+want "its 6 archives match checksums.txt"
+count 2 "hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "
+want "mount-Footplate_0.3.0_darwin_arm64"
+want "mount-Footplate_0.3.0_darwin_amd64"
+count 2 "hdiutil detach "
+count 6 "xcrun stapler validate "
+count 2 "spctl -a -vv -t open --context context:primary-signature "
+count 4 "spctl -a -vv -t exec "
+count 2 "ditto -x -k "
+want "The macOS apps and disk images are notarized"
+want "Footplate_0.3.0_darwin_arm64.dmg"
+want "Footplate_0.3.0_darwin_amd64.dmg"
+want "Footplate.app in Footplate_0.3.0_darwin_arm64.zip"
+ok "verify checks the macOS disk images"
+
+# An image with no ticket stapled to it is questioned, with what stapler
+# said, and nothing is mounted.
+begin verify-mac-dmg-unstapled
+fixture sig ok mac dmg
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_STAPLER_RC=65" \
+    "FAKE_STAPLER_OUT=Footplate_0.3.0_darwin_amd64.dmg does not have a ticket stapled to it."
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "the disk image Footplate_0.3.0_darwin_amd64.dmg of release v0.3.0 does not pass xcrun stapler validate"
+want "does not have a ticket stapled to it."
+want "it is remade by hand"
+lack "spctl -a"
+lack "hdiutil attach"
+ok "verify questions an image with no ticket stapled"
+
+# Gatekeeper that takes the image from another source than a notarized
+# Developer ID is questioned, with what spctl said.
+begin verify-mac-dmg-not-notarized
+fixture sig ok mac dmg
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" \
+    "FAKE_SPCTL_OUT=Footplate_0.3.0_darwin_amd64.dmg: accepted
+source=Developer ID"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "does not name source=Notarized Developer ID"
+want "Footplate_0.3.0_darwin_amd64.dmg"
+want "source=Developer ID"
+lack "hdiutil attach"
+ok "verify questions an image Gatekeeper does not call notarized"
+
+# An image holding more than the app and the link is questioned, and the
+# mount is still let go of.
+begin verify-mac-dmg-extra
+fixture sig ok mac dmg
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_HDIUTIL_EXTRA=yes"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "holds more than the app and the Applications link (..junk.txt)"
+count 1 "hdiutil attach "
+count 1 "hdiutil detach "
+ok "verify questions an image with an extra file, and detaches it"
+
+# As is an image without the Applications link.
+begin verify-mac-dmg-no-link
+fixture sig ok mac dmg
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FAKE_HDIUTIL_NOLINK=yes"
+want "yardr bead done footplate-rel1 --outcome question --note -"
+lack "yardr bead done footplate-rel1 --note -"
+want "holds no Applications link to /Applications"
+count 1 "hdiutil attach "
+count 1 "hdiutil detach "
+ok "verify questions an image without the Applications link, and detaches it"
+
+# Without hdiutil the macOS archives are not looked at, and the done note
+# says that: the release still goes to publish, with nothing mounted or
+# unpacked.
+begin verify-mac-no-hdiutil
+fixture sig ok mac dmg
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "PATH=$nohdiutil"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+want "its 6 archives match checksums.txt"
+want "were not checked for notarization: PATH here lacks hdiutil, which a Mac has"
+lack "hdiutil attach"
+lack "ditto -x -k"
+lack "spctl -a"
+ok "verify says it skipped the macOS check without hdiutil"
 
 # Publish files the footplate sync bead and advances it to new.
 begin publish-ok
