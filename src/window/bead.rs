@@ -14,7 +14,9 @@ use super::Expanded;
 use super::Footplate;
 use super::ask::ask_preview_head;
 use super::expanded_text_key;
-use super::metrics::{ATTACHMENT, IMAGE_HEIGHT, IMAGE_MARGIN, READING_WIDTH, drawer_fits};
+use super::metrics::{
+    ATTACHMENT, IMAGE_HEIGHT, IMAGE_MARGIN, LETTER_GUTTER, READING_WIDTH, drawer_fits,
+};
 use super::panel::{day_break, reading_column, reading_row};
 use super::rail::{ImageOpen, OpenTip, Picture, Unsent, post};
 use super::screen::screen_control;
@@ -26,6 +28,15 @@ use crate::draft::{self, Attachment, Found};
 use crate::model::{self, ArrivalDetail, AskPreview, Entry, Model, Selected, Target, Top};
 use crate::select;
 use crate::theme::Palette;
+
+/// Whether the letter `seq` shows its time in the gutter: it reads
+/// under another's head, and the pointer stands on it. A letter with
+/// a head of its own already says its time there, so hovering it
+/// shows nothing more. It wants the pointer alone, not the bar's yard
+/// and overlays: the time is the window's own to say.
+pub(crate) fn hover_clock(head: bool, hover: Option<(u64, Piece)>, seq: u64) -> bool {
+    !head && hover.is_some_and(|(at, _)| at == seq)
+}
 
 impl Footplate {
     /// Asks the yard for the images shown it was not asked for yet: the
@@ -1030,7 +1041,10 @@ impl Footplate {
     }
 
     /// The letter's body. A letter that reads under another's head has no
-    /// head of its own, so its bar of reactions floats over its first line.
+    /// head of its own, so its bar of reactions floats over its first line,
+    /// and its time stands in the gutter while the pointer is on it. The
+    /// letter draws no ground, hovered or not: the time appearing is the
+    /// whole affordance.
     pub(crate) fn entry_body(
         &self,
         entry: Entry,
@@ -1039,6 +1053,8 @@ impl Footplate {
     ) -> AnyElement {
         let seq = entry.seq;
         let hovered = !entry.head && self.reacting(seq);
+        let clocked = hover_clock(entry.head, self.react_hover, seq);
+        let at = model::clock_time(&entry.at, &chrono::Local);
         let body = div()
             .id(("body", seq))
             .relative()
@@ -1046,15 +1062,17 @@ impl Footplate {
             .flex()
             .flex_col()
             // The breathing room to the row below stands inside the
-            // body, so a body touches the head or body under it.
-            .pb_1();
+            // body, so a body touches the head or body under it: the
+            // scale's space-8, 24 pixels, past a blank line within a
+            // letter, so one letter reads apart from the next.
+            .pb_6();
         Self::hover_react(seq, Piece::Body, body, cx)
             // A correction carries its label above its text, so it reads
             // as no new thought.
             .when(entry.correction, |el| {
                 el.child(
                     div()
-                        .ml_4()
+                        .ml(rems(LETTER_GUTTER))
                         .debug_selector(|| format!("correction {seq}"))
                         .text_sm()
                         .text_color(palette.faint)
@@ -1068,16 +1086,25 @@ impl Footplate {
                 let on_ref: select::RefClick = Rc::new(move |target, window, cx| {
                     open.update(cx, |this, cx| this.open_reference(target, window, cx));
                 });
-                el.child(div().ml_4().debug_selector(|| format!("text {seq}")).child(
-                    select::text_with_refs(seq, entry.text, entry.refs, on_ref, &self.selection),
-                ))
+                el.child(
+                    div()
+                        .ml(rems(LETTER_GUTTER))
+                        .debug_selector(|| format!("text {seq}"))
+                        .child(select::text_with_refs(
+                            seq,
+                            entry.text,
+                            entry.refs,
+                            on_ref,
+                            &self.selection,
+                        )),
+                )
             })
             // The parties' reactions, one a line, in faint words under
             // the text.
             .when(!entry.reactions.is_empty(), |el| {
                 el.child(
                     div()
-                        .ml_4()
+                        .ml(rems(LETTER_GUTTER))
                         .debug_selector(|| format!("reactions {seq}"))
                         .children(entry.reactions.iter().map(|r| {
                             div()
@@ -1095,17 +1122,34 @@ impl Footplate {
             )
             .children(entry.files.iter().map(|file| {
                 div()
-                    .pl_4()
+                    .pl(rems(LETTER_GUTTER))
                     .pt_1()
                     .child(self.picture(file, false, palette, cx))
             }))
             .when_some(entry.standing, |el, standing| {
                 el.child(
                     div()
-                        .pl_4()
+                        .pl(rems(LETTER_GUTTER))
                         .text_sm()
                         .text_color(palette.faint)
                         .child(format!("· {standing}")),
+                )
+            })
+            // The letter's own time in the gutter: absolute, so it takes
+            // no room and the letter keeps its place whether it stands
+            // there or not.
+            .when(clocked, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .debug_selector({
+                            let at = at.clone();
+                            move || format!("hover clock {seq} {at}")
+                        })
+                        .text_color(palette.faint)
+                        .child(at.clone()),
                 )
             })
             .when(hovered, |el| {
@@ -1252,7 +1296,7 @@ impl Footplate {
         let bead = ask.bead.clone();
         let ask_seq = ask.ask;
         div()
-            .pl_4()
+            .pl(rems(LETTER_GUTTER))
             .pt_2()
             .flex()
             .flex_col()

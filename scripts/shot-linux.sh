@@ -12,6 +12,8 @@
 # (a long wrapped thread from alternating senders,
 # the newest mail with an image), `column` (a long conversation over
 # three days, grouped, with short links and a correction),
+# `column-hover` (that conversation with the pointer on a letter under
+# its head),
 # `plain` (an open decision card of a plain ask), `plain-select`
 # (that card with a selection posed over its context), `lines` (that
 # card with one of jo's beads changed, so Lines carries its badge), `page` (an
@@ -89,7 +91,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen"
+states="yardmaster crew thread column column-hover plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

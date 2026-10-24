@@ -1208,6 +1208,7 @@ mod tests {
         texts_label, typeback_line, typeback_mismatch, words_send,
     };
     use super::asks::{dir_url, file_url};
+    use super::bead::hover_clock;
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, RAIL, drawer_fits};
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
@@ -2897,6 +2898,8 @@ mod tests {
         assert_eq!(heads, [true, false, true]);
         let at_rest = letters_stand(&view, cx);
         assert_eq!(pointer_on(&view, cx), None);
+        let second = local("2026-10-13T09:33:00Z", "%H:%M");
+        assert!(!drawn(cx, &format!("hover clock 13 {second}")));
 
         // The pointer on a letter's head or on its text, a letter with a
         // head or one without: the bar is over that letter, and no row,
@@ -2911,6 +2914,9 @@ mod tests {
             hover_on(cx, on);
             assert_eq!(pointer_on(&view, cx).map(|(at, _)| at), Some(seq), "{on}");
             assert!(drawn(cx, &format!("react row {seq}")), "{on}");
+            if seq == 13 {
+                assert!(drawn(cx, &format!("hover clock 13 {second}")), "{on}");
+            }
             assert_eq!(
                 letters_stand(&view, cx),
                 at_rest,
@@ -2941,7 +2947,10 @@ mod tests {
         // body.
         hover_on(cx, "text 13");
         let bar = bounds_of(cx, "react row 13");
-        let text = bounds_now(cx, "text 13");
+        let (text, clock) = (
+            bounds_now(cx, "text 13"),
+            bounds_now(cx, &format!("hover clock 13 {second}")),
+        );
         assert!(
             near(bar.right(), text.right()),
             "the bar is at the column's right: {bar:?} over {text:?}"
@@ -2949,6 +2958,23 @@ mod tests {
         assert!(
             near(bar.top(), text.top()),
             "the bar is over the first line: {bar:?} over {text:?}"
+        );
+        let head = bounds_now(
+            cx,
+            &format!("clock 12 {}", local("2026-10-13T09:30:00Z", "%H:%M")),
+        );
+        assert!(
+            near(clock.left(), head.left()),
+            "the hover time stands off the head's clock: {clock:?} past {head:?}"
+        );
+        assert!(
+            clock.right() <= text.left(),
+            "the hover time runs over the text: {clock:?} over {text:?}"
+        );
+        let line = cx.update(|window, _| window.line_height());
+        assert!(
+            clock.size.height <= line,
+            "the hover time stands taller than one line: {clock:?}"
         );
 
         // Off the letters it is gone, and they stand as they stood.
@@ -3035,11 +3061,31 @@ mod tests {
             );
             assert!(drawn(cx, "react row 12"), "step {step} hid the bar");
         }
+        // A letter with a head of its own shows no time on hover: its
+        // head already says it. Never drawn in this window, where only
+        // the headed letter was hovered.
+        assert!(!drawn(
+            cx,
+            &format!("hover clock 12 {}", local("2026-10-13T09:30:00Z", "%H:%M"))
+        ));
         assert_eq!(
             letters_stand(&view, cx),
             at_rest,
             "the bar moved its letter"
         );
+    }
+
+    /// A letter under another's head shows its time while the pointer
+    /// stands on it, on its body or its bar; a letter with a head of
+    /// its own shows none, and neither does an unhovered one.
+    #[test]
+    fn hovering_a_letter_under_a_head_shows_its_time_and_a_headed_one_shows_none() {
+        assert!(hover_clock(false, Some((13, Piece::Body)), 13));
+        assert!(hover_clock(false, Some((13, Piece::Bar)), 13));
+        assert!(!hover_clock(true, Some((12, Piece::Body)), 12));
+        assert!(!hover_clock(true, Some((12, Piece::Head)), 12));
+        assert!(!hover_clock(false, None, 13));
+        assert!(!hover_clock(false, Some((12, Piece::Body)), 13));
     }
 
     /// The bar paints after the whole window, so no line of the letter
@@ -12467,8 +12513,9 @@ yardr.dev
 
     /// The conversation reads as a column: each mail's name stands over
     /// its sender's group alone, a separator breaks over each day, and at
-    /// 1920 pixels the mail stands 880 wide, centred in the pane, with the
-    /// composer under it in the same column.
+    /// 1920 pixels the mail stands in the 880 column, centred in the pane,
+    /// its words in from the gutter, with the composer under it in the
+    /// same column.
     #[gpui::test]
     fn the_conversation_reads_as_a_grouped_column_with_day_separators(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -12477,17 +12524,20 @@ yardr.dev
             "Conversation",
             &json!({"result": [
                 {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "one", "read": true},
-                {"seq": 13, "at": "2026-10-13T09:33:00Z", "from": "yardmaster", "to": "jo", "text": "two", "read": true},
+                {"seq": 13, "at": "2026-10-13T09:33:00Z", "from": "yardmaster", "to": "jo", "text": "two\n\nmore", "read": true},
                 {"seq": 14, "at": "2026-10-14T08:05:00Z", "from": "jo", "to": "yardmaster", "text": "three", "read": true},
             ]})
             .to_string(),
         );
-        let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
+        let (view, cx) = opened(&yard, &["one", "two\n\nmore", "three"], cx);
         // The second mail joins the first's group where the two fall on
         // the same day here; the third heads its own, past midnight. Each
         // mail's name stands over it exactly where the model says.
         let entries = view.read_with(cx, |v, _| v.model.as_ref().unwrap().entries());
-        assert_eq!([entries[0].head, entries[2].head], [true, true]);
+        assert_eq!(
+            entries.iter().map(|entry| entry.head).collect::<Vec<_>>(),
+            [true, false, true]
+        );
         for (seq, head) in [
             (12, entries[0].head),
             (13, entries[1].head),
@@ -12512,6 +12562,25 @@ yardr.dev
                 );
             }
         }
+        // The second letter's gap past the first is wider than both the
+        // blank paragraph gap within it and the line leading.
+        let (first, second) = (bounds_of(cx, "text 12"), bounds_of(cx, "text 13"));
+        let between = f32::from(second.top() - first.bottom());
+        let paragraph = f32::from(second.size.height) - 2. * f32::from(first.size.height);
+        assert!(
+            paragraph > 0.,
+            "the paragraphs stand with no gap: {first:?} {second:?}"
+        );
+        assert!(
+            between > paragraph,
+            "the letters stand no further apart than the paragraphs: {between} past {paragraph}"
+        );
+        let rem = cx.update(|window, _| window.rem_size());
+        let leading = f32::from(first.size.height) - f32::from(rem) * 7. / 8.;
+        assert!(
+            between > leading,
+            "the letters stand no further apart than the lines: {between} past {leading}"
+        );
         // At 1920 pixels the mail stands in the reading column: capped at
         // 880, off both edges of the pane.
         cx.simulate_resize(gpui::size(px(1920.), px(1080.)));
@@ -12522,8 +12591,10 @@ yardr.dev
                 text.size.width <= px(880.),
                 "mail {seq} runs past the column: {text:?}"
             );
+            // The words stand in from the gutter, short of the column's
+            // 880: 880 less the 56-pixel gutter.
             assert!(
-                text.size.width >= px(850.),
+                text.size.width >= px(800.),
                 "mail {seq} stands off the column's width: {text:?}"
             );
             assert!(

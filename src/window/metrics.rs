@@ -136,3 +136,12 @@ pub(crate) const BACKLOG_TITLES: usize = 6;
 /// The conversation's reading width: the mail, the notice and the
 /// composer stand full width up to 880 pixels, centred in the pane.
 pub(crate) const READING_WIDTH: f32 = 880.;
+
+/// How far a letter's body stands in from the reading column's left,
+/// in rems: past the head's clock, so the clock's place is a gutter
+/// the letter's own time stands in while the pointer is on it. The
+/// clock says five characters at the text size; 3.5 rems clears the
+/// widest of them with room past it, and the words stand roughly
+/// under the sender's name. In rems because the clock in it is: a
+/// gutter in pixels cut the time at the larger text sizes.
+pub(crate) const LETTER_GUTTER: f32 = 3.5;
