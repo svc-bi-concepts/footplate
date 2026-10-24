@@ -1945,6 +1945,30 @@ fn refused(code: &str, message: &str) -> Error {
     }
 }
 
+/// The body's shape where the edge answers for no ready yard: the
+/// router's noYard, a 403 of `{"error": "edge: <why>"}`. The yard's own
+/// refusals carry `refused`, never this key.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EdgeError {
+    error: String,
+}
+
+/// Where no yard is ready behind the edge, the edge's own 403: `status`
+/// with a body of `{"error": "<sentence>"}` is the router's noYard for a
+/// yard still building, stopped or failed, or a name of no yard of the
+/// account. Anything else is none, and the caller's own arms run. Told by
+/// which key the body carries, never by its prefix; one leading "edge: "
+/// is the router's tag, not the person's words, and is stripped.
+fn no_yard(status: u16, bytes: &[u8]) -> Option<Error> {
+    if status != 403 {
+        return None;
+    }
+    let edge: EdgeError = serde_json::from_slice(bytes.trim_ascii()).ok()?;
+    let sentence = edge.error.strip_prefix("edge: ").unwrap_or(&edge.error);
+    Some(refused("no_yard", sentence))
+}
+
 /// Redeems a pairing code at a yard's address: one request with no token,
 /// answered with the device's. The code is sent as it was typed; the yard
 /// reads it without its dash and in either case.
@@ -2012,10 +2036,22 @@ fn pair_with(
             }
             Ok(paired)
         }
-        403 => Err(refused(
-            "wrong_code",
-            "That is not the code. The yard counts a wrong one, and the fifth ends the pairing.",
-        )),
+        403 => {
+            // Through the edge, a 403 is the router's noYard where no
+            // yard is ready, told from the yard's wrong code by the
+            // body's shape; of any other shape today's arm runs.
+            if session.is_some() {
+                let mut bytes = Vec::new();
+                reply.read_to_end(&mut bytes)?;
+                if let Some(edge) = no_yard(status, &bytes) {
+                    return Err(edge);
+                }
+            }
+            Err(refused(
+                "wrong_code",
+                "That is not the code. The yard counts a wrong one, and the fifth ends the pairing.",
+            ))
+        }
         409 => Err(refused(
             "not_added",
             "The code was right and is used up, but the yard could not add the device. Its operator opens another pairing.",
@@ -2441,6 +2477,19 @@ impl Client {
         matches!(self.way, Way::Listener { .. })
     }
 
+    /// Whether calls ride to a hosted yard: at an address with the
+    /// session beside the token, where the edge may answer for no yard
+    /// of its own.
+    fn hosted(&self) -> bool {
+        matches!(
+            self.way,
+            Way::Listener {
+                session: Some(_),
+                ..
+            }
+        )
+    }
+
     /// Where the yard is looked for, in words: the socket's path or the
     /// address.
     pub fn place(&self) -> String {
@@ -2455,6 +2504,16 @@ impl Client {
     /// the yard. Of a yard at an address only; the socket has no such path.
     pub fn me(&self) -> Result<Me> {
         let (status, mut body) = self.send("GET", "/me", "", "", Some(CALL_TIMEOUT))?;
+        // Through the edge, a 403 is the router's noYard where no yard
+        // is ready, not this call's own refusal; of any other shape
+        // today's arms run, on the status alone.
+        if self.hosted() && status == 403 {
+            let mut bytes = Vec::new();
+            body.read_to_end(&mut bytes)?;
+            if let Some(edge) = no_yard(status, &bytes) {
+                return Err(edge);
+            }
+        }
         match status {
             200 => {}
             404 => return Err(Error::NoDevice),
@@ -2869,6 +2928,16 @@ impl Client {
             "",
             Some(CALL_TIMEOUT),
         )?;
+        // Through the edge, a 403 is the router's noYard where no yard
+        // is ready, not this call's own refusal; of any other shape
+        // today's arms run, on the status alone.
+        if self.hosted() && status == 403 {
+            let mut bytes = Vec::new();
+            body.read_to_end(&mut bytes)?;
+            if let Some(edge) = no_yard(status, &bytes) {
+                return Err(edge);
+            }
+        }
         match status {
             200 => {
                 let mut bytes = Vec::new();
@@ -2964,13 +3033,23 @@ impl Client {
     /// [`Error::Silent`] and may be read on, and one that stops in the
     /// middle of an event has ended.
     pub fn events(&self, after: u64, quiet: Duration) -> Result<Events> {
-        let (status, body) = self.send(
+        let (status, mut body) = self.send(
             "GET",
             &format!("/events?after={after}"),
             "Accept: application/x-ndjson\r\n",
             "",
             Some(quiet),
         )?;
+        // Through the edge, a 403 is the router's noYard where no yard
+        // is ready, not this call's own refusal; of any other shape
+        // today's arm runs, on the status alone.
+        if self.hosted() && status == 403 {
+            let mut bytes = Vec::new();
+            body.read_to_end(&mut bytes)?;
+            if let Some(edge) = no_yard(status, &bytes) {
+                return Err(edge);
+            }
+        }
         if status != 200 {
             return Err(Error::Protocol(format!(
                 "the stream answered status {status}"
@@ -3079,6 +3158,15 @@ impl Client {
         }
         let mut bytes = Vec::new();
         reply.read_to_end(&mut bytes)?;
+        // Through the edge, a 403 is the router's noYard where no yard
+        // is ready, before the Reply parse the edge's string-error body
+        // is none of; of any other shape today's parse runs.
+        if self.hosted()
+            && status == 403
+            && let Some(edge) = no_yard(status, &bytes)
+        {
+            return Err(edge);
+        }
         // An error has its status with it (200, or 503 while replacing), so
         // the body is read first, and the status only when it says nothing.
         let reply: Reply = serde_json::from_slice(&bytes).map_err(|err| {
@@ -4878,6 +4966,136 @@ mod tests {
             "{}",
             edge.last_request()
         );
+    }
+
+    /// Pairing through the edge tells no ready yard from a wrong code:
+    /// the edge's 403 reads as the yard not ready, and the code is never
+    /// spent on it, while the yard's own 403 past a ready yard stays a
+    /// wrong one.
+    #[test]
+    fn pairing_through_the_edge_tells_no_ready_yard_from_a_wrong_code() {
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        let address = Address::parse(edge.address()).unwrap();
+
+        // No yard is ready: the edge's 403 is the yard not ready, in the
+        // edge's sentence, and the pairing stays open.
+        yard.pair("K7QM-2XPD");
+        edge.no_yard("the yard is building");
+        let Err(Error::Refused { code, message }) = pair_hosted(&address, "K7QM-2XPD", SESSION, "")
+        else {
+            panic!("no yard answered the code");
+        };
+        assert_eq!(code, "no_yard");
+        assert_eq!(message, "the yard is building");
+        assert!(yard.pairing_open());
+        assert_eq!(edge.proxied(), 0);
+        assert_eq!(yard.requests(), 0);
+
+        // Past a ready yard, the yard's own 403 stays a wrong code: the
+        // code is counted, and the pairing stays open for the next try.
+        let edge = Router::start(&yard, SESSION);
+        let address = Address::parse(edge.address()).unwrap();
+        let Err(Error::Refused { code, message }) = pair_hosted(&address, "WXYZ-2345", SESSION, "")
+        else {
+            panic!("a wrong code was taken");
+        };
+        assert_eq!(code, "wrong_code");
+        assert!(message.starts_with("That is not the code."), "{message}");
+        assert!(yard.pairing_open());
+        assert_eq!(edge.proxied(), 1);
+    }
+
+    /// Calls through the edge read no ready yard as the yard not ready:
+    /// a call, who this device is, an image and the stream alike, and
+    /// the yard hears none of them. Past a ready yard a 403 of any other
+    /// shape keeps today's arms.
+    #[test]
+    fn calls_through_the_edge_read_no_ready_yard() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let edge = Router::start(&yard, SESSION);
+        edge.no_yard("the yard is building");
+        let client = edge.client_with(TOKEN, SESSION);
+
+        let not_ready = |err: Error| {
+            let Error::Refused { code, message } = err else {
+                panic!("{err:?}");
+            };
+            assert_eq!(code, "no_yard");
+            assert_eq!(message, "the yard is building");
+        };
+        not_ready(client.head().unwrap_err());
+        not_ready(client.me().unwrap_err());
+        not_ready(client.blob(HASH).unwrap_err());
+        let Err(err) = client.events(0, QUIET) else {
+            panic!("no yard opened a stream");
+        };
+        not_ready(err);
+        assert_eq!(edge.proxied(), 0);
+        assert_eq!(yard.requests(), 0);
+
+        // Past a ready yard, a 403 of any other shape keeps today's
+        // arms: the yard's own refusal reads as its own, and a bare one
+        // as its status.
+        let edge = Router::start(&yard, SESSION);
+        let client = edge.client_with(TOKEN, SESSION);
+        yard.answer_status(
+            "Head",
+            403,
+            r#"{"error": {"code": "no_such", "message": "the yard says no"}}"#,
+        );
+        let err = client.head().unwrap_err();
+        assert!(
+            matches!(err, Error::Refused { ref code, .. } if code == "no_such"),
+            "{err:?}"
+        );
+        yard.answer_status("Head", 403, "{}");
+        let err = client.head().unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)), "{err:?}");
+    }
+
+    /// The edge's noYard is told by its status and its body's key: a 403
+    /// of `{"error": "<sentence>"}`, with one leading "edge: " stripped.
+    /// Anything else is none, and the caller's own arms run.
+    #[test]
+    fn no_yard_reads_only_the_edge_s_403() {
+        let some = |status: u16, body: &str| match no_yard(status, body.as_bytes()) {
+            Some(Error::Refused { code, message }) => (code, message),
+            answer => panic!("{answer:?}"),
+        };
+        for (body, message) in [
+            (
+                r#"{"error":"edge: the yard is building"}"#,
+                "the yard is building",
+            ),
+            (
+                "{\"error\":\"edge: the yard is building\"}\n",
+                "the yard is building",
+            ),
+            (
+                r#"{"error":"the yard is building"}"#,
+                "the yard is building",
+            ),
+        ] {
+            let (code, sentence) = some(403, body);
+            assert_eq!(code, "no_yard", "{body}");
+            assert_eq!(sentence, message, "{body}");
+        }
+        // Anything else is none: the yard's own refusal, an error of the
+        // call's own shape, no JSON at all, and any other status.
+        for body in [
+            r#"{"refused":"wrong_code"}"#,
+            r#"{"error":"edge: the yard is building","refused":"wrong_code"}"#,
+            r#"{"error":"edge: the yard is building","extra":true}"#,
+            r#"{"error":{"code":"no_such","message":"the yard says no"}}"#,
+            "{}",
+            "Forbidden",
+            "",
+        ] {
+            assert!(no_yard(403, body.as_bytes()).is_none(), "{body}");
+        }
+        assert!(no_yard(200, r#"{"error":"edge: the yard is building"}"#.as_bytes()).is_none());
     }
 
     #[test]

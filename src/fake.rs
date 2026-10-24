@@ -884,15 +884,19 @@ struct EdgeShared {
     /// A pause before login answers, so the window can be checked while
     /// its request is still in flight.
     login_delay: Mutex<Duration>,
+    /// The router's sentence where no yard is ready behind the edge: past
+    /// the session check, every request is refused with its 403.
+    no_yard: Mutex<Option<String>>,
     stopped: Mutex<bool>,
 }
 
 /// A stand-in for the hosted edge in front of a yard at its listener: it
 /// checks `X-Edge-Token` as the router checks the Kratos session, proxies
 /// a known session to the yard with the credential stripped, and refuses
-/// any other with the edge's own 401, reaching no yard. Under `/kratos`
-/// it answers the login API flow, minting a session a sign-in for the
-/// account it knows. The yard answers the device token as ever; a test
+/// any other with the edge's own 401, reaching no yard. Where no yard is
+/// ready it answers the edge's own 403 past the session check. Under
+/// `/kratos` it answers the login API flow, minting a session a sign-in
+/// for the account it knows. The yard answers the device token as ever; a test
 /// stops the yard before the edge, so no relayed stream outlives what it
 /// relays.
 #[cfg(any(test, debug_assertions))]
@@ -923,6 +927,7 @@ impl Router {
             expire: Mutex::new(0),
             logins: Mutex::new(0),
             login_delay: Mutex::new(Duration::ZERO),
+            no_yard: Mutex::new(None),
             stopped: Mutex::new(false),
         });
         let accept = thread::spawn({
@@ -1010,6 +1015,15 @@ impl Router {
         relays.retain(|(known, _)| known != session);
     }
 
+    /// No yard is ready behind the edge: every request past the session
+    /// check is refused with the edge's own 403, as the router's noYard
+    /// for a yard still building, stopped or failed, or a name of no
+    /// yard of the account, reaching no yard. `why` is the router's
+    /// sentence after its "edge: " tag.
+    pub fn no_yard(&self, why: &str) {
+        *self.shared.no_yard.lock().unwrap() = Some(why.to_string());
+    }
+
     /// The head of the last request, as it came to the edge.
     pub fn last_request(&self) -> String {
         self.shared.last_request.lock().unwrap().clone()
@@ -1086,6 +1100,17 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
             conn,
             "HTTP/1.1 401 Unauthorized\r\nX-Edge-Refusal: session\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{NO_SESSION}",
             NO_SESSION.len()
+        )?;
+        return conn.flush();
+    }
+    // Past the session check, no ready yard is the edge's own 403, with
+    // no refusal header: the yard hears nothing of the request.
+    if let Some(why) = shared.no_yard.lock().unwrap().clone() {
+        let body = format!("{{\"error\":\"edge: {why}\"}}\n");
+        write!(
+            conn,
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
         )?;
         return conn.flush();
     }
