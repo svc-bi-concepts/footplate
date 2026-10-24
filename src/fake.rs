@@ -956,9 +956,21 @@ impl Router {
         &self.address
     }
 
-    /// A client at the edge's address with this device token and session.
+    /// A client at the edge's address with this device token and session,
+    /// for the account's own yard: no yard is named.
     pub fn client_with(&self, token: &str, session: &str) -> Client {
-        Client::remote_hosted(Address::parse(self.address()).unwrap(), token, session)
+        self.client_with_yard(token, session, "")
+    }
+
+    /// A client at the edge's address with this device token and session,
+    /// naming which of the account's yards with each call.
+    pub fn client_with_yard(&self, token: &str, session: &str, yard: &str) -> Client {
+        Client::remote_hosted(
+            Address::parse(self.address()).unwrap(),
+            token,
+            session,
+            yard,
+        )
     }
 
     /// The next `n` logins answer expired, as a flow the edge forgot: the

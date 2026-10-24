@@ -1734,13 +1734,14 @@ impl Footplate {
                 asked.extend([
                     yard_field("name", &self.yard_name, palette, cx).into_any_element(),
                     yard_field("address", &self.address, palette, cx).into_any_element(),
+                    yard_field("yard", &self.edge_yard, palette, cx).into_any_element(),
                     yard_field("email", &self.email, palette, cx).into_any_element(),
                     yard_field("password", &self.password, palette, cx).into_any_element(),
                     yard_submit(sign, "yard sign in", busy, palette, cx).into_any_element(),
                 ]);
                 help = Some(
                     yard_help(
-                        "The edge's one origin, as the ready page shows it, and the Kratos account's email and password. Signing in keeps the session in a file of this yard's own beside the settings, for you alone, and never with the settings; pairing the device comes next, with the code from the ready page."
+                        "The edge's one origin, as the ready page shows it, which of the account's yards there, and the Kratos account's email and password. Empty is the account's own yard. Signing in keeps the session in a file of this yard's own beside the settings, for you alone, and never with the settings; pairing the device comes next, with the code from the ready page."
                             .to_string(),
                         palette,
                     )

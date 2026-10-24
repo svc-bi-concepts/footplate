@@ -68,6 +68,11 @@ pub struct Yard {
     /// reached direct.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub account: String,
+    /// Of a hosted yard: which of the account's yards at the edge, as the
+    /// pairing named it or as it was typed. Empty is the account's own
+    /// yard, and every call goes without naming one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub edge_yard: String,
     /// The web view's base address, through which this yard's pages and
     /// images open in the browser. Empty until one is set for the yard,
     /// and left out of the file while it is: then the yard's usual
@@ -165,6 +170,7 @@ impl Yard {
             && self.token_file == other.token_file
             && self.session_file == other.session_file
             && self.account == other.account
+            && self.edge_yard == other.edge_yard
     }
 
     /// With the web view's base address `address`: what opens the yard's
@@ -771,6 +777,7 @@ impl Settings {
                     let mut kept =
                         Yard::hosted(&name, yard.address.trim(), yard.token_file.trim(), session);
                     kept.account = yard.account.trim().to_string();
+                    kept.edge_yard = yard.edge_yard.trim().to_string();
                     kept
                 }
             }
@@ -1808,12 +1815,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hosted_yard_names_its_signed_in_account_and_a_direct_one_names_none() {
+    fn a_hosted_yard_names_its_account_and_edge_yard_and_a_direct_one_names_neither() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         let set = two_far(&file);
 
-        // The account stands with the hosted yard, trimmed, and reads back.
+        // The account and which of its yards stand with the hosted yard,
+        // trimmed, and read back.
         let mut south = Yard::hosted(
             "south",
             "https://south.example.net",
@@ -1821,26 +1829,31 @@ mod tests {
             "yard-south.session",
         );
         south.account = " jo@example.net ".to_string();
+        south.edge_yard = " airy ".to_string();
         let hosted = set.clone().with_yard(None, south, Some(&file)).unwrap();
         assert_eq!(hosted.yard("south").unwrap().account, "jo@example.net");
+        assert_eq!(hosted.yard("south").unwrap().edge_yard, "airy");
         hosted.write(&file).unwrap();
         let read = Settings::read(&file);
         assert_eq!(read.yard("south").unwrap().account, "jo@example.net");
-        assert!(
-            fs::read_to_string(&file)
-                .unwrap()
-                .contains("\"account\": \"jo@example.net\"")
-        );
+        assert_eq!(read.yard("south").unwrap().edge_yard, "airy");
+        let kept = fs::read_to_string(&file).unwrap();
+        assert!(kept.contains("\"account\": \"jo@example.net\""), "{kept}");
+        assert!(kept.contains("\"edge_yard\": \"airy\""), "{kept}");
 
-        // A yard reached direct keeps none, whatever it was given.
+        // A yard reached direct keeps neither, whatever it was given.
         let mut shop = Yard::far("shop", "https://shop.example.net", "yard-shop.token");
         shop.account = "jo@example.net".to_string();
+        shop.edge_yard = "airy".to_string();
         let direct = set.clone().with_yard(None, shop, Some(&file)).unwrap();
         assert_eq!(direct.yard("shop").unwrap().account, "");
+        assert_eq!(direct.yard("shop").unwrap().edge_yard, "");
         let mut near = Yard::near("home", "");
         near.account = "jo@example.net".to_string();
+        near.edge_yard = "airy".to_string();
         let direct = set.clone().with_yard(None, near, Some(&file)).unwrap();
         assert_eq!(direct.yard("home").unwrap().account, "");
+        assert_eq!(direct.yard("home").unwrap().edge_yard, "");
     }
 
     #[test]
@@ -2512,6 +2525,11 @@ mod tests {
             "https://shop.example.net",
             "yard-mac.token"
         )));
+        // And through no change of which of the account's yards at the
+        // edge: another yard there is another yard to follow.
+        let mut named = kept.clone();
+        named.edge_yard = "airy".to_string();
+        assert!(!kept.same_yard(&named));
     }
 
     // Its paths are a unix system's: `/elsewhere` is no absolute path on

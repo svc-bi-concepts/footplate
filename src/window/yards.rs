@@ -17,7 +17,7 @@ use super::number_key;
 use super::rail::RailTip;
 use super::state::{
     Adding, AgentsBusy, Away, Counts, LoginDid, SwitchBusy, SwitchFor, SwitchRead, YardIdentity,
-    code_of, pairing_failure,
+    code_of, pairing_failure, yard_of,
 };
 use super::ui::{keys_hint, quiet_button, segment, segmented, small_button};
 use crate::api::{self, Address, Client};
@@ -609,10 +609,12 @@ impl Footplate {
     /// address that is typed, or one of the list whose device is paired
     /// again. The token goes into that yard's own file and no other's. At
     /// a hosted yard of the list the session rides beside the code, and
-    /// where it cannot be read that is said instead of pairing.
-    /// What keeps a yard out of the list is said before anything is sent,
-    /// and so is a token file that cannot be written: a code is used up by
-    /// the yard it is sent to.
+    /// where it cannot be read that is said instead of pairing, naming
+    /// which of the account's yards where the pairing's QR code or the
+    /// yard names one; the yard names it from here on where the QR code
+    /// did. What keeps a yard out of the list is said before anything is
+    /// sent, and so is a token file that cannot be written: a code is used
+    /// up by the yard it is sent to.
     pub(crate) fn pair(&mut self, cx: &mut Context<Self>) {
         if self.pairing || self.signing_in {
             return;
@@ -623,6 +625,20 @@ impl Footplate {
         cx.notify();
         let kept = self.kept.clone();
         let (address, code) = (self.address.read(cx).text(), self.code.read(cx).text());
+        // Which of the account's yards a pairing of a hosted yard is for,
+        // where what was typed for its code holds the edge QR code's
+        // third segment. A pairing that fails names nothing.
+        let payload = match &adding {
+            Adding::Again(name)
+                if self
+                    .settings
+                    .yard(name)
+                    .is_some_and(|yard| yard.is_hosted()) =>
+            {
+                yard_of(code)
+            }
+            _ => None,
+        };
         // The yard's address, the code, the file its token goes in, and
         // the settings once it is paired.
         let asked = match (&self.env.yard, &adding) {
@@ -699,6 +715,18 @@ impl Footplate {
                 return;
             }
         };
+        // Which of the account's yards the code goes to: the pairing's QR
+        // code names one where it holds a third segment, else the yard's
+        // own. A yard reached direct names none.
+        let edge_yard = match &adding {
+            Adding::Again(name) => payload.clone().unwrap_or_else(|| {
+                self.settings
+                    .yard(name)
+                    .map(|yard| yard.edge_yard.clone())
+                    .unwrap_or_default()
+            }),
+            _ => String::new(),
+        };
         self.pairing = true;
         self.yard_said = None;
         cx.spawn(async move |this, cx| {
@@ -715,9 +743,8 @@ impl Footplate {
                         )
                     })?;
                     let paired = match &session {
-                        Some(session) => {
-                            api::pair_hosted(&address, &code, session).map_err(pairing_failure)
-                        }
+                        Some(session) => api::pair_hosted(&address, &code, session, &edge_yard)
+                            .map_err(pairing_failure),
                         None => api::pair(&address, &code).map_err(|err| err.to_string()),
                     }?;
                     // The token goes from the yard's answer into its file
@@ -761,10 +788,31 @@ impl Footplate {
                                         .ok()
                                         .map(|settings| settings.opening(&name))
                                 }),
-                            (None, Adding::Again(name)) => this
-                                .settings
-                                .yard(name)
-                                .map(|_| this.settings.clone().opening(name)),
+                            (None, Adding::Again(name)) => {
+                                // The pairing's QR code named which of the
+                                // account's yards where it holds a third
+                                // segment: the yard names it from here on.
+                                // Where it cannot stand, the pairing stands
+                                // without it, with the yard's own.
+                                let mut settings = this.settings.clone();
+                                if let Some(named) = payload.as_ref()
+                                    && let Some(mut listed) = settings.yard(name).cloned()
+                                    && listed.is_hosted()
+                                    && listed.edge_yard != *named
+                                {
+                                    listed.edge_yard = named.clone();
+                                    if let Ok(pinned) = settings.clone().with_yard(
+                                        Some(name),
+                                        listed,
+                                        this.kept.as_deref(),
+                                    ) {
+                                        settings = pinned;
+                                    }
+                                }
+                                settings
+                                    .yard(name)
+                                    .map(|_| settings.clone().opening(name))
+                            }
                             (None, Adding::Near)
                             | (None, Adding::Hosted)
                             | (None, Adding::SignInAgain(_))
@@ -847,7 +895,11 @@ impl Footplate {
                 };
                 let token_file = self.settings.token_name(&name, kept.as_deref());
                 let session_file = self.settings.session_name(&name, kept.as_deref());
-                let yard = settings::Yard::hosted(&name, &address, &token_file, &session_file);
+                let mut yard = settings::Yard::hosted(&name, &address, &token_file, &session_file);
+                // Which of the account's yards at the edge; empty is the
+                // account's own yard. The pairing's QR code may name one
+                // still, when the device is paired next.
+                yard.edge_yard = self.edge_yard.read(cx).text().trim().to_string();
                 let settings = self.settings.clone();
                 settings
                     .with_yard(None, yard, kept.as_deref())

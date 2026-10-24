@@ -1949,25 +1949,42 @@ fn refused(code: &str, message: &str) -> Error {
 /// answered with the device's. The code is sent as it was typed; the yard
 /// reads it without its dash and in either case.
 pub fn pair(address: &Address, code: &str) -> Result<Paired> {
-    pair_with(address, code, None)
+    pair_with(address, code, None, "")
 }
 
 /// As [`pair`], at a hosted yard: the session token rides beside the code,
-/// which the edge checks before the code reaches the yard.
-pub fn pair_hosted(address: &Address, code: &str, session: &str) -> Result<Paired> {
-    pair_with(address, code, Some(session))
+/// which the edge checks before the code reaches the yard, naming which
+/// of the account's yards where `edge_yard` names one; empty is the
+/// account's own yard, and no header rides then.
+pub fn pair_hosted(
+    address: &Address,
+    code: &str,
+    session: &str,
+    edge_yard: &str,
+) -> Result<Paired> {
+    pair_with(address, code, Some(session), edge_yard)
 }
 
-fn pair_with(address: &Address, code: &str, session: Option<&str>) -> Result<Paired> {
+fn pair_with(
+    address: &Address,
+    code: &str,
+    session: Option<&str>,
+    edge_yard: &str,
+) -> Result<Paired> {
     let body = json!({ "code": code }).to_string();
     let mut conn = address.connect(Some(CALL_TIMEOUT))?;
     let edge = session
         .filter(|session| is_token(session))
         .map(|session| format!("X-Edge-Token: {session}\r\n"))
         .unwrap_or_default();
+    let named = if is_token(edge_yard) {
+        format!("X-Edge-Yard: {edge_yard}\r\n")
+    } else {
+        String::new()
+    };
     conn.write_all(
         format!(
-            "POST {}/user/pair HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\n{edge}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST {}/user/pair HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\n{edge}{named}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             address.path,
             address.authority,
             body.len()
@@ -2349,7 +2366,8 @@ fn split_url(url: &str) -> Result<(Address, String)> {
 
 /// How a yard is reached: by the socket of this machine's, or by the
 /// address of another's listener with a device's token, and at a hosted
-/// yard the session token beside it. Windows has the second alone.
+/// yard the session token beside it, naming which of the account's yards
+/// where one is set. Windows has the second alone.
 #[derive(Clone)]
 enum Way {
     #[cfg(unix)]
@@ -2358,6 +2376,7 @@ enum Way {
         address: Address,
         token: String,
         session: Option<String>,
+        edge_yard: String,
     },
 }
 
@@ -2390,6 +2409,7 @@ impl Client {
                 address,
                 token: token.into(),
                 session: None,
+                edge_yard: String::new(),
             },
         }
     }
@@ -2397,17 +2417,21 @@ impl Client {
     /// A hosted yard at its edge's address, as the device `token` is of
     /// with the Kratos `session` beside it. Every call carries both; one
     /// that is no token rides on no request, and the edge refuses the
-    /// session for it.
+    /// session for it. `edge_yard` names which of the account's yards it
+    /// means, and every call names it where one is set; empty is the
+    /// account's own yard, and no header rides then.
     pub fn remote_hosted(
         address: Address,
         token: impl Into<String>,
         session: impl Into<String>,
+        edge_yard: impl Into<String>,
     ) -> Self {
         Client {
             way: Way::Listener {
                 address,
                 token: token.into(),
                 session: Some(session.into()),
+                edge_yard: edge_yard.into(),
             },
         }
     }
@@ -2449,8 +2473,10 @@ impl Client {
     /// Sends one request on a connection of its own and reads the answer's
     /// head. `path` is as docs/api.md has it on the socket; at an address
     /// it stands under `/user/`, with the token beside it, and at a hosted
-    /// yard the session token in `X-Edge-Token` beside that. `headers` are
-    /// whole lines. A call's answer is waited for `timeout` long.
+    /// yard the session token in `X-Edge-Token` beside that, naming which
+    /// of the account's yards in `X-Edge-Yard` where one is set.
+    /// `headers` are whole lines. A call's answer is waited for `timeout`
+    /// long.
     fn send(
         &self,
         verb: &str,
@@ -2474,16 +2500,22 @@ impl Client {
                 address,
                 token,
                 session,
+                edge_yard,
             } => {
                 let edge = session
                     .as_deref()
                     .filter(|session| is_token(session))
                     .map(|session| format!("X-Edge-Token: {session}\r\n"))
                     .unwrap_or_default();
+                let named = if is_token(edge_yard) {
+                    format!("X-Edge-Yard: {edge_yard}\r\n")
+                } else {
+                    String::new()
+                };
                 (
                     address.connect(timeout)?,
                     format!(
-                        "{verb} {}/user{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n{edge}",
+                        "{verb} {}/user{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n{edge}{named}",
                         address.path, address.authority
                     ),
                 )
@@ -4584,6 +4616,58 @@ mod tests {
         );
     }
 
+    /// Through the edge, a named yard rides beside the session on every
+    /// call and on the pairing; an unnamed one sends no header, and the
+    /// edge reaches the account's own yard.
+    #[test]
+    fn through_the_edge_a_named_yard_rides_beside_the_session() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let edge = Router::start(&yard, SESSION);
+        // Named: every call says which of the account's yards, beside
+        // the session.
+        let named = edge.client_with_yard(TOKEN, SESSION, "airy");
+        assert_eq!(named.head().unwrap(), 12);
+        assert_eq!(named.me().unwrap().user, "jo");
+        let request = edge.last_request();
+        assert!(request.contains("X-Edge-Yard: airy\r\n"), "{request}");
+        assert!(
+            request.contains(&format!("X-Edge-Token: {SESSION}\r\n")),
+            "{request}"
+        );
+        // And the pairing too.
+        yard.pair("K7QM-2XPD");
+        let address = Address::parse(edge.address()).unwrap();
+        pair_hosted(&address, "K7QM-2XPD", SESSION, "airy").unwrap();
+        assert!(
+            edge.last_request().contains("X-Edge-Yard: airy\r\n"),
+            "{}",
+            edge.last_request()
+        );
+        // Unnamed: no header rides, as today.
+        edge.client_with(TOKEN, SESSION).head().unwrap();
+        assert!(
+            !edge
+                .last_request()
+                .to_ascii_lowercase()
+                .contains("x-edge-yard"),
+            "{}",
+            edge.last_request()
+        );
+        // One that is no token rides on no request either.
+        edge.client_with_yard(TOKEN, SESSION, "airy farm")
+            .head()
+            .unwrap();
+        assert!(
+            !edge
+                .last_request()
+                .to_ascii_lowercase()
+                .contains("x-edge-yard"),
+            "{}",
+            edge.last_request()
+        );
+    }
+
     /// Through the edge, a request written after the edge has accepted
     /// waits for its bytes: the edge blocks for them instead of hanging
     /// up on the empty read, as a nonblocking accept would.
@@ -4774,7 +4858,7 @@ mod tests {
         assert_eq!(edge.proxied(), 0);
 
         // With one, the code is the device's token, once.
-        let paired = pair_hosted(&address, "K7QM-2XPD", SESSION).unwrap();
+        let paired = pair_hosted(&address, "K7QM-2XPD", SESSION, "").unwrap();
         assert!(!yard.pairing_open());
         assert_eq!(edge.proxied(), 1);
         assert!(yard.devices().contains(&paired.token));
@@ -4783,7 +4867,8 @@ mod tests {
             "jo"
         );
         // The code is good once, and the session rode beside it.
-        let Err(Error::Refused { code, .. }) = pair_hosted(&address, "K7QM-2XPD", SESSION) else {
+        let Err(Error::Refused { code, .. }) = pair_hosted(&address, "K7QM-2XPD", SESSION, "")
+        else {
             panic!("the code was good once");
         };
         assert_eq!(code, "no_pairing");

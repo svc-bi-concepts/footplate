@@ -471,13 +471,14 @@ pub struct Footplate {
     /// The settings are shown where the conversation is.
     settings_open: bool,
     /// A yard in the settings, to add, to sign in or to pair again: its
-    /// name, its socket or its address, a pairing's code and a sign-in's
-    /// email and password as they are typed, which of them show, whether
-    /// a code or a sign-in is on its way to the yard, and what came of
-    /// the last.
+    /// name, its socket or its address, which of the account's yards at
+    /// the edge, a pairing's code and a sign-in's email and password as
+    /// they are typed, which of them show, whether a code or a sign-in is
+    /// on its way to the yard, and what came of the last.
     yard_name: Entity<Line>,
     socket: Entity<Line>,
     address: Entity<Line>,
+    edge_yard: Entity<Line>,
     code: Entity<Line>,
     email: Entity<Line>,
     password: Entity<Line>,
@@ -658,6 +659,7 @@ impl Footplate {
         let yard_name = field("plantime", cx);
         let socket = field("/Users/plantime/.yardr/yard.sock", cx);
         let address = field("https://mac.example.net", cx);
+        let edge_yard = field("airy", cx);
         let code = field("K7QM-2XPD", cx);
         let email = field("jo@example.net", cx);
         // The password shows marks, as a secret ask's field does: what is
@@ -866,6 +868,7 @@ impl Footplate {
             yard_name,
             socket,
             address,
+            edge_yard,
             code,
             email,
             password,
@@ -16389,19 +16392,21 @@ yardr.dev
         });
     }
 
-    /// Puts a hosted yard's name, its origin and a sign-in's email and
-    /// password where they are typed.
+    /// Puts a hosted yard's name, its origin, which of the account's
+    /// yards and a sign-in's email and password where they are typed.
     fn type_sign_in(
         view: &Entity<Footplate>,
         cx: &mut VisualTestContext,
         name: &str,
         address: &str,
+        yard: &str,
         email: &str,
         password: &str,
     ) {
         view.update(cx, |v, cx| {
             v.yard_name.update(cx, |line, cx| line.set_text(name, cx));
             v.address.update(cx, |line, cx| line.set_text(address, cx));
+            v.edge_yard.update(cx, |line, cx| line.set_text(yard, cx));
             v.email.update(cx, |line, cx| line.set_text(email, cx));
             v.password
                 .update(cx, |line, cx| line.set_text(password, cx));
@@ -18623,7 +18628,9 @@ yardr.dev
     }
 
     /// Pairing a hosted yard of the list again: the session rides beside
-    /// the code, and the yard opens as the new device.
+    /// the code, and the yard opens as the new device. Where the pairing's
+    /// QR code names which of the account's yards, it rides too, and the
+    /// yard names it from here on.
     #[cfg(unix)]
     #[gpui::test]
     fn pairing_a_hosted_yard_again_sends_the_session_beside_the_code(cx: &mut TestAppContext) {
@@ -18685,7 +18692,9 @@ yardr.dev
             Some(Adding::Again("south".into()))
         );
         far.pair("ABCD-EFGH");
-        cx.simulate_input("abcd efgh");
+        // As the pairing's QR code holds it at the edge: the code with
+        // which of the account's yards beside it.
+        cx.simulate_input(&format!("{}#abcd efgh#airy", edge.address()));
         cx.simulate_keystrokes("enter");
         wait(cx, "the pairing", |cx| {
             yard_said(&view, cx).starts_with("Paired:")
@@ -18695,6 +18704,21 @@ yardr.dev
         });
         assert_ne!(yard::read_token(&token).unwrap(), crate::fake::TOKEN);
         assert_eq!(mode_of(&token), 0o600);
+        // The yard names it from here on, and every call says it.
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .settings
+                .yard("south")
+                .unwrap()
+                .edge_yard
+                .clone()),
+            "airy"
+        );
+        assert!(
+            edge.last_request().contains("X-Edge-Yard: airy\r\n"),
+            "{}",
+            edge.last_request()
+        );
     }
 
     /// On the away screen of a yard at an address, with a way's fields
@@ -18780,8 +18804,9 @@ yardr.dev
     /// From no yard, the hosted road ends in the yard's conversations:
     /// the fourth way signs the Kratos account in, the session is kept
     /// as the device's is, and the pair-by-code road comes next, with
-    /// the signed-in account under the yard's name. No terminal, and no
-    /// pasted token anywhere.
+    /// the signed-in account under the yard's name. Which of the
+    /// account's yards was typed rides on every call. No terminal, and
+    /// no pasted token anywhere.
     #[cfg(unix)]
     #[gpui::test]
     fn opening_a_hosted_yard_signs_in_then_pairs_and_shows_its_conversations(
@@ -18801,8 +18826,8 @@ yardr.dev
         let token = dir.path().join("footplate/yard-south.token");
         let (view, cx) = no_yard(dir.path(), cx);
 
-        // The fourth way, with the origin and the account's email and
-        // password to type.
+        // The fourth way, with the origin, which of the account's
+        // yards and the account's email and password to type.
         click_on(cx, "way hosted");
         assert_eq!(
             view.read_with(cx, |v, _| v.adding.clone()),
@@ -18811,26 +18836,29 @@ yardr.dev
         assert!(
             drawn(cx, "yard name")
                 && drawn(cx, "yard address")
+                && drawn(cx, "yard yard")
                 && drawn(cx, "yard email")
                 && drawn(cx, "yard password")
                 && drawn(cx, "yard sign in")
         );
         // An email and a password are wanted, before anything is sent.
-        type_sign_in(&view, cx, "south", edge.address(), "", "");
+        type_sign_in(&view, cx, "south", edge.address(), "", "", "");
         cx.simulate_keystrokes("enter");
         assert!(yard_said(&view, cx).starts_with("An email is wanted:"));
-        type_sign_in(&view, cx, "south", edge.address(), KRATOS_EMAIL, "");
+        type_sign_in(&view, cx, "south", edge.address(), "", KRATOS_EMAIL, "");
         click_on(cx, "yard sign in");
         assert!(yard_said(&view, cx).starts_with("A password is wanted:"));
         assert!(!file.exists() && !session.exists());
 
         // Signing in keeps the session in a file of the yard's own, for
         // its user alone, and the road goes on to pairing the device.
+        // The yard names which of the account's yards at the edge.
         type_sign_in(
             &view,
             cx,
             "south",
             edge.address(),
+            "airy",
             KRATOS_EMAIL,
             KRATOS_PASSWORD,
         );
@@ -18861,6 +18889,7 @@ yardr.dev
         });
         let kept = std::fs::read_to_string(&file).unwrap();
         assert!(kept.contains(&format!("\"account\": \"{KRATOS_EMAIL}\"")));
+        assert!(kept.contains("\"edge_yard\": \"airy\""), "{kept}");
         for held in [&kept, &std::fs::read_to_string(&session).unwrap()] {
             assert!(!held.contains(KRATOS_PASSWORD), "{held}");
         }
@@ -18868,6 +18897,7 @@ yardr.dev
         let south = Settings::read(&file).yard("south").unwrap().clone();
         assert!(south.is_hosted());
         assert_eq!(south.account, KRATOS_EMAIL);
+        assert_eq!(south.edge_yard, "airy");
 
         // The code from the ready page pairs the device through the edge,
         // with the session beside it: the yard's conversations, with the
@@ -18900,6 +18930,12 @@ yardr.dev
                 edge.address()
             )
         );
+        // Every call names which of the account's yards beside the session.
+        assert!(
+            edge.last_request().contains("X-Edge-Yard: airy\r\n"),
+            "{}",
+            edge.last_request()
+        );
     }
 
     /// A wrong password fails the sign-in and names it: the sign-in, never
@@ -18923,6 +18959,7 @@ yardr.dev
             cx,
             "south",
             edge.address(),
+            "",
             KRATOS_EMAIL,
             "not-the-password",
         );

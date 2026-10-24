@@ -697,11 +697,11 @@ goes on trying the one that is away meanwhile:
   user of that yard, as "[A yard at an address](#a-yard-at-an-address)"
   has it. It is not yardr's peer pairing, which links two yards to each
   other and stays a command of the terminal.
-- **open a hosted yard** asks for the edge's one origin, and the Kratos
-  account's email and password, in the window. Signing in keeps the
-  session as the device's token is kept, and the road goes on to pairing
-  the device with the code from the ready page, as
-  "[A hosted yard](#a-hosted-yard)" has it.
+- **open a hosted yard** asks for the edge's one origin, which of the
+  account's yards there, and the Kratos account's email and password, in
+  the window. Signing in keeps the session as the device's token is kept,
+  and the road goes on to pairing the device with the code from the ready
+  page, as "[A hosted yard](#a-hosted-yard)" has it.
 
 The last three are the settings' own entries, "add a yard of this machine",
 "add a yard at an address" and "add a hosted yard", in the same fields with
@@ -882,8 +882,9 @@ the device is removed.
 A yard behind the hosted edge, at the edge's one origin, is paired as a
 yard at an address is, with a sign-in first. "open a hosted yard" on the
 [first screen](#what-it-talks-to), or "add a hosted yard" in the settings,
-asks for the origin and the Kratos account's email and password, in the
-window: no terminal, and no token pasted anywhere. Signing in keeps the
+asks for the origin, which of the account's yards there, and the Kratos
+account's email and password, in the window: no terminal, and no token
+pasted anywhere. Empty is the account's own yard. Signing in keeps the
 session in a file of the yard's own beside the settings, mode 0600 as the
 device's token is, with the edge's address under it; the settings keep the
 file and the signed-in account, never the session. The road goes on to
@@ -893,8 +894,12 @@ head's line, in the whole telling the settings say, and on the yard's row.
 
 Every call to a hosted yard carries both: the device token in
 `Authorization: Bearer`, as ever, and the session token in `X-Edge-Token`
-beside it, which the edge checks before the call reaches the yard. Pairing
-sends the session beside the code. A refused session and a refused device
+beside it, which the edge checks before the call reaches the yard. Where
+the yard names which of the account's yards, every call names it in
+`X-Edge-Yard` beside them. Pairing sends the session beside the code, and
+the yard where one is named: where the pairing's QR code names one,
+`<address>#<code>#<yard>`, pasting it for the code pairs that yard and
+names it from here on. A refused session and a refused device
 are told apart on screen, and neither is tried again: the edge refuses a
 session it does not know with 401 carrying `X-Edge-Refusal: session`, and
 the window says to sign in again; the yard refuses a token that is not a

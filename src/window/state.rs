@@ -17,11 +17,32 @@ use crate::setup;
 
 /// A pairing's code as it was typed where the yard's address is known
 /// already: what a pairing's QR code holds, `<address>#<code>`, may be
-/// given for it, and is its code.
+/// given for it, and is its code. Where the address is the edge's the QR
+/// code holds `<address>#<code>#<yard>`, and the code is its middle.
 pub(crate) fn code_of(typed: &str) -> String {
     let typed = typed.trim();
-    let code = typed.rsplit_once('#').map_or(typed, |(_, code)| code);
-    code.trim().to_string()
+    match typed.split('#').collect::<Vec<_>>().as_slice() {
+        [_, code, _] => code.trim().to_string(),
+        _ => typed
+            .rsplit_once('#')
+            .map_or(typed, |(_, code)| code)
+            .trim()
+            .to_string(),
+    }
+}
+
+/// Which of the account's yards a pairing is for, where what was typed
+/// for its code holds the edge QR code's third segment,
+/// `<address>#<code>#<yard>`. None where no third stands: a bare code,
+/// or a QR code of a yard reached direct.
+pub(crate) fn yard_of(typed: &str) -> Option<String> {
+    match typed.trim().split('#').collect::<Vec<_>>().as_slice() {
+        [_, _, yard] => match yard.trim() {
+            "" => None,
+            yard => Some(yard.to_string()),
+        },
+        _ => None,
+    }
 }
 
 /// A mail of the open conversation to keep in place while older mail is
@@ -112,9 +133,10 @@ pub(crate) enum Adding {
     /// A pairing's code for the yard of this name, to pair its device
     /// again.
     Again(String),
-    /// A hosted yard: its name, the edge's origin, and the Kratos
-    /// account's email and password to sign in with. Signing in writes
-    /// the session file and moves to pairing the device.
+    /// A hosted yard: its name, the edge's origin, which of the
+    /// account's yards there, and the Kratos account's email and password
+    /// to sign in with. Signing in writes the session file and moves to
+    /// pairing the device.
     Hosted,
     /// The Kratos account's email and password for the hosted yard of
     /// this name, whose session is signed in again.
@@ -372,5 +394,26 @@ impl Drop for Held {
         if let Some(stop) = self.following_stop.take() {
             stop.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a pairing's QR code holds is its code, and where the address
+    /// is the edge's, which of the account's yards beside it.
+    #[test]
+    fn what_a_pairing_s_qr_code_holds_is_a_code_and_maybe_a_yard() {
+        assert_eq!(code_of(" K7QM-2XPD "), "K7QM-2XPD");
+        assert_eq!(code_of("https://mac.example.net#K7QM-2XPD"), "K7QM-2XPD");
+        assert_eq!(code_of("https://my.yardr.dev#K7QM-2XPD#airy"), "K7QM-2XPD");
+        assert_eq!(yard_of("K7QM-2XPD"), None);
+        assert_eq!(yard_of("https://mac.example.net#K7QM-2XPD"), None);
+        assert_eq!(
+            yard_of(" https://my.yardr.dev#K7QM-2XPD#airy "),
+            Some("airy".to_string())
+        );
+        assert_eq!(yard_of("https://my.yardr.dev#K7QM-2XPD#"), None);
     }
 }

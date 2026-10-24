@@ -126,9 +126,9 @@ impl Footplate {
                 .update(cx, |line, cx| line.set_text(&socket, cx));
         }
         // The hosted shot is the first screen with the hosted way's fields
-        // open and filled: the origin, and the Kratos account's email and
-        // password, the password showing marks. Nothing is sent. A debug
-        // build's alone, as above.
+        // open and filled: the origin, which of the account's yards, and
+        // the Kratos account's email and password, the password showing
+        // marks. Nothing is sent. A debug build's alone, as above.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("hosted") {
             this.adding = Some(Adding::Hosted);
@@ -136,6 +136,8 @@ impl Footplate {
                 .update(cx, |line, cx| line.set_text("trial", cx));
             this.address
                 .update(cx, |line, cx| line.set_text("https://my.yardr.dev", cx));
+            this.edge_yard
+                .update(cx, |line, cx| line.set_text("airy", cx));
             this.email
                 .update(cx, |line, cx| line.set_text("jo@example.net", cx));
             this.password
@@ -3516,6 +3518,7 @@ impl Footplate {
             &self.yard_name,
             &self.socket,
             &self.address,
+            &self.edge_yard,
             &self.code,
             &self.email,
             &self.password,

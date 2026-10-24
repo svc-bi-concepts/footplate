@@ -157,7 +157,9 @@ impl Env {
         let file = self.token_of(set, &opened.name, settings)?;
         let token = token_for(&file, &address)?;
         Ok(match session {
-            Some(session) => Client::remote_hosted(address, token, session),
+            Some(session) => {
+                Client::remote_hosted(address, token, session, opened.edge_yard.trim())
+            }
             None => Client::remote(address, token),
         })
     }
@@ -1398,6 +1400,26 @@ mod tests {
             request.contains(&format!("Authorization: Bearer {TOKEN}\r\n")),
             "{request}"
         );
+        // Unnamed: no yard rides beside the session.
+        assert!(
+            !request.to_ascii_lowercase().contains("x-edge-yard"),
+            "{request}"
+        );
+        // Which of the account's yards the entry names rides beside it.
+        let mut south = settings::Yard::hosted(
+            "south",
+            edge.address(),
+            "yard-south.token",
+            "yard-south.session",
+        );
+        south.edge_yard = "airy".to_string();
+        let named = Settings::default()
+            .with_yard(None, south, Some(&settings))
+            .unwrap()
+            .opening("south");
+        env.open(&named, Some(&settings)).unwrap().head().unwrap();
+        let request = edge.last_request();
+        assert!(request.contains("X-Edge-Yard: airy\r\n"), "{request}");
         // A bare session is bound to the edge on its first opening, and
         // the settings hold neither token.
         assert_eq!(
