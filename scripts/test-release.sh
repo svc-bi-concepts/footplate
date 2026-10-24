@@ -16,6 +16,7 @@ set -eu
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 script=$script_dir/release.sh
 lib=$script_dir/linux-container.sh
+retry=$script_dir/codesign-retry.sh
 bundle=$script_dir/bundle-mac.sh
 desktop=$script_dir/../assets/linux/footplate.desktop
 tmp=$(mktemp -d)
@@ -45,6 +46,7 @@ make_checkout() {
     mkdir -p "$1/scripts"
     cp "$script" "$1/scripts/release.sh"
     cp "$lib" "$1/scripts/linux-container.sh"
+    cp "$retry" "$1/scripts/codesign-retry.sh"
     cp "$bundle" "$1/scripts/bundle-mac.sh"
     chmod +x "$1/scripts/release.sh" "$1/scripts/bundle-mac.sh"
     printf '[package]\nname = "footplate"\nversion = "%s"\n' "$2" > "$1/Cargo.toml"
@@ -120,6 +122,10 @@ esac
 #   STANDIN_ZIP_VERSION   the version in the name of the zip the artifact holds
 #   STANDIN_ZIP_STRAY     a file of that name in the Windows zip, besides its four
 #   STANDIN_EXE           what the zip's footplate.exe is, as file below reads it
+#   STANDIN_CODESIGN_FAIL_SKIP/COUNT
+#                         the timestamped signings that fail with a missing
+#                         secure timestamp, attempts SKIP+1 through SKIP+COUNT
+#                         (0 and 0: none fail)
 bin=$tmp/bin
 mkdir -p "$bin"
 REAL_FIND=$(command -v find)
@@ -236,6 +242,20 @@ case " $* " in
         }
         ;;
     *)
+        # A timestamped signing alone fails as Apple's timestamp server
+        # fails it, attempts SKIP+1 through SKIP+COUNT of the timestamped
+        # signings in the calls, this one already logged among them; a
+        # verify and an ad hoc signing never fail. A failed attempt seals
+        # nothing, so only a signing tried again leaves its mark.
+        case " $* " in
+            *" --timestamp "*)
+                n=$(grep -c '^codesign .*--timestamp' "$CALLS")
+                if [ "$n" -gt "${STANDIN_CODESIGN_FAIL_SKIP:-0}" ] && [ "$n" -le "$((${STANDIN_CODESIGN_FAIL_SKIP:-0} + ${STANDIN_CODESIGN_FAIL_COUNT:-0}))" ]; then
+                    echo "$last: A timestamp was expected but was not found" >&2
+                    exit 1
+                fi
+                ;;
+        esac
         if [ -f "$last" ]; then
             echo 'signature: sealed' >>"$last"
         else
@@ -824,6 +844,47 @@ for arch in arm64 amd64; do
     in_dmg "$dmg" 'ticket: stapled' || fail "signed: the $arch image holds no ticket"
 done
 lack_line '^codesign .*--options.* /.*\.dmg$'
+archives_in_out
+
+# A timestamp the server drops once is tried again: the arm64 app signs at
+# the second try and the release passes whole, saying so.
+release_run sign-retry-app "$signer" "$notary" FOOTPLATE_SIGN_RETRY_SLEEP=0 STANDIN_CODESIGN_FAIL_SKIP=0 STANDIN_CODESIGN_FAIL_COUNT=1
+[ "$rc" = 0 ] || fail "$name: a release with one dropped timestamp failed: $text"
+case "$text" in
+    *"the timestamp was not found; trying again"*) ;;
+    *) fail "$name: it did not say the timestamp was tried again: $text" ;;
+esac
+[ "$(grep -c -E "^codesign --force --options runtime --timestamp --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 2 ] ||
+    fail "$name: the arm64 app was signed: $(grep '^codesign' "$calls")"
+archives_in_out
+
+# A timestamp server that answers nothing fails the release after exactly 3
+# signings of the arm64 app, with the tool's own words.
+release_run sign-retry-dead "$signer" "$notary" FOOTPLATE_SIGN_RETRY_SLEEP=0 STANDIN_CODESIGN_FAIL_SKIP=0 STANDIN_CODESIGN_FAIL_COUNT=99
+[ "$rc" = 1 ] || fail "$name: a release with no timestamp exited $rc: $text"
+case "$text" in
+    *"A timestamp was expected but was not found"*) ;;
+    *) fail "$name: it did not name the missing timestamp: $text" ;;
+esac
+[ "$(grep -c -E "^codesign --force --options runtime --timestamp --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 3 ] ||
+    fail "$name: the arm64 app was signed: $(grep '^codesign' "$calls")"
+lack_line '^codesign --verify --strict /.*/mac-arm64/Footplate\.app$'
+[ ! -e "$out" ] || fail "$name: a release with no timestamp wrote its out dir"
+
+# The first disk image's signing dropped once: the release still passes, the
+# image signed at the second try and the app before it signed once. This
+# proves the image's signing is wrapped: the calls log alone cannot show it,
+# as a wrapped call logs the same argv.
+release_run sign-retry-dmg "$signer" "$notary" FOOTPLATE_SIGN_RETRY_SLEEP=0 STANDIN_CODESIGN_FAIL_SKIP=1 STANDIN_CODESIGN_FAIL_COUNT=1
+[ "$rc" = 0 ] || fail "$name: a release with one dropped image timestamp failed: $text"
+case "$text" in
+    *"the timestamp was not found; trying again"*) ;;
+    *) fail "$name: it did not say the timestamp was tried again: $text" ;;
+esac
+[ "$(grep -c -E "^codesign --force --sign $signer_re --timestamp /.*/Footplate_0\\.3\\.0_darwin_arm64\\.dmg\$" "$calls")" = 2 ] ||
+    fail "$name: the arm64 image was signed: $(grep '^codesign' "$calls")"
+[ "$(grep -c -E "^codesign --force --options runtime --timestamp --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 1 ] ||
+    fail "$name: the arm64 app was signed: $(grep '^codesign' "$calls")"
 archives_in_out
 
 # A yardr in an archive is refused, whichever of the three kinds holds it: the

@@ -375,7 +375,7 @@ repo() {
 # for the cases that run it in place of fakebuild.
 real_release() {
     mkdir -p "$checkout/scripts"
-    cp "$script_dir/release.sh" "$script_dir/linux-container.sh" "$script_dir/bundle-mac.sh" "$checkout/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/linux-container.sh" "$script_dir/codesign-retry.sh" "$script_dir/bundle-mac.sh" "$checkout/scripts/"
     git -C "$checkout" add -A
     git -C "$checkout" commit -qm scripts
     git -C "$checkout" push -q origin main

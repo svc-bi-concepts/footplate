@@ -25,6 +25,7 @@ if [ $# -ne 0 ] && [ $# -ne 2 ]; then
 fi
 
 cd "$(dirname "$0")/.."
+. ./scripts/codesign-retry.sh
 binary=${1:-target/release/footplate}
 icon=assets/icon.png
 app=${2:-target/Footplate.app}
@@ -88,7 +89,7 @@ if [ -n "$identity" ]; then
     # without a secure timestamp, so both are asked for; and the signature
     # is checked here, so that one that does not hold fails here and not
     # after the wait for Apple.
-    codesign --force --options runtime --timestamp --sign "$identity" "$app"
+    codesign_retry --force --options runtime --timestamp --sign "$identity" "$app"
     codesign --verify --strict "$app"
 else
     # Ad hoc, with no identity: a builder's or a contributor's build.

@@ -57,6 +57,7 @@ esac
 cd "$(dirname "$0")/.."
 root=$PWD
 . ./scripts/linux-container.sh
+. ./scripts/codesign-retry.sh
 
 number=${version#v}
 toml=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
@@ -414,7 +415,7 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
         # signature is checked here as the app's is, before the wait. The
         # ticket is stapled to the image itself, whose line in checksums.txt
         # is of it. The hardened runtime is for code, which an image is not.
-        codesign --force --sign "$identity" --timestamp "$dmg" >&2
+        codesign_retry --force --sign "$identity" --timestamp "$dmg" >&2
         codesign --verify --strict "$dmg" >&2
         notarize "macOS $arch disk image" "$dmg" "$dmg"
     fi
