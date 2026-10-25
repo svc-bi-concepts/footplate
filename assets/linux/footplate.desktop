@@ -8,14 +8,18 @@
 #   exec "$HOME/.local/bin/footplate"
 # and the backslashes are the entry format's escape and the Exec key's quoting
 # together, which is why they come in pairs.
+#
+# The name leads with yardr so the app sorts under Y, next to yardr, in
+# the menu of applications.
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Footplate
+Name=yardr footplate
+GenericName=Chat client
 Comment=Talk with the crew of a yardr yard
 Exec=sh -c "exec \\"\\$HOME/.local/bin/footplate\\""
 Icon=footplate
 Terminal=false
 Categories=Network;Chat;
-Keywords=yardr;yard;chat;
+Keywords=footplate;yardr;yard;chat;
 StartupWMClass=footplate

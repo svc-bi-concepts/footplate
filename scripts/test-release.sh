@@ -666,7 +666,8 @@ linux_archive_holds() {
     cmp -s "$unpacked/footplate.png" "$tmp/$name/checkout/assets/icon-512.png" ||
         fail "$name: the icon in $1 is not the checkout's"
     entry=$unpacked/footplate.desktop
-    for held in '[Desktop Entry]' Type=Application Name=Footplate Icon=footplate \
+    for held in '[Desktop Entry]' Type=Application Name='yardr footplate' \
+        GenericName='Chat client' Keywords='footplate;yardr;yard;chat;' Icon=footplate \
         Terminal=false StartupWMClass=footplate; do
         grep -q -x -F -- "$held" "$entry" || fail "$name: the launcher in $1 lacks [$held]: $(cat "$entry")"
     done

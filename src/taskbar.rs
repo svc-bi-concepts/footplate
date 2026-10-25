@@ -397,6 +397,10 @@ mod tests {
         assert!(shown(launcher));
         assert!(launcher.contains(&format!("\nStartupWMClass={}\n", crate::NAME)));
         assert!(launcher.contains(&format!("\nIcon={}\n", crate::NAME)));
+        // The launcher sorts under Y, next to yardr, and stays findable by
+        // either name.
+        assert!(launcher.contains("\nName=yardr footplate\n"));
+        assert!(launcher.contains("\nKeywords=footplate;yardr;yard;chat;\n"));
         fs::write(&entry_file, launcher).unwrap();
         assert!(!install(dir.path(), "footplate", exe, b"png").unwrap());
         assert_eq!(fs::read_to_string(&entry_file).unwrap(), launcher);
