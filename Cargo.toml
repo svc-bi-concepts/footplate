@@ -1,6 +1,6 @@
 [package]
 name = "footplate"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "A native window onto a yardr yard: talk with the crew, and with the crew a linked yard exposes"
 publish = false
