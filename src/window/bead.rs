@@ -1041,7 +1041,7 @@ impl Footplate {
     }
 
     /// The letter's body. A letter that reads under another's head has no
-    /// head of its own, so its bar of reactions floats over its top edge,
+    /// head of its own, so its bar of reactions floats on its top edge,
     /// and its time stands in the gutter while the pointer is on it. The
     /// letter draws no ground, hovered or not: the time appearing is the
     /// whole affordance.
@@ -1159,23 +1159,23 @@ impl Footplate {
     }
 
     /// The reactions a tap puts on the mail, in a bar that floats at the
-    /// top right of the letter while the pointer stands on it, half over
-    /// its top edge: it is absolute in the head or body that draws it, so
-    /// it takes no room and the letter keeps its place and its height. In
-    /// a letter with a head the bar stands over the empty right of the
-    /// head's line, clear of the text; in one that reads under another's
-    /// head its lower part is over the right end of the first line, which
-    /// only a line that runs that far loses. It paints after the rest of
-    /// the window, so no line of the letter or of the next one paints
-    /// over it and the list's scroll does not cut it: the kit paints in
-    /// tree order, and the letter's body stands after the head that draws
-    /// the bar. Its own ground and hairline keep the text under it from
-    /// showing through, the kit's popover shadow lifts it, and it blocks
-    /// the mouse, so that a tap on it is no press on that text. The
-    /// yard's fixed set, each in a square of 26 pixels with 4 pixels
-    /// around and between them: closer than the kit's 32-pixel control,
-    /// since the bar floats over a letter and the emoji are all it holds.
-    /// The one the pointer stands on draws 1.2 times larger in its square,
+    /// top right of the letter while the pointer stands on it, on its top
+    /// edge: it is absolute in the head or body that draws it, so it takes
+    /// no room and the letter keeps its place and its height. All of it
+    /// stands above the letter, over the blank the letter above leaves
+    /// and the bottom of that letter's last line: no line of this one is
+    /// under it, nor the copy control of a code block that starts it. It
+    /// paints after the rest of the window, so no line of the letter or of
+    /// the next one paints over it and the list's scroll does not cut it:
+    /// the kit paints in tree order, and the letter's body stands after
+    /// the head that draws the bar. Its own ground and hairline keep the
+    /// text under it from showing through, the kit's popover shadow lifts
+    /// it, and it blocks the mouse, so that a tap on it is no press on
+    /// that text. The yard's fixed set, each in a square of 26 pixels with
+    /// 4 pixels around and between them, so the bar is 36 pixels high at
+    /// every text size: closer than the kit's 32-pixel control, since the
+    /// bar floats over a letter and the emoji are all it holds. The one
+    /// the pointer stands on draws 1.2 times larger in its square,
     /// so neither its neighbours nor the bar move. The user's own current
     /// one stands on the open ground. A tap on that one takes it away, and
     /// a tap on another puts it instead.
@@ -1200,20 +1200,23 @@ impl Footplate {
             div()
                 .id(("react", seq))
                 .absolute()
-                // Half over the top edge of the head or body, near enough:
-                // 16 of its 36 pixels stand above it, and the rest ends in
-                // the head's line, clear of the text under it, at every
-                // text size. 16 is the room the lists leave above their
-                // first row at the usual one (`py_4`, `p_4`), so the first
-                // letter's bar stays in the list, and under the bar's
-                // upper part is the blank the letter above leaves under
-                // its text (`pb_6`, 24 pixels).
-                .top(px(-16.))
+                // On the top edge of the head or body: 36 pixels up, the
+                // bar's own height, so its bottom meets that edge (mckean's
+                // pick, ask 13848). No line of the letter is under it, nor
+                // the copy control of a code block that starts it. It
+                // stands over the blank the letter above leaves under its
+                // text (`pb_6`, 24 pixels; 32 above a head) and the bottom
+                // of that letter's last line. Its gap and padding are in
+                // pixels, not rems, so it is 36 high at every text size: a
+                // shorter bar would leave a strip between it and the
+                // letter, where the pointer going up from the letter lands
+                // on the one above and the bar goes.
+                .top(px(-36.))
                 .right_0()
                 .flex()
                 .flex_row()
-                .gap_1()
-                .p_1()
+                .gap(px(4.))
+                .p(px(4.))
                 .rounded_md()
                 .border_1()
                 .border_color(palette.line)
@@ -1273,7 +1276,7 @@ impl Footplate {
         }
         // Deferred, so the bar paints after the letter and what stands
         // under it: its layout stays where it is, absolute at the top
-        // right of the head or body, raised over its top edge.
+        // right of the head or body, raised to stand on its top edge.
         gpui::deferred(row).into_any_element()
     }
 

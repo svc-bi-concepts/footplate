@@ -2885,26 +2885,25 @@ mod tests {
         f32::from(a - b).abs() < 1.
     }
 
-    /// The bar of reactions stands half over the top edge of the head or
-    /// body it is raised from, 16 of its 36 pixels above it. Near enough
-    /// half: that is what the check holds it to.
-    fn assert_over_edge(bar: Bounds<Pixels>, edge: Pixels, of: &str) {
-        let above = edge - bar.top();
+    /// The bar of reactions stands on the top edge of the head or body it
+    /// is raised from: its bottom is that edge, to a hundredth of a pixel,
+    /// so that no part of it is over the letter and no strip between the
+    /// two is neither (a pointer going up from the letter would land on
+    /// what is above it, and the bar would go).
+    fn assert_on_edge(bar: Bounds<Pixels>, edge: Pixels, of: &str) {
         assert!(
-            near(above, px(16.)),
-            "the bar is not 16 pixels over the top of {of}: {bar:?} over {edge:?}"
-        );
-        assert!(
-            above > bar.size.height * 0.4 && above < bar.size.height * 0.6,
-            "the bar is not about half over the top of {of}: {bar:?} over {edge:?}"
+            f32::from(bar.bottom() - edge).abs() < 0.01,
+            "the bar does not stand on the top of {of}: {bar:?} over {edge:?}"
         );
     }
 
-    /// The bar of reactions floats at the top right of the letter, half
-    /// over its top edge: over the head's line where the letter has a
-    /// head, over the top of its body where it reads under another's. It
-    /// takes no room: with the pointer on a letter, every row and every
-    /// mail stands where it stood with the pointer elsewhere.
+    /// The bar of reactions floats at the top right of the letter, on its
+    /// top edge (36 pixels up at the usual text size, ask 13848): over
+    /// the blank the letter above leaves and the bottom of that letter's
+    /// last line, never over a line of this one, whether it has a head or
+    /// reads under another's. It takes no room: with the pointer on a
+    /// letter, every row and every mail stands where it stood with the
+    /// pointer elsewhere.
     #[gpui::test]
     fn the_bar_of_reactions_floats_over_a_letter_and_moves_nothing(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -2945,9 +2944,9 @@ mod tests {
         }
 
         // A letter with a head has the bar at the right of the head's
-        // line, at the column's right, half over the head's top edge: it
-        // ends in the head's line, so the text under the head is clear of
-        // it. It floats, so it paints over what is above the head.
+        // line, at the column's right, on the head's top edge: the head's
+        // line and the text under it are clear of it. It floats, so it
+        // paints over what is above the head.
         hover_on(cx, "text 12");
         let bar = bounds_of(cx, "react row 12");
         let (head, text) = (bounds_now(cx, "head 12"), bounds_now(cx, "text 12"));
@@ -2959,21 +2958,28 @@ mod tests {
             near(bar.right(), head.right()),
             "the bar is at the column's right: {bar:?} in {head:?}"
         );
-        assert_over_edge(bar, head.top(), "the head");
+        assert_on_edge(bar, head.top(), "the head");
+        // 36 pixels is the bar's height at the usual text size, and so
+        // as far up as it stands.
+        assert!(
+            near(head.top() - bar.top(), px(36.)),
+            "the bar is not 36 pixels over the top of the head: {bar:?} over {head:?}"
+        );
         assert!(
             bar.bottom() <= text.top(),
             "the bar runs over the text under the head: {bar:?} over {text:?}"
         );
-        // This is the first letter: its bar stands in the list, not
-        // above the list's top, where the pane's head would be under it.
+        // This is the first letter: the line above the oldest mail leaves
+        // room for its bar, which stands in the list and not over the
+        // pane's head.
         let list = view.read_with(cx, |v, _| v.conversation.bounds());
         assert!(
             bar.top() >= list.top(),
             "the first letter's bar stands above the list: {bar:?} over {list:?}"
         );
 
-        // One that reads under another's has it half over the top edge
-        // of its body, its lower part over the first line.
+        // One that reads under another's has it on the top edge of its
+        // body, so its first line is clear of the bar.
         hover_on(cx, "text 13");
         let bar = bounds_of(cx, "react row 13");
         let (text, clock) = (
@@ -2984,7 +2990,11 @@ mod tests {
             near(bar.right(), text.right()),
             "the bar is at the column's right: {bar:?} over {text:?}"
         );
-        assert_over_edge(bar, text.top(), "the body");
+        assert_on_edge(bar, text.top(), "the body");
+        assert!(
+            near(text.top() - bar.top(), px(36.)),
+            "the bar is not 36 pixels over the top of the body: {bar:?} over {text:?}"
+        );
         let head = bounds_now(
             cx,
             &format!("clock 12 {}", local("2026-10-13T09:30:00Z", "%H:%M")),
@@ -3009,9 +3019,14 @@ mod tests {
         assert_eq!(letters_stand(&view, cx), at_rest);
 
         // The bar is drawn in pixels and the letter in rems, which follow
-        // the text size: at the smallest and the largest the bar still
-        // stands 16 pixels over the head and ends in its line, clear of
-        // the text, and the first letter's bar is still in the list.
+        // the text size: at the smallest and the largest the bar is still
+        // 36 pixels high and stands on the head's top edge, the head's
+        // line and the text under it clear of it. A bar with its padding
+        // in rems is shorter at the smallest, and leaves a strip between
+        // it and the letter, where the pointer going up from the letter
+        // lands on what is above and the bar goes: the pointer goes up
+        // through the edge in half-pixel steps, and every one stands on
+        // the letter.
         for text in [settings::TEXT_MIN, settings::TEXT_MAX] {
             view.update(cx, |v, cx| {
                 let set = Settings {
@@ -3023,9 +3038,10 @@ mod tests {
             hover_on(cx, "text 12");
             let bar = bounds_of(cx, "react row 12");
             let (head, under) = (bounds_now(cx, "head 12"), bounds_now(cx, "text 12"));
+            assert_on_edge(bar, head.top(), &format!("the head at {text} px"));
             assert!(
-                near(head.top() - bar.top(), px(16.)),
-                "at {text} px the bar is not 16 pixels over the head: {bar:?} over {head:?}"
+                near(bar.size.height, px(36.)),
+                "at {text} px the bar is not 36 pixels high: {bar:?}"
             );
             assert!(
                 bar.bottom() <= under.top(),
@@ -3036,6 +3052,21 @@ mod tests {
                 bar.top() >= list.top(),
                 "at {text} px the first letter's bar stands above the list: {bar:?} over {list:?}"
             );
+            let x = bar.center().x;
+            for step in 0..=16 {
+                let y = head.top() + px(4.) - px(step as f32 * 0.5);
+                cx.simulate_mouse_move(gpui::point(x, y), None, gpui::Modifiers::default());
+                assert_eq!(
+                    pointer_on(&view, cx).map(|(at, _)| at),
+                    Some(12),
+                    "at {text} px the pointer left the letter at {y:?}, going up through {head:?}"
+                );
+                assert!(
+                    view.read_with(cx, |v, _| v.reacting(12)),
+                    "{text} px, {y:?}"
+                );
+            }
+            assert_eq!(pointer_on(&view, cx), Some((12, Piece::Bar)), "{text} px");
         }
     }
 
@@ -3051,8 +3082,8 @@ mod tests {
         grouped_letters(&yard);
         let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
 
-        // A letter with a head has the bar half over the head's top
-        // edge: the pointer goes up to it from the text.
+        // A letter with a head has the bar on the head's top edge: the
+        // pointer goes up to it from the text.
         hover_on(cx, "text 12");
         assert_eq!(pointer_on(&view, cx), Some((12, Piece::Body)));
         hover_on(cx, "react 12 👍");
@@ -3082,12 +3113,11 @@ mod tests {
         hover_on(cx, "text 13");
         assert_eq!(pointer_on(&view, cx), Some((13, Piece::Body)));
 
-        // The bar stands half over the letter's top edge, and the part
-        // above the edge is still the letter: the pointer goes straight
-        // up from the text, under the bar, to the bar's top in steps, and
-        // the bar stays at every one. A step more, off the bar, it stands
-        // on what is above the letter: the letter above, whose bar comes
-        // instead, or none.
+        // The bar stands on the letter's top edge, and the bar is still
+        // the letter: the pointer goes straight up from the text, over the
+        // edge and up the bar to its top in steps, and the bar stays at
+        // every one. A step more, off the bar, it stands on what is above
+        // the letter: the letter above, whose bar comes instead, or none.
         for (seq, edge, above) in [
             (12, "head 12", None),
             (13, "text 13", Some((12, Piece::Body))),
@@ -3110,7 +3140,7 @@ mod tests {
                     "step {step} hid the bar {seq}"
                 );
             }
-            // The last step stands on the part of the bar above the letter.
+            // The last step stands on the bar's top, above the letter.
             assert!(px(to) < edge.top(), "{seq}: not above the letter");
             assert_eq!(pointer_on(&view, cx), Some((seq, Piece::Bar)));
             cx.simulate_mouse_move(
@@ -3288,13 +3318,26 @@ mod tests {
         assert_eq!(bounds_of(cx, "react row 12"), bar_rest);
     }
 
-    /// A press on the bar is no press on the text under it: it starts no
-    /// selection there, as a press beside the bar does.
+    /// A press on the bar is no press on the text under it, the bottom of
+    /// the last line of the letter above: it starts no selection there, as
+    /// a press beside the bar does.
     #[gpui::test]
     fn a_press_on_the_bar_is_no_press_on_the_text_under_it(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        grouped_letters(&yard);
+        // One group, the yardmaster's minute by minute, no reactions and
+        // no day between the letters: 13 and 14 read under 12's head, and
+        // the bar of 14 stands over the bottom of 13's last line.
+        yard.answer("React", "{}");
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": "2026-10-13T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "one", "read": true},
+                {"seq": 13, "at": "2026-10-13T09:31:00Z", "from": "yardmaster", "to": "jo", "text": "two", "read": true},
+                {"seq": 14, "at": "2026-10-13T09:32:00Z", "from": "yardmaster", "to": "jo", "text": "three", "read": true},
+            ]})
+            .to_string(),
+        );
         let (view, cx) = opened(&yard, &["one", "two", "three"], cx);
 
         // A drag along the text of 13 selects it.
@@ -3302,13 +3345,16 @@ mod tests {
         drag(cx, from, to);
         assert_eq!(selected(&view, cx).as_deref(), Some("two"));
 
-        // The bar's lower part is over the text's first line, at its
-        // right: a drag from the bar to the start of the text starts no
+        // The bar of the letter under it (14) stands on that letter's top
+        // edge, so its upper part is over the last line of this one, at
+        // its right: a drag from there to the start of the text starts no
         // selection, and the press drops the one there was, as a press
         // outside the text does.
-        hover_on(cx, "text 13");
-        let on_bar = bounds_of(cx, "react 13 🎉").center();
+        hover_on(cx, "text 14");
+        let bar = bounds_of(cx, "react row 14");
+        let on_bar = gpui::point(bounds_now(cx, "react 14 🎉").center().x, bar.top() + px(8.));
         let text = bounds_now(cx, "text 13");
+        assert!(bar.contains(&on_bar), "{on_bar:?} is no point of {bar:?}");
         assert!(text.contains(&on_bar), "{on_bar:?} is no point of {text:?}");
         drag(cx, on_bar, from);
         assert_eq!(selected(&view, cx), None);
@@ -3523,10 +3569,10 @@ mod tests {
     }
 
     /// The yard row draws a mail's head and body in one element, with
-    /// nothing between them: the bar floats half over the head's top edge
-    /// there too, and moves nothing. The list leaves 16 pixels above its
-    /// first mail, which is as high as the bar stands: the first mail's
-    /// bar is in the list.
+    /// nothing between them: the bar floats on the head's top edge there
+    /// too, and moves nothing. The list leaves 16 pixels above its first
+    /// mail, and the bar stands 36 above it: 20 pixels of the first
+    /// mail's bar are over the pane's head, which it paints over.
     #[gpui::test]
     fn the_bar_of_reactions_floats_over_a_mail_on_the_yard_row_too(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3564,22 +3610,27 @@ mod tests {
             near(bar.right(), head.right()),
             "the bar is at the list's right: {bar:?} in {head:?}"
         );
-        assert_over_edge(bar, head.top(), "the head");
+        assert_on_edge(bar, head.top(), "the head");
 
         // The pointer goes up onto the bar, and the bar stays.
         hover_on(cx, "react 31 👍");
         assert_eq!(pointer_on(&view, cx), Some((31, Piece::Bar)));
         assert_eq!(stand(cx), at_rest, "the bar moved a mail");
 
-        // The first mail of the list stands 16 pixels under its top: the
-        // bar reaches the list's top and no higher, where the pane's head
-        // would be under it.
+        // The first mail of the list stands 16 pixels under its top, so
+        // its bar reaches 20 pixels above the list: over the lower part
+        // of the pane's head, below the strip at the window's top, and no
+        // room is taken from either.
         hover_on(cx, "text 30");
         let bar = bounds_of(cx, "react row 30");
         let list = view.read_with(cx, |v, _| v.conversation.bounds());
         assert!(
-            bar.top() > list.top() - px(0.5),
-            "the first mail's bar stands above the list: {bar:?} over {list:?}"
+            near(list.top() - bar.top(), px(20.)),
+            "the first mail's bar does not reach 20 pixels over the list: {bar:?} over {list:?}"
+        );
+        assert!(
+            bar.top() >= px(titlebar::HEIGHT),
+            "the first mail's bar reaches the strip at the window's top: {bar:?}"
         );
         assert_eq!(stand(cx), at_rest, "the bar moved a mail");
     }
@@ -4728,8 +4779,26 @@ mod tests {
         );
         let long = format!("```sh\n{code}\n```");
         let two = "First:\n```\none\n```\nSecond:\n```\ntwo\n```";
-        mails(&yard, &[short, &long, two]);
-        let (view, cx) = opened(&yard, &[short, &long, two], cx);
+        let report = "yardr review -g box-approvers";
+        let under_a_head = format!("```\n{report}\n```");
+        let adjacent = chrono::DateTime::parse_from_rfc3339(&mailed(2))
+            .unwrap()
+            .checked_add_signed(chrono::TimeDelta::minutes(1))
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        yard.answer("React", "{}");
+        yard.answer(
+            "Conversation",
+            &json!({"result": [
+                {"seq": 12, "at": mailed(0), "from": "yardmaster", "to": "jo", "text": short, "read": false},
+                {"seq": 13, "at": mailed(1), "from": "yardmaster", "to": "jo", "text": long, "read": false},
+                {"seq": 14, "at": mailed(2), "from": "yardmaster", "to": "jo", "text": two, "read": false},
+                {"seq": 15, "at": adjacent, "from": "yardmaster", "to": "jo", "text": under_a_head, "read": false},
+            ]})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &[short, &long, two, &under_a_head], cx);
         cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
 
         // The long line wraps: one block, much higher than the short one's.
@@ -4776,6 +4845,33 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(3));
         cx.run_until_parked();
         assert_eq!(copied(cx, 14), None);
+
+        // The last mail reads under 14's head and begins with a code
+        // block. Its bar leaves the line and copy control clear; clicking
+        // the control copies the report and taps no reaction.
+        hover_on(cx, "text 15");
+        assert_eq!(pointer_on(&view, cx), Some((15, Piece::Body)));
+        let bar = bounds_of(cx, "react row 15");
+        let text = bounds_now(cx, "text 15");
+        let chip = view.read_with(cx, |v, cx| v.selection.read(cx).chips_in(15))[0].1;
+        assert!(
+            text.contains(&chip.origin) && text.contains(&chip.bottom_right()),
+            "the control is not in the letter: {chip:?} in {text:?}"
+        );
+        assert!(
+            bar.bottom() <= text.top(),
+            "the bar covers the letter's first line: {bar:?} over {text:?}"
+        );
+        assert!(
+            !bar.intersects(&chip),
+            "the bar covers the copy control: {bar:?} over {chip:?}"
+        );
+        assert!(view.read_with(cx, |v, _| v.reacting(15)));
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        assert_eq!(clipboard(cx).as_deref(), Some(report));
+        assert_eq!(selected(&view, cx).as_deref(), Some("cargo test"));
+        cx.run_until_parked();
+        assert_eq!(yard.asked("React"), Vec::<serde_json::Value>::new());
     }
 
     #[gpui::test]

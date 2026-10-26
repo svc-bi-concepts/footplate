@@ -411,6 +411,8 @@ three days, grouped by sender, with short links, a correction and a
 code block of one line),
 `column-hover` (that conversation with the pointer on the code block, a
 letter under its head: its time in the gutter, its bar floating),
+`column-copy` (that with the pointer on the block itself: its copy
+control shows at the block's top right, clear of the bar),
 `plain` (an open decision card of a plain ask), `plain-select`
 (that card with a selection posed over its context), `lines` (that
 card with one of jo's beads changed, so Lines carries its badge), `page` (an

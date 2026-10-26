@@ -22,7 +22,8 @@ use crate::yard::Env;
 /// image, a long conversation over three days, grouped by sender, with
 /// short links, a correction and a code block of one line, that
 /// conversation with the pointer posed on the code block, a letter under
-/// its head, an open decision card of a plain
+/// its head, that conversation with the pointer posed on the block
+/// itself too, so its copy control shows, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
 /// card of a run ask, a weighty run ask's card beside a routine one's,
@@ -98,6 +99,7 @@ pub const STATES: &[&str] = &[
     "thread",
     "column",
     "column-hover",
+    "column-copy",
     "plain",
     "plain-select",
     "lines",
@@ -1135,7 +1137,7 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         }
-        "column" | "column-hover" => {
+        "column" | "column-hover" | "column-copy" => {
             // A long conversation over three days, grouped by sender, with
             // a call link, a calendar link and a correction: the shot shows
             // the reading column, the grouping, the separators and the
@@ -1143,8 +1145,9 @@ fn populate(yard: &Yard, state: &str) {
             // separators read Today, Yesterday and the weekday. The hover
             // state poses the pointer on the last mail, a code block of
             // one line that reads under the one above's head: its time
-            // stands in the gutter, and its bar of reactions floats over
-            // its first line.
+            // stands in the gutter, and its bar of reactions floats on its
+            // top edge. The copy state poses it on the block too, so its
+            // copy control shows, clear of the bar.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -1272,12 +1275,11 @@ fn populate(yard: &Yard, state: &str) {
             // The yardmaster's conversation with the parties' reactions
             // under three mails: jo's on the question, both parties' on
             // the answer, and jo's on a last one, with a mail between
-            // without any. The last reads under the one above's head and
-            // is long enough to run under the bar's lower part. The hover
-            // state poses the pointer on it, so its bar of reactions to
-            // tap floats half over its top edge, over the end of its
-            // first line, with jo's own marked, and no mail moves; the
-            // zoom state poses it on one emoji of that bar.
+            // without any. The last reads under the one above's head. The
+            // hover state poses the pointer on it, so its bar of reactions
+            // to tap floats on its top edge, with jo's own marked, and no
+            // mail moves; the zoom state poses it on one emoji of that
+            // bar.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -2423,7 +2425,7 @@ mod tests {
                     assert_eq!(letters[6].files.len(), 1, "{state}");
                     assert!(crate::model::is_image(&letters[6].files[0]), "{state}");
                 }
-                "column" | "column-hover" => {
+                "column" | "column-hover" | "column-copy" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     // Twelve mails over three days, grouped by sender,
                     // with a call link, a calendar link, a correction and

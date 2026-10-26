@@ -43,6 +43,11 @@ pub struct Selection {
     /// Where each text's copy controls were last drawn, by text key and
     /// block: clicks there copy and select nothing.
     chips: Vec<(u64, Chips)>,
+    /// The block a screenshot has the pointer over, by text key and block:
+    /// its copy control shows as it does for a pointer there. A debug
+    /// build's alone.
+    #[cfg(debug_assertions)]
+    posed_hover: Option<(u64, usize)>,
 }
 
 /// Where the copy controls of one text were last drawn, by block.
@@ -105,6 +110,15 @@ impl Selection {
             clicked: None,
             selecting: false,
         });
+        cx.notify();
+    }
+
+    /// A posed pointer, for the screenshots: over the block `block` of the
+    /// text `key`, whose copy control shows as it does for a pointer
+    /// there. A debug build's alone.
+    #[cfg(debug_assertions)]
+    pub fn pose_hover(&mut self, key: u64, block: usize, cx: &mut Context<Self>) {
+        self.posed_hover = Some((key, block));
         cx.notify();
     }
 
@@ -1317,6 +1331,12 @@ impl Element for Text {
             .is_hovered(window)
             .then(|| drawn.hovered_code(window.mouse_position()))
             .flatten();
+        #[cfg(debug_assertions)]
+        let hovered = hovered.or(self
+            .selection
+            .read(cx)
+            .posed_hover
+            .and_then(|(at, block)| (at == key).then_some(block)));
         for (ix, chip) in drawn.chips.iter() {
             let just_copied = copied == Some((key, *ix));
             if Some(*ix) != hovered && !just_copied {
