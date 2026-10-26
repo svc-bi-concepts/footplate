@@ -19,7 +19,7 @@ use super::metrics::{
 };
 use super::panel::{day_break, reading_column, reading_row};
 use super::rail::{ImageOpen, OpenTip, Picture, Unsent, post};
-use super::screen::screen_control;
+use super::screen::{screen_control, screen_icon};
 use super::state::Piece;
 use super::ui::{keys_hint, send_held, small_button};
 use super::words::{ask_words, bead_back_name, bead_sub, remark_color, worker_words};
@@ -1380,21 +1380,34 @@ impl Footplate {
             .child(
                 div()
                     .flex()
-                    .items_baseline()
+                    .items_center()
+                    .justify_between()
                     .gap_2()
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(with.to_string()),
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(with.to_string()),
+                            )
+                            // What the agent is doing, beside its name, so the
+                            // reader looks no further than the header. People and
+                            // a linked yard's people have no state.
+                            .children(model.crew_state(with).map(|state| {
+                                div()
+                                    .debug_selector(|| "conversation state".to_string())
+                                    .text_color(palette.faint)
+                                    .child(format!("· {state}"))
+                            })),
                     )
-                    // What the agent is doing, beside its name, so the
-                    // reader looks no further than the header. People and
-                    // a linked yard's people have no state.
-                    .children(model.crew_state(with).map(|state| {
-                        div()
-                            .debug_selector(|| "conversation state".to_string())
-                            .text_color(palette.faint)
-                            .child(format!("· {state}"))
+                    // The crew member's screen, at the header's right edge.
+                    // Who is no member of this yard's crew has no session,
+                    // and the header carries no icon.
+                    .children(model.screen_for_crew(with).map(|session| {
+                        screen_icon(session, format!("talk screen {with}"), palette, cx)
                     })),
             )
             .children(about.into_iter().enumerate().map(|(i, line)| {

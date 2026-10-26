@@ -6890,14 +6890,20 @@ yardr.dev
             &json!({"result": {"screen": "\u{1b}[1myardmaster\u{1b}[0m\n❯ "}}).to_string(),
         );
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        // The operator's window offers the crew's screens on their rows.
-        assert!(drawn(cx, "row screen yardmaster"));
-        assert!(drawn(cx, "row screen assembly"));
+        // The operator's window offers the open conversation's screen in
+        // its header; the crew rows carry none.
+        assert!(drawn(cx, "talk screen yardmaster"));
+        assert!(!drawn(cx, "row screen yardmaster"));
+        assert!(!drawn(cx, "row screen assembly"));
         assert!(!drawn(cx, "screen overlay"));
         // A click opens it over the window: the overlay, the card with
-        // the session's name, the refresh and the ×. The row's
-        // conversation is not opened instead.
-        click_on(cx, "row screen assembly");
+        // the session's name, the refresh and the ×. Assembly's opens
+        // from assembly's conversation, which stays open.
+        click_on(cx, "row assembly");
+        wait(cx, "assembly's conversation", |cx| {
+            drawn(cx, "talk screen assembly")
+        });
+        click_on(cx, "talk screen assembly");
         wait(cx, "assembly's screen", |cx| {
             screen_of(&view, cx) == "2 lines"
         });
@@ -6909,7 +6915,7 @@ yardr.dev
         view.read_with(cx, |v, _| {
             assert_eq!(
                 v.model.as_ref().unwrap().selected(),
-                Some(&Selected::Conversation("yardmaster".into()))
+                Some(&Selected::Conversation("assembly".into()))
             );
         });
         assert!(drawn(cx, "screen overlay"));
@@ -6937,7 +6943,7 @@ yardr.dev
         assert_eq!(overlay_screen(&view, cx), None);
         assert!(line_focused(&view, cx));
         // A click outside shuts it too.
-        click_on(cx, "row screen assembly");
+        click_on(cx, "talk screen assembly");
         wait(cx, "assembly's screen", |cx| {
             screen_of(&view, cx) == "2 lines"
         });
@@ -6953,7 +6959,7 @@ yardr.dev
             "SessionScreen",
             r#"{"error": {"code": "unknown-method", "message": "no such method: SessionScreen"}}"#,
         );
-        click_on(cx, "row screen assembly");
+        click_on(cx, "talk screen assembly");
         wait(cx, "the refusal", |cx| {
             screen_of(&view, cx).starts_with("the screen could not be read: ")
         });
@@ -6962,6 +6968,15 @@ yardr.dev
         cx.run_until_parked();
         assert_eq!(overlay_screen(&view, cx), None);
         assert!(line_focused(&view, cx));
+        // A linked yard's member has no session here, so their
+        // conversation's header carries no icon.
+        click_on(cx, "row clerk@north");
+        wait(cx, "the clerk's conversation", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected_conversation() == Some("clerk@north")
+            })
+        });
+        assert!(!drawn(cx, "talk screen clerk@north"));
     }
 
     #[gpui::test]
@@ -7037,9 +7052,16 @@ yardr.dev
         a_yard_of_jo(&yard);
         // The yard's operator is mckean, and the window runs as jo.
         yard.answer("Settings", r#"{"result": {"operator": "mckean"}}"#);
-        let (_view, cx) = opened(&yard, &["Shall I land it?"], cx);
-        assert!(!drawn(cx, "row screen yardmaster"));
-        assert!(!drawn(cx, "row screen assembly"));
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        assert!(!drawn(cx, "talk screen yardmaster"));
+        // Nor on another member's conversation.
+        click_on(cx, "row assembly");
+        wait(cx, "assembly's conversation", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected_conversation() == Some("assembly")
+            })
+        });
+        assert!(!drawn(cx, "talk screen assembly"));
     }
 
     #[gpui::test]

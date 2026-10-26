@@ -42,7 +42,6 @@ use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, grown};
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
-use super::screen::screen_control;
 use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
@@ -5084,14 +5083,13 @@ impl Footplate {
                 body = body.child(group_head(title));
                 for row in rows {
                     let sel = Selected::Conversation(row.name.clone());
-                    let screen = model.screen_for_crew(&row.name);
-                    body = body.child(self.row(row, sel, screen, palette, cx));
+                    body = body.child(self.row(row, sel, palette, cx));
                 }
             }
         }
         body = body.child(group_head("Yard"));
         let yard = model.yard_row();
-        body = body.child(self.row(yard, Selected::Yard, None, palette, cx));
+        body = body.child(self.row(yard, Selected::Yard, palette, cx));
         self.column(body, palette, top, cx)
     }
 
@@ -5170,14 +5168,13 @@ impl Footplate {
     /// badge; every other count is quiet words, never a numeral badge.
     /// The open row keeps its fill, and a row under the pointer a
     /// hairline instead: hover drawn apart from selection, so exactly
-    /// one row ever reads open. A crew row carries Screen past the
-    /// unread, which opens the `screen` session's screen over the
-    /// window instead of the conversation; any other row carries none.
+    /// one row ever reads open. No row carries Screen: the open
+    /// conversation's header holds the crew member's screen at its
+    /// right edge instead.
     pub(crate) fn row(
         &self,
         row: Row,
         sel: Selected,
-        screen: Option<String>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -5296,11 +5293,6 @@ impl Footplate {
                         .child(unread_words(row.unread)),
                 ),
             })
-            .children(
-                screen.map(|session| {
-                    screen_control(session, format!("row screen {name}"), palette, cx)
-                }),
-            )
     }
 
     pub(crate) fn talk(

@@ -10,6 +10,7 @@ use gpui::{
 use super::Footplate;
 use super::metrics::IMAGE_MARGIN;
 use super::rail::RailTip;
+use super::ui::terminal_glyph;
 use crate::ansi::{self, Color, Span};
 use crate::select;
 use crate::theme::{Look, Palette};
@@ -76,6 +77,36 @@ pub(crate) fn screen_control(
             this.open_screen(session.clone(), window, cx);
         }))
         .child("Screen")
+}
+
+/// The control that opens `session`'s screen from the conversation
+/// header: the terminal glyph at the header's right edge, quiet until
+/// the pointer is over it. The hover, the press that takes no focus
+/// and the click are the text control's.
+pub(crate) fn screen_icon(
+    session: String,
+    id: String,
+    palette: Palette,
+    cx: &mut Context<Footplate>,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
+        .flex_none()
+        .p_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|style| style.bg(palette.hover))
+        .tooltip(|_, cx| cx.new(|_| RailTip(SCREEN_TIP.to_string())).into())
+        // The press takes no focus, as the text control's: the window
+        // holds the keys once the screen shows, and the focus goes back
+        // where the click found it when it shuts.
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            this.open_screen(session.clone(), window, cx);
+        }))
+        .child(terminal_glyph(palette.faint))
 }
 
 /// The triple draws as an Rgba.

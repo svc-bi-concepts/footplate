@@ -128,6 +128,35 @@ pub(crate) fn gear_glyph(color: Rgba) -> impl IntoElement {
     })
 }
 
+/// The terminal: Octicons', a rounded square holding a ">" prompt
+/// and an underscore, on the mock's grid. The conversation header's
+/// screen control; no icon font is loaded for the one glyph.
+pub(crate) fn terminal_glyph(color: Rgba) -> impl IntoElement {
+    glyph_canvas(move |o, s, window| {
+        let mut path = gpui::PathBuilder::stroke(px(2. * s));
+        // The rounded square, drawn clockwise from the top edge: the
+        // corner arcs join the straight sides.
+        let at = |x: f32, y: f32| gpui::point(o.x + px(x * s), o.y + px(y * s));
+        let radii = gpui::point(px(4. * s), px(4. * s));
+        path.move_to(at(7., 3.));
+        path.line_to(at(17., 3.));
+        path.arc_to(radii, px(0.), false, true, at(21., 7.));
+        path.line_to(at(21., 17.));
+        path.arc_to(radii, px(0.), false, true, at(17., 21.));
+        path.line_to(at(7., 21.));
+        path.arc_to(radii, px(0.), false, true, at(3., 17.));
+        path.line_to(at(3., 7.));
+        path.arc_to(radii, px(0.), false, true, at(7., 3.));
+        path.close();
+        glyph_line(&mut path, o, s, 9., 8.5, 12.5, 12.);
+        glyph_line(&mut path, o, s, 12.5, 12., 9., 15.5);
+        glyph_line(&mut path, o, s, 8., 17.5, 16., 17.5);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    })
+}
+
 /// The window's top band, where the content reaches up into the title bar
 /// and the traffic lights stand over the rail's top: `top` pixels high, with
 /// the hairline at its foot. The rail, the list's head and the settings'

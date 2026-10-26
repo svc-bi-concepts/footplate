@@ -59,13 +59,13 @@ impl Footplate {
         let mut body = self.list_body();
         let arrivals = model.arrivals_row();
         body = body.child(section_head("Timetable", arrivals.line.clone(), palette));
-        body = body.child(self.row(arrivals, Selected::Arrivals, None, palette, cx));
+        body = body.child(self.row(arrivals, Selected::Arrivals, palette, cx));
         for row in model.active_line_rows() {
             let sel = Selected::Line(row.name.clone());
-            body = body.child(self.row(row, sel, None, palette, cx));
+            body = body.child(self.row(row, sel, palette, cx));
         }
         if let Some(row) = model.no_line_row() {
-            body = body.child(self.row(row, Selected::NoLine, None, palette, cx));
+            body = body.child(self.row(row, Selected::NoLine, palette, cx));
         }
         let quiet = model.quiet_rows();
         if !quiet.is_empty() {
@@ -95,7 +95,7 @@ impl Footplate {
             if open {
                 for row in quiet {
                     let sel = Selected::Line(row.name.clone());
-                    body = body.child(self.row(row, sel, None, palette, cx));
+                    body = body.child(self.row(row, sel, palette, cx));
                 }
             }
         }
