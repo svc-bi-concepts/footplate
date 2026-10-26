@@ -11,6 +11,8 @@
 # stand-in for gh. A run that succeeded gives it, a run that is going is waited
 # for, a commit with no run gets one started, and a run that failed or was
 # cancelled refuses the release, before any build when that is known by then.
+# With FOOTPLATE_RELEASE_WINDOWS=off the Windows zip is left out instead: no
+# run is started or asked about, and the out dir holds the six other archives.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -512,9 +514,10 @@ fi
 # whole, in a checkout and with an out dir of the case's own, the stand-ins
 # first on PATH. $rc is its exit status, $text what it said, $out its out
 # dir and $calls the stand-ins' log. The two signing variables are always
-# given, empty for none, so that the caller's own never reach it. With
-# DETACH_HEAD set the checkout is left on no branch, for a release from a
-# detached HEAD.
+# given, empty for none, so that the caller's own never reach it, and
+# FOOTPLATE_RELEASE_WINDOWS is empty unless a case gives it, for the same
+# reason. With DETACH_HEAD set the checkout is left on no branch, for a
+# release from a detached HEAD.
 release_run() {
     name=$1
     sign_with=$2
@@ -529,6 +532,7 @@ release_run() {
     if text=$(env PATH="$bin:$PATH" CALLS="$calls" \
         FOOTPLATE_RELEASE_SIGN_IDENTITY="$sign_with" \
         FOOTPLATE_RELEASE_NOTARY_PROFILE="$notary_with" \
+        FOOTPLATE_RELEASE_WINDOWS= \
         "$@" "$tmp/$name/checkout/scripts/release.sh" v0.3.0 "$out" 2>&1); then
         rc=0
     else
@@ -582,19 +586,27 @@ in_dmg() {
     grep -q -x -F -- "$2" "$1"
 }
 
-# archives_in_out: the seven archives and the checksums of a release, and
-# nothing else, and the checksums are of what is there.
+# archives_in_out [off]: the seven archives and the checksums of a release,
+# and nothing else, and the checksums are of what is there. With off, the
+# six without the Windows zip.
 archives_in_out() {
-    for f in Footplate_0.3.0_darwin_arm64.zip Footplate_0.3.0_darwin_amd64.zip \
+    off=${1:-}
+    set -- Footplate_0.3.0_darwin_arm64.zip Footplate_0.3.0_darwin_amd64.zip \
         Footplate_0.3.0_darwin_arm64.dmg Footplate_0.3.0_darwin_amd64.dmg \
-        footplate_0.3.0_linux_arm64.tar.gz footplate_0.3.0_linux_amd64.tar.gz \
-        footplate_0.3.0_windows_amd64.zip checksums.txt; do
+        footplate_0.3.0_linux_arm64.tar.gz footplate_0.3.0_linux_amd64.tar.gz
+    if [ "$off" = off ]; then
+        want_n=6
+    else
+        set -- "$@" footplate_0.3.0_windows_amd64.zip
+        want_n=7
+    fi
+    for f in "$@" checksums.txt; do
         [ -f "$out/$f" ] || fail "$name: no $f in the out dir: $(find "$out" -mindepth 1)"
     done
-    [ "$(find "$out" -mindepth 1 | wc -l | tr -d ' ')" = 8 ] || fail "$name: the out dir holds: $(find "$out" -mindepth 1)"
+    [ "$(find "$out" -mindepth 1 | wc -l | tr -d ' ')" = $((want_n + 1)) ] || fail "$name: the out dir holds: $(find "$out" -mindepth 1)"
     (cd "$out" && shasum -a 256 -c checksums.txt >/dev/null) || fail "$name: checksums.txt is not of the archives"
-    # And the checksums are of all seven: none is left out of them.
-    [ "$(wc -l <"$out/checksums.txt" | tr -d ' ')" = 7 ] || fail "$name: checksums.txt is: $(cat "$out/checksums.txt")"
+    # And the checksums are of them all: none is left out of them.
+    [ "$(wc -l <"$out/checksums.txt" | tr -d ' ')" = "$want_n" ] || fail "$name: checksums.txt is: $(cat "$out/checksums.txt")"
 }
 
 # refused <case> <exit> <says> <identity> <profile> [VAR=value ...]: the
@@ -635,12 +647,19 @@ image_holds() {
     done
 }
 
-# listed_clean: the release said of each of its seven archives that it listed it
-# and found no yardr in it, and let go of each image it mounted to do so.
+# listed_clean [off]: the release said of each of its seven archives that it
+# listed it and found no yardr in it, and let go of each image it mounted to
+# do so. With off, the six without the Windows zip.
 listed_clean() {
-    for what in "macOS arm64 zip" "macOS amd64 zip" "macOS arm64 disk image" \
-        "macOS amd64 disk image" "Linux arm64 archive" "Linux amd64 archive" \
-        "Windows archive"; do
+    if [ "${1:-}" = off ]; then
+        set -- "macOS arm64 zip" "macOS amd64 zip" "macOS arm64 disk image" \
+            "macOS amd64 disk image" "Linux arm64 archive" "Linux amd64 archive"
+    else
+        set -- "macOS arm64 zip" "macOS amd64 zip" "macOS arm64 disk image" \
+            "macOS amd64 disk image" "Linux arm64 archive" "Linux amd64 archive" \
+            "Windows archive"
+    fi
+    for what in "$@"; do
         case "$text" in
             *"$what: lists "*" members, none of yardr"*) ;;
             *) fail "$name: it did not say that the $what holds no yardr: $text" ;;
@@ -981,6 +1000,33 @@ windows_refused no-artifact "could not take the Windows zip from run 4242" yes S
 windows_refused other-version "holds no footplate_0.3.0_windows_amd64.zip" yes STANDIN_ZIP_VERSION=0.2.0
 windows_refused more-members "the Windows archive holds: LICENSE NOTICE README.md footplate.exe notes.txt;" yes STANDIN_ZIP_STRAY=notes.txt
 windows_refused not-windows "is no PE32+ executable binary" yes STANDIN_EXE=linux-amd64
+
+# With FOOTPLATE_RELEASE_WINDOWS=off the release ships without the Windows
+# zip: it says so once, no run is started or asked about (the commit has
+# none, which would otherwise start one), and the out dir holds the six
+# other archives with the checksums over those alone. Any other value is
+# today's release, Windows zip and all.
+release_run windows-off "" "" FOOTPLATE_RELEASE_WINDOWS=off STANDIN_RUNS=none
+[ "$rc" = 0 ] || fail "windows-off: a release without Windows failed: $text"
+case "$text" in
+    *"release.sh: Windows: off, no Windows zip in this release"*) ;;
+    *) fail "windows-off: it did not say Windows is off: $text" ;;
+esac
+said=$(printf '%s\n' "$text" | grep -c 'Windows: off' || true)
+[ "$said" = 1 ] || fail "windows-off: it said Windows is off $said times: $text"
+lack_line '^gh '
+listed_clean off
+archives_in_out off
+[ ! -e "$out/footplate_0.3.0_windows_amd64.zip" ] || fail "windows-off: the out dir holds the Windows zip"
+! grep -q windows "$out/checksums.txt" || fail "windows-off: checksums.txt names the Windows zip: $(cat "$out/checksums.txt")"
+release_run windows-on "" "" FOOTPLATE_RELEASE_WINDOWS=on
+[ "$rc" = 0 ] || fail "windows-on: a release with FOOTPLATE_RELEASE_WINDOWS=on failed: $text"
+case "$text" in
+    *"Windows: off"*) fail "windows-on: it said Windows is off: $text" ;;
+esac
+want_line "^gh run list "
+archives_in_out
+windows_archive_holds "$out/footplate_0.3.0_windows_amd64.zip"
 
 # A submission Apple does not accept fails the release with the notary
 # service's log of it, whether or not notarytool's own exit status says so,

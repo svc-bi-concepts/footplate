@@ -6,7 +6,9 @@
 # call log. The build step runs a stand-in build script (the real
 # scripts/release.sh is test-release.sh's), so no test compiles footplate.
 # Verify's look at the macOS apps has stand-ins for xcrun, spctl and ditto,
-# which only a Mac has, so it is tried the same on any system.
+# which only a Mac has, so it is tried the same on any system. With
+# FOOTPLATE_RELEASE_WINDOWS=off the build makes the six archives without
+# the Windows zip, and verify and publish pass without it.
 set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -140,6 +142,8 @@ EOF
 # fakebuild stands in for scripts/release.sh: the seven footplate archives
 # and a checksums.txt over them, and a log of where it ran, with what cache
 # and with which of the signing variables the group's environment gave it.
+# With FOOTPLATE_RELEASE_WINDOWS=off it leaves the Windows zip out, as the
+# real one does.
 cat >"$bin/fakebuild" <<'EOF'
 #!/bin/sh
 # fakebuild <version> <out-dir>
@@ -159,9 +163,13 @@ fi
 if [ "${FAKE_BUILD_OMIT:-}" != "Footplate_${number}_darwin_amd64.dmg" ]; then
     printf 'fake footplate darwin amd64 image for %s\n' "$1" >"$2/Footplate_${number}_darwin_amd64.dmg"
 fi
-printf 'fake footplate linux arm64 for %s\n' "$1" >"$2/footplate_${number}_linux_arm64.tar.gz"
-printf 'fake footplate linux amd64 for %s\n' "$1" >"$2/footplate_${number}_linux_amd64.tar.gz"
-if [ "${FAKE_BUILD_OMIT:-}" != "footplate_${number}_windows_amd64.zip" ]; then
+if [ "${FAKE_BUILD_OMIT:-}" != "footplate_${number}_linux_arm64.tar.gz" ]; then
+    printf 'fake footplate linux arm64 for %s\n' "$1" >"$2/footplate_${number}_linux_arm64.tar.gz"
+fi
+if [ "${FAKE_BUILD_OMIT:-}" != "footplate_${number}_linux_amd64.tar.gz" ]; then
+    printf 'fake footplate linux amd64 for %s\n' "$1" >"$2/footplate_${number}_linux_amd64.tar.gz"
+fi
+if [ "${FAKE_BUILD_OMIT:-}" != "footplate_${number}_windows_amd64.zip" ] && [ "${FOOTPLATE_RELEASE_WINDOWS:-}" != off ]; then
     printf 'fake footplate windows amd64 for %s\n' "$1" >"$2/footplate_${number}_windows_amd64.zip"
 fi
 if [ "${FAKE_BUILD_EXTRA:-}" = yes ]; then
@@ -381,18 +389,32 @@ real_release() {
     git -C "$checkout" push -q origin main
 }
 
-# fixture <sig|nosig> <ok|corrupt> [mac] [dmg]: a release for verify to
-# download, of two archives with a checksums.txt over them, and with mac
-# the two zips of footplate's macOS apps as well (their bytes are no
+# fixture <sig|nosig> <ok|corrupt> [mac|six] [dmg]: a release for verify
+# to download, of two archives with a checksums.txt over them, and with
+# mac the two zips of footplate's macOS apps as well (their bytes are no
 # zips: ditto is a stand-in), and with dmg the two disk images beside
 # whatever else was asked for (their bytes are no images: hdiutil is a
-# stand-in).
+# stand-in). With six, the release is footplate's six archives without
+# the Windows zip instead of the two.
 fixture() {
     rdir=$casedir/release
     mkdir -p "$rdir"
-    printf 'a\n' >"$rdir/a.tar.gz"
-    printf 'b\n' >"$rdir/b.tar.gz"
-    archives="a.tar.gz b.tar.gz"
+    if [ "${3:-}" = six ]; then
+        archives=""
+        for arch in arm64 amd64; do
+            printf 'footplate darwin %s\n' "$arch" >"$rdir/Footplate_0.3.0_darwin_$arch.zip"
+            printf 'footplate darwin %s image\n' "$arch" >"$rdir/Footplate_0.3.0_darwin_$arch.dmg"
+            archives="$archives Footplate_0.3.0_darwin_$arch.zip Footplate_0.3.0_darwin_$arch.dmg"
+        done
+        for arch in arm64 amd64; do
+            printf 'footplate linux %s\n' "$arch" >"$rdir/footplate_0.3.0_linux_$arch.tar.gz"
+            archives="$archives footplate_0.3.0_linux_$arch.tar.gz"
+        done
+    else
+        printf 'a\n' >"$rdir/a.tar.gz"
+        printf 'b\n' >"$rdir/b.tar.gz"
+        archives="a.tar.gz b.tar.gz"
+    fi
     if [ "${3:-}" = mac ]; then
         for arch in arm64 amd64; do
             printf 'footplate darwin %s\n' "$arch" >"$rdir/Footplate_0.3.0_darwin_$arch.zip"
@@ -412,8 +434,8 @@ fixture() {
 }
 
 # run <mode> [VAR=value ...]: release-stage the way the exec group runs it.
-# The signing variables are empty unless a case gives them, so that the
-# caller's own never reach it.
+# The signing variables and FOOTPLATE_RELEASE_WINDOWS are empty unless a
+# case gives them, so that the caller's own never reach it.
 run() {
     mode=$1
     shift
@@ -421,6 +443,7 @@ run() {
         YARDR_BIN=yardr YARDR_BEAD=footplate-rel1 YARDR_BASE=main \
         YARDR_RELEASE_BUILD="$bin/fakebuild" \
         env FOOTPLATE_RELEASE_SIGN_IDENTITY= FOOTPLATE_RELEASE_NOTARY_PROFILE= \
+        FOOTPLATE_RELEASE_WINDOWS= \
         "$@" "$stage" "$mode" >"$casedir/out.log" 2>&1 ||
         fail "$name: release-stage $mode exited $?: $(tail -n 20 "$casedir/out.log")"
 }
@@ -499,6 +522,39 @@ if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
     fail "extra-asset: a tag was made for an unexpected asset"
 fi
 ok "build refuses an extra asset"
+
+# With FOOTPLATE_RELEASE_WINDOWS=off the build releases the six archives
+# without the Windows zip: tagged, pushed and made, and the note says six.
+begin build-no-windows
+repo
+show "footplate v0.3.0" "notes"
+run build "YARDR_DEPOT_PATH=$checkout" "FOOTPLATE_RELEASE_WINDOWS=off"
+at=$(git -C "$checkout" rev-parse refs/tags/v0.3.0)
+[ "$at" = "$(git -C "$checkout" rev-parse refs/heads/main)" ] ||
+    fail "build-no-windows: tag v0.3.0 is at $at, not at main"
+want "gh release create v0.3.0"
+want "Footplate_0.3.0_darwin_arm64.zip"
+want "footplate_0.3.0_linux_amd64.tar.gz"
+want "checksums.txt"
+want "6 archives and checksums.txt"
+lack "footplate_0.3.0_windows_amd64.zip"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+ok "build releases without the Windows zip when it is off"
+
+# ... but one of the six missing is still refused, Windows or no Windows.
+begin build-no-windows-missing
+repo
+show "footplate v0.3.0" "notes"
+run build "YARDR_DEPOT_PATH=$checkout" "FOOTPLATE_RELEASE_WINDOWS=off" \
+    "FAKE_BUILD_OMIT=footplate_0.3.0_linux_amd64.tar.gz"
+want "yardr bead done footplate-rel1 --outcome failed --note -"
+want "the build left no footplate_0.3.0_linux_amd64.tar.gz"
+lack "gh release create"
+if git -C "$checkout" rev-parse --verify -q "refs/tags/v0.3.0" >/dev/null; then
+    fail "build-no-windows-missing: a tag was made for a partial build"
+fi
+ok "build without Windows still refuses a missing archive"
 
 # A dirty tree is refused.
 begin dirty-tree
@@ -641,6 +697,19 @@ want "holds no macOS archive"
 lack "xcrun"
 lack "ditto"
 ok "verify checks a signed release"
+
+# A signed release without the Windows zip verifies: its six archives
+# match its checksums, and the macOS ones are looked at as ever.
+begin verify-no-windows
+fixture sig ok six
+show "footplate v0.3.0" "notes"
+run verify "FAKE_RELEASE_DIR=$rdir" "FOOTPLATE_RELEASE_WINDOWS=off"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+want "the signature on v0.3.0 is good"
+want "its 6 archives match checksums.txt"
+want "The macOS apps and disk images are notarized"
+ok "verify passes without the Windows zip when it is off"
 
 # A bad signature fails, so sign is asked again, with what minisign said.
 begin verify-bad-signature
@@ -889,6 +958,19 @@ want "publish: filed yardr.dev-s9nc"
 want "yardr bead done footplate-rel1 --note -"
 lack "--outcome"
 ok "publish files the sync bead"
+
+# Publish files the sync bead with the switch off too: it points at the
+# release, whatever archives it holds.
+begin publish-no-windows
+repo
+git -C "$checkout" tag v0.3.0
+show "footplate v0.3.0" "notes"
+run publish "YARDR_DEPOT_PATH=$checkout" "FOOTPLATE_RELEASE_WINDOWS=off" "FAKE_CREATE_ID=yardr.dev-s9nc"
+want "yardr bead create Sync footplate v0.3.0 to yardr.dev"
+want "yardr bead advance yardr.dev-s9nc --to new"
+want "yardr bead done footplate-rel1 --note -"
+lack "--outcome"
+ok "publish files the sync bead without the Windows zip"
 
 # Without the tag publish has nothing to point at.
 begin publish-missing-tag

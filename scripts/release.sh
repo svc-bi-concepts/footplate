@@ -23,6 +23,11 @@
 # and checks its footplate.exe as it does the other archives.
 # YARDR_RELEASE_REPO names the repository the run is in, owner/name, as it
 # does for scripts/release-stage (default yardr-dev/footplate).
+# With FOOTPLATE_RELEASE_WINDOWS=off in the environment the release ships
+# without the Windows zip: no run is started or asked for, nothing is
+# fetched, and the zip is left out of the archives and of checksums.txt,
+# which covers the other six. Unset or any other value, the release is as
+# above.
 #
 # Run it from anywhere: `scripts/release.sh <version> [out-dir]`.
 # <version> is the tag (v0.4.0) and must equal Cargo.toml's version, and the
@@ -108,14 +113,23 @@ windows_artifact=footplate-windows-amd64
 repo=${YARDR_RELEASE_REPO:-yardr-dev/footplate}
 commit=$(git rev-parse HEAD)
 
-# What a release carries, in the order checksums.txt lists it.
+# What a release carries, in the order checksums.txt lists it. With
+# FOOTPLATE_RELEASE_WINDOWS=off the Windows zip is left out, and no run is
+# started or asked for; unset or any other value, the release is as ever.
 archives="Footplate_${number}_darwin_arm64.zip
 Footplate_${number}_darwin_amd64.zip
 Footplate_${number}_darwin_arm64.dmg
 Footplate_${number}_darwin_amd64.dmg
 footplate_${number}_linux_arm64.tar.gz
-footplate_${number}_linux_amd64.tar.gz
+footplate_${number}_linux_amd64.tar.gz"
+if [ "${FOOTPLATE_RELEASE_WINDOWS:-}" = off ]; then
+    windows_off=1
+    echo "release.sh: Windows: off, no Windows zip in this release" >&2
+else
+    windows_off=""
+    archives="$archives
 $windows_zip"
+fi
 
 work=$(mktemp -d)
 stage_out=$work/out
@@ -367,8 +381,11 @@ windows_fetch() {
 # The zip is taken at the end, but its run is looked at now. A commit with no
 # run gets one started now, and one whose run failed is refused, before the
 # builds below, which take the better part of an hour, and not after them.
-windows_check
-echo "release.sh: Windows: run $run_id for $commit: $run_status${run_conclusion:+, $run_conclusion} ($run_url); its zip is taken after the builds" >&2
+# With FOOTPLATE_RELEASE_WINDOWS=off there is no run to look at.
+if [ -z "$windows_off" ]; then
+    windows_check
+    echo "release.sh: Windows: run $run_id for $commit: $run_status${run_conclusion:+, $run_conclusion} ($run_url); its zip is taken after the builds" >&2
+fi
 
 # Both darwin targets are installed: a release builds each.
 if command -v rustup >/dev/null 2>&1; then
@@ -485,7 +502,9 @@ for arch in arm64 amd64; do
     release_marker=""
 done
 
-windows_fetch
+if [ -z "$windows_off" ]; then
+    windows_fetch
+fi
 
 # The names have no spaces, so the list splits on its lines.
 # shellcheck disable=SC2086

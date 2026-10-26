@@ -194,7 +194,8 @@ first time) and packs each binary with `footplate.desktop`, its entry for the
 menu of applications (`assets/linux`), `footplate.png`, its icon
 (`assets/icon-512.png`), README.md, LICENSE and NOTICE, and takes the
 Windows zip from GitHub (below), with one `checksums.txt` over the seven
-archives. The archives go to out-dir, else to `dist/`. The disk image is a
+archives (six without the Windows zip: `FOOTPLATE_RELEASE_WINDOWS=off`,
+below). The archives go to out-dir, else to `dist/`. The disk image is a
 compressed read-only HFS+ volume named Footplate, made with `hdiutil create`.
 It holds the bundle beside a link to `/Applications`, so installing is a
 drag. The zip stays as it was. The Linux binaries link Debian 13's glibc and
@@ -206,7 +207,7 @@ release stops if a member's path has yardr in it, in any case, since
 footplate fetches yardr the first time it opens
 ([yardr, fetched](#yardr-fetched)) and carries none. An image that will not
 mount cannot be listed, and stops the release too. Nothing reaches out-dir
-until all seven pass. yardr.dev's `scripts/sync-release` checks the members of
+until all seven pass (six with the switch off). yardr.dev's `scripts/sync-release` checks the members of
 a Linux archive and of the Windows zip against lists of its own, so a member
 added here is added there before the release is cut.
 
@@ -235,6 +236,13 @@ and its `footplate.exe` must be a Windows program for x86-64. As in
 `scripts/release-stage`, `YARDR_RELEASE_REPO` names the repository the run is
 in (default `yardr-dev/footplate`). The zip is not signed, so Windows asks once
 before it opens ([Installing](#windows-pc)).
+
+With `FOOTPLATE_RELEASE_WINDOWS=off` in the environment the release ships
+without the Windows zip: no run is started or asked for, nothing is
+fetched, and the zip is left out of the archives and of `checksums.txt`.
+Unset or any other value, the release is as above. The release group reads
+its environment from its `env_file` (below), which is where the operator
+sets it.
 
 The macOS apps are signed ad hoc and not notarized, and the disk images not
 signed, unless the release is asked for more, and says so. With both
@@ -285,10 +293,11 @@ from there:
 - `build` refuses a bad title, a version that is not `Cargo.toml`'s, an
   existing release or tag, a dirty tree, or a checkout that is not the
   remote's `main`; builds the seven archives and `checksums.txt` with
-  `scripts/release.sh`; tags the base commit, pushes the tag, and makes
-  the GitHub release; notes on the bead whether the macOS apps and disk
-  images came out signed and notarized or ad hoc and unsigned, and the five
-  signing commands.
+  `scripts/release.sh` (six without the Windows zip when
+  `FOOTPLATE_RELEASE_WINDOWS=off` is in the group's environment); tags the
+  base commit, pushes the tag, and makes the GitHub release; notes on the
+  bead whether the macOS apps and disk images came out signed and notarized
+  or ad hoc and unsigned, and the five signing commands.
 - `sign` asks mckean whether `checksums.txt.minisig` is uploaded. Run the
   five commands from the build's note, in a directory of their own, then
   Done. Each names the version, so a stale file or a wrong release shows

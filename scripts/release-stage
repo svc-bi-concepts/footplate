@@ -47,8 +47,11 @@
 # note says that look was skipped). gh acts as whoever it is logged in as.
 # The build runs scripts/release.sh, so on a Mac, where that builds. That takes
 # the Windows zip from the run of the Windows workflow for the base commit with
-# the gh above, waiting for the run if it is going. It also signs and
-# notarizes the macOS apps and disk images when
+# the gh above, waiting for the run if it is going, unless
+# FOOTPLATE_RELEASE_WINDOWS=off is in the environment this runs in, in which
+# case the release ships without the Windows zip and the stage expects the
+# six other archives. It also signs and notarizes the macOS apps and disk
+# images when
 # FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are in
 # the environment this runs in, which the exec group takes from its env_file
 # (README "Building"); the build's note says which it was. Needs this Mac
@@ -237,8 +240,19 @@ build() {
     fail failed "building $v failed" "$(tail -n 30 "$log")"
   fi
   [ -f "$out/checksums.txt" ] || fail failed "the build left no checksums.txt in $out; nothing was tagged"
-  # This depot's release has seven fixed archive names. Do not publish a
-  # partial build or let an unexpected file ride along as a release asset.
+  # This depot's release has seven fixed archive names, six with
+  # FOOTPLATE_RELEASE_WINDOWS=off, which releases without the Windows zip.
+  # Do not publish a partial build or let an unexpected file ride along as
+  # a release asset.
+  if [ "${FOOTPLATE_RELEASE_WINDOWS:-}" = off ]; then
+    windows_wanted=""
+    n=6
+    count="six"
+  else
+    windows_wanted=1
+    n=7
+    count="seven"
+  fi
   files=""
   for f in \
       "Footplate_${number}_darwin_arm64.zip" \
@@ -248,6 +262,9 @@ build() {
       "footplate_${number}_linux_arm64.tar.gz" \
       "footplate_${number}_linux_amd64.tar.gz" \
       "footplate_${number}_windows_amd64.zip"; do
+    if [ -z "$windows_wanted" ] && [ "$f" = "footplate_${number}_windows_amd64.zip" ]; then
+      continue
+    fi
     [ -f "$out/$f" ] || fail failed "the build left no $f in $out; nothing was tagged"
     files="$files
 $f"
@@ -262,18 +279,20 @@ $f"
     "Footplate_${number}_darwin_arm64.dmg" | \
     "Footplate_${number}_darwin_amd64.dmg" | \
     "footplate_${number}_linux_arm64.tar.gz" | \
-    "footplate_${number}_linux_amd64.tar.gz" | \
-    "footplate_${number}_windows_amd64.zip") ;;
-    *) fail failed "the build left unexpected file $b in $out; expected seven archives and checksums.txt" ;;
+    "footplate_${number}_linux_amd64.tar.gz") ;;
+    "footplate_${number}_windows_amd64.zip")
+      [ -n "$windows_wanted" ] ||
+        fail failed "the build left unexpected file $b in $out; expected six archives and checksums.txt"
+      ;;
+    *) fail failed "the build left unexpected file $b in $out; expected $count archives and checksums.txt" ;;
     esac
   done
-  n=7
   [ -z "$tagat" ] || echo "== $BEAD: tag $v is already at $at; finishing that run"
   [ -n "$tagat" ] || git -C "$REPO" tag "$v" "$base" || fail failed "tagging $at as $v failed; nothing was pushed"
   git -C "$REPO" push "$REMOTE" "$v" >"$tmp/push.log" 2>&1 ||
     fail failed "tag $v is made but pushing it to $REMOTE failed; push it by hand, then advance the bead back to build" "$(tail -n 10 "$tmp/push.log")"
   printf '%s\n' "$body" >"$tmp/notes.md"
-  # The asset list is the seven fixed filenames, so pass it from inside the
+  # The asset list is the fixed filenames, so pass it from inside the
   # output directory; a TMPDIR containing spaces stays one path.
   # shellcheck disable=SC2086 # $files is a newline-separated list
   if (cd "$out" && gh release create "$v" $files checksums.txt --repo "$GHREPO" --title "$v" --notes-file "$tmp/notes.md" --verify-tag >"$tmp/create.log" 2>&1); then
