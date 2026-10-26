@@ -1069,21 +1069,6 @@ impl Footplate {
                             back: None,
                         });
                     }
-                    // The screen shot opens the session's screen over
-                    // the window, as its Screen control does: the yard
-                    // holds the shot's bytes, and they show when they
-                    // come. A debug build's alone, as above, and a unix
-                    // one's.
-                    #[cfg(all(debug_assertions, unix))]
-                    if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("screen") {
-                        self.screen_open = Some(super::screen::ScreenOpen {
-                            session: crate::shot::SCREEN_OPEN.to_string(),
-                            shown: super::screen::Shown::Asked,
-                            back: None,
-                            request: 0,
-                        });
-                        self.read_screen(cx);
-                    }
                     // The drawer shot opens the bead beside the
                     // yardmaster's conversation, as a click on its chip
                     // does: the bead is read whole, and the drawer shows
@@ -1110,6 +1095,29 @@ impl Footplate {
                     }
                 }
                 self.model = Some(model);
+                // The screen shot opens the session's screen over
+                // the window, as its Screen control does: the yard
+                // holds the shot's bytes, and they show when they
+                // come. The screen-hosted shot opens it the same
+                // way: its yard is a hosted one, so the card says
+                // the screen is read on the yard's machine, and the
+                // yard is asked nothing. After the model stands, so
+                // the read sees it: posed earlier, the hosted card
+                // would ask the yard. A debug build's alone, as
+                // above, and a unix one's.
+                #[cfg(all(debug_assertions, unix))]
+                if matches!(
+                    std::env::var("FOOTPLATE_SHOT").as_deref(),
+                    Ok("screen") | Ok("screen-hosted")
+                ) {
+                    self.screen_open = Some(super::screen::ScreenOpen {
+                        session: crate::shot::SCREEN_OPEN.to_string(),
+                        shown: super::screen::Shown::Asked,
+                        back: None,
+                        request: 0,
+                    });
+                    self.read_screen(cx);
+                }
                 // The yard answers: the away screen's details are shut,
                 // for the next time it is away.
                 self.away_details = false;

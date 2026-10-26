@@ -472,9 +472,11 @@ conversation with the notice a flows view that did not answer
 leaves under the mail), `drawer` (the conversation with the
 bead its chip names open in the drawer beside it), `delivery`
 (the yard row open on a hook delivery whose photo the yard holds,
-with a document it did not take under the photo) and `screen`
+with a document it did not take under the photo), `screen`
 (the yardmaster's screen open over the window, as its Screen
-control opens it).
+control opens it) and `screen-hosted` (that card on a hosted
+yard, saying the screen is read on the yard's machine, with no
+Screen offered).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
@@ -1283,6 +1285,18 @@ delivery's files under its notice as a mail's are (its images, a page or file as
 a line for one the yard did not take): they come after the notice, and show when the yard
 says it has them, with the row left open; or a bead's open
 asks, each as its card.
+
+Where the window runs as the yard's operator, a crew member's conversation
+carries a terminal icon at the right of its header, and a bead a session
+works carries Screen where the window says so (its row of the arrivals, its
+details). Either opens what that session's pane shows over the window
+(`SessionScreen`), as the terminal draws it, with Refresh, and `esc` to
+leave it. A screen can show what an agent printed, a secret among it, so the
+yard reads it to no request that comes down the link from its edge: a hosted
+yard is not asked and offers no Screen, since the screen is read on the
+yard's machine. A yard reached any other way that refuses the read as such
+has the card say the same, in no red, and is asked no more; its other
+refusals are shown as they come.
 
 A conversation opens on its newest fifty mails. Towards its top the fifty
 before are read and put in above, and the mail in view stays where it is;

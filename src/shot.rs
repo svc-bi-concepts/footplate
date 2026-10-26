@@ -66,15 +66,19 @@ use crate::yard::Env;
 /// answer leaves under the mail, the yardmaster's conversation with
 /// the bead its chip names open in the drawer beside it, the yard row
 /// open on a hook delivery whose photo the yard holds, with a document it
-/// did not take under the photo, and the yardmaster's screen open over
-/// the window, as its Screen control opens it.
+/// did not take under the photo, the yardmaster's screen open over
+/// the window, as its Screen control opens it, and that card on a
+/// hosted yard, saying the screen is read on the yard's machine, with
+/// no Screen offered.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
 /// rename shot opens that same far yard, with its rename form open in
 /// its card; the
 /// signed-out yard from settings the state writes itself, against a
-/// throwaway config, with a session the edge no longer knows; the away
+/// throwaway config, with a session the edge no longer knows, and the
+/// hosted screen's yard from the same settings, with a session the
+/// edge still knows; the away
 /// yard from settings the state writes itself, against a throwaway
 /// config, with a device the yard no longer knows; the
 /// switcher's four yards, in both its states, from settings the state
@@ -150,6 +154,7 @@ pub const STATES: &[&str] = &[
     "drawer",
     "delivery",
     "screen",
+    "screen-hosted",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -184,9 +189,10 @@ const FILE_HASH: &str = "efefefefefefefefefefefefefefefefefefefefefefefefefefefe
 pub(super) struct ShotYard {
     yard: std::sync::Arc<Yard>,
     directory: PathBuf,
-    /// The hosted yard and the edge in front of it, for `signedout` alone:
-    /// the window opens the hosted yard through the edge, whose session
-    /// is none the edge knows.
+    /// The hosted yard and the edge in front of it, for `signedout` and
+    /// `screen-hosted` alone: the window opens the hosted yard through
+    /// the edge, whose session is none the edge knows for the first, and
+    /// one it still knows for the second.
     edge: Option<(Yard, Router)>,
     /// The switcher's other live yards, for `switcher` and `switcher-shut`
     /// alone: adventuretime and plantime at their listeners, held from the
@@ -266,10 +272,12 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
 /// the hosted shot is the first screen with the hosted way's fields open
 /// on it. The signedout shot opens the hosted yard south through an edge
 /// that no longer knows its session, so the window opens on the away
-/// screen of a yard that is signed out. The away shot opens the yard
-/// far at its address with a device the yard no longer knows, so the
-/// window opens on the away screen that offers to pair again, with a
-/// way's fields open.
+/// screen of a yard that is signed out; the screen-hosted shot opens
+/// that same yard through an edge that still knows it, so the window
+/// opens on the yard, with no Screen offered. The away shot opens the
+/// yard far at its address with a device the yard no longer knows, so
+/// the window opens on the away screen that offers to pair again, with
+/// a way's fields open.
 fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     if state == "stopped" || state == "refusal" || state == "setup" || state == "hosted" {
         let mut env = env;
@@ -286,15 +294,19 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
             std::process::exit(1);
         }
     };
-    if state == "signedout" {
+    if state == "signedout" || state == "screen-hosted" {
         // The window opens south through the edge, as the sign-in-again
-        // test has it: the session stands in its file, and the edge knew
-        // it until it was revoked there.
+        // test has it: the session stands in its file, and the edge
+        // knows it until it is revoked there. Signedout's is revoked,
+        // so the window opens on the away screen; the hosted screen's
+        // stands, so the window opens on the yard.
         let hosted = Yard::start_tcp();
         populate(&hosted, state);
         let edge = Router::start(&hosted, crate::fake::SESSION);
-        edge.revoke(crate::fake::SESSION);
-        write_signedout_settings(edge.address());
+        if state == "signedout" {
+            edge.revoke(crate::fake::SESSION);
+        }
+        write_hosted_settings(edge.address(), state);
         shot.edge = Some((hosted, edge));
     }
     if state == "away" {
@@ -370,31 +382,31 @@ fn look_named(name: &str) -> crate::theme::Look {
     }
 }
 
-/// The settings the `signedout` shot opens: the hosted yard south at the
-/// edge's address, with the account it was signed in as, its device token
-/// and the session in files beside them, as the sign-in-again test keeps
-/// them. The shot script runs against a throwaway config, which keeps no
-/// settings; where a settings file already stands, the state is refused
-/// rather than overwrite it. The window opens in the look the script asked
-/// for.
-fn write_signedout_settings(address: &str) {
+/// The settings the `signedout` and `screen-hosted` shots open: the
+/// hosted yard south at the edge's address, with the account it was
+/// signed in as, its device token and the session in files beside them,
+/// as the sign-in-again test keeps them. The shot script runs against a
+/// throwaway config, which keeps no settings; where a settings file
+/// already stands, the state is refused rather than overwrite it. The
+/// window opens in the look the script asked for.
+fn write_hosted_settings(address: &str, state: &str) {
     let Some(file) = crate::settings::file() else {
-        eprintln!("footplate: the signedout shot keeps no settings without a home");
+        eprintln!("footplate: the {state} shot keeps no settings without a home");
         std::process::exit(1);
     };
     if file.exists() {
         eprintln!(
-            "footplate: the signedout shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
+            "footplate: the {state} shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
             file.display()
         );
         std::process::exit(2);
     }
-    keep_signedout_settings(&file, address, look_asked());
+    keep_hosted_settings(&file, address, look_asked(), state);
 }
 
-/// The `signedout` shot's settings, device token and session, in `file`'s
+/// The hosted shots' settings, device token and session, in `file`'s
 /// directory, with the window in `look`.
-fn keep_signedout_settings(file: &Path, address: &str, look: crate::theme::Look) {
+fn keep_hosted_settings(file: &Path, address: &str, look: crate::theme::Look, state: &str) {
     let mut south =
         crate::settings::Yard::hosted("south", address, "yard-south.token", "yard-south.session");
     south.account = crate::fake::KRATOS_EMAIL.to_string();
@@ -409,23 +421,23 @@ fn keep_signedout_settings(file: &Path, address: &str, look: crate::theme::Look)
             .map_err(|error| error.to_string())
     })
     .unwrap_or_else(|error| {
-        eprintln!("footplate: the signedout shot keeps no settings: {error}");
+        eprintln!("footplate: the {state} shot keeps no settings: {error}");
         std::process::exit(1);
     });
     let edge = crate::api::Address::parse(address).unwrap_or_else(|error| {
-        eprintln!("footplate: the signedout shot's edge has no address: {error}");
+        eprintln!("footplate: the {state} shot's edge has no address: {error}");
         std::process::exit(1);
     });
     let dir = file.parent().unwrap_or_else(|| Path::new("."));
     crate::yard::token_place(&dir.join("yard-south.token"))
         .and_then(|place| place.keep(crate::fake::TOKEN, &edge))
         .unwrap_or_else(|error| {
-            eprintln!("footplate: the signedout shot keeps no token: {error}");
+            eprintln!("footplate: the {state} shot keeps no token: {error}");
             std::process::exit(1);
         });
     crate::yard::keep_session(&dir.join("yard-south.session"), crate::fake::SESSION, &edge)
         .unwrap_or_else(|error| {
-            eprintln!("footplate: the signedout shot keeps no session: {error}");
+            eprintln!("footplate: the {state} shot keeps no session: {error}");
             std::process::exit(1);
         });
 }
@@ -643,11 +655,18 @@ fn populate(yard: &Yard, state: &str) {
         "GetUser",
         r#"{"result": {"name": "jo", "cursor": 5, "notification_cursor": 0}}"#,
     );
-    yard.answer_once_status(
-        "GetUser",
-        200,
-        r#"{"error": {"code": "not-found", "message": "user: not found"}}"#,
-    );
+    // The login name is refused once, as the window's tests have it: a
+    // client of the socket asks after it, and falls back to the
+    // operator. At an address the token says who the window is for, and
+    // that read is not refused: the first load opens the window instead
+    // of the follower's retry.
+    if !yard.at_listener() {
+        yard.answer_once_status(
+            "GetUser",
+            200,
+            r#"{"error": {"code": "not-found", "message": "user: not found"}}"#,
+        );
+    }
     yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
     yard.answer("AckUserInbox", "{}");
     yard.answer(
@@ -750,8 +769,9 @@ fn populate(yard: &Yard, state: &str) {
         // opens on the panel, the board, the bead and the flow, the
         // switcher's, which the window opens with the switcher's list
         // standing, as it does for the one that shuts it by a click
-        // outside, the notice's, whose flows view does not answer, and
-        // the screen's, whose session's screen opens over it.
+        // outside, the notice's, whose flows view does not answer, the
+        // screen's, whose session's screen opens over it, and the
+        // hosted screen's, whose card opens over it with no call.
         "yardmaster"
         | "far"
         | "settings"
@@ -775,7 +795,8 @@ fn populate(yard: &Yard, state: &str) {
         | "about"
         | "about-unfetched"
         | "notice"
-        | "screen" => {
+        | "screen"
+        | "screen-hosted" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
             // grouping and the separators.
@@ -2633,6 +2654,26 @@ mod tests {
                     assert_eq!(parsed.lines.len(), 51, "{state}");
                     assert!(parsed.width > 0, "{state}");
                 }
+                "screen-hosted" => {
+                    // The yardmaster's six mails, as the window opens
+                    // them past the edge: through it the state says the
+                    // screen is read on the yard's machine, so the card
+                    // the shot opens asks nothing.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
+                    assert_eq!(letters.len(), 6, "{state}");
+                    assert_eq!(letters[1].from, "jo", "{state}");
+                    let south = Yard::start_tcp();
+                    populate(&south, state);
+                    let edge = Router::start(&south, crate::fake::SESSION);
+                    let hosted = session::load(
+                        &edge.client_with(crate::fake::TOKEN, crate::fake::SESSION),
+                        "shot",
+                    )
+                    .unwrap();
+                    assert_eq!(hosted.me, "jo", "{state}");
+                    assert!(hosted.screen_on_the_yard, "{state}");
+                }
                 _ => unreachable!("a state with no coverage: {state}"),
             }
         }
@@ -2708,14 +2749,19 @@ mod tests {
             assert_eq!(kept.opened().name, "far", "away");
             assert!(away.path().join("yard-far.token").is_file());
 
-            let signedout = tempfile::tempdir().unwrap();
-            let file = signedout.path().join("settings.json");
-            keep_signedout_settings(&file, "https://edge.example.net", look);
-            let kept = Settings::read(&file);
-            assert_eq!(kept.look, look, "signedout");
-            assert_eq!(kept.opened().name, "south", "signedout");
-            assert!(signedout.path().join("yard-south.token").is_file());
-            assert!(signedout.path().join("yard-south.session").is_file());
+            for state in ["signedout", "screen-hosted"] {
+                let hosted = tempfile::tempdir().unwrap();
+                let file = hosted.path().join("settings.json");
+                keep_hosted_settings(&file, "https://edge.example.net", look, state);
+                let kept = Settings::read(&file);
+                assert_eq!(kept.look, look, "{state}");
+                assert_eq!(kept.opened().name, "south", "{state}");
+                assert!(hosted.path().join("yard-south.token").is_file(), "{state}");
+                assert!(
+                    hosted.path().join("yard-south.session").is_file(),
+                    "{state}"
+                );
+            }
         }
     }
 

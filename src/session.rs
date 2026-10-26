@@ -336,6 +336,11 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         grants_notice,
         grants_too_old,
         grants_on_the_yard,
+        // The yard reads a session's screen to no device that comes down
+        // the link from its edge either. Nothing is asked for it here: the
+        // way the client reaches the yard is all there is to go by, and a
+        // refusal later teaches the window the rest.
+        screen_on_the_yard: client.hosted(),
         yard,
     })
 }
@@ -755,8 +760,9 @@ mod tests {
     /// its settings could not be read. Nor does the operator's window of a
     /// hosted yard: the yard serves the list to no request that comes down
     /// the link from its edge, so it is not asked, where the same yard
-    /// asked at its address with no edge before it is. The window still
-    /// opens.
+    /// asked at its address with no edge before it is. That yard reads no
+    /// session's screen down that link either, which the state says too. The
+    /// window still opens.
     #[test]
     fn load_reads_no_grants_where_the_window_is_not_given_them() {
         let yard = Yard::start();
@@ -803,6 +809,7 @@ mod tests {
         assert_eq!(direct.me, "jo");
         assert_eq!(direct.operator, "jo");
         assert!(!direct.grants_on_the_yard);
+        assert!(!direct.screen_on_the_yard);
         assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
         let edge = Router::start(&yard, SESSION);
         let hosted = load(&edge.client_with(TOKEN, SESSION), "jo").unwrap();
@@ -812,6 +819,7 @@ mod tests {
         assert_eq!(hosted.grants_notice, None);
         assert!(!hosted.grants_too_old);
         assert!(hosted.grants_on_the_yard);
+        assert!(hosted.screen_on_the_yard);
         assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
 
         // Another user's window of it says the same, and asks no more: the
@@ -825,6 +833,7 @@ mod tests {
         assert_eq!(hosted.me, "ada");
         assert_eq!(hosted.operator, "jo");
         assert!(hosted.grants_on_the_yard);
+        assert!(hosted.screen_on_the_yard);
         assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
     }
 

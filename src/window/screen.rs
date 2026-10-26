@@ -12,6 +12,7 @@ use super::metrics::IMAGE_MARGIN;
 use super::rail::RailTip;
 use super::ui::terminal_glyph;
 use crate::ansi::{self, Color, Span};
+use crate::model;
 use crate::select;
 use crate::theme::{Look, Palette};
 
@@ -31,12 +32,15 @@ impl ScreenOpen {
     }
 }
 
-/// What the open screen has: the read is underway, the parsed screen, or
-/// why there is none.
+/// What the open screen has: the read is underway, the parsed screen, that
+/// the yard reads it on its machine alone, or why there is none.
 pub(crate) enum Shown {
     /// The yard is asked for it.
     Asked,
     Here(ansi::Screen),
+    /// The yard reads no screen down the link from its edge: it is not
+    /// asked, or it refused as much. Nothing is wrong, so nothing is red.
+    OnTheYard,
     /// Why there is none to show, in a line.
     Not(String),
 }
@@ -202,7 +206,10 @@ impl Footplate {
 
     /// Reads the open screen again: the refresh, and the open. An answer
     /// for a read that no longer stands current is dropped: a shut
-    /// screen stays shut, and a refresh keeps its own answer.
+    /// screen stays shut, and a refresh keeps its own answer. A yard that
+    /// reads no screen down the link from its edge is not asked, and one
+    /// that refuses as much is not asked again: the card says where the
+    /// screen is read.
     pub(crate) fn read_screen(&mut self, cx: &mut Context<Self>) {
         let Some(open) = self.screen_open.as_mut() else {
             return;
@@ -211,6 +218,11 @@ impl Footplate {
         self.screen_read = self.screen_read.wrapping_add(1);
         let request = self.screen_read;
         open.request = request;
+        if self.model.as_ref().is_some_and(|m| m.screen_on_the_yard()) {
+            open.shown = Shown::OnTheYard;
+            cx.notify();
+            return;
+        }
         open.shown = Shown::Asked;
         self.ask(
             cx,
@@ -228,6 +240,16 @@ impl Footplate {
                 }
                 let shown = match answer {
                     Ok(screen) => Shown::Here(ansi::parse(&screen.screen)),
+                    // However the client came by the yard, it came down
+                    // the link from the edge: no Screen is offered from
+                    // here, and the refusal's advice is not shown, since
+                    // the device did nothing wrong.
+                    Err(err) if model::screen_over_the_link(&err) => {
+                        if let Some(model) = this.model.as_mut() {
+                            model.screen_refused_down_the_link();
+                        }
+                        Shown::OnTheYard
+                    }
                     Err(err) => Shown::Not(format!("the screen could not be read: {err}")),
                 };
                 this.screen_open
@@ -288,12 +310,17 @@ impl Footplate {
                     f32::from(avail.width) - 2. * margin,
                 )
             }
-            Shown::Asked | Shown::Not(_) => f32::from(rem) * CARD_MIN,
+            Shown::Asked | Shown::OnTheYard | Shown::Not(_) => f32::from(rem) * CARD_MIN,
         };
         let body = match &open.shown {
             Shown::Asked => div()
                 .text_color(dark.faint)
                 .child("Reading the screen.")
+                .into_any_element(),
+            Shown::OnTheYard => div()
+                .debug_selector(|| "screen on the yard".to_string())
+                .text_color(dark.faint)
+                .child(model::SCREEN_ON_THE_YARD)
                 .into_any_element(),
             Shown::Not(why) => {
                 let why = why.clone();

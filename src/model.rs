@@ -97,6 +97,10 @@ pub struct State {
     /// link from its edge: it is read on the yard's machine. The grants
     /// pane says so, and the call is not made, nor a notice raised.
     pub grants_on_the_yard: bool,
+    /// The yard reads a session's screen to no device that comes down the
+    /// link from its edge: it is read on the yard's machine. The window
+    /// offers no Screen, and the call is not made.
+    pub screen_on_the_yard: bool,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -1085,6 +1089,12 @@ pub struct Model {
     /// A window reached by the edge starts so; a refusal that says the
     /// request came down the link sets it, and grants read clear it.
     grants_on_the_yard: bool,
+    /// A session's screen is read on the yard's machine, since the yard
+    /// serves it down no link: the window offers no Screen, and no call is
+    /// made for one. A window reached by the edge starts so; a refusal that
+    /// says the request came down the link sets it, and the model of a state
+    /// read again keeps it.
+    screen_on_the_yard: bool,
     /// The yard has no React call: one from before reactions. The row
     /// the reactions are tapped on is hidden, and no notice is raised.
     /// A reaction answered clears it.
@@ -1269,6 +1279,7 @@ impl Model {
             grants: state.grants,
             grants_too_old: state.grants_too_old,
             grants_on_the_yard: state.grants_on_the_yard,
+            screen_on_the_yard: state.screen_on_the_yard,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -1390,6 +1401,10 @@ impl Model {
         // A read made before the state was read again is older than it.
         m.reads = self.reads.clone();
         m.reads.restarted();
+        // What a refusal taught of the screen stays true: a client cannot
+        // always tell that the yard is reached by its edge, so the state
+        // read again may not say it.
+        m.screen_on_the_yard |= self.screen_on_the_yard;
         // What the yard said of the ids mail names stays true: asking
         // them again for every reconnection would make a call each.
         m.looked = self.looked.clone();
@@ -2424,10 +2439,11 @@ impl Model {
 
     /// The session whose screen opens for the bead: the one working it.
     /// The operator's alone to open: none where the window is not the
-    /// operator's, where no session works the bead, or where the yard
+    /// operator's, where the yard reads no screen down the link this
+    /// window comes by, where no session works the bead, or where the yard
     /// names none.
     pub fn screen_for_bead(&self, bead: &str) -> Option<String> {
-        if !self.is_operator() {
+        if !self.is_operator() || self.screen_on_the_yard {
             return None;
         }
         let (found, _) = self.flow_bead(bead)?;
@@ -2439,12 +2455,27 @@ impl Model {
 
     /// The session whose screen opens for the crew member: their own.
     /// The operator's alone to open: none where the window is not the
-    /// operator's, or where the name is none of this yard's crew.
+    /// operator's, where the yard reads no screen down the link this
+    /// window comes by, or where the name is none of this yard's crew.
     pub fn screen_for_crew(&self, name: &str) -> Option<String> {
-        if !self.is_operator() {
+        if !self.is_operator() || self.screen_on_the_yard {
             return None;
         }
         self.member(name).map(|member| member.name.clone())
+    }
+
+    /// Whether a session's screen is read on the yard's machine: the yard
+    /// serves it down no link, and this window comes by one. The window
+    /// offers no Screen then, and asks for none.
+    pub fn screen_on_the_yard(&self) -> bool {
+        self.screen_on_the_yard
+    }
+
+    /// The yard refused a screen as a request come down the link from its
+    /// edge: it reads none for this window, whatever the client could tell
+    /// of the way it comes. The Screen goes from the window.
+    pub fn screen_refused_down_the_link(&mut self) {
+        self.screen_on_the_yard = true;
     }
 
     /// One travelling bead whole, as the details pane shows it: what the
@@ -5872,6 +5903,24 @@ pub fn grants_over_the_link(err: &api::Error) -> bool {
 /// hosted yard by its edge, and the yard serves no such call down the link.
 pub const GRANTS_ON_THE_YARD: &str =
     "the grants are read on the yard's machine: yardr source grants";
+
+/// Whether the yard refused a session's screen because the request came
+/// down the link from its edge: it reads none to a device that comes so,
+/// whoever holds it. That is no fault of the device's, whatever the rest of
+/// the refusal says of it: the card says the screen is read on the yard's
+/// machine, in no red. Its words are read here, as above, and when they
+/// change this is shown as any refusal. The yard's other refusals of a
+/// screen (plain HTTP from another machine) are the address's fault, and
+/// stay red.
+pub fn screen_over_the_link(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("a session's screen is not read over the link"))
+}
+
+/// What the screen's card says of a yard that reads a session's screen on
+/// its own machine alone, in place of the screen it would draw: one line of
+/// plain words, never in red, since nothing is wrong. A window reaches a
+/// hosted yard by its edge, and the yard serves no such call down the link.
+pub const SCREEN_ON_THE_YARD: &str = "the screen is read on the yard's machine";
 
 /// Whether the yard has no DeliveryFiles call: one from before a device
 /// could learn a hook delivery's files, which says it has no such method.
@@ -11233,7 +11282,12 @@ mod tests {
     /// A session's screen opens for the operator alone: the session
     /// working a bead, without its runner word, and a crew member's
     /// own. Anyone else is offered none, as is an unworked bead, an
-    /// unknown bead, and a name that is none of the crew.
+    /// unknown bead, and a name that is none of the crew. Nor does the
+    /// operator's window get one where the yard reads none down the link
+    /// it comes by: a state says so of a hosted yard, a refusal of the
+    /// screen as a request come down the link from the edge says so of any
+    /// other, and the model of a state read again keeps that. The yard's
+    /// other refusals of a screen are faults of the address, and say so.
     #[test]
     fn the_screen_opens_for_the_operator_alone() {
         use crate::api::FlowBead;
@@ -11261,9 +11315,10 @@ mod tests {
         // member their own.
         let mut state = yard(&[]);
         state.operator = "jo".into();
-        state.flows = flows;
-        let (m, _) = Model::new(state, Mode::Timetable, None);
+        state.flows = flows.clone();
+        let (mut m, _) = Model::new(state, Mode::Timetable, None);
         assert!(m.is_operator());
+        assert!(!m.screen_on_the_yard());
         assert_eq!(
             m.screen_for_bead("yd-zulu"),
             Some("yd-zulu-new".to_string())
@@ -11275,6 +11330,53 @@ mod tests {
             Some("yardmaster".to_string())
         );
         assert_eq!(m.screen_for_crew("ada"), None);
+
+        // A refusal that says the request came down the link from the edge
+        // takes the Screen away, and a state read again keeps it away.
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        let link = refused(
+            "a session's screen is not read over the link: this request came down the link from the edge. Read it on the yard's machine. The edge saw the device's token with it: remove the device and add it again (yardr user device rm).",
+        );
+        let plain = refused(
+            "a session's screen is taken over https only, or from the yard's own machine: this request reached the yard's listener in plain HTTP from another machine. Put the proxy or tunnel that ends TLS on the yard's machine, or Read it on the yard's machine. The device's token was sent with it and may have crossed a network in the clear: if it did, remove the device and add it again (yardr user device rm).",
+        );
+        assert!(screen_over_the_link(&link));
+        assert!(!screen_over_the_link(&plain));
+        assert!(!screen_over_the_link(&refused(
+            "no such method: SessionScreen"
+        )));
+        assert!(!screen_over_the_link(&api::Error::Down(
+            std::io::Error::other("the yard went away")
+        )));
+        // Plain words, never the wire's method name, and one line.
+        assert!(SCREEN_ON_THE_YARD.contains("read on the yard's machine"));
+        assert!(!SCREEN_ON_THE_YARD.contains("SessionScreen"));
+        assert!(!SCREEN_ON_THE_YARD.contains('\n'));
+        m.screen_refused_down_the_link();
+        assert!(m.is_operator());
+        assert!(m.screen_on_the_yard());
+        assert_eq!(m.screen_for_bead("yd-zulu"), None);
+        assert_eq!(m.screen_for_crew("yardmaster"), None);
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.flows = flows.clone();
+        let (m, _) = m.resumed(state, Mode::Timetable);
+        assert!(m.screen_on_the_yard());
+        assert_eq!(m.screen_for_crew("yardmaster"), None);
+
+        // A hosted yard's state says it from the start.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.flows = flows;
+        state.screen_on_the_yard = true;
+        let (m, _) = Model::new(state, Mode::Timetable, None);
+        assert!(m.is_operator());
+        assert!(m.screen_on_the_yard());
+        assert_eq!(m.screen_for_bead("yd-zulu"), None);
+        assert_eq!(m.screen_for_crew("yardmaster"), None);
     }
 
     /// The grants view lists what `yardr source grants` prints: who holds

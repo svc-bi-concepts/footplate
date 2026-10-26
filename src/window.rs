@@ -1733,7 +1733,8 @@ mod tests {
     }
 
     /// What the window has of the open screen: `asked`, the parsed
-    /// lines' count, the line that says why there is none, or nothing.
+    /// lines' count, the line that says it is read on the yard's machine,
+    /// the line that says why there is none, or nothing.
     fn screen_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
         view.read_with(cx, |v, _| {
             match v.screen_open.as_ref().map(|open| &open.shown) {
@@ -1741,6 +1742,7 @@ mod tests {
                 Some(super::screen::Shown::Here(screen)) => {
                     format!("{} lines", screen.lines.len())
                 }
+                Some(super::screen::Shown::OnTheYard) => model::SCREEN_ON_THE_YARD.to_string(),
                 Some(super::screen::Shown::Not(why)) => why.clone(),
                 None => String::new(),
             }
@@ -7183,6 +7185,37 @@ yardr.dev
             })
         });
         assert!(!drawn(cx, "talk screen clerk@north"));
+        // A yard that refuses the read as a request come down the link
+        // from its edge reads no screen for this window, however it was
+        // reached: the card says where it is read, in no red, the refresh
+        // asks no more, and the Screen goes from the window.
+        yard.answer(
+            "SessionScreen",
+            &json!({"error": {"code": "error", "message": "a session's screen is not read over the link: this request came down the link from the edge. Read it on the yard's machine. The edge saw the device's token with it: remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        click_on(cx, "row assembly");
+        wait(cx, "assembly's conversation", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected_conversation() == Some("assembly")
+            })
+        });
+        let asked = yard.asked("SessionScreen").len();
+        click_on(cx, "talk screen assembly");
+        wait(cx, "the screen read on the yard's machine", |cx| {
+            screen_of(&view, cx) == model::SCREEN_ON_THE_YARD
+        });
+        assert!(drawn(cx, "screen on the yard"));
+        assert_eq!(yard.asked("SessionScreen").len(), asked + 1);
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.screen_on_the_yard());
+            assert_eq!(model.screen_for_crew("assembly"), None);
+        });
+        assert_eq!(notice(&view, cx), "");
+        click_on(cx, "screen refresh");
+        cx.run_until_parked();
+        assert_eq!(screen_of(&view, cx), model::SCREEN_ON_THE_YARD);
+        assert_eq!(yard.asked("SessionScreen").len(), asked + 1);
     }
 
     #[gpui::test]
@@ -10930,9 +10963,11 @@ yardr.dev
     /// A hosted yard is not asked for its grants, which it serves down no
     /// link from its edge: not at the start, and not by opening the row.
     /// No notice is raised, and the row and the pane say the grants are
-    /// read on the yard's machine.
+    /// read on the yard's machine. It reads no session's screen down that
+    /// link either: the conversation's header carries no Screen, and one
+    /// opened regardless asks nothing and says where the screen is read.
     #[gpui::test]
-    fn a_hosted_yard_is_not_asked_for_its_grants_and_says_where_they_are_read(
+    fn a_hosted_yard_is_asked_for_neither_its_grants_nor_a_screen_and_says_where_they_are_read(
         cx: &mut TestAppContext,
     ) {
         use crate::fake::{Router, SESSION, TOKEN};
@@ -10970,6 +11005,24 @@ yardr.dev
         assert!(!drawn(cx, "grants empty"));
         assert_eq!(notice(&view, cx), "");
         assert!(far.asked("SourceGrants").is_empty());
+
+        // The operator's conversation with the yardmaster was drawn with
+        // its state beside the name and no Screen at the header's edge.
+        assert!(drawn(cx, "conversation state"));
+        assert!(!drawn(cx, "talk screen yardmaster"));
+        // A screen opened regardless is not asked for: the card says where
+        // it is read, and the refresh asks nothing either.
+        view.update_in(cx, |v, window, cx| {
+            v.open_screen("yardmaster".into(), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(screen_of(&view, cx), model::SCREEN_ON_THE_YARD);
+        assert!(drawn(cx, "screen on the yard"));
+        click_on(cx, "screen refresh");
+        cx.run_until_parked();
+        assert_eq!(screen_of(&view, cx), model::SCREEN_ON_THE_YARD);
+        assert_eq!(notice(&view, cx), "");
+        assert!(far.asked("SessionScreen").is_empty());
     }
 
     /// Chat's groups hold their rows in order, each under its head: the
