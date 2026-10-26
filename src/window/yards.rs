@@ -2394,7 +2394,7 @@ impl Footplate {
                     .child("No notices. The yard reports here what you subscribe to."),
             )
         } else {
-            list.children(said.into_iter().map(|(_, said)| {
+            list.children(said.into_iter().enumerate().map(|(item, (_, said))| {
                 let n = match said {
                     Said::Notice(n) => n,
                     Said::Mail(mut entry) => {
@@ -2402,7 +2402,7 @@ impl Footplate {
                         // reads under another's name here: every one carries
                         // its own.
                         entry.head = true;
-                        return self.entry(entry, palette, cx).into_any_element();
+                        return self.entry(entry, item, palette, cx).into_any_element();
                     }
                 };
                 div()

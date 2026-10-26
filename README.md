@@ -413,6 +413,9 @@ code block of one line),
 letter under its head: its time in the gutter, its bar floating),
 `column-copy` (that with the pointer on the block itself: its copy
 control shows at the block's top right, clear of the bar),
+`column-top` (that conversation scrolled to stand a letter's head at
+the top of the list, with the pointer on it: its bar of reactions stops
+at the list's top, clear of the Screen control in the header),
 `plain` (an open decision card of a plain ask), `plain-select`
 (that card with a selection posed over its context), `lines` (that
 card with one of jo's beads changed, so Lines carries its badge), `page` (an

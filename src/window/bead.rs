@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Div, Focusable, FontWeight, Image, ImageFormat, MouseButton, ObjectFit,
-    ScrollHandle, SharedString, Window, div, img, prelude::*, px, rems, rgba, white,
+    Pixels, ScrollHandle, SharedString, Window, div, img, prelude::*, px, rems, rgba, white,
 };
 
 use super::Expanded;
@@ -36,6 +36,22 @@ use crate::theme::Palette;
 /// and overlays: the time is the window's own to say.
 pub(crate) fn hover_clock(head: bool, hover: Option<(u64, Piece)>, seq: u64) -> bool {
     !head && hover.is_some_and(|(at, _)| at == seq)
+}
+
+/// The rows of the conversation's list that stand before its mail: the
+/// line above the oldest mail, which `talk_conversation` puts first.
+pub(crate) const ROWS_BEFORE_MAIL: usize = 1;
+
+/// Where the bar of reactions stands over the row of the list that draws
+/// it, as the `top` it takes from that row's top edge: its own 36 pixels
+/// up, but no higher than the list's top (mckean's pick, ask 13938). `below`
+/// is how far under the list's top the row's top edge stands, negative
+/// where the scroll has carried it above, and `height` the row's. A row
+/// that is wholly above the list has no bar: the bar would stay at the
+/// list's top for a letter that is gone, since a wheel moves no pointer
+/// and the letter stays the pointer's until the next move.
+pub(crate) fn bar_top(below: Pixels, height: Pixels) -> Option<Pixels> {
+    (below + height > px(0.)).then(|| px(-36.).max(-below))
 }
 
 impl Footplate {
@@ -996,10 +1012,12 @@ impl Footplate {
     /// pointer stands on the letter: the head is the letter's first line,
     /// where it has one. `at` is the time it says: the time alone where a
     /// separator above names the day, with the date where none does.
+    /// `item` is the row of the list the head stands in.
     pub(crate) fn entry_head(
         &self,
         entry: &Entry,
         at: String,
+        item: usize,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1035,7 +1053,7 @@ impl Footplate {
                 .child(entry.from.clone()),
         )
         .when(self.reacting(seq), |el| {
-            el.child(self.react_row(seq, &entry.reactions, palette, cx))
+            el.children(self.react_row(seq, item, &entry.reactions, palette, cx))
         })
         .into_any_element()
     }
@@ -1044,10 +1062,11 @@ impl Footplate {
     /// head of its own, so its bar of reactions floats on its top edge,
     /// and its time stands in the gutter while the pointer is on it. The
     /// letter draws no ground, hovered or not: the time appearing is the
-    /// whole affordance.
+    /// whole affordance. `item` is the row of the list the body stands in.
     pub(crate) fn entry_body(
         &self,
         entry: Entry,
+        item: usize,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1153,7 +1172,7 @@ impl Footplate {
                 )
             })
             .when(hovered, |el| {
-                el.child(self.react_row(seq, &entry.reactions, palette, cx))
+                el.children(self.react_row(seq, item, &entry.reactions, palette, cx))
             })
             .into_any_element()
     }
@@ -1164,7 +1183,13 @@ impl Footplate {
     /// no room and the letter keeps its place and its height. All of it
     /// stands above the letter, over the blank the letter above leaves
     /// and the bottom of that letter's last line: no line of this one is
-    /// under it, nor the copy control of a code block that starts it. It
+    /// under it, nor the copy control of a code block that starts it. A
+    /// letter at the list's top, or within the bar's height under it, has
+    /// no such room: the bar stops at the list's top instead, over the
+    /// letter's own first lines, and never stands over the pane's head,
+    /// where a crew member's conversation has its Screen control. `item`
+    /// is the row of the list that draws the head or body: a row that the
+    /// scroll has carried wholly above the list has no bar (`bar_top`). It
     /// paints after the rest of the window, so no line of the letter or of
     /// the next one paints over it and the list's scroll does not cut it:
     /// the kit paints in tree order, and the letter's body stands after
@@ -1182,10 +1207,27 @@ impl Footplate {
     pub(crate) fn react_row(
         &self,
         seq: u64,
+        item: usize,
         reactions: &[Reaction],
         palette: Palette,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
+        // How far under the list's top the row stands, as `keep_place`
+        // reckons it: the row's top in the layout, which the scroll has not
+        // moved, with the scroll offset and the list's top. The layout is
+        // the last frame's, so a change of it shows here a frame late; the
+        // bar shows while the pointer rests on a letter, after the scroll
+        // has settled, and the offset is the current one, so the wheel's
+        // scroll shows at once. With no layout yet there is nothing to stop
+        // the bar at.
+        let list = &self.conversation;
+        let top = match list.bounds_for_item(item) {
+            Some(row) => {
+                let below = row.top() + list.offset().y - list.bounds().top();
+                bar_top(below, row.size.height)?
+            }
+            None => px(-36.),
+        };
         let me = self.model.as_ref().map(Model::me).unwrap_or_default();
         let mine = reactions
             .iter()
@@ -1210,8 +1252,11 @@ impl Footplate {
                 // pixels, not rems, so it is 36 high at every text size: a
                 // shorter bar would leave a strip between it and the
                 // letter, where the pointer going up from the letter lands
-                // on the one above and the bar goes.
-                .top(px(-36.))
+                // on the one above and the bar goes. Where the letter is
+                // too near the list's top for that, the offset is the
+                // clamped one worked out above, so that the bar stops at
+                // the list's top (mckean's pick, ask 13938).
+                .top(top)
                 .right_0()
                 .flex()
                 .flex_row()
@@ -1277,14 +1322,17 @@ impl Footplate {
         // Deferred, so the bar paints after the letter and what stands
         // under it: its layout stays where it is, absolute at the top
         // right of the head or body, raised to stand on its top edge.
-        gpui::deferred(row).into_any_element()
+        Some(gpui::deferred(row).into_any_element())
     }
 
     /// A mail among the yard row's notices. No separator names its day
     /// there, so its head says the date with the time, as a notice does.
+    /// `item` is the row of the list the mail stands in, head and body
+    /// together.
     pub(crate) fn entry(
         &self,
         entry: Entry,
+        item: usize,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1294,9 +1342,9 @@ impl Footplate {
             .flex_col()
             .when(head, |el| {
                 let at = model::clock(&entry.at, &chrono::Local);
-                el.child(self.entry_head(&entry, at, palette, cx))
+                el.child(self.entry_head(&entry, at, item, palette, cx))
             })
-            .child(self.entry_body(entry, palette, cx))
+            .child(self.entry_body(entry, item, palette, cx))
             .into_any_element()
     }
 
@@ -1352,7 +1400,11 @@ impl Footplate {
     /// The conversation's mail as groups under one head each: a mail that
     /// reads under the sender's name above joins its group, and every other
     /// one starts a group, with the day's separator above it where the day
-    /// changes. Each group stands in the reading column.
+    /// changes. Each group stands in the reading column. The rows are the
+    /// list's own, one for each day break, head and body, from the first
+    /// after the line above the oldest mail: each head and body is told
+    /// the row it stands in, for the bar of reactions to stop at the
+    /// list's top by.
     pub(crate) fn mail_rows(
         &self,
         entries: Vec<Entry>,
@@ -1371,9 +1423,17 @@ impl Footplate {
                 // A separator above names the day, over this group or an
                 // earlier one of it: the head says the time alone.
                 let at = model::clock_time(&entry.at, &chrono::Local);
-                out.push(reading_row(self.entry_head(&entry, at, palette, cx), true));
+                let item = ROWS_BEFORE_MAIL + out.len();
+                out.push(reading_row(
+                    self.entry_head(&entry, at, item, palette, cx),
+                    true,
+                ));
             }
-            out.push(reading_row(self.entry_body(entry, palette, cx), false));
+            let item = ROWS_BEFORE_MAIL + out.len();
+            out.push(reading_row(
+                self.entry_body(entry, item, palette, cx),
+                false,
+            ));
         }
         out
     }

@@ -1208,7 +1208,7 @@ mod tests {
         texts_label, typeback_line, typeback_mismatch, words_send,
     };
     use super::asks::{dir_url, file_url};
-    use super::bead::hover_clock;
+    use super::bead::{bar_top, hover_clock};
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, RAIL, drawer_fits};
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
@@ -3216,6 +3216,41 @@ mod tests {
         assert!(!hover_clock(false, Some((12, Piece::Body)), 13));
     }
 
+    /// The bar stands 36 pixels over its row's top edge, no higher than
+    /// the list's top (ask 13938), and a row that the scroll carried
+    /// wholly above the list has none.
+    #[test]
+    fn the_bar_stands_36_pixels_over_its_row_and_no_higher_than_the_list_s_top() {
+        // (how far the row's top is under the list's top, the row's
+        // height, the bar's top from the row's top)
+        for (below, height, top) in [
+            // Down the list: the whole 36 up.
+            (200., 24., Some(-36.)),
+            (36., 24., Some(-36.)),
+            // Near the top: as far up as the list leaves room.
+            (35., 24., Some(-35.)),
+            (16., 24., Some(-16.)),
+            (0., 24., Some(0.)),
+            // Partly above the top: at the list's top, under the row's own.
+            (-10., 24., Some(10.)),
+            (-23., 24., Some(23.)),
+            // Wholly above it: no bar for a row that is gone.
+            (-24., 24., None),
+            (-300., 24., None),
+            // A tall row, a long letter's body, goes on having its bar at
+            // the list's top while any of it is in view.
+            (-300., 800., Some(300.)),
+            (-799., 800., Some(799.)),
+            (-800., 800., None),
+        ] {
+            assert_eq!(
+                bar_top(px(below), px(height)),
+                top.map(px),
+                "a row {height} high, its top {below} pixels under the list's"
+            );
+        }
+    }
+
     /// The bar paints after the whole window, so no line of the letter
     /// or of the next one paints over it. An overlay standing over the
     /// mail hides it instead, and it is back when the overlay shuts, the
@@ -3573,8 +3608,8 @@ mod tests {
     /// The yard row draws a mail's head and body in one element, with
     /// nothing between them: the bar floats on the head's top edge there
     /// too, and moves nothing. The list leaves 16 pixels above its first
-    /// mail, and the bar stands 36 above it: 20 pixels of the first
-    /// mail's bar are over the pane's head, which it paints over.
+    /// mail, so the first mail's bar rises 16 and stops at the list's top,
+    /// clear of the pane's head.
     #[gpui::test]
     fn the_bar_of_reactions_floats_over_a_mail_on_the_yard_row_too(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -3620,21 +3655,146 @@ mod tests {
         assert_eq!(stand(cx), at_rest, "the bar moved a mail");
 
         // The first mail of the list stands 16 pixels under its top, so
-        // its bar reaches 20 pixels above the list: over the lower part
-        // of the pane's head, below the strip at the window's top, and no
-        // room is taken from either.
+        // its bar rises 16 pixels, to the list's top, and stops there: the
+        // pane's head and the strip at the window's top are clear of it,
+        // and no room is taken from either.
         hover_on(cx, "text 30");
         let bar = bounds_of(cx, "react row 30");
+        let head = bounds_now(cx, "head 30");
         let list = view.read_with(cx, |v, _| v.conversation.bounds());
         assert!(
-            near(list.top() - bar.top(), px(20.)),
-            "the first mail's bar does not reach 20 pixels over the list: {bar:?} over {list:?}"
+            near(bar.top(), list.top()) && near(head.top() - bar.top(), px(16.)),
+            "the first mail's bar does not stop 16 pixels up, at the list's top: {bar:?}, {head:?} in {list:?}"
         );
         assert!(
             bar.top() >= px(titlebar::HEIGHT),
             "the first mail's bar reaches the strip at the window's top: {bar:?}"
         );
         assert_eq!(stand(cx), at_rest, "the bar moved a mail");
+    }
+
+    /// The bar stands 36 pixels over its letter and no higher than the
+    /// list's top: a letter at or near the top keeps it over its own first
+    /// lines, not over the pane's head (mckean's pick, ask 13938). At the
+    /// default window the reading column reaches the head's right end,
+    /// where a crew member's conversation has its Screen control, so a bar
+    /// that rose over the head took the click meant for the screen and
+    /// tapped an emoji instead. It takes no room, and it goes with a head
+    /// that the scroll has carried out of the list.
+    #[gpui::test]
+    fn the_bar_of_reactions_stops_at_the_list_s_top_and_leaves_the_screen_control_clear(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("React", "{}");
+        yard.answer(
+            "SessionScreen",
+            &json!({"result": {"screen": "\u{1b}[1myardmaster\u{1b}[0m\n❯ "}}).to_string(),
+        );
+        // The yardmaster's forty mails, seq 12 to 51: six minutes apart,
+        // so that each heads its own group, a head over a body.
+        let said: Vec<String> = (0..40).map(|n| format!("Mail {n}.")).collect();
+        let said: Vec<&str> = said.iter().map(String::as_str).collect();
+        mails(&yard, &said);
+        let (view, cx) = opened(&yard, &said, cx);
+        // The default window, as main.rs opens it.
+        cx.simulate_resize(gpui::size(px(960.), px(640.)));
+        frames(cx);
+        let list = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.conversation.bounds());
+        // The head of the mail `seq` stands `under` pixels below the list's
+        // top, or above it where that is negative.
+        let stand = |cx: &mut VisualTestContext, seq: u64, under: f32| {
+            let head = bounds_of(cx, &format!("head {seq}"));
+            let top = list(cx).top();
+            view.read_with(cx, |v, _| {
+                let mut at = v.conversation.offset();
+                at.y += top + px(under) - head.top();
+                v.conversation.set_offset(at);
+            });
+            frames(cx);
+        };
+
+        // A letter at the list's top: its bar stops there, over the
+        // letter's own head and first line, and the Screen control at the
+        // head's right is clear of it and takes a click.
+        stand(cx, 32, 0.);
+        let at_rest = letters_stand(&view, cx);
+        hover_on(cx, "text 32");
+        assert_eq!(pointer_on(&view, cx), Some((32, Piece::Body)));
+        let (bar, list_now) = (bounds_of(cx, "react row 32"), list(cx));
+        let icon = bounds_of(cx, "talk screen yardmaster");
+        assert!(
+            bar.left() < icon.right() && icon.left() < bar.right(),
+            "at the default window the bar stands in the Screen control's column: {bar:?}, {icon:?}"
+        );
+        assert!(
+            near(bar.top(), list_now.top()),
+            "the bar of the letter at the list's top does not stop there: {bar:?} in {list_now:?}"
+        );
+        assert!(
+            !bar.intersects(&icon),
+            "the bar covers the Screen control: {bar:?} over {icon:?}"
+        );
+        assert_eq!(letters_stand(&view, cx), at_rest, "the bar moved a letter");
+        click_on(cx, "talk screen yardmaster");
+        wait(cx, "the screen of the yardmaster", |cx| {
+            overlay_screen(&view, cx) == Some("yardmaster".to_string())
+        });
+        assert!(
+            yard.asked("React").is_empty(),
+            "the click on the Screen control tapped an emoji"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        // A head nearer the list's top than 36 pixels has its bar rise as
+        // far as the list leaves room, which is how far under the top the
+        // head stands; from 36 pixels down it is the whole 36.
+        for (under, rise) in [(10., 10.), (20., 20.), (36., 36.), (100., 36.)] {
+            stand(cx, 32, under);
+            hover_on(cx, "text 32");
+            let (bar, head) = (bounds_of(cx, "react row 32"), bounds_now(cx, "head 32"));
+            let list_now = list(cx);
+            assert!(
+                near(head.top() - bar.top(), px(rise)),
+                "a head {under} pixels under the list's top has its bar {rise} pixels up: {bar:?} over {head:?}"
+            );
+            assert!(
+                bar.top() >= list_now.top() - px(0.01),
+                "a head {under} pixels under the list's top has its bar above the list: {bar:?} in {list_now:?}"
+            );
+            if rise == 36. {
+                assert_on_edge(bar, head.top(), "the head");
+            }
+        }
+
+        // A head partly above the list's top has its bar at the list's top
+        // all the same, over what is left of the head. One that is wholly
+        // above has none: a wheel moves no pointer, so the letter stays the
+        // pointer's, and a bar kept at the list's top would outlast it.
+        stand(cx, 32, -10.);
+        hover_on(cx, "text 32");
+        let (bar, head) = (bounds_of(cx, "react row 32"), bounds_now(cx, "head 32"));
+        let list_now = list(cx);
+        assert!(
+            near(bar.top(), list_now.top()) && head.top() < list_now.top(),
+            "the bar of a head partly above the list is not at the list's top: {bar:?}, {head:?} in {list_now:?}"
+        );
+        stand(cx, 32, -30.);
+        assert!(
+            view.read_with(cx, |v, _| v.reacting(32)),
+            "the letter is no longer the pointer's"
+        );
+        // (The debug bounds of a bar that was drawn stay, so the bar's
+        // absence is read from the pointer: where it stood the pointer
+        // finds the letter's body, a bar would be found instead.)
+        cx.simulate_mouse_move(bar.center(), None, gpui::Modifiers::default());
+        assert_eq!(
+            pointer_on(&view, cx),
+            Some((32, Piece::Body)),
+            "the bar stays over the list for a head that left it"
+        );
     }
 
     /// No separator names a day on the yard row, where a mail stands among

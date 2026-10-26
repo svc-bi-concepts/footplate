@@ -235,6 +235,15 @@ impl Footplate {
             this.selection
                 .update(cx, |selection, cx| selection.pose_hover(23, 0, cx));
         }
+        // The column-top shot poses the pointer on the head of mail 15, a
+        // letter that begins a group: the list stands that head at its top
+        // (`reconcile_scroll`), where the bar of reactions has no room
+        // above the letter and stops at the list's top. A debug build's
+        // alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("column-top") {
+            this.react_hover = Some((15, super::state::Piece::Head));
+        }
         // The reactions-zoom shot poses it on one emoji of that bar, so
         // the emoji draws larger in its square.
         #[cfg(debug_assertions)]
@@ -1537,6 +1546,34 @@ impl Footplate {
                 let mut at = self.rows.offset();
                 at.y = px(0.) - max;
                 self.rows.set_offset(at);
+            }
+        }
+        // The column-top shot stands the head of mail 15 at the list's top
+        // once the layout has the conversation, still at its newest as it
+        // opens; past that the list is the reader's. The row is counted as
+        // `mail_rows` lays them out: a day's break, then a head where the
+        // mail has one, then its body. The offset is set here, before the
+        // rows are drawn, and not asked of the layout
+        // (`scroll_to_top_of_item`): that moves the view after they are
+        // drawn, a letter above the list has no bar, and nothing would
+        // draw the window again for it. A debug build's alone, as above.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("column-top")
+            && self.at_bottom()
+            && self.conversation.max_offset().height > px(0.)
+        {
+            let mut row = super::bead::ROWS_BEFORE_MAIL;
+            for entry in self.model.iter().flat_map(|m| m.entries()) {
+                row += usize::from(entry.day.is_some());
+                if entry.seq == 15 {
+                    if let Some(bounds) = self.conversation.bounds_for_item(row) {
+                        let mut at = self.conversation.offset();
+                        at.y = self.conversation.bounds().top() - bounds.top();
+                        self.conversation.set_offset(at);
+                    }
+                    break;
+                }
+                row += usize::from(entry.head) + 1;
             }
         }
     }

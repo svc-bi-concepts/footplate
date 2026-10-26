@@ -23,7 +23,10 @@ use crate::yard::Env;
 /// short links, a correction and a code block of one line, that
 /// conversation with the pointer posed on the code block, a letter under
 /// its head, that conversation with the pointer posed on the block
-/// itself too, so its copy control shows, an open decision card of a plain
+/// itself too, so its copy control shows, that conversation with a
+/// letter's head scrolled to the list's top and the pointer posed on
+/// it, so its bar of reactions stops at the list's top, clear of the
+/// Screen control in the header, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
 /// card of a run ask, a weighty run ask's card beside a routine one's,
@@ -104,6 +107,7 @@ pub const STATES: &[&str] = &[
     "column",
     "column-hover",
     "column-copy",
+    "column-top",
     "plain",
     "plain-select",
     "lines",
@@ -1158,7 +1162,7 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         }
-        "column" | "column-hover" | "column-copy" => {
+        "column" | "column-hover" | "column-copy" | "column-top" => {
             // A long conversation over three days, grouped by sender, with
             // a call link, a calendar link and a correction: the shot shows
             // the reading column, the grouping, the separators and the
@@ -1168,7 +1172,10 @@ fn populate(yard: &Yard, state: &str) {
             // one line that reads under the one above's head: its time
             // stands in the gutter, and its bar of reactions floats on its
             // top edge. The copy state poses it on the block too, so its
-            // copy control shows, clear of the bar.
+            // copy control shows, clear of the bar. The top state scrolls
+            // the list to stand mail 15's head at its top and poses the
+            // pointer on it: the bar has no room above the letter there,
+            // and stops at the list's top, clear of the Screen control.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -2446,7 +2453,7 @@ mod tests {
                     assert_eq!(letters[6].files.len(), 1, "{state}");
                     assert!(crate::model::is_image(&letters[6].files[0]), "{state}");
                 }
-                "column" | "column-hover" | "column-copy" => {
+                "column" | "column-hover" | "column-copy" | "column-top" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     // Twelve mails over three days, grouped by sender,
                     // with a call link, a calendar link, a correction and
