@@ -118,6 +118,20 @@ impl Error {
     pub fn not_found(&self) -> bool {
         matches!(self, Error::Refused { code, .. } if code == NOT_FOUND)
     }
+
+    /// How a request that failed so is said in the line it leaves
+    /// ([`Sent`]).
+    fn outcome(&self) -> &'static str {
+        match self {
+            Error::Slow { .. } | Error::Silent => "timeout",
+            Error::Down(err) if timed_out(err) => "timeout",
+            Error::Down(_) => "down",
+            Error::Refused { .. } | Error::NotLetIn | Error::NotSignedIn | Error::NoDevice => {
+                "refused"
+            }
+            Error::Protocol(_) => "unreadable",
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -2530,15 +2544,28 @@ impl Client {
     /// Who the token is: the user every call is made as, the device and
     /// the yard. Of a yard at an address only; the socket has no such path.
     pub fn me(&self) -> Result<Me> {
-        let (status, bytes) = self.get_body("/me", "", Some(CALL_TIMEOUT), |status| {
+        let (status, bytes, request) = self.get_body("/me", "", Some(CALL_TIMEOUT), |status| {
             status == 200 || self.hosted() && status == 403
         })?;
+        let sent = Sent {
+            verb: "GET",
+            path: "/me",
+            limit: Some(CALL_TIMEOUT),
+            request: request.as_deref(),
+            status: Some(status),
+        };
+        self.me_of(status, &bytes).map_err(|err| sent.failed(err))
+    }
+
+    /// Who the token is, from the answer to `/me`: the user, or why it is
+    /// none.
+    fn me_of(&self, status: u16, bytes: &[u8]) -> Result<Me> {
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, not this call's own refusal; of any other shape
         // today's arms run, on the status alone.
         if self.hosted()
             && status == 403
-            && let Some(edge) = no_yard(status, &bytes)
+            && let Some(edge) = no_yard(status, bytes)
         {
             return Err(edge);
         }
@@ -2551,7 +2578,7 @@ impl Client {
                 )));
             }
         }
-        serde_json::from_slice(&bytes)
+        serde_json::from_slice(bytes)
             .map_err(|err| Error::Protocol(format!("who this device is: {err}")))
     }
 
@@ -2582,25 +2609,37 @@ impl Client {
         }
     }
 
-    /// Sends a finite GET and reads the body where its status needs one.
-    /// A timeout anywhere in the request or body gets the same one retry:
-    /// the yard's `/me` and blob answers are safe to ask for again.
+    /// Sends a finite GET and reads the body where its status needs one,
+    /// and gives the status, the body and the edge's id for the request. A
+    /// timeout anywhere in the request or body gets the same one retry: the
+    /// yard's `/me` and blob answers are safe to ask for again. A body that
+    /// cannot be read leaves its line ([`Sent`]), as a try that fails
+    /// before its answer does.
     fn get_body(
         &self,
         path: &str,
         headers: &str,
         timeout: Option<Duration>,
         read_body: impl Fn(u16) -> bool,
-    ) -> Result<(u16, Vec<u8>)> {
+    ) -> Result<(u16, Vec<u8>, Option<String>)> {
         let mut tries = SLOW_RETRIES + 1;
         loop {
             let result = (|| {
                 let (status, mut body) = self.send_once("GET", path, headers, "", timeout)?;
                 let mut bytes = Vec::new();
                 if read_body(status) {
-                    body.read_to_end(&mut bytes)?;
+                    let request = body.request.clone();
+                    let sent = Sent {
+                        verb: "GET",
+                        path,
+                        limit: timeout,
+                        request: request.as_deref(),
+                        status: Some(status),
+                    };
+                    body.read_to_end(&mut bytes)
+                        .map_err(|err| sent.failed(err.into()))?;
                 }
-                Ok((status, bytes))
+                Ok((status, bytes, body.request))
             })();
             match result {
                 Err(Error::Down(err)) if timed_out(&err) && tries > 1 => {
@@ -2621,7 +2660,9 @@ impl Client {
     /// yard the session token in `X-Edge-Token` beside that, naming which
     /// of the account's yards in `X-Edge-Yard` where one is set.
     /// `headers` are whole lines. A call's answer is waited for `timeout`
-    /// long.
+    /// long. A request that fails before its answer is in hand, and a 401,
+    /// leave their line ([`Sent`]) here; what a caller refuses of an answer
+    /// it has, it leaves.
     fn send_once(
         &self,
         verb: &str,
@@ -2630,7 +2671,53 @@ impl Client {
         body: &str,
         timeout: Option<Duration>,
     ) -> Result<(u16, Body)> {
-        let (mut conn, head) = match &self.way {
+        let sent = Sent {
+            verb,
+            path,
+            limit: timeout,
+            request: None,
+            status: None,
+        };
+        // At an address the connect has a wait of its own.
+        let connecting = Sent {
+            limit: if self.is_remote() {
+                Some(CONNECT_TIMEOUT)
+            } else {
+                timeout
+            },
+            ..sent
+        };
+        let (mut conn, head) = self
+            .open(verb, path, timeout)
+            .map_err(|err| connecting.failed(err))?;
+        // In one write: over TLS each write is a record of its own.
+        conn.write_all(format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes())
+            .and_then(|()| conn.flush())
+            .map_err(|err| sent.failed(err.into()))?;
+        let (status, refused_session, body) = respond_call(conn).map_err(|err| sent.failed(err))?;
+        let sent = Sent {
+            request: body.request.as_deref(),
+            status: Some(status),
+            ..sent
+        };
+        // A 401 is a state of its own: the edge refused the session, or
+        // the yard the device, told apart by the response's shape. The
+        // yard's own 401 the edge passes through byte for byte, adding
+        // nothing, so without its header it is the device that is out.
+        if status == 401 && refused_session {
+            return Err(sent.failed(Error::NotSignedIn));
+        }
+        if status == 401 {
+            return Err(sent.failed(Error::NotLetIn));
+        }
+        Ok((status, body))
+    }
+
+    /// Connects to the yard, and gives the connection with the lines of the
+    /// request's head that come first: its request line and, at an address,
+    /// whose it is.
+    fn open(&self, verb: &str, path: &str, timeout: Option<Duration>) -> Result<(Conn, String)> {
+        Ok(match &self.way {
             #[cfg(unix)]
             Way::Socket(socket) => {
                 let conn = UnixStream::connect(socket)?;
@@ -2665,24 +2752,7 @@ impl Client {
                     ),
                 )
             }
-        };
-        // In one write: over TLS each write is a record of its own.
-        conn.write_all(
-            format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes(),
-        )?;
-        conn.flush()?;
-        let (status, refused_session, body) = respond_call(conn)?;
-        // A 401 is a state of its own: the edge refused the session, or
-        // the yard the device, told apart by the response's shape. The
-        // yard's own 401 the edge passes through byte for byte, adding
-        // nothing, so without its header it is the device that is out.
-        if status == 401 && refused_session {
-            return Err(Error::NotSignedIn);
-        }
-        if status == 401 {
-            return Err(Error::NotLetIn);
-        }
-        Ok((status, body))
+        })
     }
 
     /// The seq of the newest event.
@@ -3007,12 +3077,27 @@ impl Client {
         if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Ok(None);
         }
-        let (status, bytes) = self.get_body(
-            &format!("/blobs/{hash}"),
+        let path = format!("/blobs/{hash}");
+        let (status, bytes, request) = self.get_body(
+            &path,
             "Connection: close\r\n",
             Some(CALL_TIMEOUT),
             |status| status == 200 || self.hosted() && status == 403,
         )?;
+        let sent = Sent {
+            verb: "GET",
+            path: &path,
+            limit: Some(CALL_TIMEOUT),
+            request: request.as_deref(),
+            status: Some(status),
+        };
+        self.blob_of(hash, status, bytes)
+            .map_err(|err| sent.failed(err))
+    }
+
+    /// The image `hash`, from the answer to its request: its bytes, none
+    /// for one the yard does not hold, or why it is neither.
+    fn blob_of(&self, hash: &str, status: u16, bytes: Vec<u8>) -> Result<Option<Vec<u8>>> {
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, not this call's own refusal; of any other shape
         // today's arms run, on the status alone.
@@ -3113,13 +3198,28 @@ impl Client {
     /// [`Error::Silent`] and may be read on, and one that stops in the
     /// middle of an event has ended.
     pub fn events(&self, after: u64, quiet: Duration) -> Result<Events> {
-        let (status, mut body) = self.send(
+        let path = format!("/events?after={after}");
+        let (status, body) = self.send(
             "GET",
-            &format!("/events?after={after}"),
+            &path,
             "Accept: application/x-ndjson\r\n",
             "",
             Some(quiet),
         )?;
+        let request = body.request.clone();
+        let sent = Sent {
+            verb: "GET",
+            path: &path,
+            limit: Some(quiet),
+            request: request.as_deref(),
+            status: Some(status),
+        };
+        self.events_of(status, body).map_err(|err| sent.failed(err))
+    }
+
+    /// The stream, from the answer that opens it: its head read, or why it
+    /// is none.
+    fn events_of(&self, status: u16, mut body: Body) -> Result<Events> {
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, not this call's own refusal; of any other shape
         // today's arm runs, on the status alone.
@@ -3206,7 +3306,7 @@ impl Client {
     fn reply(&self, method: &str, args: Value) -> Result<Reply> {
         let mut replacing: Option<Instant> = None;
         loop {
-            let reply = self.call_once(method, &args);
+            let reply = self.call_once(method, &args, CALL_TIMEOUT);
             let again = match &reply {
                 Err(Error::Refused { code, .. }) => code == REPLACING,
                 Err(Error::Down(_)) => replacing.is_some(),
@@ -3220,18 +3320,37 @@ impl Client {
         }
     }
 
-    fn call_once(&self, method: &str, args: &Value) -> Result<Reply> {
+    /// One try of a call, its answer waited for `timeout`. A try that fails
+    /// leaves its line ([`Sent`]), with the edge's id where the answer's head
+    /// carried one.
+    fn call_once(&self, method: &str, args: &Value, timeout: Duration) -> Result<Reply> {
         let body = args.to_string();
+        let path = format!("/call/{method}");
         let (status, mut reply) = self.send(
             "POST",
-            &format!("/call/{method}"),
+            &path,
             &format!(
                 "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
                 body.len()
             ),
             &body,
-            Some(CALL_TIMEOUT),
+            Some(timeout),
         )?;
+        let request = reply.request.clone();
+        let sent = Sent {
+            verb: "POST",
+            path: &path,
+            limit: Some(timeout),
+            request: request.as_deref(),
+            status: Some(status),
+        };
+        self.reply_of(method, status, &mut reply)
+            .map_err(|err| sent.failed(err))
+    }
+
+    /// What the answer to a call says, its head read: the reply, or why it
+    /// is none.
+    fn reply_of(&self, method: &str, status: u16, reply: &mut Body) -> Result<Reply> {
         // No call is answered 404 by a yard: at an address it is the answer
         // of one with nothing under /user/.
         if status == 404 && self.is_remote() {
@@ -3351,6 +3470,58 @@ fn slow_error(err: Error, verb: &str) -> Error {
     }
 }
 
+/// A request as it went out, with what is known of it when it fails. A
+/// failed request leaves one line on stderr, as `notify` and `tray` say what
+/// they could not do, so that the edge's own line for it, which names the
+/// same id, can be found:
+///
+/// `footplate: call failed: request=<id|none> method=<verb> path=<path> outcome=<outcome> status=<status|none> timeout=<limit|none>`
+///
+/// `request` is the edge's id from the answer's `X-Edge-Request`, none where
+/// no answer's head was read or it carried none. `outcome` is `timeout` (a
+/// wait ran out), `down` (nothing answered, or the answer was cut off),
+/// `refused` (the yard or the edge said no) or `unreadable` (what answered
+/// is no reply). `status` is that of the answer's head, where it was read.
+/// `timeout` is the wait set on the step that failed: the connect's own at
+/// an address, else the request's. No token and no body is in it.
+#[derive(Clone, Copy)]
+struct Sent<'a> {
+    verb: &'a str,
+    /// As docs/api.md has it on the socket: at an address the request
+    /// stands under `/user` too.
+    path: &'a str,
+    limit: Option<Duration>,
+    request: Option<&'a str>,
+    status: Option<u16>,
+}
+
+impl Sent<'_> {
+    fn line(&self, err: &Error) -> String {
+        let status = self.status.map_or("none".to_string(), |s| s.to_string());
+        let limit = self.limit.map_or("none".to_string(), |l| format!("{l:?}"));
+        format!(
+            "call failed: request={} method={} path={} outcome={} status={status} timeout={limit}",
+            self.request.unwrap_or("none"),
+            self.verb,
+            self.path,
+            err.outcome(),
+        )
+    }
+
+    /// Says the line, and gives the error back to be returned.
+    fn failed(&self, err: Error) -> Error {
+        say(&self.line(&err));
+        err
+    }
+}
+
+/// Says `line` on stderr, led by the program's name as its other lines are.
+fn say(line: &str) {
+    #[cfg(test)]
+    tests::said(line);
+    eprintln!("footplate: {line}");
+}
+
 /// Reads the status and the headers of a response, and gives its body.
 fn respond(conn: Conn) -> Result<(u16, Body)> {
     let (status, _, _, body) = respond_with_location(conn)?;
@@ -3398,6 +3569,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
     let mut chunked = false;
     let mut location = None;
     let mut refused = false;
+    let mut request = None;
     loop {
         line.clear();
         if read_line(&mut conn, &mut line)? == 0 {
@@ -3419,6 +3591,8 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
             location = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("x-edge-refusal") {
             refused = value.eq_ignore_ascii_case("session");
+        } else if name.eq_ignore_ascii_case("x-edge-request") {
+            request = edge_request(value);
         }
     }
     let framing = match (chunked, length) {
@@ -3430,7 +3604,16 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
         (false, Some(n)) => Framing::Length(n),
         (false, None) => Framing::UntilClosed,
     };
-    Ok((status, location, refused, Body { conn, framing }))
+    Ok((
+        status,
+        location,
+        refused,
+        Body {
+            conn,
+            framing,
+            request,
+        },
+    ))
 }
 
 /// The body of a response, as the server frames it. Go's server sends a
@@ -3438,6 +3621,22 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
 struct Body {
     conn: BufReader<Conn>,
     framing: Framing,
+    /// The edge's id for the request this answers, as it echoes it in
+    /// `X-Edge-Request`. None where the answer carried none: a yard reached
+    /// without an edge, an edge from before the header, or a value that is
+    /// no id.
+    request: Option<String>,
+}
+
+/// The most bytes of an edge's request id that are kept: its own are 26,
+/// and a line of the log must stay a line.
+const EDGE_REQUEST_MOST: usize = 64;
+
+/// The id the edge gave a request, from its `X-Edge-Request` value: one
+/// token of visible characters, so that it stands in a line of the log as
+/// one word. A value that is not one is no id.
+fn edge_request(value: &str) -> Option<String> {
+    (is_token(value) && value.len() <= EDGE_REQUEST_MOST).then(|| value.to_string())
 }
 
 enum Framing {
@@ -3517,6 +3716,22 @@ impl Read for Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// The lines the requests of this test said on stderr.
+        static SAID: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Where [`say`] leaves a line in a test, beside stderr, for the test
+    /// to read: a call is made on the thread that asks it.
+    pub(super) fn said(line: &str) {
+        SAID.with(|said| said.borrow_mut().push(line.to_string()));
+    }
+
+    /// The lines said since this was last asked, in order.
+    fn take_said() -> Vec<String> {
+        SAID.with(|said| std::mem::take(&mut *said.borrow_mut()))
+    }
 
     /// A port of this machine that answers every connection with `reply`
     /// and closes: its address.
@@ -4727,6 +4942,22 @@ mod tests {
         assert!(matches!(stranger.blob(HASH), Err(Error::NotLetIn)));
         assert!(matches!(stranger.events(0, QUIET), Err(Error::NotLetIn)));
         assert_eq!(yard.requests(), before + 4);
+        // The four left a line each: the yard's own 401, with no id, as no
+        // edge stands in front of it.
+        let refused = |method: &str, path: &str, status: u16, wait: &str| {
+            format!(
+                "call failed: request=none method={method} path={path} outcome=refused status={status} timeout={wait}"
+            )
+        };
+        assert_eq!(
+            take_said(),
+            [
+                refused("POST", "/call/Head", 401, "30s"),
+                refused("GET", "/me", 401, "30s"),
+                refused("GET", &format!("/blobs/{HASH}"), 401, "30s"),
+                refused("GET", "/events?after=0", 401, "60s"),
+            ]
+        );
         // The call never reached the yard's store.
         assert_eq!(yard.asked("Head"), Vec::<Value>::new());
 
@@ -4739,6 +4970,7 @@ mod tests {
         yard.remove_device(TOKEN);
         assert!(events.next().is_none());
         assert!(matches!(client.head(), Err(Error::NotLetIn)));
+        assert_eq!(take_said(), [refused("POST", "/call/Head", 401, "30s")]);
 
         // A yard with no device at all has nothing under /user/, with a
         // token or without: 404, which is said as what it is.
@@ -4746,9 +4978,18 @@ mod tests {
         for err in [client.me().unwrap_err(), client.head().unwrap_err()] {
             assert!(matches!(err, Error::NoDevice), "{err:?}");
         }
-        // An image that is gone is 404 too, and is no such thing.
+        assert_eq!(
+            take_said(),
+            [
+                refused("GET", "/me", 404, "30s"),
+                refused("POST", "/call/Head", 404, "30s"),
+            ]
+        );
+        // An image that is gone is 404 too, and is no such thing: no
+        // failure, so no line.
         yard.add_device(TOKEN);
         assert_eq!(client.blob(HASH).unwrap(), None);
+        assert_eq!(take_said(), Vec::<String>::new());
     }
 
     /// Through the edge, a good pair reaches the yard: every call carries
@@ -5141,6 +5382,23 @@ mod tests {
         not_ready(err);
         assert_eq!(edge.proxied(), 0);
         assert_eq!(yard.requests(), 0);
+        // Each of the four left its line, in the order they were made: the
+        // edge's own refusal, with the status it came with and no id, as
+        // the edge of this test echoes none.
+        let refused = |method: &str, path: &str, wait: &str| {
+            format!(
+                "call failed: request=none method={method} path={path} outcome=refused status=403 timeout={wait}"
+            )
+        };
+        assert_eq!(
+            take_said(),
+            [
+                refused("POST", "/call/Head", "30s"),
+                refused("GET", "/me", "30s"),
+                refused("GET", &format!("/blobs/{HASH}"), "30s"),
+                refused("GET", "/events?after=0", "60s"),
+            ]
+        );
 
         // Past a ready yard, a 403 of any other shape keeps today's
         // arms: the yard's own refusal reads as its own, and a bare one
@@ -6733,12 +6991,226 @@ mod tests {
     #[test]
     fn what_is_no_reply_is_an_error_and_no_panic() {
         let yard = Yard::start();
+        let said = |status: u16| {
+            format!(
+                "call failed: request=none method=POST path=/call/Head outcome=unreadable status={status} timeout=30s"
+            )
+        };
         yard.answer("Head", "not JSON");
         assert!(matches!(yard.client().head(), Err(Error::Protocol(_))));
+        assert_eq!(take_said(), [said(200)]);
+        // A reply that came whole and is not the shape asked for is no
+        // failed exchange: the call leaves no line.
         yard.answer("Head", r#"{"result": "twelve"}"#);
         assert!(matches!(yard.client().head(), Err(Error::Protocol(_))));
+        assert_eq!(take_said(), Vec::<String>::new());
         yard.answer_status("Head", 500, "{}");
         assert!(matches!(yard.client().head(), Err(Error::Protocol(_))));
+        assert_eq!(take_said(), [said(500)]);
+    }
+
+    /// As [`answering`], but each connection is held open after `reply`, as
+    /// one whose rest is slow to come.
+    fn holding(reply: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let finished = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut asked = [0u8; 1024];
+            let _ = conn.read(&mut asked);
+            let _ = conn.write_all(&reply);
+            // The client closes after its timeout; waiting for that is both
+            // the fixture's release and the end of this one-request server.
+            let mut rest = [0u8; 1];
+            while conn.read(&mut rest).unwrap_or(0) != 0 {}
+        });
+        (address, finished)
+    }
+
+    /// A call that fails leaves one line, with the edge's id where the head
+    /// of the answer carried one, and `none` where it did not (a yard with
+    /// no edge in front, an edge from before the header, a value that is no
+    /// id): refused by the yard or by the edge, cut off, slow after its
+    /// head, answered by the edge's own gateway error, and not answered at
+    /// all. One that answers leaves none.
+    #[test]
+    fn a_failed_call_leaves_one_line_with_the_edge_s_request_id() {
+        let answer = |status: &str, headers: &str, body: &str| {
+            format!(
+                "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        };
+        // Says more than it sends, as an answer cut off or slow in its body.
+        let short = b"HTTP/1.1 200 OK\r\nX-Edge-Request: r-5\r\nContent-Length: 50\r\n\r\nshort";
+        let refusal = r#"{"error": {"code": "no-such", "message": "no"}}"#;
+        let long = format!("X-Edge-Request: r-{}\r\n", "0".repeat(EDGE_REQUEST_MOST));
+        // What the listener sends, whether it holds the connection after,
+        // and the id, outcome and status the line says.
+        let cases = [
+            (
+                "the yard's refusal",
+                answer("200 OK", "X-Edge-Request: r-1\r\n", refusal),
+                false,
+                "r-1",
+                "refused",
+                "200",
+            ),
+            (
+                "the device out",
+                answer("401 Unauthorized", "X-Edge-Request: r-2\r\n", ""),
+                false,
+                "r-2",
+                "refused",
+                "401",
+            ),
+            (
+                "the session out, at the edge",
+                answer(
+                    "401 Unauthorized",
+                    "X-Edge-Refusal: session\r\nX-Edge-Request: r-3\r\n",
+                    "",
+                ),
+                false,
+                "r-3",
+                "refused",
+                "401",
+            ),
+            (
+                "the edge's own gateway error",
+                answer("504 Gateway Timeout", "X-Edge-Request: r-4\r\n", "too slow"),
+                false,
+                "r-4",
+                "unreadable",
+                "504",
+            ),
+            (
+                "cut off in its body",
+                short.to_vec(),
+                false,
+                "r-5",
+                "down",
+                "200",
+            ),
+            (
+                "slow in its body",
+                short.to_vec(),
+                true,
+                "r-5",
+                "timeout",
+                "200",
+            ),
+            (
+                "no id: an edge from before the header",
+                answer("401 Unauthorized", "", ""),
+                false,
+                "none",
+                "refused",
+                "401",
+            ),
+            (
+                "no id: two words",
+                answer("401 Unauthorized", "X-Edge-Request: r 6\r\n", ""),
+                false,
+                "none",
+                "refused",
+                "401",
+            ),
+            (
+                "no id: too long",
+                answer("401 Unauthorized", &long, ""),
+                false,
+                "none",
+                "refused",
+                "401",
+            ),
+            (
+                "hung up before any answer",
+                Vec::new(),
+                false,
+                "none",
+                "down",
+                "none",
+            ),
+            (
+                "no answer in time",
+                Vec::new(),
+                true,
+                "none",
+                "timeout",
+                "none",
+            ),
+        ];
+        // Only the held ones are meant to run out of their wait: the rest
+        // are given so long a one that a busy machine never decides them.
+        let (brief, ample) = (Duration::from_millis(100), Duration::from_secs(5));
+        for (name, reply, held, id, outcome, status) in cases {
+            let (address, wait, finished) = match held {
+                true => {
+                    let (address, finished) = holding(reply);
+                    (address, brief, Some(finished))
+                }
+                false => (answering(reply), ample, None),
+            };
+            let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+            let Err(err) = client.call_once("Head", &json!({}), wait) else {
+                panic!("{name}: the call answered");
+            };
+            if let Some(finished) = finished {
+                finished.join().unwrap();
+            }
+            assert_eq!(err.outcome(), outcome, "{name}: {err:?}");
+            assert_eq!(
+                take_said(),
+                [format!(
+                    "call failed: request={id} method=POST path=/call/Head outcome={outcome} status={status} timeout={wait:?}"
+                )],
+                "{name}"
+            );
+        }
+
+        let address = answering(answer(
+            "200 OK",
+            "X-Edge-Request: r-8\r\n",
+            r#"{"result": 4}"#,
+        ));
+        let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+        assert!(client.call_once("Head", &json!({}), ample).is_ok());
+        assert_eq!(take_said(), Vec::<String>::new());
+    }
+
+    /// The id is one short token, so the line stays one line of words; what
+    /// is not known stands as `none`, and every outcome has its word.
+    #[test]
+    fn the_edge_s_id_is_one_short_token_and_the_line_says_what_it_does_not_know() {
+        assert_eq!(edge_request("r-0123abcd").as_deref(), Some("r-0123abcd"));
+        for no in ["", "r 1", "r\t1", "r-é", &"x".repeat(EDGE_REQUEST_MOST + 1)] {
+            assert_eq!(edge_request(no), None, "{no:?}");
+        }
+        let sent = Sent {
+            verb: "GET",
+            path: "/me",
+            limit: None,
+            request: None,
+            status: None,
+        };
+        assert_eq!(
+            sent.line(&Error::NoDevice),
+            "call failed: request=none method=GET path=/me outcome=refused status=none timeout=none"
+        );
+        for (err, outcome) in [
+            (Error::Down(io::ErrorKind::ConnectionReset.into()), "down"),
+            (Error::Down(io::ErrorKind::TimedOut.into()), "timeout"),
+            (Error::Down(io::ErrorKind::WouldBlock.into()), "timeout"),
+            (Error::Slow { idempotent: true }, "timeout"),
+            (Error::Silent, "timeout"),
+            (Error::NotLetIn, "refused"),
+            (Error::NotSignedIn, "refused"),
+            (Error::Protocol("no".into()), "unreadable"),
+        ] {
+            assert_eq!(err.outcome(), outcome, "{err:?}");
+        }
     }
 
     #[test]
@@ -6950,6 +7422,13 @@ mod tests {
             let client = yard.client();
             let way = client.place();
             let slow = Duration::from_millis(100);
+            // Each try that gave up leaves a line, with no edge id: no head
+            // came to carry one.
+            let gave_up = |method: &str, path: &str| {
+                format!(
+                    "call failed: request=none method={method} path={path} outcome=timeout status=none timeout=100ms"
+                )
+            };
             yard.answer("Head", r#"{"result": 4}"#);
             yard.answer("Crew", r#"{"result": []}"#);
             // A GET the yard never answers is asked again, then said
@@ -6969,6 +7448,11 @@ mod tests {
             );
             assert!(!err.to_string().contains("os error"), "{way}: {err}");
             assert_eq!(yard.asked("Head").len(), 2, "{way}");
+            assert_eq!(
+                take_said(),
+                [gave_up("GET", "/call/Head"), gave_up("GET", "/call/Head")],
+                "{way}"
+            );
             // A GET that answers the second time shows no error.
             yard.stall_once("/call/Crew");
             let Ok((status, mut body)) = client.send("GET", "/call/Crew", "", "", Some(slow))
@@ -6980,6 +7464,8 @@ mod tests {
             body.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, br#"{"result": []}"#, "{way}");
             assert_eq!(yard.asked("Crew").len(), 2, "{way}");
+            // The try that gave up said so, though the call went on to answer.
+            assert_eq!(take_said(), [gave_up("GET", "/call/Crew")], "{way}");
             // Anything else is asked once, and says it may have run.
             yard.stall("/call/Mail");
             let Err(err) = client.send(
@@ -7002,6 +7488,7 @@ mod tests {
             );
             assert!(!err.to_string().contains("os error"), "{way}: {err}");
             assert_eq!(yard.asked("Mail").len(), 1, "{way}");
+            assert_eq!(take_said(), [gave_up("POST", "/call/Mail")], "{way}");
             // A stream whose head never comes is said plainly too.
             yard.stall("/events");
             let before = yard.requests();
@@ -7018,6 +7505,14 @@ mod tests {
                 "{way}"
             );
             assert_eq!(yard.requests(), before + 2, "{way}");
+            assert_eq!(
+                take_said(),
+                [
+                    gave_up("GET", "/events?after=20"),
+                    gave_up("GET", "/events?after=20")
+                ],
+                "{way}"
+            );
         }
 
         // The same retry covers a response body that starts but times out
@@ -7040,7 +7535,7 @@ mod tests {
             read_head(&first);
             write!(
                 first,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nX-Edge-Request: r-first\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 reply.len()
             )
             .unwrap();
@@ -7051,18 +7546,27 @@ mod tests {
             read_head(&second);
             write!(
                 second,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nX-Edge-Request: r-second\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 reply.len()
             )
             .unwrap();
             second.write_all(reply).unwrap();
         });
         let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
-        let (status, bytes) = client
+        let (status, bytes, request) = client
             .get_body("/me", "", Some(Duration::from_millis(100)), |_| true)
             .unwrap();
         assert_eq!(status, 200);
         assert_eq!(bytes, reply);
+        // The answer read whole is the second's, and the try that timed out
+        // in its body left its line, with the id its head carried.
+        assert_eq!(request.as_deref(), Some("r-second"));
+        assert_eq!(
+            take_said(),
+            [
+                "call failed: request=r-first method=GET path=/me outcome=timeout status=200 timeout=100ms"
+            ]
+        );
         server.join().unwrap();
     }
 

@@ -477,9 +477,10 @@ bead its chip names open in the drawer beside it), `delivery`
 (the yard row open on a hook delivery whose photo the yard holds,
 with a document it did not take under the photo), `screen`
 (the yardmaster's screen open over the window, as its Screen
-control opens it) and `screen-hosted` (that card on a hosted
+control opens it), `screen-hosted` (that card on a hosted
 yard, saying the screen is read on the yard's machine, with no
-Screen offered).
+Screen offered) and `screen-refused` (that card on a yard that
+refuses the read in many words, which wrap inside it).
 With no state the first
 screen is shot, as
 above. A state is a debug build's alone: the
@@ -521,6 +522,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 |---|---|
 | `Head`, then `GET /events` after it | what happens from then on |
 | `Crew`, `Peers`, `Users` | whom there is to talk with: the crew, `<name>@<peer>` for each one a linked yard exposes, and the users of this yard, yourself among them. A peer's `trust` says which of its names are a user of this yard speaking. `Crew` is also read for the one key of a session's `handle` that says it sits at its harness's login screen, and for the one that says the yard leads that login: docs/api.md names no key of the handle, and the crew is read again on the events that tell of it (`nudge_held`, `login_led`) |
+| `GET /user/me` | who the device's token is for: read with the state, so when a yard at an address is opened and again each time it is read whole; never on the socket, which has no such path, and no event asks for it again |
 | `GetUser`, `Settings` | who the window is for; `Settings` also for the yard's cap on a file and how many a letter carries, before one is sent |
 | `UserInbox` | the unread mail, counted on each row |
 | `UserNotifications` | what the yard reports, counted on the `yard` row |
@@ -934,6 +936,23 @@ deletes its session's file with its token's, where footplate wrote them;
 the session itself stays signed in at the edge until it expires or is
 revoked, and the device stays at the yard until its operator removes it.
 
+A request that fails, at a hosted yard or any other, leaves one line on
+stderr, so that it can be found in the log the edge keeps of its own
+requests: the edge echoes its id for a request in `X-Edge-Request`, and the
+line names it, `none` where the answer carried none or never came:
+
+    footplate: call failed: request=r-3f9a2c4d81b07e5a6c1d9e02 method=POST path=/call/Flows outcome=timeout status=none timeout=30s
+
+`outcome` is `timeout` (a wait ran out), `down` (nothing answered, or the
+answer was cut off), `refused` (the yard or the edge said no) or `unreadable`
+(what answered is no reply). `status` is that of the answer's head, where
+one came. `timeout` is the wait set on the step that failed: the connect's
+10 seconds, else the request's own, which is 30 for a call. Every try that
+fails leaves a line, so a GET asked again after a timeout leaves one for
+each, and so does a call that a server replacing itself refuses and that is
+made again. A request that answers leaves none, nor does a reply that came
+whole and is not the shape asked for. No token and no body is in a line.
+
 The sign-in is Kratos's API login flow at the origin's `/kratos` path, as
 a native client uses it: one flow is opened
 (`GET /kratos/self-service/login/api`), and the password method answers it
@@ -1303,7 +1322,8 @@ yard reads it to no request that comes down the link from its edge: a hosted
 yard is not asked and offers no Screen, since the screen is read on the
 yard's machine. A yard reached any other way that refuses the read as such
 has the card say the same, in no red, and is asked no more; its other
-refusals are shown as they come.
+refusals are shown as they come, in red, wrapped to the card's width and
+scrolled where the window is too short for them.
 
 A conversation opens on its newest fifty mails. Towards its top the fifty
 before are read and put in above, and the mail in view stays where it is;

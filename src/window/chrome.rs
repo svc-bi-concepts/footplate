@@ -1112,12 +1112,14 @@ impl Footplate {
                 // the screen is read on the yard's machine, and the
                 // yard is asked nothing. After the model stands, so
                 // the read sees it: posed earlier, the hosted card
-                // would ask the yard. A debug build's alone, as
-                // above, and a unix one's.
+                // would ask the yard. The screen-refused shot opens
+                // it too, and its yard refuses the read in many
+                // words, which the card shows in red. A debug
+                // build's alone, as above, and a unix one's.
                 #[cfg(all(debug_assertions, unix))]
                 if matches!(
                     std::env::var("FOOTPLATE_SHOT").as_deref(),
-                    Ok("screen") | Ok("screen-hosted")
+                    Ok("screen") | Ok("screen-hosted") | Ok("screen-refused")
                 ) {
                     self.screen_open = Some(super::screen::ScreenOpen {
                         session: crate::shot::SCREEN_OPEN.to_string(),

@@ -324,7 +324,24 @@ impl Footplate {
                 .into_any_element(),
             Shown::Not(why) => {
                 let why = why.clone();
-                div().text_color(dark.warn).child(why).into_any_element()
+                // gpui lays a text out unbroken when asked for its min or
+                // max content, so as a flex item the line would be its own
+                // minimum width and run out of the card: free of it, the
+                // item takes the card's width and the line wraps there.
+                // Where the card is shorter than the wrapped line (a short
+                // window), the line scrolls, as the terminal's screen does.
+                div()
+                    .id("screen refusal")
+                    .debug_selector(|| "screen refusal".to_string())
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .text_color(dark.warn)
+                    .child(
+                        div()
+                            .debug_selector(|| "screen refusal text".to_string())
+                            .child(why),
+                    )
+                    .into_any_element()
             }
             Shown::Here(screen) => {
                 let mut lines = div().flex().flex_col();

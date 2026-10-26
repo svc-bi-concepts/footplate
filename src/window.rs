@@ -7332,6 +7332,63 @@ yardr.dev
             screen_of(&view, cx).starts_with("the screen could not be read: ")
         });
         assert!(drawn(cx, "screen body assembly"));
+        // A refusal of many words (the yard's own, for a screen asked in
+        // plain HTTP) wraps inside the card, as the narrowest window has
+        // it, and all of it stands: the red text is taller than the head's
+        // one line, so it is neither cut to a line nor let run on, and
+        // its edges are the card's at most.
+        let window = bounds_of(cx, "screen overlay").size;
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(600.)));
+        yard.answer(
+            "SessionScreen",
+            &json!({"error": {"code": "error", "message": "a session's screen is taken over https only, or from the yard's own machine: this request reached the yard's listener in plain HTTP from another machine. Put the proxy or tunnel that ends TLS on the yard's machine, or Read it on the yard's machine. The device's token was sent with it and may have crossed a network in the clear: if it did, remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        click_on(cx, "screen refresh");
+        wait(cx, "the long refusal", |cx| {
+            screen_of(&view, cx).contains("is taken over https only")
+        });
+        let over = bounds_of(cx, "screen overlay");
+        let card = bounds_now(cx, "screen card assembly");
+        let red = bounds_now(cx, "screen refusal");
+        let head = bounds_now(cx, "screen head assembly");
+        assert!(
+            over.left() <= card.left() && card.right() <= over.right(),
+            "the card {card:?} is not in the window {over:?}"
+        );
+        assert!(
+            card.left() <= red.left() && red.right() <= card.right(),
+            "the refusal {red:?} runs out of the card {card:?}"
+        );
+        assert!(
+            red.size.height >= head.size.height * 2.,
+            "the refusal {red:?} stands on one line, as the head {head:?} does"
+        );
+        // A click on the words shuts nothing, as one on the card does not.
+        click_on(cx, "screen refusal");
+        assert_eq!(overlay_screen(&view, cx), Some("assembly".to_string()));
+        // At the window's least height the card is shorter than the wrapped
+        // line, which scrolls in it: it starts at the box's top, and scrolled
+        // as far as it goes its end stands in the box, so none of it is lost
+        // to the card's edge.
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
+        let card = bounds_of(cx, "screen card assembly");
+        let red = bounds_now(cx, "screen refusal");
+        let text = bounds_now(cx, "screen refusal text");
+        assert!(
+            red.bottom() <= card.bottom(),
+            "the refusal {red:?} runs out of the card {card:?}"
+        );
+        assert!(
+            text.size.height > red.size.height && text.origin.y == red.origin.y,
+            "the wrapped refusal {text:?} does not start in a box {red:?} too short for it"
+        );
+        scroll_on(cx, "screen refusal", gpui::point(px(0.), px(-1000.)));
+        let text = bounds_now(cx, "screen refusal text");
+        assert!(
+            text.bottom() <= red.bottom(),
+            "the refusal's end {text:?} is not in view in its box {red:?}"
+        );
+        cx.simulate_resize(window);
         click_on(cx, "screen close");
         cx.run_until_parked();
         assert_eq!(overlay_screen(&view, cx), None);

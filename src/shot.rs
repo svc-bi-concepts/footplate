@@ -70,9 +70,10 @@ use crate::yard::Env;
 /// the bead its chip names open in the drawer beside it, the yard row
 /// open on a hook delivery whose photo the yard holds, with a document it
 /// did not take under the photo, the yardmaster's screen open over
-/// the window, as its Screen control opens it, and that card on a
+/// the window, as its Screen control opens it, that card on a
 /// hosted yard, saying the screen is read on the yard's machine, with
-/// no Screen offered.
+/// no Screen offered, and that card on a yard that refuses the read in
+/// many words, which wrap inside it.
 /// The stopped yard answers nothing, as the refused one answers nowhere:
 /// both open on a yard that is down, as the posed setup does. The yard at
 /// an address is opened from the settings the shot script writes; the
@@ -159,6 +160,7 @@ pub const STATES: &[&str] = &[
     "delivery",
     "screen",
     "screen-hosted",
+    "screen-refused",
 ];
 
 /// The image in the `page`, `mail` and `image` states, and its hash: the
@@ -177,6 +179,11 @@ const SCREEN_SHOT: &str = include_str!("fixtures/screen-claude.ansi");
 /// The overlay the `screen` state opens with: the session it reads, one
 /// of the shot yard's crew.
 pub(crate) const SCREEN_OPEN: &str = "yardmaster";
+
+/// What the yard says to a screen asked of it in plain HTTP from another
+/// machine, as it words it: the `screen-refused` state's answer, a refusal
+/// of many words that stays red and has to wrap inside the card.
+const SCREEN_REFUSAL: &str = "a session's screen is taken over https only, or from the yard's own machine: this request reached the yard's listener in plain HTTP from another machine. Put the proxy or tunnel that ends TLS on the yard's machine, or Read it on the yard's machine. The device's token was sent with it and may have crossed a network in the clear: if it did, remove the device and add it again (yardr user device rm).";
 
 /// The pages in the `page` and `mail` states: the note's, which Open
 /// takes to the browser, and a mail's, which Open takes there too, with
@@ -774,8 +781,10 @@ fn populate(yard: &Yard, state: &str) {
         // switcher's, which the window opens with the switcher's list
         // standing, as it does for the one that shuts it by a click
         // outside, the notice's, whose flows view does not answer, the
-        // screen's, whose session's screen opens over it, and the
-        // hosted screen's, whose card opens over it with no call.
+        // screen's, whose session's screen opens over it, the
+        // hosted screen's, whose card opens over it with no call, and
+        // the refused screen's, whose card opens over it with the
+        // yard's long refusal in red.
         "yardmaster"
         | "far"
         | "settings"
@@ -800,7 +809,8 @@ fn populate(yard: &Yard, state: &str) {
         | "about-unfetched"
         | "notice"
         | "screen"
-        | "screen-hosted" => {
+        | "screen-hosted"
+        | "screen-refused" => {
             // The conversation reads over two days, with a mail in each
             // sender's group: the yardmaster shot shows the column, the
             // grouping and the separators.
@@ -849,6 +859,14 @@ fn populate(yard: &Yard, state: &str) {
                 yard.answer(
                     "SessionScreen",
                     &json!({"result": {"screen": SCREEN_SHOT}}).to_string(),
+                );
+            }
+            // The yard's refusal of a screen asked in plain HTTP, which
+            // the card shows in red.
+            if state == "screen-refused" {
+                yard.answer(
+                    "SessionScreen",
+                    &json!({"error": {"code": "error", "message": SCREEN_REFUSAL}}).to_string(),
                 );
             }
         }
@@ -2680,6 +2698,21 @@ mod tests {
                     .unwrap();
                     assert_eq!(hosted.me, "jo", "{state}");
                     assert!(hosted.screen_on_the_yard, "{state}");
+                }
+                "screen-refused" => {
+                    // The yard is asked, and refuses in its own many words:
+                    // not the refusal of the link, which the card answers
+                    // with where the screen is read, so the card stands
+                    // red and the line wraps.
+                    assert!(!loaded.screen_on_the_yard, "{state}");
+                    let Err(err) = yard.client().session_screen(SCREEN_OPEN) else {
+                        panic!("{state}: the screen was read");
+                    };
+                    assert!(
+                        matches!(&err, crate::api::Error::Refused { message, .. } if message == SCREEN_REFUSAL),
+                        "{state}: {err:?}"
+                    );
+                    assert!(!crate::model::screen_over_the_link(&err), "{state}");
                 }
                 _ => unreachable!("a state with no coverage: {state}"),
             }

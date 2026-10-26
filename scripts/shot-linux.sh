@@ -77,8 +77,10 @@
 # yard row open on a hook delivery whose photo the yard holds, with a
 # document it did not take under the photo), `screen` (the
 # yardmaster's screen open over the window, as its Screen control
-# opens it) and `screen-hosted` (that card on a hosted yard, saying
-# the screen is read on the yard's machine, with no Screen offered).
+# opens it), `screen-hosted` (that card on a hosted yard, saying
+# the screen is read on the yard's machine, with no Screen offered)
+# and `screen-refused` (that card on a yard that refuses the read in
+# many words, which wrap inside it).
 # With no state the first
 # screen is shot, as ever.
 # The switch's yardr answers canned JSON, so the status row draws the
@@ -98,7 +100,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted"
+states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

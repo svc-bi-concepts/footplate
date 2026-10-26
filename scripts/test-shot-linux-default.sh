@@ -105,7 +105,8 @@ expect_run() {
     what=$1
     log=$2
     lines=$3
-    grep -F -q -- "run -d --name $name " "$log" \
+    # linux-container.sh passes the host's --platform explicitly: an arm64 Mac's log has it
+    grep -E -q -- "run (--platform [^ ]+ )?-d --name $name " "$log" \
         || fail "$what started no container of its own"
     grep -F -q -- ":/src:ro" "$log" \
         || fail "$what did not mount the checkout read-only"
@@ -127,7 +128,8 @@ if MOCK_FAIL_CP=1 MOCK_LOG=$tmp/log-failure PATH="$tmp/bin:$PATH" \
         "$script" "$tmp/shot-failure.png" >"$tmp/failure.out" 2>&1; then
     fail "a failed screenshot unexpectedly succeeded"
 fi
-grep -F -q -- "run -d --name $name " "$tmp/log-failure" \
+# linux-container.sh passes the host's --platform explicitly: an arm64 Mac's log has it
+grep -E -q -- "run (--platform [^ ]+ )?-d --name $name " "$tmp/log-failure" \
     || fail "the failing shot started no container"
 [ "$(tail -n 1 "$tmp/log-failure")" = "rm -f $name" ] \
     || fail "the failing shot left its container behind"

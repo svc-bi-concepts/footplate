@@ -107,7 +107,8 @@ expect_launch() {
 expect_cleanup() {
     what=$1
     log=$2
-    grep -F -q -- "run -d --name $name " "$log" \
+    # linux-container.sh passes the host's --platform explicitly: an arm64 Mac's log has it
+    grep -E -q -- "run (--platform [^ ]+ )?-d --name $name " "$log" \
         || fail "$what started no container of its own"
     grep -F -q -- "-v footplate-shot-cargo:/cargo -v footplate-shot-target:/target" "$log" \
         || fail "$what did not mount the shared volumes"
