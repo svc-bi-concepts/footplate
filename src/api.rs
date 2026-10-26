@@ -2505,8 +2505,9 @@ impl Client {
 
     /// Whether calls ride to a hosted yard: at an address with the
     /// session beside the token, where the edge may answer for no yard
-    /// of its own.
-    fn hosted(&self) -> bool {
+    /// of its own. Every call comes to the yard down the link from the
+    /// edge, which is why the yard serves some calls to no such client.
+    pub fn hosted(&self) -> bool {
         matches!(
             self.way,
             Way::Listener {

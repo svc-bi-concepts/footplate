@@ -2473,7 +2473,8 @@ impl Footplate {
                         },
                     )
                 }
-                // A yard too old for the grants view has no call to make again.
+                // A yard too old for the grants view has no call to make
+                // again, nor has one that serves it on its machine alone.
                 Effect::Grants => {
                     let stamp = self.stamp_in(session);
                     self.ask_in(
@@ -2492,7 +2493,8 @@ impl Footplate {
                                     session,
                                     Read::Grants,
                                     stamp,
-                                    !model::grants_too_old(&err),
+                                    !model::grants_too_old(&err)
+                                        && !model::grants_over_the_link(&err),
                                     cx,
                                 ) {
                                     this.change_in(session, cx, |m| {

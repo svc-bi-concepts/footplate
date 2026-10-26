@@ -10678,6 +10678,99 @@ yardr.dev
         assert_eq!(notice(&view, cx), "");
     }
 
+    /// A yard that refuses the grants as a request come down the link from
+    /// its edge serves them on its machine alone: the row and the pane say
+    /// where they are read, with no notice, and the refusal is not asked
+    /// again, by opening the row or by the window's second try of a failed
+    /// read. The window is not the operator's at first, and the operator
+    /// named afterwards is: the read that makes is the one refused.
+    #[gpui::test]
+    fn a_yard_that_refuses_the_grants_down_the_link_says_where_they_are_read(
+        cx: &mut TestAppContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Settings", r#"{"result": {"operator": "mckean"}}"#);
+        yard.answer(
+            "SourceGrants",
+            &json!({"error": {"code": "error", "message": "the operator's grant list is not read over the link: this request came down the link from the edge. Read it on the yard's machine (`yardr source grants`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(!drawn(cx, "row grants"));
+        assert!(yard.asked("SourceGrants").is_empty());
+
+        yard.emit(r#"{"seq": 21, "kind": "setting_changed", "actor": "mckean", "data": {"key": "operator", "value": "jo"}}"#);
+        wait(cx, "the grants refused down the link", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.is_operator() && m.grants_on_the_yard())
+            })
+        });
+        assert_eq!(yard.asked("SourceGrants").len(), 1);
+        assert_eq!(notice(&view, cx), "");
+        assert!(drawn(cx, "row grants"));
+        click_on(cx, "row grants");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Grants));
+        assert!(drawn(cx, "grants on the yard"));
+        assert!(!drawn(cx, "grants too old"));
+        assert!(!drawn(cx, "grants empty"));
+        // A failed read is made again once, after a while: not this one,
+        // which no try will change.
+        cx.executor().advance_clock(session::RETRY + session::RETRY);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("SourceGrants").len(), 1);
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// A hosted yard is not asked for its grants, which it serves down no
+    /// link from its edge: not at the start, and not by opening the row.
+    /// No notice is raised, and the row and the pane say the grants are
+    /// read on the yard's machine.
+    #[gpui::test]
+    fn a_hosted_yard_is_not_asked_for_its_grants_and_says_where_they_are_read(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::fake::{Router, SESSION, TOKEN};
+
+        let far = Yard::start_tcp();
+        a_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(edge.client_with(TOKEN, SESSION), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the hosted yard's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert!(model.grants_on_the_yard());
+            assert!(model.grant_records().is_empty());
+        });
+        assert_eq!(notice(&view, cx), "");
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row grants"));
+        click_on(cx, "row grants");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Grants));
+        assert!(drawn(cx, "grants on the yard"));
+        assert!(!drawn(cx, "grants too old"));
+        assert!(!drawn(cx, "grants empty"));
+        assert_eq!(notice(&view, cx), "");
+        assert!(far.asked("SourceGrants").is_empty());
+    }
+
     /// Chat's groups hold their rows in order, each under its head: the
     /// crew with their states as dots beside their names, the linked
     /// yards' people with their peer suffixes drawn apart, this yard's

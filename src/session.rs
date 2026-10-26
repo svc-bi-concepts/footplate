@@ -291,14 +291,22 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     };
     // Who the grants view is offered to: the yard's operator, and no one
     // else. Its settings unreadable, the window still opens, with no
-    // grants row; a yard from before the call has no grants to serve.
+    // grants row; a yard from before the call has no grants to serve. The
+    // yard serves the list to no device that comes down the link from its
+    // edge, so a hosted yard is not asked for it, and one that refuses it
+    // so after all is no error either: the grants are read on its machine.
     let operator = client.settings().map(|s| s.operator).unwrap_or_default();
     let is_operator = !operator.is_empty() && operator == user.name;
-    let (grants, grants_notice, grants_too_old) = match is_operator {
+    let mut grants_on_the_yard = client.hosted();
+    let (grants, grants_notice, grants_too_old) = match is_operator && !grants_on_the_yard {
         false => (Vec::new(), None, false),
         true => match client.source_grants() {
             Ok(grants) => (grants, None, false),
             Err(err) if model::grants_too_old(&err) => (Vec::new(), None, true),
+            Err(err) if model::grants_over_the_link(&err) => {
+                grants_on_the_yard = true;
+                (Vec::new(), None, false)
+            }
             Err(err) => (
                 Vec::new(),
                 Some(format!("the grants could not be read: {err}")),
@@ -327,6 +335,7 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         grants,
         grants_notice,
         grants_too_old,
+        grants_on_the_yard,
         yard,
     })
 }
@@ -679,7 +688,9 @@ mod tests {
 
     /// The grants are read where the window is the operator's, with the
     /// yard's operator as read: a yard from before the call reads as
-    /// empty with its pane saying so, and an unreadable one with why.
+    /// empty with its pane saying so, one that refuses the list as a
+    /// request come down the link from its edge reads as empty with the
+    /// pane saying where they are read, and an unreadable one with why.
     /// Anywhere else no grants call is made.
     #[test]
     fn load_reads_the_grants_for_the_operator_alone() {
@@ -698,6 +709,7 @@ mod tests {
         assert_eq!(state.grants[0].source, "crm");
         assert_eq!(state.grants_notice, None);
         assert!(!state.grants_too_old);
+        assert!(!state.grants_on_the_yard);
         assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
 
         // A yard from before the call: empty, with no notice, and too old.
@@ -709,8 +721,21 @@ mod tests {
         assert!(state.grants.is_empty());
         assert_eq!(state.grants_notice, None);
         assert!(state.grants_too_old);
+        assert!(!state.grants_on_the_yard);
 
-        // An unreadable one: empty, with why, and not too old.
+        // A yard that says the request came down the link from its edge:
+        // empty, with no notice, not too old, and read on its machine.
+        yard.answer(
+            "SourceGrants",
+            &json!({"error": {"code": "error", "message": "the operator's grant list is not read over the link: this request came down the link from the edge. Read it on the yard's machine (`yardr source grants`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.grants.is_empty());
+        assert_eq!(state.grants_notice, None);
+        assert!(!state.grants_too_old);
+        assert!(state.grants_on_the_yard);
+
+        // An unreadable one: empty, with why, and neither.
         yard.answer_nothing("SourceGrants");
         let state = load(&yard.client(), "jo").unwrap();
         assert!(state.grants.is_empty());
@@ -722,13 +747,18 @@ mod tests {
                 .starts_with("the grants could not be read: ")
         );
         assert!(!state.grants_too_old);
+        assert!(!state.grants_on_the_yard);
     }
 
     /// Anywhere but the operator's, the window reads no grants: not for
     /// another user, not where the yard names no operator, and not where
-    /// its settings could not be read. The window still opens.
+    /// its settings could not be read. Nor does the operator's window of a
+    /// hosted yard: the yard serves the list to no request that comes down
+    /// the link from its edge, so it is not asked, where the same yard
+    /// asked at its address with no edge before it is. The window still
+    /// opens.
     #[test]
-    fn load_reads_no_grants_where_the_window_is_not_the_operator_s() {
+    fn load_reads_no_grants_where_the_window_is_not_given_them() {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         // Another user: the operator's call is never made.
@@ -762,6 +792,40 @@ mod tests {
         let state = load(&yard.client(), "ada").unwrap();
         assert!(state.operator.is_empty());
         assert!(state.grants.is_empty());
+
+        // The operator's window of a hosted yard: no call, no notice, and
+        // the pane says where they are read. The same yard at its address,
+        // with no edge before it, is asked, and answers.
+        use crate::fake::{Router, SESSION, TOKEN};
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        let direct = load(&yard.client(), "jo").unwrap();
+        assert_eq!(direct.me, "jo");
+        assert_eq!(direct.operator, "jo");
+        assert!(!direct.grants_on_the_yard);
+        assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
+        let edge = Router::start(&yard, SESSION);
+        let hosted = load(&edge.client_with(TOKEN, SESSION), "jo").unwrap();
+        assert_eq!(hosted.me, "jo");
+        assert_eq!(hosted.operator, "jo");
+        assert!(hosted.grants.is_empty());
+        assert_eq!(hosted.grants_notice, None);
+        assert!(!hosted.grants_too_old);
+        assert!(hosted.grants_on_the_yard);
+        assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
+
+        // Another user's window of it says the same, and asks no more: the
+        // yard is reached by the edge whoever is at the window, and an
+        // operator named later is not asked either.
+        yard.answer(
+            "GetUser",
+            r#"{"result": {"name": "ada", "cursor": 9, "notification_cursor": 4}}"#,
+        );
+        let hosted = load(&edge.client_with(TOKEN, SESSION), "ada").unwrap();
+        assert_eq!(hosted.me, "ada");
+        assert_eq!(hosted.operator, "jo");
+        assert!(hosted.grants_on_the_yard);
+        assert_eq!(yard.asked("SourceGrants"), vec![json!({})]);
     }
 
     /// A yard at an address: the window is for the user its token is of,

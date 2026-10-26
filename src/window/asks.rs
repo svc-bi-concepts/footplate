@@ -2097,7 +2097,8 @@ impl Footplate {
 
     /// The grants row, last of decisions where the window is the
     /// operator's: what is granted, in so many calls, or that none is,
-    /// or that the yard is too old to say.
+    /// or that the yard is too old to say, or that it says them on its
+    /// machine alone.
     pub(crate) fn grants_row(
         &self,
         model: &Model,
@@ -2105,9 +2106,10 @@ impl Footplate {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let selected = model.selected() == Some(&Selected::Grants);
-        let sub = match model.grants_too_old() {
-            true => "yard too old".to_string(),
-            false => {
+        let sub = match (model.grants_too_old(), model.grants_on_the_yard()) {
+            (true, _) => "yard too old".to_string(),
+            (false, true) => "read on the yard's machine".to_string(),
+            (false, false) => {
                 let calls: usize = model.grant_records().iter().map(|g| g.calls.len()).sum();
                 match calls {
                     0 => "none granted".to_string(),
@@ -3792,7 +3794,8 @@ impl Footplate {
     /// by source, with each call's own time and approver, the weighty
     /// words for update and `--as` rows in rust as on a card, and each
     /// row's revoke line to copy. It changes nothing itself. A yard too
-    /// old for the call says so, in plain words.
+    /// old for the call says so, in plain words, and so does one that
+    /// serves it on its own machine alone.
     pub(crate) fn talk_grants(
         &self,
         model: &Model,
@@ -3800,7 +3803,12 @@ impl Footplate {
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
-        if model.grants_too_old() {
+        let said = match (model.grants_too_old(), model.grants_on_the_yard()) {
+            (true, _) => Some(("grants too old", model::GRANTS_TOO_OLD)),
+            (false, true) => Some(("grants on the yard", model::GRANTS_ON_THE_YARD)),
+            (false, false) => None,
+        };
+        if let Some((selector, words)) = said {
             return pane
                 .children(self.reconnect_strip(palette))
                 .child(
@@ -3813,9 +3821,9 @@ impl Footplate {
                 .child(
                     div().flex_1().min_h_0().p_4().child(
                         div()
-                            .debug_selector(|| "grants too old".to_string())
+                            .debug_selector(move || selector.to_string())
                             .text_color(palette.faint)
-                            .child(model::GRANTS_TOO_OLD),
+                            .child(words),
                     ),
                 );
         }

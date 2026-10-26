@@ -93,6 +93,10 @@ pub struct State {
     /// The yard has no SourceGrants call: one from before the grants
     /// view. The grants pane says so, and no notice is raised.
     pub grants_too_old: bool,
+    /// The yard serves the grant list to no device that comes down the
+    /// link from its edge: it is read on the yard's machine. The grants
+    /// pane says so, and the call is not made, nor a notice raised.
+    pub grants_on_the_yard: bool,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -1076,6 +1080,11 @@ pub struct Model {
     /// view. The grants pane says so, and no notice is raised. Grants
     /// read again clear it, as ones read at the start never set it.
     grants_too_old: bool,
+    /// The grants are read on the yard's machine, since the yard serves
+    /// them down no link: the pane says so, and no call is made for them.
+    /// A window reached by the edge starts so; a refusal that says the
+    /// request came down the link sets it, and grants read clear it.
+    grants_on_the_yard: bool,
     /// The yard has no React call: one from before reactions. The row
     /// the reactions are tapped on is hidden, and no notice is raised.
     /// A reaction answered clears it.
@@ -1259,6 +1268,7 @@ impl Model {
             operator: state.operator,
             grants: state.grants,
             grants_too_old: state.grants_too_old,
+            grants_on_the_yard: state.grants_on_the_yard,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -2174,11 +2184,12 @@ impl Model {
         &self.grants
     }
 
-    /// The grants as read again. The yard has the call, so it is not too
-    /// old for it.
+    /// The grants as read again. The yard has the call and serves it to
+    /// this window, so it is neither too old for it nor read elsewhere.
     pub fn grants(&mut self, grants: Vec<SourceGrant>) {
         self.grants = grants;
         self.grants_too_old = false;
+        self.grants_on_the_yard = false;
     }
 
     /// Whether the yard has no SourceGrants call: one from before the
@@ -2187,14 +2198,37 @@ impl Model {
         self.grants_too_old
     }
 
+    /// Whether the grants are read on the yard's machine: the yard serves
+    /// them down no link, and this window comes by one. The grants pane
+    /// says so.
+    pub fn grants_on_the_yard(&self) -> bool {
+        self.grants_on_the_yard
+    }
+
+    /// The call for the grants where the yard serves them to this window,
+    /// and none where they are read on its machine.
+    fn read_grants(&self) -> Vec<Effect> {
+        match self.grants_on_the_yard {
+            true => Vec::new(),
+            false => vec![Effect::Grants],
+        }
+    }
+
     /// The grants could not be read again. A yard without the call has
     /// none to show: the grants pane says it is too old, and no notice
-    /// is raised. Anything else is said as a notice, as ever.
+    /// is raised. A yard that says the request came down the link has
+    /// none to give this window: the pane says they are read on its
+    /// machine, again with no notice. Anything else is said as a notice,
+    /// as ever.
     pub fn grants_failed(&mut self, err: &api::Error) {
         match grants_too_old(err) {
             true => {
                 self.grants.clear();
                 self.grants_too_old = true;
+            }
+            false if grants_over_the_link(err) => {
+                self.grants.clear();
+                self.grants_on_the_yard = true;
             }
             false => {
                 self.notice = format!("the grants could not be read: {err}");
@@ -4321,7 +4355,7 @@ impl Model {
                 }
             }
             Some(Selected::Grants) => match self.is_operator() {
-                true if !self.grants_too_old => vec![Effect::Grants],
+                true if !self.grants_too_old => self.read_grants(),
                 false => Vec::new(),
                 true => Vec::new(),
             },
@@ -4723,7 +4757,7 @@ impl Model {
                 self.grants.clear();
                 self.grants_too_old = false;
                 if self.is_operator() {
-                    vec![Effect::Grants]
+                    self.read_grants()
                 } else if self.selected == Some(Selected::Grants) {
                     self.selected = self.row_in(Mode::Decisions, None);
                     self.opened();
@@ -4737,7 +4771,7 @@ impl Model {
             // operator's. A revoke tells no event; opening the grants
             // reads them again.
             "source_granted" => match self.is_operator() {
-                true => vec![Effect::Grants],
+                true => self.read_grants(),
                 false => Vec::new(),
             },
             _ => Vec::new(),
@@ -5821,6 +5855,23 @@ pub fn grants_too_old(err: &api::Error) -> bool {
 /// method name, and never in red.
 pub const GRANTS_TOO_OLD: &str =
     "this yard's yardr is older than the grants view (it needs yardr from 21 Oct 2026 or later)";
+
+/// Whether the yard refused the grant list because the request came down
+/// the link from its edge: it serves the list to no device that comes so,
+/// whoever holds it. That is no fault of the device's, whatever the rest of
+/// the refusal says of it: the grants pane says they are read on the
+/// yard's machine, and no notice is raised. Its words are read here, as
+/// above, and when they change this is shown as any refusal.
+pub fn grants_over_the_link(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("the operator's grant list is not read over the link"))
+}
+
+/// What the grants pane says of a yard that serves the grant list on its
+/// own machine alone, in place of the grants it would list: one line of
+/// plain words, never in red, since nothing is wrong. A window reaches a
+/// hosted yard by its edge, and the yard serves no such call down the link.
+pub const GRANTS_ON_THE_YARD: &str =
+    "the grants are read on the yard's machine: yardr source grants";
 
 /// Whether the yard has no DeliveryFiles call: one from before a device
 /// could learn a hook delivery's files, which says it has no such method.
@@ -10976,23 +11027,43 @@ mod tests {
 
     /// A yard from before the grants view has no SourceGrants call: its
     /// answer is no error, so no notice is raised, and the grants pane
-    /// says the yard is too old instead. Anything else the call fails
-    /// with is said as a notice, as ever. Grants read again clear it.
+    /// says the yard is too old instead. A yard that says the request came
+    /// down the link from its edge serves the list on its machine alone:
+    /// no notice either, and the pane says where they are read. Anything
+    /// else the call fails with is said as a notice, as ever. Grants read
+    /// again clear both.
     #[test]
-    fn an_old_yard_s_grants_are_said_in_the_grants_pane_not_as_a_notice() {
+    fn a_yard_that_gives_no_grants_says_so_in_the_grants_pane_not_as_a_notice() {
         let refused = |message: &str| api::Error::Refused {
             code: "error".into(),
             message: message.into(),
         };
+        // The yard's own words, as it refuses the list down the link and as
+        // it refuses it in plain HTTP from another machine: the second is a
+        // fault of the address, and stays a notice.
+        let link = refused(
+            "the operator's grant list is not read over the link: this request came down the link from the edge. Read it on the yard's machine (`yardr source grants`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm).",
+        );
+        let plain = refused(
+            "the operator's grant list is taken over https only, or from the yard's own machine: this request reached the yard's listener in plain HTTP from another machine. Put the proxy or tunnel that ends TLS on the yard's machine, or Read it on the yard's machine (`yardr source grants`).",
+        );
         assert!(grants_too_old(&refused("no such method SourceGrants")));
         assert!(!grants_too_old(&refused("the grants are closed")));
         assert!(!grants_too_old(&api::Error::Protocol(
             "SourceGrants: status 200, and no JSON object".into()
         )));
+        assert!(grants_over_the_link(&link));
+        assert!(!grants_over_the_link(&plain));
+        assert!(!grants_over_the_link(&refused(
+            "no such method SourceGrants"
+        )));
+        assert!(!grants_too_old(&link));
         // Plain words, and never the wire's method name.
         assert!(GRANTS_TOO_OLD.contains("older than the grants view"));
         assert!(!GRANTS_TOO_OLD.contains("no such method"));
         assert!(!GRANTS_TOO_OLD.contains("SourceGrants"));
+        assert!(GRANTS_ON_THE_YARD.contains("read on the yard's machine"));
+        assert!(!GRANTS_ON_THE_YARD.contains("SourceGrants"));
 
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         m.grants(vec![SourceGrant {
@@ -11000,9 +11071,11 @@ mod tests {
             ..Default::default()
         }]);
         assert!(!m.grants_too_old());
+        assert!(!m.grants_on_the_yard());
         assert_eq!(m.grant_records().len(), 1);
         m.grants_failed(&refused("no such method SourceGrants"));
         assert!(m.grants_too_old());
+        assert!(!m.grants_on_the_yard());
         assert!(m.grant_records().is_empty());
         assert!(m.notice.is_empty(), "{}", m.notice);
 
@@ -11010,14 +11083,31 @@ mod tests {
         m.grants(Vec::new());
         assert!(!m.grants_too_old());
 
+        // The link's refusal says where they are read, in no notice: not
+        // too old, and the old rows go.
+        m.grants(vec![SourceGrant {
+            source: "crm".into(),
+            ..Default::default()
+        }]);
+        m.grants_failed(&link);
+        assert!(m.grants_on_the_yard());
+        assert!(!m.grants_too_old());
+        assert!(m.grant_records().is_empty());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+        // Grants read again clear that too.
+        m.grants(Vec::new());
+        assert!(!m.grants_on_the_yard());
+
         // Any other failure is a notice, as ever, and not the pane's.
         for err in [
             refused("the grants are closed"),
+            plain,
             api::Error::Protocol("SourceGrants: status 200, and no JSON object".into()),
             api::Error::Down(std::io::Error::other("the yard went away")),
         ] {
             m.grants_failed(&err);
             assert!(!m.grants_too_old());
+            assert!(!m.grants_on_the_yard());
             assert_eq!(m.notice, format!("the grants could not be read: {err}"));
             m.notice.clear();
         }
@@ -11027,7 +11117,8 @@ mod tests {
     /// decisions where the window runs as the yard's operator, and
     /// nowhere else. Opening it reads the grants again, so a revoke,
     /// which tells no event, is seen; a grant given reads them again
-    /// through its event.
+    /// through its event. Where the yard serves the list on its machine
+    /// alone, the row stands and none of that asks it.
     #[test]
     fn the_grants_row_stands_for_the_operator_alone_and_reads_again() {
         // Not the operator's: no row, no read.
@@ -11075,6 +11166,19 @@ mod tests {
         let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
         assert!(m.event(&event("source_granted")).is_empty());
 
+        // The operator's window of a yard that serves the list on its
+        // machine alone: the row stands, and neither opening it nor a
+        // grant given asks the yard for the list.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.grants_on_the_yard = true;
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(m.is_operator());
+        assert_eq!(m.order_in(Mode::Decisions).last(), Some(&Selected::Grants));
+        assert_eq!(m.select(Selected::Grants), Vec::new());
+        assert_eq!(m.selected(), Some(&Selected::Grants));
+        assert!(m.event(&event("source_granted")).is_empty());
+
         // Changing the operator clears the grants at once. The old
         // operator's selected pane closes, and a newly named operator
         // reads grants only for their own window.
@@ -11114,6 +11218,16 @@ mod tests {
         };
         assert!(m.event(&changed).contains(&Effect::Grants));
         assert!(m.is_operator());
+
+        // Where the list is read on the yard's machine, a newly named
+        // operator reads none either, and the pane keeps saying so.
+        let mut state = yard(&[]);
+        state.operator = "ada".into();
+        state.grants_on_the_yard = true;
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(!m.event(&changed).contains(&Effect::Grants));
+        assert!(m.is_operator());
+        assert!(m.grants_on_the_yard());
     }
 
     /// A session's screen opens for the operator alone: the session

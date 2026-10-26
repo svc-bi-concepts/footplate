@@ -1247,7 +1247,10 @@ weighty by the kind the yard serves for it: a read has no weighty words
 and an update has them; a call with no kind served, as every call of a yard
 from before it served kinds, counts as an update. It reads through
 `SourceGrants` and changes nothing itself; a yard too old for the call
-says so in its pane. Then
+says so in its pane. A hosted yard is not asked: it serves the list to
+no request that comes down the link from its edge, so the row and the
+pane say the grants are read on the yard's machine
+(`yardr source grants`), with no notice. Then
 the crew with what each one's session does (`working`,
 `idle`, `blocked`, `not logged in`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a
