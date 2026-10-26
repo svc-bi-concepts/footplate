@@ -1270,6 +1270,11 @@ mod tests {
         let signed_out = pairing_failure(api::Error::NotSignedIn);
         assert!(signed_out.starts_with("Pairing failed:"));
         assert!(signed_out.contains("Sign in again, then pair this device."));
+
+        let slow = pairing_failure(api::Error::Slow { idempotent: false });
+        assert!(slow.starts_with("The yard did not answer in time"));
+        assert!(slow.contains("pairing may or may not have happened"));
+        assert!(slow.contains("Check whether this device is paired"));
     }
 
     #[test]

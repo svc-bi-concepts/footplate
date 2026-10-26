@@ -5726,7 +5726,7 @@ pub fn given_line(given: &api::Given) -> String {
 /// to a terminal. The words hold what the yard said and never a value.
 pub fn not_given(err: &api::Error, bead: &str, ask: u64) -> String {
     match err {
-        api::Error::Down(_) | api::Error::Protocol(_) => {
+        api::Error::Down(_) | api::Error::Protocol(_) | api::Error::Slow { idempotent: false } => {
             "the yard did not answer. The value may be written. Give it again.".to_string()
         }
         // The yard's one answer with no code of its own: its words are
@@ -6112,7 +6112,7 @@ pub fn setup_approve_command(bead: &str, ask: u64, setup: &Setup) -> String {
 /// the yard's words, whole.
 pub fn not_approved(err: &api::Error) -> String {
     match err {
-        api::Error::Down(_) | api::Error::Protocol(_) => {
+        api::Error::Down(_) | api::Error::Protocol(_) | api::Error::Slow { idempotent: false } => {
             "the yard did not answer; read the card again".to_string()
         }
         _ => format!("not approved: {err}"),
@@ -13831,6 +13831,7 @@ mod tests {
         for none in [
             api::Error::Down(std::io::Error::other("the yard went away")),
             api::Error::Protocol("ApproveAsk: status 200, and no JSON object".into()),
+            api::Error::Slow { idempotent: false },
         ] {
             assert!(!approves_elsewhere(&none));
             assert_eq!(
@@ -14395,6 +14396,7 @@ mod tests {
         for err in [
             api::Error::Down(gone),
             api::Error::Protocol("GiveSecret: status 200, and no JSON object".into()),
+            api::Error::Slow { idempotent: false },
         ] {
             let why = not_given(&err, "yd-crm", 18);
             assert_eq!(

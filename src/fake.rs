@@ -127,6 +127,14 @@ struct State {
     once: HashMap<String, VecDeque<Reply>>,
     /// The methods a call of which is read and never answered.
     silent: Vec<String>,
+    /// The requests that are read and never answered: the connection is
+    /// held open until the yard stops, so the client's read gives up for
+    /// its timeout. By target prefix: "/call/Head" holds those calls,
+    /// "/events" the streams before their head.
+    stall: Vec<String>,
+    /// The requests held once: the first whose target starts with one of
+    /// these is held, and the rule is gone.
+    stall_once: Vec<String>,
     asked: Vec<(String, Value)>,
     last_request: String,
     /// Every request that came, let in or not.
@@ -394,6 +402,26 @@ impl Yard {
         self.shared.state.lock().unwrap().silent.push(method.into());
     }
 
+    /// A request for `target` is taken and never answered: the connection
+    /// is held open until the yard stops, as by a yard too busy to answer,
+    /// so the client's read gives up for its timeout. By prefix of the
+    /// request's target: "/call/Head" holds those calls, "/events" the
+    /// streams before their head.
+    pub fn stall(&self, target: &str) {
+        self.shared.state.lock().unwrap().stall.push(target.into());
+    }
+
+    /// The next request for `target` alone is held as [`Yard::stall`]
+    /// holds every one: the one after it is answered as ever.
+    pub fn stall_once(&self, target: &str) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .stall_once
+            .push(target.into());
+    }
+
     fn set(&self, method: &str, reply: Reply) {
         let mut state = self.shared.state.lock().unwrap();
         state.silent.retain(|silent| silent != method);
@@ -567,6 +595,33 @@ fn pair(conn: &mut Wire, shared: &Shared, body: &[u8]) -> io::Result<()> {
     plain(conn, "200 OK", JSON, &answer)
 }
 
+/// Whether a request for `target` is held without answer: one whose
+/// prefix is stalled, or the first for a prefix stalled once.
+fn stalled(shared: &Shared, target: &str) -> bool {
+    let mut state = shared.state.lock().unwrap();
+    if state.stall.iter().any(|prefix| target.starts_with(prefix)) {
+        return true;
+    }
+    if let Some(held) = state
+        .stall_once
+        .iter()
+        .position(|prefix| target.starts_with(prefix))
+    {
+        state.stall_once.remove(held);
+        return true;
+    }
+    false
+}
+
+/// Holds a stalled request's connection open until the yard stops, as a
+/// yard that never answers holds it.
+fn hold_until_stopped(shared: &Shared) {
+    let mut state = shared.state.lock().unwrap();
+    while !state.stopped {
+        state = shared.changed.wait_timeout(state, LOOK).unwrap().0;
+    }
+}
+
 fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
     conn.set_nonblocking(false)?;
     let mut reader = BufReader::new(conn.try_clone()?);
@@ -610,6 +665,10 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
             (state.pairing.is_some(), state.devices.len(), known)
         };
         if target == "/user/pair" && pairing {
+            if stalled(shared, &target) {
+                hold_until_stopped(shared);
+                return Ok(());
+            }
             return pair(&mut conn, shared, &body);
         }
         if devices == 0 {
@@ -642,6 +701,23 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
     }
     // The stream of a device ends when the device is removed.
     let token = token.filter(|_| listener);
+
+    // A stalled request is read and never answered: the connection is held
+    // open until the yard stops, so the client's read gives up for its
+    // timeout. A stalled call was still asked.
+    if stalled(shared, &target) {
+        if let Some(method) = target.strip_prefix("/call/") {
+            let args: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            shared
+                .state
+                .lock()
+                .unwrap()
+                .asked
+                .push((method.to_string(), args));
+        }
+        hold_until_stopped(shared);
+        return Ok(());
+    }
 
     if let Some(query) = target.strip_prefix("/events") {
         let after: u64 = query

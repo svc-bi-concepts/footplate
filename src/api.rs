@@ -60,6 +60,12 @@ const KEEPALIVE_RETRIES: u32 = 3;
 const REPLACING_PAUSE: Duration = Duration::from_millis(100);
 const REPLACING_PATIENCE: Duration = Duration::from_secs(30);
 
+/// A GET the yard is slow to answer is asked again after this long, this
+/// many times: GETs change nothing, so asking again is safe. Anything else
+/// is asked once: it may have run.
+const SLOW_PAUSE: Duration = Duration::from_millis(100);
+const SLOW_RETRIES: u32 = 1;
+
 /// The error code of a server that is replacing itself, and of a name the
 /// yard does not have.
 const REPLACING: &str = "replacing";
@@ -77,6 +83,11 @@ pub const FILES_MAX: u64 = 64;
 pub enum Error {
     /// Nothing listens: the socket is missing, refused, or went away.
     Down(io::Error),
+    /// The yard is slow to answer: a connect, read or write gave up for
+    /// its timeout (on macOS a slow unix socket reads as EAGAIN, "os error
+    /// 35"). `idempotent` says the request changes nothing, so it was
+    /// asked again; anything else was asked once, and may have run.
+    Slow { idempotent: bool },
     /// The call reached the yard, and the yard said no. `message` is a
     /// sentence for a person: shown, never read.
     Refused { code: String, message: String },
@@ -113,6 +124,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Down(err) => write!(f, "the yard does not answer ({err})"),
+            Error::Slow { idempotent: true } => {
+                f.write_str("the yard is slow to answer; trying again")
+            }
+            Error::Slow { idempotent: false } => f.write_str(
+                "the yard did not answer in time, and the action may or may not have happened",
+            ),
             Error::Refused { message, .. } => f.write_str(message),
             Error::Protocol(what) => {
                 write!(f, "the yard answered what footplate cannot read: {what}")
@@ -1973,7 +1990,7 @@ fn no_yard(status: u16, bytes: &[u8]) -> Option<Error> {
 /// answered with the device's. The code is sent as it was typed; the yard
 /// reads it without its dash and in either case.
 pub fn pair(address: &Address, code: &str) -> Result<Paired> {
-    pair_with(address, code, None, "")
+    pair_with(address, code, None, "", CALL_TIMEOUT)
 }
 
 /// As [`pair`], at a hosted yard: the session token rides beside the code,
@@ -1986,7 +2003,7 @@ pub fn pair_hosted(
     session: &str,
     edge_yard: &str,
 ) -> Result<Paired> {
-    pair_with(address, code, Some(session), edge_yard)
+    pair_with(address, code, Some(session), edge_yard, CALL_TIMEOUT)
 }
 
 fn pair_with(
@@ -1994,9 +2011,12 @@ fn pair_with(
     code: &str,
     session: Option<&str>,
     edge_yard: &str,
+    timeout: Duration,
 ) -> Result<Paired> {
     let body = json!({ "code": code }).to_string();
-    let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+    let mut conn = address
+        .connect(Some(timeout))
+        .map_err(|err| slow_or_down(err, "POST"))?;
     let edge = session
         .filter(|session| is_token(session))
         .map(|session| format!("X-Edge-Token: {session}\r\n"))
@@ -2014,9 +2034,11 @@ fn pair_with(
             body.len()
         )
         .as_bytes(),
-    )?;
-    conn.flush()?;
-    let (status, refused_session, mut reply) = respond_call(conn)?;
+    )
+    .map_err(|err| slow_or_down(err, "POST"))?;
+    conn.flush().map_err(|err| slow_or_down(err, "POST"))?;
+    let (status, refused_session, mut reply) =
+        respond_call(conn).map_err(|err| slow_error(err, "POST"))?;
     if status == 401 && refused_session {
         return Err(refused(
             "no_session",
@@ -2026,7 +2048,9 @@ fn pair_with(
     match status {
         200 => {
             let mut bytes = Vec::new();
-            reply.read_to_end(&mut bytes)?;
+            reply
+                .read_to_end(&mut bytes)
+                .map_err(|err| slow_or_down(err, "POST"))?;
             let paired: Paired = serde_json::from_slice(&bytes)
                 .map_err(|err| Error::Protocol(format!("the pairing: {err}")))?;
             if !is_token(&paired.token) {
@@ -2042,7 +2066,9 @@ fn pair_with(
             // body's shape; of any other shape today's arm runs.
             if session.is_some() {
                 let mut bytes = Vec::new();
-                reply.read_to_end(&mut bytes)?;
+                reply
+                    .read_to_end(&mut bytes)
+                    .map_err(|err| slow_or_down(err, "POST"))?;
                 if let Some(edge) = no_yard(status, &bytes) {
                     return Err(edge);
                 }
@@ -2503,16 +2529,17 @@ impl Client {
     /// Who the token is: the user every call is made as, the device and
     /// the yard. Of a yard at an address only; the socket has no such path.
     pub fn me(&self) -> Result<Me> {
-        let (status, mut body) = self.send("GET", "/me", "", "", Some(CALL_TIMEOUT))?;
+        let (status, bytes) = self.get_body("/me", "", Some(CALL_TIMEOUT), |status| {
+            status == 200 || self.hosted() && status == 403
+        })?;
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, not this call's own refusal; of any other shape
         // today's arms run, on the status alone.
-        if self.hosted() && status == 403 {
-            let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes)?;
-            if let Some(edge) = no_yard(status, &bytes) {
-                return Err(edge);
-            }
+        if self.hosted()
+            && status == 403
+            && let Some(edge) = no_yard(status, &bytes)
+        {
+            return Err(edge);
         }
         match status {
             200 => {}
@@ -2523,10 +2550,68 @@ impl Client {
                 )));
             }
         }
-        let mut bytes = Vec::new();
-        body.read_to_end(&mut bytes)?;
         serde_json::from_slice(&bytes)
             .map_err(|err| Error::Protocol(format!("who this device is: {err}")))
+    }
+
+    /// Sends one request and reads the answer's head. A GET the yard is
+    /// slow to answer is asked again, after a short pause, before its
+    /// silence reads as an error; anything else is asked once, since it
+    /// may have run.
+    fn send(
+        &self,
+        verb: &str,
+        path: &str,
+        headers: &str,
+        body: &str,
+        timeout: Option<Duration>,
+    ) -> Result<(u16, Body)> {
+        let mut tries = if verb == "GET" { SLOW_RETRIES + 1 } else { 1 };
+        loop {
+            match self.send_once(verb, path, headers, body, timeout) {
+                Err(Error::Down(err)) if timed_out(&err) && tries > 1 => {
+                    tries -= 1;
+                    thread::sleep(SLOW_PAUSE);
+                }
+                Err(Error::Down(err)) if timed_out(&err) => {
+                    return Err(slow_or_down(err, verb));
+                }
+                reply => return reply,
+            }
+        }
+    }
+
+    /// Sends a finite GET and reads the body where its status needs one.
+    /// A timeout anywhere in the request or body gets the same one retry:
+    /// the yard's `/me` and blob answers are safe to ask for again.
+    fn get_body(
+        &self,
+        path: &str,
+        headers: &str,
+        timeout: Option<Duration>,
+        read_body: impl Fn(u16) -> bool,
+    ) -> Result<(u16, Vec<u8>)> {
+        let mut tries = SLOW_RETRIES + 1;
+        loop {
+            let result = (|| {
+                let (status, mut body) = self.send_once("GET", path, headers, "", timeout)?;
+                let mut bytes = Vec::new();
+                if read_body(status) {
+                    body.read_to_end(&mut bytes)?;
+                }
+                Ok((status, bytes))
+            })();
+            match result {
+                Err(Error::Down(err)) if timed_out(&err) && tries > 1 => {
+                    tries -= 1;
+                    thread::sleep(SLOW_PAUSE);
+                }
+                Err(Error::Down(err)) if timed_out(&err) => {
+                    return Err(slow_or_down(err, "GET"));
+                }
+                reply => return reply,
+            }
+        }
     }
 
     /// Sends one request on a connection of its own and reads the answer's
@@ -2536,7 +2621,7 @@ impl Client {
     /// of the account's yards in `X-Edge-Yard` where one is set.
     /// `headers` are whole lines. A call's answer is waited for `timeout`
     /// long.
-    fn send(
+    fn send_once(
         &self,
         verb: &str,
         path: &str,
@@ -2921,29 +3006,23 @@ impl Client {
         if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Ok(None);
         }
-        let (status, mut body) = self.send(
-            "GET",
+        let (status, bytes) = self.get_body(
             &format!("/blobs/{hash}"),
             "Connection: close\r\n",
-            "",
             Some(CALL_TIMEOUT),
+            |status| status == 200 || self.hosted() && status == 403,
         )?;
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, not this call's own refusal; of any other shape
         // today's arms run, on the status alone.
-        if self.hosted() && status == 403 {
-            let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes)?;
-            if let Some(edge) = no_yard(status, &bytes) {
-                return Err(edge);
-            }
+        if self.hosted()
+            && status == 403
+            && let Some(edge) = no_yard(status, &bytes)
+        {
+            return Err(edge);
         }
         match status {
-            200 => {
-                let mut bytes = Vec::new();
-                body.read_to_end(&mut bytes)?;
-                Ok(Some(bytes))
-            }
+            200 => Ok(Some(bytes)),
             404 => Ok(None),
             _ => Err(Error::Protocol(format!(
                 "the image {hash}: status {status}"
@@ -3045,7 +3124,8 @@ impl Client {
         // today's arm runs, on the status alone.
         if self.hosted() && status == 403 {
             let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes)?;
+            body.read_to_end(&mut bytes)
+                .map_err(|err| slow_or_down(err, "GET"))?;
             if let Some(edge) = no_yard(status, &bytes) {
                 return Err(edge);
             }
@@ -3157,7 +3237,9 @@ impl Client {
             return Err(Error::NoDevice);
         }
         let mut bytes = Vec::new();
-        reply.read_to_end(&mut bytes)?;
+        reply
+            .read_to_end(&mut bytes)
+            .map_err(|err| slow_or_down(err, "POST"))?;
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, before the Reply parse the edge's string-error body
         // is none of; of any other shape today's parse runs.
@@ -3229,6 +3311,9 @@ impl Iterator for Events {
                 Err(err) if timed_out(&err) && self.line.is_empty() => {
                     return Some(Err(Error::Silent));
                 }
+                Err(err) if timed_out(&err) => {
+                    return Some(Err(Error::Slow { idempotent: true }));
+                }
                 Err(err) => return Some(Err(Error::Down(err))),
             }
         }
@@ -3242,6 +3327,27 @@ fn timed_out(err: &io::Error) -> bool {
         err.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
+}
+
+/// An I/O failure of a yard connection as the call's error: one that gave
+/// up for its timeout says the yard is slow, in plain words, and not the
+/// raw OS error; anything else says the yard is down.
+fn slow_or_down(err: io::Error, verb: &str) -> Error {
+    match timed_out(&err) {
+        true => Error::Slow {
+            idempotent: verb == "GET",
+        },
+        false => Error::Down(err),
+    }
+}
+
+/// A response reader that already turned its I/O error into `Error`:
+/// classify a timeout the same way as the connection's direct reads.
+fn slow_error(err: Error, verb: &str) -> Error {
+    match err {
+        Error::Down(err) => slow_or_down(err, verb),
+        other => other,
+    }
 }
 
 /// Reads the status and the headers of a response, and gives its body.
@@ -5282,6 +5388,24 @@ mod tests {
         // And one with a pairing open for its first device has.
         yard.pair("ABCD-EFGH");
         assert!(pair(&address, "ABCD-EFGH").is_ok());
+
+        // A timed out pairing is not tried again: it may already have
+        // made the device. The timeout is still said without an OS error.
+        yard.pair("WXYZ-2345");
+        yard.stall("/user/pair");
+        let request_before = yard.requests();
+        let err = match pair_with(&address, "WXYZ-2345", None, "", Duration::from_millis(100)) {
+            Err(err) => err,
+            Ok(_) => panic!("the stalled pairing answered"),
+        };
+        assert!(matches!(&err, Error::Slow { idempotent: false }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "the yard did not answer in time, and the action may or may not have happened"
+        );
+        assert_eq!(yard.requests(), request_before + 1);
+        assert!(yard.pairing_open());
+
         yard.stop();
         assert!(matches!(pair(&address, "ABCD-EFGH"), Err(Error::Down(_))));
     }
@@ -6770,19 +6894,24 @@ mod tests {
         assert_eq!((event.seq, event.bead.as_str()), (22, "yd-shed"));
     }
 
-    /// A stream that stops in the middle of an event has ended: what of
-    /// the event came cannot be read on from.
+    /// A stream that times out in the middle of an event has ended: what
+    /// of the event came cannot be read on from, and the timeout is said
+    /// plainly.
     #[test]
     fn a_stream_that_stops_in_the_middle_of_an_event_has_ended() {
         let whole = chunk(r#"{"seq": 21, "kind": "mail"}"#);
         let client = streaming(vec![(Duration::ZERO, whole[..12].to_vec())]);
         let mut events = client.events(20, Duration::from_millis(100)).unwrap();
-        let next = events.next().unwrap();
-        assert!(matches!(next, Err(Error::Down(_))), "{next:?}");
+        let Err(err) = events.next().unwrap() else {
+            panic!("the partial event was complete");
+        };
+        assert!(matches!(&err, Error::Slow { idempotent: true }), "{err:?}");
+        assert_eq!(err.to_string(), "the yard is slow to answer; trying again");
     }
 
-    /// A stream whose answer does not come is not waited for longer than
-    /// its events are: the follower's stop could not reach it before.
+    /// A stream whose answer does not come is asked once more, then said
+    /// to be slow in plain words; the wait stays bounded, as the follower's
+    /// stop could not reach it before.
     #[test]
     fn a_stream_that_does_not_answer_is_not_waited_for_without_end() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -6794,10 +6923,146 @@ mod tests {
         });
         let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
         let asked = Instant::now();
-        let answer = client.events(20, Duration::from_millis(100));
-        assert!(matches!(answer, Err(Error::Down(_))), "{:?}", answer.err());
+        let Err(err) = client.events(20, Duration::from_millis(100)) else {
+            panic!("a held stream opened");
+        };
+        assert!(matches!(err, Error::Slow { idempotent: true }), "{err:?}");
+        assert_eq!(err.to_string(), "the yard is slow to answer; trying again");
         assert!(asked.elapsed() < Duration::from_secs(1));
         held.join().unwrap();
+    }
+
+    /// A yard that never answers within the timeout is said to be slow, in
+    /// plain words, and not the raw OS error (on macOS a slow unix socket
+    /// reads as EAGAIN, "os error 35"): a GET is asked again, and one that
+    /// answers then shows no error, while anything else is asked once,
+    /// since it may have run.
+    #[test]
+    fn a_slow_yard_is_said_plainly_and_a_get_is_asked_again() {
+        // On Windows Yard::start() is the TCP yard, so the socket arm is
+        // unix's alone.
+        #[cfg(unix)]
+        let yards = vec![Yard::start(), Yard::start_tcp()];
+        #[cfg(not(unix))]
+        let yards = vec![Yard::start()];
+        for yard in yards {
+            let client = yard.client();
+            let way = client.place();
+            let slow = Duration::from_millis(100);
+            yard.answer("Head", r#"{"result": 4}"#);
+            yard.answer("Crew", r#"{"result": []}"#);
+            // A GET the yard never answers is asked again, then said
+            // plainly.
+            yard.stall("/call/Head");
+            let Err(err) = client.send("GET", "/call/Head", "", "", Some(slow)) else {
+                panic!("{way}: a stalled yard answered");
+            };
+            assert!(
+                matches!(err, Error::Slow { idempotent: true }),
+                "{way}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the yard is slow to answer; trying again",
+                "{way}"
+            );
+            assert!(!err.to_string().contains("os error"), "{way}: {err}");
+            assert_eq!(yard.asked("Head").len(), 2, "{way}");
+            // A GET that answers the second time shows no error.
+            yard.stall_once("/call/Crew");
+            let Ok((status, mut body)) = client.send("GET", "/call/Crew", "", "", Some(slow))
+            else {
+                panic!("{way}: the second try failed");
+            };
+            assert_eq!(status, 200, "{way}");
+            let mut bytes = Vec::new();
+            body.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, br#"{"result": []}"#, "{way}");
+            assert_eq!(yard.asked("Crew").len(), 2, "{way}");
+            // Anything else is asked once, and says it may have run.
+            yard.stall("/call/Mail");
+            let Err(err) = client.send(
+                "POST",
+                "/call/Mail",
+                "Content-Type: application/json\r\nContent-Length: 2\r\n",
+                "{}",
+                Some(slow),
+            ) else {
+                panic!("{way}: a stalled yard answered");
+            };
+            assert!(
+                matches!(err, Error::Slow { idempotent: false }),
+                "{way}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the yard did not answer in time, and the action may or may not have happened",
+                "{way}"
+            );
+            assert!(!err.to_string().contains("os error"), "{way}: {err}");
+            assert_eq!(yard.asked("Mail").len(), 1, "{way}");
+            // A stream whose head never comes is said plainly too.
+            yard.stall("/events");
+            let before = yard.requests();
+            let Err(err) = client.events(20, slow) else {
+                panic!("{way}: a stalled stream opened");
+            };
+            assert!(
+                matches!(err, Error::Slow { idempotent: true }),
+                "{way}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the yard is slow to answer; trying again",
+                "{way}"
+            );
+            assert_eq!(yard.requests(), before + 2, "{way}");
+        }
+
+        // The same retry covers a response body that starts but times out
+        // before it is complete. The second answer is read whole.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let reply = br#"{"user":"jo","said_by":"laptop","yard":"south"}"#;
+        let server = thread::spawn(move || {
+            let read_head = |conn: &std::net::TcpStream| {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+            };
+            let (mut first, _) = listener.accept().unwrap();
+            read_head(&first);
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                reply.len()
+            )
+            .unwrap();
+            first.write_all(&reply[..2]).unwrap();
+            first.flush().unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            read_head(&second);
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                reply.len()
+            )
+            .unwrap();
+            second.write_all(reply).unwrap();
+        });
+        let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+        let (status, bytes) = client
+            .get_body("/me", "", Some(Duration::from_millis(100)), |_| true)
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(bytes, reply);
+        server.join().unwrap();
     }
 
     /// The connection to a yard at an address asks the other end after

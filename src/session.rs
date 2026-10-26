@@ -162,6 +162,7 @@ impl Trouble {
             Trouble::NotLetIn | Trouble::Yard(api::Error::NoDevice) => PAIR_AGAIN,
             Trouble::NotSignedIn => SIGN_IN_AGAIN,
             Trouble::NoUser(_) => "no user here",
+            Trouble::Yard(api::Error::Slow { .. }) => "slow to answer",
             Trouble::Yard(_) => "cannot be read",
         }
     }
@@ -178,6 +179,9 @@ impl fmt::Display for Trouble {
             }
             Trouble::Yard(api::Error::NoDevice) => f.write_str(
                 "Nothing of a yard is under /user/ at this address: the yard has no device any more, or the address is not a yard's listener. Pair this device again, with a code the yard's operator opens: yardr user device pair <user> <device>",
+            ),
+            Trouble::Yard(api::Error::Slow { .. }) => f.write_str(
+                "The yard is slow to answer: it did not answer in time. The window tries again shortly.",
             ),
             Trouble::Yard(err) => {
                 write!(f, "The yard is there, but footplate cannot read it: {err}")
@@ -1090,6 +1094,26 @@ mod tests {
         assert_eq!(trouble.short(), PAIR_AGAIN);
     }
 
+    /// A yard that is slow to answer is said so, in plain words, by its
+    /// socket and at its address alike: nothing is to be started, so the
+    /// trouble stays the yard's on either.
+    #[test]
+    fn a_slow_yard_is_said_so() {
+        for idempotent in [true, false] {
+            let trouble = Trouble::Yard(api::Error::Slow { idempotent });
+            assert_eq!(
+                trouble.to_string(),
+                "The yard is slow to answer: it did not answer in time. The window tries again shortly."
+            );
+            assert!(!trouble.to_string().contains("os error"));
+            let yard = Yard::start_tcp();
+            assert!(matches!(
+                trouble.with(&yard.client()),
+                Trouble::Yard(api::Error::Slow { .. })
+            ));
+        }
+    }
+
     /// The short why says what the person does where that is one thing,
     /// and never more than a row has room for.
     #[test]
@@ -1107,6 +1131,12 @@ mod tests {
             Trouble::Yard(api::Error::Protocol("x".into())).short(),
             "cannot be read"
         );
+        for idempotent in [true, false] {
+            assert_eq!(
+                Trouble::Yard(api::Error::Slow { idempotent }).short(),
+                "slow to answer"
+            );
+        }
     }
 
     #[test]

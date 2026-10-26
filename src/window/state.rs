@@ -174,6 +174,12 @@ pub(crate) fn pairing_failure(error: api::Error) -> String {
         api::Error::Silent => {
             "Pairing failed because the yard does not answer. Check the origin and your connection, then try the code again.".to_string()
         }
+        api::Error::Slow { idempotent: false } => "The yard did not answer in time; pairing may or may not have happened. Check whether this device is paired before trying again.".to_string(),
+        // A pairing is not idempotent, but keep the plain recovery if a
+        // caller supplies the other timeout kind.
+        api::Error::Slow { idempotent: true } => {
+            "Pairing failed because the yard is slow to answer. Try again shortly.".to_string()
+        }
     }
 }
 
