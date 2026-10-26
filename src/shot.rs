@@ -20,8 +20,9 @@ use crate::yard::Env;
 /// full: crew working and stopped, a linked yard's people, this yard's
 /// people, and unread notices, a long wrapped thread with an
 /// image, a long conversation over three days, grouped by sender, with
-/// short links and a correction, that conversation with the pointer
-/// posed on a letter under its head, an open decision card of a plain
+/// short links, a correction and a code block of one line, that
+/// conversation with the pointer posed on the code block, a letter under
+/// its head, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
 /// card of a run ask, a weighty run ask's card beside a routine one's,
@@ -1140,10 +1141,10 @@ fn populate(yard: &Yard, state: &str) {
             // the reading column, the grouping, the separators and the
             // short links. The days count back from today, so the
             // separators read Today, Yesterday and the weekday. The hover
-            // state poses the pointer on the last mail, which reads
-            // under the one above's head: its time stands in the
-            // gutter, and its bar of reactions floats over its first
-            // line.
+            // state poses the pointer on the last mail, a code block of
+            // one line that reads under the one above's head: its time
+            // stands in the gutter, and its bar of reactions floats over
+            // its first line.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -1188,6 +1189,9 @@ fn populate(yard: &Yard, state: &str) {
                      "read": true},
                     {"seq": 22, "at": day(0, "08:09:00"), "from": "yardmaster", "to": "jo",
                      "text": "The second lands behind it.",
+                     "read": true},
+                    {"seq": 23, "at": day(0, "08:10:00"), "from": "yardmaster", "to": "jo",
+                     "text": "```\nyardr review -g box-approvers\n```",
                      "read": true},
                 ]})
                 .to_string(),
@@ -1269,11 +1273,11 @@ fn populate(yard: &Yard, state: &str) {
             // under three mails: jo's on the question, both parties' on
             // the answer, and jo's on a last one, with a mail between
             // without any. The last reads under the one above's head and
-            // is long enough to run under the bar. The hover state poses
-            // the pointer on it, so its bar of reactions to tap floats
-            // over the end of its first line with jo's own marked, and
-            // no mail moves; the zoom state poses it on one emoji of
-            // that bar.
+            // is long enough to run under the bar's lower part. The hover
+            // state poses the pointer on it, so its bar of reactions to
+            // tap floats half over its top edge, over the end of its
+            // first line, with jo's own marked, and no mail moves; the
+            // zoom state poses it on one emoji of that bar.
             yard.answer(
                 "UserInbox",
                 r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
@@ -2421,13 +2425,18 @@ mod tests {
                 }
                 "column" | "column-hover" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
-                    // Eleven mails over three days, grouped by sender,
-                    // with a call link, a calendar link and a correction.
+                    // Twelve mails over three days, grouped by sender,
+                    // with a call link, a calendar link, a correction and
+                    // a code block of one line last.
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
-                    assert_eq!(letters.len(), 11, "{state}");
+                    assert_eq!(letters.len(), 12, "{state}");
                     assert!(letters[2].text.contains("teams.microsoft.com"), "{state}");
                     assert!(letters[6].text.contains("calendar.google.com"), "{state}");
                     assert!(letters[4].text.starts_with("correction"), "{state}");
+                    assert_eq!(
+                        letters[11].text, "```\nyardr review -g box-approvers\n```",
+                        "{state}"
+                    );
                 }
                 "mail" | "image" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

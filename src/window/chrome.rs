@@ -210,21 +210,21 @@ impl Footplate {
         }
         // The reactions-hover shot poses the pointer on the last mail,
         // which reads under the one above's head: its bar of reactions
-        // to tap floats over the end of its first line. A debug build's
-        // alone, as above.
+        // to tap floats half over its top edge, over the end of its first
+        // line. A debug build's alone, as above.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reactions-hover") {
             this.react_hover = Some((15, super::state::Piece::Body));
         }
-        // The column-hover shot poses the pointer on the last mail,
-        // which reads under the one above's head: its time stands in
-        // the gutter, and its bar of reactions floats over its first
-        // line. The last, so the hovered letter is in view where the
-        // window opens at the newest mail. A debug build's alone, as
-        // above.
+        // The column-hover shot poses the pointer on the last mail, a
+        // code block of one line that reads under the one above's head:
+        // its time stands in the gutter, and its bar of reactions floats
+        // over its first line. The last, so the hovered letter is in view
+        // where the window opens at the newest mail. A debug build's
+        // alone, as above.
         #[cfg(debug_assertions)]
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("column-hover") {
-            this.react_hover = Some((22, super::state::Piece::Body));
+            this.react_hover = Some((23, super::state::Piece::Body));
         }
         // The reactions-zoom shot poses it on one emoji of that bar, so
         // the emoji draws larger in its square.
