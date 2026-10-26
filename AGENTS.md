@@ -82,10 +82,11 @@ Setup, release and tests:
 
 ## Where to start
 
-- A new socket call: the call in `src/api.rs`, its answers in
-  `src/fake.rs`, the state it needs in `src/model.rs` (an `Effect` for
-  what the window must do), the drawing and the call site in
-  `src/window.rs`.
+- A new socket call: the call in `src/api.rs` with its row in
+  `README.md`'s "It reads" or "It writes" (a test in `src/api.rs` asks for
+  it), its answers in `src/fake.rs`, the state it needs in `src/model.rs`
+  (an `Effect` for what the window must do), the drawing and the call site
+  in `src/window.rs`.
 - A new view or pane: state in `src/model.rs`, drawing in `src/window.rs`;
   window chrome in `src/main.rs`. A pane's top row is under the macOS
   title bar's strip (`src/titlebar.rs`): a press on it drags the window, so

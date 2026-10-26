@@ -7217,4 +7217,59 @@ mod tests {
             ["yd-shed".to_string()]
         );
     }
+
+    /// Every literal method name passed through this file's call helpers has
+    /// a row in README's tables of what the window reads and writes, saying
+    /// when it is made: a new call ships its row. The names are found in the
+    /// text of this file, passed through one of four helpers, so there is no
+    /// list to keep. One way only: `GET /blobs/<hash>` has a row and no name
+    /// to find.
+    #[test]
+    fn the_readme_rows_every_literal_helper_call() {
+        let source = include_str!("api.rs");
+        let mut calls = Vec::new();
+        for helper in ["answer", "list", "call", "reply"] {
+            // Put together here so that this test is not one of the calls it
+            // looks for. rustfmt breaks a long call after its bracket, with
+            // the name on the next line.
+            let opening = format!("self.{helper}(");
+            for (at, _) in source.match_indices(&opening) {
+                let after = source[at + opening.len()..].trim_start();
+                if let Some(name) = after.strip_prefix('"').and_then(|s| s.split('"').next()) {
+                    calls.push(name);
+                }
+            }
+        }
+        // Few found means the calls are no longer written as they are looked
+        // for, and every row would pass unread.
+        assert!(calls.len() > 20, "found {calls:?}");
+        calls.sort();
+        calls.dedup();
+
+        // From the reads' header to the end of the writes' table, whether the
+        // checkout ends its lines with LF or CR LF.
+        let mut writes = false;
+        let tables = include_str!("../README.md")
+            .lines()
+            .skip_while(|line| !line.starts_with("| It reads |"))
+            .take_while(|line| {
+                writes |= line.starts_with("| It writes |");
+                !writes || line.starts_with('|')
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            tables.contains("| It writes |"),
+            "README's tables of what it reads and writes were not found"
+        );
+        // All at once, for a change that adds several.
+        let rowless: Vec<_> = calls
+            .iter()
+            .filter(|call| !tables.contains(&format!("`{call}`")))
+            .collect();
+        assert!(
+            rowless.is_empty(),
+            "called in src/api.rs and with no row in README's tables: {rowless:?}"
+        );
+    }
 }
