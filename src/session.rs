@@ -205,6 +205,12 @@ impl Trouble {
             Trouble::NotSignedIn => SIGN_IN_AGAIN,
             Trouble::NoUser(_) => "no user here",
             Trouble::Yard(api::Error::Slow { .. }) => "slow to answer",
+            Trouble::Yard(api::Error::Refused { code, .. })
+                if code == "away" || code == "no_answer" =>
+            {
+                "slow to answer"
+            }
+            Trouble::Yard(api::Error::Refused { code, .. }) if code == "busy" => "busy",
             Trouble::Yard(api::Error::Gateway) => "gateway refused",
             Trouble::Yard(_) => "cannot be read",
         }
@@ -232,6 +238,18 @@ impl fmt::Display for Trouble {
             Trouble::Yard(api::Error::Gateway) => f.write_str(
                 "A gateway turned the window's request away (401), which does not mean this device is out. The window tries again shortly.",
             ),
+            // The edge's link, not its yard: away or slow is a slow yard,
+            // busy is busy. Each is tried again, and said in the edge's
+            // words, never as what footplate cannot read.
+            Trouble::Yard(api::Error::Refused { code, .. }) if code == "away" => f.write_str(
+                "The yard is away. The window tries again shortly.",
+            ),
+            Trouble::Yard(api::Error::Refused { code, .. }) if code == "no_answer" => f.write_str(
+                "The yard gave no answer in time. The window tries again shortly.",
+            ),
+            Trouble::Yard(api::Error::Refused { code, .. }) if code == "busy" => {
+                f.write_str("The yard is busy. The window tries again shortly.")
+            }
             Trouble::Yard(err) => {
                 write!(f, "The yard is there, but footplate cannot read it: {err}")
             }
@@ -1581,6 +1599,53 @@ mod tests {
                 Trouble::Yard(api::Error::Slow { idempotent }).short(),
                 "slow to answer"
             );
+        }
+        // The edge's link: away or slow is slow, busy is busy.
+        for (code, short) in [
+            ("away", "slow to answer"),
+            ("no_answer", "slow to answer"),
+            ("busy", "busy"),
+        ] {
+            assert_eq!(
+                Trouble::Yard(api::Error::Refused {
+                    code: code.into(),
+                    message: "the edge's words".into(),
+                })
+                .short(),
+                short,
+                "{code}"
+            );
+        }
+    }
+
+    /// The edge's away, slow and busy are said in the edge's words, and
+    /// tried again: away or slow as a slow yard is, busy as busy. Never
+    /// as what footplate cannot read.
+    #[test]
+    fn an_edge_that_is_away_slow_or_busy_is_said_in_its_words() {
+        for (code, message, why) in [
+            (
+                "away",
+                "the yard is away",
+                "The yard is away. The window tries again shortly.",
+            ),
+            (
+                "no_answer",
+                "the yard gave no answer in time",
+                "The yard gave no answer in time. The window tries again shortly.",
+            ),
+            (
+                "busy",
+                "the yard's link holds too many open calls and streams",
+                "The yard is busy. The window tries again shortly.",
+            ),
+        ] {
+            let trouble = Trouble::Yard(api::Error::Refused {
+                code: code.into(),
+                message: message.into(),
+            });
+            assert_eq!(trouble.to_string(), why, "{code}");
+            assert!(!trouble.to_string().contains("cannot read"), "{code}");
         }
     }
 

@@ -1020,6 +1020,17 @@ const KRATOS_FLOW: &str = "test-flow-id";
 const NO_SESSION: &str = "{\"error\":\"edge: no Kratos session; sign in first\"}\n";
 
 #[cfg(any(test, debug_assertions))]
+#[derive(Clone)]
+struct EdgeRefusal {
+    status: u16,
+    /// The `X-Edge-Refusal` value the edge answers with: `away` for 503,
+    /// `busy` for 429, none for 403 and 504.
+    refusal: Option<String>,
+    /// The router's sentence after its "edge: " tag.
+    why: String,
+}
+
+#[cfg(any(test, debug_assertions))]
 struct EdgeShared {
     sessions: Mutex<Vec<String>>,
     last_request: Mutex<String>,
@@ -1035,9 +1046,11 @@ struct EdgeShared {
     /// A pause before login answers, so the window can be checked while
     /// its request is still in flight.
     login_delay: Mutex<Duration>,
-    /// The router's sentence where no yard is ready behind the edge: past
-    /// the session check, every request is refused with its 403.
-    no_yard: Mutex<Option<String>>,
+    /// The router's refusal past the session check, where one stands in
+    /// for every request: no ready yard (403), no live link (503), no
+    /// answer in time (504), or past what the link holds (429). None
+    /// where every request past the session check is proxied.
+    edge_refusal: Mutex<Option<EdgeRefusal>>,
     /// The paths a request for which is turned away with the 401 of the
     /// yard's web gateway, reaching no yard.
     turned_away: Mutex<Vec<String>>,
@@ -1056,8 +1069,9 @@ const GATEWAY_REFUSAL: &str =
 /// A stand-in for the hosted edge in front of a yard at its listener: it
 /// checks `X-Edge-Token` as the router checks the Kratos session, proxies
 /// a known session to the yard with the credential stripped, and refuses
-/// any other with the edge's own 401, reaching no yard. Where no yard is
-/// ready it answers the edge's own 403 past the session check, and a path
+/// any other with the edge's own 401, reaching no yard. Where the edge
+/// refuses every request it answers its own 403, 503, 504 or 429 past the
+/// session check, and a path
 /// it is told to turn away it answers with the web gateway's 401 (a hosted
 /// vps yard's stream, sent down the wrong socket). Under
 /// `/kratos` it answers the login API flow, minting a session a sign-in
@@ -1092,7 +1106,7 @@ impl Router {
             expire: Mutex::new(0),
             logins: Mutex::new(0),
             login_delay: Mutex::new(Duration::ZERO),
-            no_yard: Mutex::new(None),
+            edge_refusal: Mutex::new(None),
             turned_away: Mutex::new(Vec::new()),
             stopped: Mutex::new(false),
         });
@@ -1187,7 +1201,48 @@ impl Router {
     /// yard of the account, reaching no yard. `why` is the router's
     /// sentence after its "edge: " tag.
     pub fn no_yard(&self, why: &str) {
-        *self.shared.no_yard.lock().unwrap() = Some(why.to_string());
+        *self.shared.edge_refusal.lock().unwrap() = Some(EdgeRefusal {
+            status: 403,
+            refusal: None,
+            why: why.to_string(),
+        });
+    }
+
+    /// No link is up behind the edge: every request past the session
+    /// check is refused with the edge's own 503, as the router's
+    /// refuseCall for a yard that is away, reaching no yard. `why` is
+    /// the router's sentence after its "edge: " tag.
+    pub fn away(&self, why: &str) {
+        *self.shared.edge_refusal.lock().unwrap() = Some(EdgeRefusal {
+            status: 503,
+            refusal: Some("away".to_string()),
+            why: why.to_string(),
+        });
+    }
+
+    /// The yard gave no answer in time: every request past the session
+    /// check is refused with the edge's own 504, as the router's
+    /// refuseCall, reaching no yard further. `why` is the router's
+    /// sentence after its "edge: " tag.
+    pub fn no_answer(&self, why: &str) {
+        *self.shared.edge_refusal.lock().unwrap() = Some(EdgeRefusal {
+            status: 504,
+            refusal: None,
+            why: why.to_string(),
+        });
+    }
+
+    /// Past what the link holds: every request past the session check
+    /// is refused with the edge's own 429, as the router's refuseCall
+    /// for a link holding as many open calls and streams as the edge
+    /// carries, reaching no yard. `why` is the router's sentence after
+    /// its "edge: " tag.
+    pub fn busy(&self, why: &str) {
+        *self.shared.edge_refusal.lock().unwrap() = Some(EdgeRefusal {
+            status: 429,
+            refusal: Some("busy".to_string()),
+            why: why.to_string(),
+        });
     }
 
     /// A request for `path` (as the edge has it, `/user/events`, the query
@@ -1287,13 +1342,26 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
         )?;
         return conn.flush();
     }
-    // Past the session check, no ready yard is the edge's own 403, with
-    // no refusal header: the yard hears nothing of the request.
-    if let Some(why) = shared.no_yard.lock().unwrap().clone() {
-        let body = format!("{{\"error\":\"edge: {why}\"}}\n");
+    // Past the session check, the edge's own refusal where one stands
+    // in: 403 with no header, 503 with away, 504 with none, 429 with
+    // busy. The yard hears nothing of the request.
+    if let Some(refusal) = shared.edge_refusal.lock().unwrap().clone() {
+        let body = format!("{{\"error\":\"edge: {}\"}}\n", refusal.why);
+        let reason = match refusal.status {
+            403 => "Forbidden",
+            503 => "Service Unavailable",
+            504 => "Gateway Timeout",
+            429 => "Too Many Requests",
+            _ => "Error",
+        };
+        let header = refusal
+            .refusal
+            .map(|r| format!("X-Edge-Refusal: {r}\r\n"))
+            .unwrap_or_default();
         write!(
             conn,
-            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "HTTP/1.1 {} {reason}\r\n{header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            refusal.status,
             body.len()
         )?;
         return conn.flush();

@@ -3899,6 +3899,9 @@ impl Model {
                 Ok(found) => {
                     self.looked.insert(id.clone(), found == id);
                 }
+                // The edge's own words about its link say nothing of the
+                // id; it is asked again.
+                Err(err) if err.edge_link() => {}
                 Err(api::Error::Refused { .. }) => {
                     self.looked.insert(id, false);
                 }
@@ -5794,6 +5797,9 @@ pub fn not_given(err: &api::Error, bead: &str, ask: u64) -> String {
         api::Error::Down(_) | api::Error::Protocol(_) | api::Error::Slow { idempotent: false } => {
             "the yard did not answer. The value may be written. Give it again.".to_string()
         }
+        err if err.may_have_run() => {
+            "the yard did not answer. The value may be written. Give it again.".to_string()
+        }
         // The yard's one answer with no code of its own: its words are
         // read here, and when they change this is shown as any refusal.
         api::Error::Refused { message, .. } if message.starts_with("no such method") => format!(
@@ -6215,6 +6221,7 @@ pub fn not_approved(err: &api::Error) -> String {
         api::Error::Down(_) | api::Error::Protocol(_) | api::Error::Slow { idempotent: false } => {
             "the yard did not answer; read the card again".to_string()
         }
+        err if err.may_have_run() => "the yard did not answer; read the card again".to_string(),
         _ => format!("not approved: {err}"),
     }
 }
@@ -8514,6 +8521,11 @@ mod tests {
             code: "error".into(),
             message: "bead built-in: give at least 4 characters after \"built-\"".into(),
         };
+        // The edge's word about its link is no word on the id either.
+        let away = api::Error::Refused {
+            code: "away".into(),
+            message: "the yard is away".into(),
+        };
         m.beads_looked(
             &["x-yz12".to_string(), "built-in".to_string()],
             vec![
@@ -8521,6 +8533,7 @@ mod tests {
                 ("built-in".into(), Err(refused)),
             ],
         );
+        m.beads_looked(&["x-yz12".to_string()], vec![("x-yz12".into(), Err(away))]);
         let effects = m.event(&event(
             21,
             "mail",
@@ -14048,6 +14061,11 @@ mod tests {
             api::Error::Down(std::io::Error::other("the yard went away")),
             api::Error::Protocol("ApproveAsk: status 200, and no JSON object".into()),
             api::Error::Slow { idempotent: false },
+            // The edge heard nothing back in time; away and busy never sent it.
+            api::Error::Refused {
+                code: "no_answer".into(),
+                message: "the yard gave no answer in time".into(),
+            },
         ] {
             assert!(!approves_elsewhere(&none));
             assert_eq!(
@@ -14613,6 +14631,10 @@ mod tests {
             api::Error::Down(gone),
             api::Error::Protocol("GiveSecret: status 200, and no JSON object".into()),
             api::Error::Slow { idempotent: false },
+            api::Error::Refused {
+                code: "no_answer".into(),
+                message: "the yard gave no answer in time".into(),
+            },
         ] {
             let why = not_given(&err, "yd-crm", 18);
             assert_eq!(

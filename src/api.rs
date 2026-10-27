@@ -130,6 +130,20 @@ impl Error {
         matches!(self, Error::Refused { code, .. } if code == NOT_FOUND)
     }
 
+    /// Whether the edge answered for its link and not the yard: the yard
+    /// is away, gave no answer in time, or the link is busy. None of them
+    /// is the yard's word on the call, so what asked is asked again.
+    pub fn edge_link(&self) -> bool {
+        matches!(self, Error::Refused { code, .. } if matches!(code.as_str(), "away" | "no_answer" | "busy"))
+    }
+
+    /// Whether the call may have run all the same: the edge sent it down
+    /// the link and heard nothing back in time. (Away and busy are
+    /// answered before it is sent.)
+    pub fn may_have_run(&self) -> bool {
+        matches!(self, Error::Refused { code, .. } if code == "no_answer")
+    }
+
     /// How a request that failed so is said in the line it leaves
     /// ([`Sent`]).
     fn outcome(&self) -> &'static str {
@@ -2016,6 +2030,27 @@ fn no_yard(status: u16, bytes: &[u8]) -> Option<Error> {
     Some(refused("no_yard", sentence))
 }
 
+/// Where the edge answers a call for its link, not its yard: the router's
+/// refuseCall. A 503 with `X-Edge-Refusal: away` where no link is up, a 504
+/// where the yard gave no answer in time (with no refusal header), and a 429
+/// with `X-Edge-Refusal: busy` past what the link holds, each with a body of
+/// `{"error": "<sentence>"}`. Anything else is none, and the caller's own
+/// arms run: a 503 of any other shape is the yard's own, while replacing.
+/// Told by the status with its header and by which key the body carries,
+/// never by the sentence's prefix; one leading "edge: " is the router's tag,
+/// not the person's words, and is stripped.
+fn edge_call_refusal(status: u16, refusal: Option<&str>, bytes: &[u8]) -> Option<Error> {
+    let code = match status {
+        503 if refusal.is_some_and(|r| r.eq_ignore_ascii_case("away")) => "away",
+        504 => "no_answer",
+        429 if refusal.is_some_and(|r| r.eq_ignore_ascii_case("busy")) => "busy",
+        _ => return None,
+    };
+    let edge: EdgeError = serde_json::from_slice(bytes.trim_ascii()).ok()?;
+    let sentence = edge.error.strip_prefix("edge: ").unwrap_or(&edge.error);
+    Some(refused(code, sentence))
+}
+
 /// Redeems a pairing code at a yard's address: one request with no token,
 /// answered with the device's. The code is sent as it was typed; the yard
 /// reads it without its dash and in either case.
@@ -3379,11 +3414,18 @@ impl Client {
             .read_to_end(&mut bytes)
             .map_err(|err| slow_or_down(err, reads(method)))?;
         // Through the edge, a 403 is the router's noYard where no yard
-        // is ready, before the Reply parse the edge's string-error body
-        // is none of; of any other shape today's parse runs.
+        // is ready, and a 503, 504 or 429 its refuseCall for the link,
+        // before the Reply parse the edge's string-error body is none of;
+        // of any other shape today's parse runs.
         if self.hosted()
             && status == 403
             && let Some(edge) = no_yard(status, &bytes)
+        {
+            return Err(edge);
+        }
+        if self.hosted()
+            && matches!(status, 503 | 504 | 429)
+            && let Some(edge) = edge_call_refusal(status, reply.refusal.as_deref(), &bytes)
         {
             return Err(edge);
         }
@@ -3664,6 +3706,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Refuser, Bo
     let mut chunked = false;
     let mut location = None;
     let mut session_refused = false;
+    let mut refusal: Option<String> = None;
     let mut bearer = false;
     let mut request = None;
     loop {
@@ -3687,6 +3730,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Refuser, Bo
             location = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("x-edge-refusal") {
             session_refused = value.eq_ignore_ascii_case("session");
+            refusal = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("www-authenticate") {
             bearer |= offers_bearer(value);
         } else if name.eq_ignore_ascii_case("x-edge-request") {
@@ -3710,6 +3754,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Refuser, Bo
             conn,
             framing,
             request,
+            refusal,
         },
     ))
 }
@@ -3724,6 +3769,12 @@ struct Body {
     /// without an edge, an edge from before the header, or a value that is
     /// no id.
     request: Option<String>,
+    /// What the edge refused the request for, as it names it in
+    /// `X-Edge-Refusal`: `away` where no link is up, `busy` past what one
+    /// holds, `session` where it knows none. None where the answer
+    /// carried none: a yard reached without an edge, or a 504, which the
+    /// edge answers with no refusal header.
+    refusal: Option<String>,
 }
 
 /// The most bytes of an edge's request id that are kept: its own are 26,
@@ -5567,6 +5618,83 @@ mod tests {
         assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     }
 
+    /// Calls through the edge read away, no answer and busy in the edge's
+    /// words: a 503 with away, a 504, and a 429 with busy, each with the
+    /// edge's string-error body, never as what footplate cannot read. The
+    /// yard hears none of them. Past a ready yard a 503 of the yard's own
+    /// shape keeps today's arms: replacing is the yard's, and a bare one
+    /// its status.
+    #[test]
+    fn calls_through_the_edge_read_away_no_answer_and_busy() {
+        let yard = Yard::start_tcp();
+        yard.answer("Head", r#"{"result": 12}"#);
+        let refused = |method: &str, path: &str, status: u16, wait: &str| {
+            format!(
+                "call failed: request=none method={method} path={path} outcome=refused status={status} timeout={wait}"
+            )
+        };
+        for (set, code, message, status) in [
+            ("away", "away", "the yard is away", 503),
+            (
+                "no_answer",
+                "no_answer",
+                "the yard gave no answer in time",
+                504,
+            ),
+            (
+                "busy",
+                "busy",
+                "the yard's link holds too many open calls and streams",
+                429,
+            ),
+        ] {
+            let edge = Router::start(&yard, SESSION);
+            match set {
+                "away" => edge.away(message),
+                "no_answer" => edge.no_answer(message),
+                _ => edge.busy(message),
+            }
+            let client = edge.client_with(TOKEN, SESSION);
+            let Err(Error::Refused {
+                code: got,
+                message: said,
+            }) = client.head()
+            else {
+                panic!("{set}: an away edge answered");
+            };
+            assert_eq!(got, code, "{set}");
+            assert_eq!(said, message, "{set}");
+            assert!(!said.contains("cannot read"), "{set}: {said}");
+            assert_eq!(edge.proxied(), 0, "{set}");
+            assert_eq!(
+                take_said(),
+                [refused("POST", "/call/Head", status, "30s")],
+                "{set}"
+            );
+        }
+        assert_eq!(yard.requests(), 0);
+
+        // Past a ready yard, the yard's own 503 keeps today's arms: its
+        // refusal reads as its own, and a bare one as its status. The
+        // edge's header alone, without its body, is none of the edge's.
+        let edge = Router::start(&yard, SESSION);
+        let client = edge.client_with(TOKEN, SESSION);
+        yard.answer_status(
+            "Head",
+            503,
+            r#"{"error": {"code": "no_such", "message": "the yard says no"}}"#,
+        );
+        let err = client.head().unwrap_err();
+        assert!(
+            matches!(err, Error::Refused { ref code, .. } if code == "no_such"),
+            "{err:?}"
+        );
+        yard.answer_status("Head", 503, "{}");
+        let err = client.head().unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)), "{err:?}");
+        let _ = take_said();
+    }
+
     /// The edge's noYard is told by its status and its body's key: a 403
     /// of `{"error": "<sentence>"}`, with one leading "edge: " stripped.
     /// Anything else is none, and the caller's own arms run.
@@ -5608,6 +5736,106 @@ mod tests {
             assert!(no_yard(403, body.as_bytes()).is_none(), "{body}");
         }
         assert!(no_yard(200, r#"{"error":"edge: the yard is building"}"#.as_bytes()).is_none());
+    }
+
+    /// The edge's refuseCall is told by its status with its header and its
+    /// body's key: a 503 with away, a 504, and a 429 with busy, each of
+    /// `{"error": "<sentence>"}`, with one leading "edge: " stripped.
+    /// Anything else is none, and the caller's own arms run.
+    #[test]
+    fn edge_call_refusal_reads_only_the_edge_s_503_504_and_429() {
+        let some = |status: u16, refusal: Option<&str>, body: &str| match edge_call_refusal(
+            status,
+            refusal,
+            body.as_bytes(),
+        ) {
+            Some(Error::Refused { code, message }) => (code, message),
+            answer => panic!("{status} {refusal:?} {body}: {answer:?}"),
+        };
+        for (status, refusal, body, code, message) in [
+            (
+                503,
+                Some("away"),
+                r#"{"error":"edge: the yard is away"}"#,
+                "away",
+                "the yard is away",
+            ),
+            (
+                503,
+                Some("Away"),
+                "{\"error\":\"edge: the yard is away\"}\n",
+                "away",
+                "the yard is away",
+            ),
+            (
+                503,
+                Some("away"),
+                r#"{"error":"the yard is away"}"#,
+                "away",
+                "the yard is away",
+            ),
+            (
+                504,
+                None,
+                r#"{"error":"edge: the yard gave no answer in time"}"#,
+                "no_answer",
+                "the yard gave no answer in time",
+            ),
+            (
+                504,
+                None,
+                "{\"error\":\"edge: the yard gave no answer in time\"}\n",
+                "no_answer",
+                "the yard gave no answer in time",
+            ),
+            (
+                429,
+                Some("busy"),
+                r#"{"error":"edge: the yard's link holds too many open calls and streams"}"#,
+                "busy",
+                "the yard's link holds too many open calls and streams",
+            ),
+            (
+                429,
+                Some("BUSY"),
+                "{\"error\":\"edge: the yard's link holds too many open calls and streams\"}\n",
+                "busy",
+                "the yard's link holds too many open calls and streams",
+            ),
+        ] {
+            let (got, said) = some(status, refusal, body);
+            assert_eq!(got, code, "{body}");
+            assert_eq!(said, message, "{body}");
+        }
+        for (status, refusal, body) in [
+            (503, None, r#"{"error":"edge: the yard is away"}"#),
+            (503, Some("busy"), r#"{"error":"edge: the yard is away"}"#),
+            (
+                503,
+                Some("away"),
+                r#"{"error": {"code": "x", "message": "y"}}"#,
+            ),
+            (503, Some("away"), "{}"),
+            (503, Some("away"), "Service Unavailable"),
+            (504, None, r#"{"error": {"code": "x", "message": "y"}}"#),
+            (504, None, "{}"),
+            (504, None, "Gateway Timeout"),
+            (429, None, r#"{"error":"edge: busy"}"#),
+            (429, Some("away"), r#"{"error":"edge: busy"}"#),
+            (
+                429,
+                Some("busy"),
+                r#"{"error": {"code": "x", "message": "y"}}"#,
+            ),
+            (429, Some("busy"), "{}"),
+            (200, Some("away"), r#"{"error":"edge: the yard is away"}"#),
+            (403, None, r#"{"error":"edge: the yard is away"}"#),
+        ] {
+            assert!(
+                edge_call_refusal(status, refusal, body.as_bytes()).is_none(),
+                "{status} {refusal:?} {body}"
+            );
+        }
     }
 
     #[test]
