@@ -19441,6 +19441,85 @@ yardr.dev
         assert!(near.at_listener() || !drawn(cx, "pair again"));
     }
 
+    /// A hosted yard whose stream a gateway turns away while its calls
+    /// pass, as the edge's router did a vps yard's (yardr-hosted-c0sb):
+    /// the timetable's catch-up asks that stream when the head has moved
+    /// on, and says what turned it away. The device is not out, so the
+    /// window does not say it is, nor to pair or sign in again, and the
+    /// yard stays open.
+    #[gpui::test]
+    fn a_stream_a_gateway_turns_away_does_not_say_the_device_is_out(cx: &mut TestAppContext) {
+        use crate::fake::{Router, SESSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        edge.turn_away("/user/events");
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::hosted(
+                    "south",
+                    edge.address(),
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-south.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let env = env_on(&near, &file);
+        let (view, cx) = watching_at(env, &file, cx);
+        wait(cx, "what waits in the hosted yard", |cx| {
+            state_of(&view, cx, "south") == "1 mail"
+        });
+        click_on(cx, "yard chip");
+        click_on(cx, "switch south");
+        wait(cx, "the hosted yard open", |cx| {
+            open_yard(&view, cx) == "south"
+                && view.read_with(cx, |v, _| v.model.is_some() && v.down.is_none())
+        });
+        assert_eq!(notice(&view, cx), "");
+
+        // The head moves on while the stream is turned away: the state is
+        // read again by the calls, which pass, and the window catches up
+        // through the stream, which does not.
+        far.answer("Head", r#"{"result": 42}"#);
+        wait(cx, "the catch-up's notice", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.notice
+                        .starts_with("the timetable's changes could not be read: ")
+                })
+            })
+        });
+        let said = notice(&view, cx);
+        assert!(
+            said.ends_with(
+                "a gateway turned the request away (401), which does not mean this device is out"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("no longer let in"), "{said}");
+        // The yard goes on: open, neither out nor signed out, and the
+        // window is still told what the calls read.
+        assert_eq!(state_of(&view, cx, "south"), "open");
+        assert!(view.read_with(cx, |v, _| v.down.is_none() && v.away != Away::Out));
+        assert!(edge.proxied() > 0);
+    }
+
     /// Pairing a hosted yard of the list again: the session rides beside
     /// the code, and the yard opens as the new device. Where the pairing's
     /// QR code names which of the account's yards, it rides too, and the

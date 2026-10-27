@@ -167,6 +167,11 @@ pub(crate) fn pairing_failure(error: api::Error) -> String {
         api::Error::NotSignedIn => {
             "Pairing failed: this session is no longer signed in. Sign in again, then pair this device.".to_string()
         }
+        // The pairing's own 401 is read before this (no pairing is open);
+        // one a gateway answered says nothing of the code.
+        api::Error::Gateway => {
+            "Pairing failed: a gateway turned the request away (401). Try the code again; if the yard says it is used, ask the operator to open another pairing.".to_string()
+        }
         api::Error::NoDevice => {
             "Pairing failed: no yard answers at this origin. Check the origin and ask its operator to open a pairing.".to_string()
         }

@@ -894,17 +894,26 @@ name the file as the yard's `token_file`, whole.)
 A yard that is refused is not tried again: the window says why, and the
 settings, or `cmd+1` to `cmd+9`, open another.
 
-**"This device is no longer let in."** The yard answers 401 when the token
-is not a device's: the operator removed the device (`yardr user device rm`),
-or the token is another yard's. That does not pass by itself, so footplate
-says so and stops asking: no call, no stream, until the device has a token
-again. "pair again" under the words opens the settings on that yard, for a
-new code. A yard that has no device at all answers 404 under
+**"This device is no longer let in."** The yard answers 401 with
+`WWW-Authenticate: Bearer` when the token is not a device's: the operator
+removed the device (`yardr user device rm`), or the token is another
+yard's. That does not pass by itself, so footplate says so and stops
+asking: no call, no stream, until the device has a token again. "pair
+again" under the words opens the settings on that yard, for a new code. A
+yard that has no device at all answers 404 under
 `/user/`, to a token as to none, and so does an address that is no yard's
 listener: the window says that, offers the same, and goes on trying every
 3 seconds, since a proxy that is being set right answers so too. When
 nothing answers at the address it says so, names the address, and tries
 again.
+
+**"A gateway turned the request away (401), which does not mean this
+device is out."** Only the yard's own answer says the device is out. A 401
+that carries neither its `WWW-Authenticate: Bearer` nor the edge's
+`X-Edge-Refusal: session` was answered by something else, and says nothing
+of the device: it stays paired. A read that meets one is said with those
+words, and the window, which is told the yard cannot be read, tries again
+every 3 seconds as it does a yard that is slow, instead of stopping.
 
 What a device reads and writes, and how it is taken back, is the yard's:
 `docs/users.md` there. In short, it reads what any user of the yard can
@@ -937,8 +946,10 @@ names it from here on. A refused session and a refused device
 are told apart on screen, and neither is tried again: the edge refuses a
 session it does not know with 401 carrying `X-Edge-Refusal: session`, and
 the window says to sign in again; the yard refuses a token that is not a
-device's with its own 401, which the edge passes through byte for byte,
-and the window says to pair again. "sign in again" stands under the words
+device's with its own 401, which the edge passes through byte for byte
+(it carries `WWW-Authenticate: Bearer`), and the window says to pair again.
+A 401 with neither header is neither refusal and is tried again, with
+the words above. "sign in again" stands under the words
 and on the yard's row in the settings; where the session is what is out,
 pairing again is not offered, since it helps nothing. Removing the yard
 deletes its session's file with its token's, where footplate wrote them;
@@ -1792,7 +1803,7 @@ options have no icon, so the program sees to it when it starts
 | `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow, which can turn a path away as the yard's web gateway does |
 
 The tests run without a yard and without a screen. The yard a test starts
 with is the fake's socket, and on Windows, which has none, its TCP port, so

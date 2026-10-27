@@ -161,8 +161,10 @@ pub enum Trouble {
     /// The name the window runs as is no user of the yard, and the yard
     /// names no operator that is one.
     NoUser(String),
-    /// The yard at an address answered 401: the device was removed, or its
-    /// token is not that yard's. Trying again changes nothing.
+    /// The yard at an address refused the device with its own 401: the
+    /// device was removed, or its token is not that yard's. Trying again
+    /// changes nothing. A 401 that is not the yard's check is no such
+    /// thing, and is [`api::Error::Gateway`] in `Yard`.
     NotLetIn,
     /// The edge answered 401 carrying `X-Edge-Refusal: session`: the
     /// session was revoked, or is not that edge's. Trying again changes
@@ -203,6 +205,7 @@ impl Trouble {
             Trouble::NotSignedIn => SIGN_IN_AGAIN,
             Trouble::NoUser(_) => "no user here",
             Trouble::Yard(api::Error::Slow { .. }) => "slow to answer",
+            Trouble::Yard(api::Error::Gateway) => "gateway refused",
             Trouble::Yard(_) => "cannot be read",
         }
     }
@@ -222,6 +225,12 @@ impl fmt::Display for Trouble {
             ),
             Trouble::Yard(api::Error::Slow { .. }) => f.write_str(
                 "The yard is slow to answer: it did not answer in time. The window tries again shortly.",
+            ),
+            // Not the yard's check of the device, which is `NotLetIn`: the
+            // device stays paired, and what turned the request away may
+            // not turn the next one.
+            Trouble::Yard(api::Error::Gateway) => f.write_str(
+                "A gateway turned the window's request away (401), which does not mean this device is out. The window tries again shortly.",
             ),
             Trouble::Yard(err) => {
                 write!(f, "The yard is there, but footplate cannot read it: {err}")
@@ -1025,7 +1034,9 @@ mod tests {
 
     /// Through the edge: a session that is revoked is told so and never
     /// asked after again, with signing in again as what to do, while the
-    /// device pairing stands as it was.
+    /// device pairing stands as it was. A 401 that is neither the edge's
+    /// nor the yard's is told as trouble that passes, before that, and the
+    /// yard is asked again until it answers.
     #[test]
     fn a_session_that_is_revoked_is_told_so_and_the_yard_is_not_asked_again() {
         use crate::fake::{Router, SESSION};
@@ -1065,6 +1076,41 @@ mod tests {
             panic!("the live stream carries the event")
         };
         assert_eq!(event.seq, 21);
+
+        // A gateway turns the next state read away with a 401 of its own,
+        // as the yard's web view does what the edge sent it by mistake
+        // (yardr-hosted-c0sb). Neither the device nor the session is out:
+        // the window is told the yard cannot be read, the thread goes on
+        // asking, and the state comes back once the gateway lets it by. A
+        // device that is out ends the thread (the test above).
+        edge.turn_away("/user/call/Head");
+        yard.end_streams();
+        let (why, short) = loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Down(why, short) => break (why, short),
+                Update::Out(why) => panic!("a gateway's 401 is not the device refused: {why}"),
+                Update::SignedOut(why) => panic!("the session is good: {why}"),
+                Update::Up(_) | Update::Event(_) => continue,
+            }
+        };
+        assert!(
+            why.starts_with("A gateway turned the window's request away (401)"),
+            "{why}"
+        );
+        assert!(why.contains("tries again"), "{why}");
+        assert!(!why.contains("no longer let in"), "{why}");
+        assert_eq!(short, "gateway refused");
+        edge.let_through();
+        loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Up(state) => {
+                    assert_eq!(state.me, "jo");
+                    break;
+                }
+                Update::Down(..) | Update::Event(_) => continue,
+                Update::Out(why) | Update::SignedOut(why) => panic!("it passes again: {why}"),
+            }
+        }
 
         // The session is revoked at the edge: what it relayed is cut, and
         // the next request is answered with the edge's own 401.
@@ -1521,6 +1567,10 @@ mod tests {
         assert_eq!(Trouble::Unreached(gone()).short(), "nothing answers");
         assert_eq!(Trouble::NotLetIn.short(), "pair again");
         assert_eq!(Trouble::NotSignedIn.short(), "sign in again");
+        assert_eq!(
+            Trouble::Yard(api::Error::Gateway).short(),
+            "gateway refused"
+        );
         assert_eq!(Trouble::NoUser("jo".into()).short(), "no user here");
         assert_eq!(
             Trouble::Yard(api::Error::Protocol("x".into())).short(),

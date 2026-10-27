@@ -93,15 +93,23 @@ pub enum Error {
     Refused { code: String, message: String },
     /// What came back is not what docs/api.md says.
     Protocol(String),
-    /// The yard's listener answered 401: the token is not a device's, or
-    /// the device was removed. It is no fault that passes, so nothing is
-    /// asked again until the device has a token again.
+    /// The yard's listener answered 401 with `WWW-Authenticate: Bearer`:
+    /// the token is not a device's, or the device was removed. It is no
+    /// fault that passes, so nothing is asked again until the device has a
+    /// token again.
     NotLetIn,
     /// The edge answered 401 carrying `X-Edge-Refusal: session`: the
     /// session token is none Kratos knows, or none was sent. It is no
     /// fault that passes either, so nothing is asked again until signed
     /// in again. The device pairing is untouched.
     NotSignedIn,
+    /// A 401 that is neither of those: it carries neither the edge's
+    /// `X-Edge-Refusal: session` nor the listener's `WWW-Authenticate:
+    /// Bearer`, so no check of this device refused it. Something else
+    /// answered, as the yard's web view does a request the edge sent it by
+    /// mistake. The device is not out, so this is no reason to pair again;
+    /// what asked is asked again.
+    Gateway,
     /// At the yard's address nothing is under `/user/`: 404 to a call. A
     /// yard answers so while it has no device at all, with a token or
     /// without, and so does an address that is no yard's listener.
@@ -126,9 +134,11 @@ impl Error {
             Error::Slow { .. } | Error::Silent => "timeout",
             Error::Down(err) if timed_out(err) => "timeout",
             Error::Down(_) => "down",
-            Error::Refused { .. } | Error::NotLetIn | Error::NotSignedIn | Error::NoDevice => {
-                "refused"
-            }
+            Error::Refused { .. }
+            | Error::NotLetIn
+            | Error::NotSignedIn
+            | Error::Gateway
+            | Error::NoDevice => "refused",
             Error::Protocol(_) => "unreadable",
         }
     }
@@ -150,6 +160,9 @@ impl fmt::Display for Error {
             }
             Error::NotLetIn => f.write_str("this device is no longer let in"),
             Error::NotSignedIn => f.write_str("this session is no longer signed in"),
+            Error::Gateway => f.write_str(
+                "a gateway turned the request away (401), which does not mean this device is out",
+            ),
             Error::NoDevice => {
                 f.write_str("the yard has no device, or the address is not a yard's")
             }
@@ -2051,9 +2064,8 @@ fn pair_with(
     )
     .map_err(|err| slow_or_down(err, "POST"))?;
     conn.flush().map_err(|err| slow_or_down(err, "POST"))?;
-    let (status, refused_session, mut reply) =
-        respond_call(conn).map_err(|err| slow_error(err, "POST"))?;
-    if status == 401 && refused_session {
+    let (status, refuser, mut reply) = respond_call(conn).map_err(|err| slow_error(err, "POST"))?;
+    if status == 401 && refuser == Refuser::Edge {
         return Err(refused(
             "no_session",
             "Sign in first: the edge does not know this session, and the code never reached the yard. Then pair this device with the code.",
@@ -2694,21 +2706,18 @@ impl Client {
         conn.write_all(format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes())
             .and_then(|()| conn.flush())
             .map_err(|err| sent.failed(err.into()))?;
-        let (status, refused_session, body) = respond_call(conn).map_err(|err| sent.failed(err))?;
+        let (status, refuser, body) = respond_call(conn).map_err(|err| sent.failed(err))?;
         let sent = Sent {
             request: body.request.as_deref(),
             status: Some(status),
             ..sent
         };
-        // A 401 is a state of its own: the edge refused the session, or
-        // the yard the device, told apart by the response's shape. The
-        // yard's own 401 the edge passes through byte for byte, adding
-        // nothing, so without its header it is the device that is out.
-        if status == 401 && refused_session {
-            return Err(sent.failed(Error::NotSignedIn));
-        }
+        // A 401 is a state of its own, and of three: the edge refused the
+        // session, the yard the device, or neither did, told apart by the
+        // response's shape ([`Refuser`]). Only the yard's says the device
+        // is out: a 401 of any other shape is not its check.
         if status == 401 {
-            return Err(sent.failed(Error::NotLetIn));
+            return Err(sent.failed(refuser.error()));
         }
         Ok((status, body))
     }
@@ -3528,16 +3537,65 @@ fn respond(conn: Conn) -> Result<(u16, Body)> {
     Ok((status, body))
 }
 
-/// As [`respond`], with whether the edge refused the session: a 401
-/// carrying `X-Edge-Refusal: session`. A call's answer is read so.
-fn respond_call(conn: Conn) -> Result<(u16, bool, Body)> {
-    let (status, _, refused, body) = respond_with_location(conn)?;
-    Ok((status, refused, body))
+/// As [`respond`], with whose a 401 would be ([`Refuser`]). A call's answer
+/// is read so.
+fn respond_call(conn: Conn) -> Result<(u16, Refuser, Body)> {
+    let (status, _, refuser, body) = respond_with_location(conn)?;
+    Ok((status, refuser, body))
+}
+
+/// Whose a 401 is, told by the answer's head alone. The edge refuses a
+/// session it does not know with `X-Edge-Refusal: session`. The yard's
+/// listener refuses a token that is no device's with `WWW-Authenticate:
+/// Bearer`, on every such refusal (`refuse` of the yardr repository's
+/// internal/rpc/user.go), and the edge passes the yard's answer through
+/// with its headers but for its own refusal's, so it arrives so. A 401 with
+/// neither was answered by something else, as the yard's web view answers a
+/// request the edge sent down its socket by mistake; a message is shown,
+/// never parsed, so its words say nothing here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Refuser {
+    Edge,
+    Yard,
+    Other,
+}
+
+impl Refuser {
+    /// From what the head carried: `X-Edge-Refusal: session`, and a
+    /// `WWW-Authenticate` that offers Bearer. The edge's header wins: the
+    /// edge takes its own off whatever the yard sent, so it is the edge's.
+    fn of(session_refused: bool, bearer: bool) -> Refuser {
+        match (session_refused, bearer) {
+            (true, _) => Refuser::Edge,
+            (false, true) => Refuser::Yard,
+            (false, false) => Refuser::Other,
+        }
+    }
+
+    /// What a 401 of this refuser is.
+    fn error(self) -> Error {
+        match self {
+            Refuser::Edge => Error::NotSignedIn,
+            Refuser::Yard => Error::NotLetIn,
+            Refuser::Other => Error::Gateway,
+        }
+    }
+}
+
+/// Whether a `WWW-Authenticate` value offers the Bearer scheme. One value
+/// may hold several challenges, each a scheme and then its parameters.
+fn offers_bearer(value: &str) -> bool {
+    value.split(',').any(|challenge| {
+        challenge
+            .split_whitespace()
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer"))
+    })
 }
 
 /// As [`respond`], with where the response sends on to, when it does,
-/// and whether the edge refused the session.
-fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)> {
+/// and whose a 401 would be.
+fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, Refuser, Body)> {
     let mut conn = BufReader::new(conn);
     let mut line = String::new();
     // A line of the head, read within what is left of the head's limit.
@@ -3568,7 +3626,8 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
     let mut length = None;
     let mut chunked = false;
     let mut location = None;
-    let mut refused = false;
+    let mut session_refused = false;
+    let mut bearer = false;
     let mut request = None;
     loop {
         line.clear();
@@ -3590,7 +3649,9 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
         } else if name.eq_ignore_ascii_case("location") {
             location = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("x-edge-refusal") {
-            refused = value.eq_ignore_ascii_case("session");
+            session_refused = value.eq_ignore_ascii_case("session");
+        } else if name.eq_ignore_ascii_case("www-authenticate") {
+            bearer |= offers_bearer(value);
         } else if name.eq_ignore_ascii_case("x-edge-request") {
             request = edge_request(value);
         }
@@ -3607,7 +3668,7 @@ fn respond_with_location(conn: Conn) -> Result<(u16, Option<String>, bool, Body)
     Ok((
         status,
         location,
-        refused,
+        Refuser::of(session_refused, bearer),
         Body {
             conn,
             framing,
@@ -5131,7 +5192,9 @@ mod tests {
 
     /// The two 401s through the edge are told apart by the response's
     /// shape: the edge's own refuses the session, the yard's the device,
-    /// and neither is asked twice.
+    /// and neither is asked twice. A third, which has neither's header, is
+    /// no refusal of the device: it is said as what it is, and the calls
+    /// beside it go on.
     #[test]
     fn a_refused_session_and_a_refused_device_are_told_apart() {
         let yard = Yard::start_tcp();
@@ -5169,6 +5232,33 @@ mod tests {
         assert_eq!(edge.proxied(), 2);
         // The call reached the yard, but never its store.
         assert_eq!(yard.asked("Head").len(), 1);
+
+        // A known device with a good session, and the stream turned away
+        // as a hosted vps yard's was (yardr-hosted-c0sb): a 401 of the
+        // yard's web view, with neither header. It says nothing of the
+        // device, which the calls beside it show, and it is not the words
+        // of a device that is out.
+        let known = edge.client_with(TOKEN, SESSION);
+        edge.turn_away("/user/events");
+        take_said();
+        let Err(err) = known.events(0, QUIET) else {
+            panic!("the stream opened");
+        };
+        assert!(matches!(err, Error::Gateway), "{err:?}");
+        assert!(!err.to_string().contains("no longer"), "{err}");
+        assert_eq!(
+            take_said(),
+            [
+                "call failed: request=none method=GET path=/events?after=0 outcome=refused status=401 timeout=60s"
+            ]
+        );
+        assert_eq!(known.head().unwrap(), 12);
+        assert!(known.me().is_ok());
+        // The turned-away request never reached the yard; the two calls did.
+        assert_eq!(edge.proxied(), 4);
+        // Passed again, the stream opens: the same device, the same session.
+        edge.let_through();
+        assert!(known.events(0, QUIET).is_ok());
     }
 
     /// A connection whose request has not arrived when the edge reads for
@@ -5219,7 +5309,8 @@ mod tests {
     /// The shapes the two refusals are told by: the edge's carries
     /// `X-Edge-Refusal: session` with a body naming the edge, the yard's
     /// is plain `Unauthorized` with `WWW-Authenticate: Bearer` and no
-    /// edge header — through the edge byte for byte.
+    /// edge header — through the edge byte for byte. A 401 of the yard's
+    /// web view has the words of its gateway and neither header.
     #[test]
     fn the_two_refusals_have_the_shapes_they_are_told_by() {
         use std::net::TcpStream;
@@ -5271,6 +5362,25 @@ mod tests {
             "GET /user/me HTTP/1.1\r\nHost: edge\r\nAuthorization: Bearer unknown\r\nX-Edge-Token: {SESSION}\r\nConnection: close\r\n\r\n"
         );
         assert_eq!(ask(edge.address(), &head), direct);
+        // The yard's web view, asked what is not its to answer: neither
+        // header, so neither refusal.
+        edge.turn_away("/user/me");
+        let gateway = ask(edge.address(), &head);
+        assert!(
+            gateway.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{gateway}"
+        );
+        let lower = gateway.to_ascii_lowercase();
+        assert!(
+            !lower.contains("www-authenticate") && !lower.contains("x-edge-refusal"),
+            "{gateway}"
+        );
+        assert!(
+            gateway.ends_with(
+                "the gateway's token is missing: the X-Edge-JWT header is not on the request\n"
+            ),
+            "{gateway}"
+        );
     }
 
     /// Pairing through the edge: with a good session the code reaches the
@@ -7059,9 +7169,25 @@ mod tests {
             ),
             (
                 "the device out",
-                answer("401 Unauthorized", "X-Edge-Request: r-2\r\n", ""),
+                answer(
+                    "401 Unauthorized",
+                    "WWW-Authenticate: Bearer\r\nX-Edge-Request: r-2\r\n",
+                    "Unauthorized\n",
+                ),
                 false,
                 "r-2",
+                "refused",
+                "401",
+            ),
+            (
+                "turned away by a gateway, neither header",
+                answer(
+                    "401 Unauthorized",
+                    "X-Edge-Request: r-9\r\n",
+                    "the gateway's token is missing: the X-Edge-JWT header is not on the request\n",
+                ),
+                false,
+                "r-9",
                 "refused",
                 "401",
             ),
@@ -7180,6 +7306,82 @@ mod tests {
         assert_eq!(take_said(), Vec::<String>::new());
     }
 
+    /// A 401 is told by its head, never by its words. Only the yard's own
+    /// challenge, `WWW-Authenticate: Bearer`, says the device is out, and
+    /// the edge's header says the session is. A 401 with neither, as the
+    /// yard's web view answers a stream the edge sent it by mistake
+    /// (yardr-hosted-c0sb), says nothing of the device: it is not said in
+    /// the words of a device that is out.
+    #[test]
+    fn a_401_says_the_device_is_out_only_with_the_yard_s_challenge() {
+        let gateway =
+            "the gateway's token is missing: the X-Edge-JWT header is not on the request\n";
+        for (name, headers, body, want) in [
+            (
+                "the yard's own",
+                "WWW-Authenticate: Bearer\r\n",
+                "Unauthorized\n",
+                "device",
+            ),
+            (
+                "in any case, with parameters",
+                "www-authenticate: bearer realm=\"yardr\"\r\n",
+                "",
+                "device",
+            ),
+            (
+                "among several challenges",
+                "WWW-Authenticate: Basic realm=\"x\", Bearer\r\n",
+                "",
+                "device",
+            ),
+            (
+                "in a header of its own",
+                "WWW-Authenticate: Basic realm=\"x\"\r\nWWW-Authenticate: Bearer\r\n",
+                "",
+                "device",
+            ),
+            (
+                "another scheme",
+                "WWW-Authenticate: Basic realm=\"Bearer\"\r\n",
+                "",
+                "gateway",
+            ),
+            ("the web gateway's, neither header", "", gateway, "gateway"),
+            (
+                "the edge's, whatever else the head offers",
+                "X-Edge-Refusal: session\r\nWWW-Authenticate: Bearer\r\n",
+                "",
+                "session",
+            ),
+        ] {
+            let reply = format!(
+                "HTTP/1.1 401 Unauthorized\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes();
+            let client = Client::remote(Address::parse(&answering(reply)).unwrap(), TOKEN);
+            let err = client.head().unwrap_err();
+            let (kind, said) = match &err {
+                Error::NotLetIn => ("device", "this device is no longer let in"),
+                Error::NotSignedIn => ("session", "this session is no longer signed in"),
+                Error::Gateway => (
+                    "gateway",
+                    "a gateway turned the request away (401), which does not mean this device is out",
+                ),
+                other => panic!("{name}: {other:?}"),
+            };
+            assert_eq!((kind, err.to_string().as_str()), (want, said), "{name}");
+            // The words of a device that is out are said of that alone.
+            assert_eq!(
+                err.to_string().contains("this device is no longer let in"),
+                want == "device",
+                "{name}"
+            );
+        }
+        take_said();
+    }
+
     /// The id is one short token, so the line stays one line of words; what
     /// is not known stands as `none`, and every outcome has its word.
     #[test]
@@ -7207,6 +7409,7 @@ mod tests {
             (Error::Silent, "timeout"),
             (Error::NotLetIn, "refused"),
             (Error::NotSignedIn, "refused"),
+            (Error::Gateway, "refused"),
             (Error::Protocol("no".into()), "unreadable"),
         ] {
             assert_eq!(err.outcome(), outcome, "{err:?}");

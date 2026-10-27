@@ -1038,14 +1038,28 @@ struct EdgeShared {
     /// The router's sentence where no yard is ready behind the edge: past
     /// the session check, every request is refused with its 403.
     no_yard: Mutex<Option<String>>,
+    /// The paths a request for which is turned away with the 401 of the
+    /// yard's web gateway, reaching no yard.
+    turned_away: Mutex<Vec<String>>,
     stopped: Mutex<bool>,
 }
+
+/// What the yard's web view answers a request it is sent with no minted
+/// token: `http.Error` of internal/web's JWT gateway, 401 with the plain
+/// sentence, and none of the listener's `WWW-Authenticate: Bearer`. The
+/// edge's router sends a hosted yard's stream down that socket by mistake
+/// (yardr-hosted-c0sb).
+#[cfg(any(test, debug_assertions))]
+const GATEWAY_REFUSAL: &str =
+    "the gateway's token is missing: the X-Edge-JWT header is not on the request\n";
 
 /// A stand-in for the hosted edge in front of a yard at its listener: it
 /// checks `X-Edge-Token` as the router checks the Kratos session, proxies
 /// a known session to the yard with the credential stripped, and refuses
 /// any other with the edge's own 401, reaching no yard. Where no yard is
-/// ready it answers the edge's own 403 past the session check. Under
+/// ready it answers the edge's own 403 past the session check, and a path
+/// it is told to turn away it answers with the web gateway's 401 (a hosted
+/// vps yard's stream, sent down the wrong socket). Under
 /// `/kratos` it answers the login API flow, minting a session a sign-in
 /// for the account it knows. The yard answers the device token as ever; a test
 /// stops the yard before the edge, so no relayed stream outlives what it
@@ -1079,6 +1093,7 @@ impl Router {
             logins: Mutex::new(0),
             login_delay: Mutex::new(Duration::ZERO),
             no_yard: Mutex::new(None),
+            turned_away: Mutex::new(Vec::new()),
             stopped: Mutex::new(false),
         });
         let accept = thread::spawn({
@@ -1175,6 +1190,24 @@ impl Router {
         *self.shared.no_yard.lock().unwrap() = Some(why.to_string());
     }
 
+    /// A request for `path` (as the edge has it, `/user/events`, the query
+    /// aside) is answered as the yard's web view answers a request with no
+    /// minted token: 401, plain words, no `WWW-Authenticate`, and the
+    /// listener hears nothing of it. Every other request passes, as the
+    /// calls of a hosted vps yard do while its stream is turned away.
+    pub fn turn_away(&self, path: &str) {
+        self.shared
+            .turned_away
+            .lock()
+            .unwrap()
+            .push(path.to_string());
+    }
+
+    /// Every path that was turned away passes again.
+    pub fn let_through(&self) {
+        self.shared.turned_away.lock().unwrap().clear();
+    }
+
     /// The head of the last request, as it came to the edge.
     pub fn last_request(&self) -> String {
         self.shared.last_request.lock().unwrap().clone()
@@ -1262,6 +1295,16 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
             conn,
             "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
+        )?;
+        return conn.flush();
+    }
+    let path = asked.split_whitespace().nth(1).unwrap_or("");
+    let path = path.split('?').next().unwrap_or(path);
+    if shared.turned_away.lock().unwrap().iter().any(|p| p == path) {
+        write!(
+            conn,
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\n\r\n{GATEWAY_REFUSAL}",
+            GATEWAY_REFUSAL.len()
         )?;
         return conn.flush();
     }
