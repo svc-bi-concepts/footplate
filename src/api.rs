@@ -62,7 +62,7 @@ const REPLACING_PATIENCE: Duration = Duration::from_secs(30);
 
 /// A GET the yard is slow to answer is asked again after this long, this
 /// many times: GETs change nothing, so asking again is safe. Anything else
-/// is asked once: it may have run.
+/// is asked once: a write may have run, and a read called by POST is no GET.
 const SLOW_PAUSE: Duration = Duration::from_millis(100);
 const SLOW_RETRIES: u32 = 1;
 
@@ -85,8 +85,11 @@ pub enum Error {
     Down(io::Error),
     /// The yard is slow to answer: a connect, read or write gave up for
     /// its timeout (on macOS a slow unix socket reads as EAGAIN, "os error
-    /// 35"). `idempotent` says the request changes nothing, so it was
-    /// asked again; anything else was asked once, and may have run.
+    /// 35"). `idempotent` says the request changes nothing, so its timeout
+    /// says nothing of the yard having done anything: a GET was asked
+    /// again first, and a read is read again by the window. Anything else
+    /// was asked once, and may have run. A call is a POST whether it reads
+    /// or writes, so it is told by the call (`reads`) and not by the verb.
     Slow { idempotent: bool },
     /// The call reached the yard, and the yard said no. `message` is a
     /// sentence for a person: shown, never read.
@@ -2041,9 +2044,10 @@ fn pair_with(
     timeout: Duration,
 ) -> Result<Paired> {
     let body = json!({ "code": code }).to_string();
+    // A pairing is no read: a timed out one may already have made the device.
     let mut conn = address
         .connect(Some(timeout))
-        .map_err(|err| slow_or_down(err, "POST"))?;
+        .map_err(|err| slow_or_down(err, false))?;
     let edge = session
         .filter(|session| is_token(session))
         .map(|session| format!("X-Edge-Token: {session}\r\n"))
@@ -2062,9 +2066,9 @@ fn pair_with(
         )
         .as_bytes(),
     )
-    .map_err(|err| slow_or_down(err, "POST"))?;
-    conn.flush().map_err(|err| slow_or_down(err, "POST"))?;
-    let (status, refuser, mut reply) = respond_call(conn).map_err(|err| slow_error(err, "POST"))?;
+    .map_err(|err| slow_or_down(err, false))?;
+    conn.flush().map_err(|err| slow_or_down(err, false))?;
+    let (status, refuser, mut reply) = respond_call(conn).map_err(|err| slow_error(err, false))?;
     if status == 401 && refuser == Refuser::Edge {
         return Err(refused(
             "no_session",
@@ -2076,7 +2080,7 @@ fn pair_with(
             let mut bytes = Vec::new();
             reply
                 .read_to_end(&mut bytes)
-                .map_err(|err| slow_or_down(err, "POST"))?;
+                .map_err(|err| slow_or_down(err, false))?;
             let paired: Paired = serde_json::from_slice(&bytes)
                 .map_err(|err| Error::Protocol(format!("the pairing: {err}")))?;
             if !is_token(&paired.token) {
@@ -2094,7 +2098,7 @@ fn pair_with(
                 let mut bytes = Vec::new();
                 reply
                     .read_to_end(&mut bytes)
-                    .map_err(|err| slow_or_down(err, "POST"))?;
+                    .map_err(|err| slow_or_down(err, false))?;
                 if let Some(edge) = no_yard(status, &bytes) {
                     return Err(edge);
                 }
@@ -2597,7 +2601,9 @@ impl Client {
     /// Sends one request and reads the answer's head. A GET the yard is
     /// slow to answer is asked again, after a short pause, before its
     /// silence reads as an error; anything else is asked once, since it
-    /// may have run.
+    /// may have run. `idempotent` is whether the request changes nothing,
+    /// which is what its silence is then said to be ([`Error::Slow`]): a
+    /// read called by POST is said so, and is asked once all the same.
     fn send(
         &self,
         verb: &str,
@@ -2605,6 +2611,7 @@ impl Client {
         headers: &str,
         body: &str,
         timeout: Option<Duration>,
+        idempotent: bool,
     ) -> Result<(u16, Body)> {
         let mut tries = if verb == "GET" { SLOW_RETRIES + 1 } else { 1 };
         loop {
@@ -2614,7 +2621,7 @@ impl Client {
                     thread::sleep(SLOW_PAUSE);
                 }
                 Err(Error::Down(err)) if timed_out(&err) => {
-                    return Err(slow_or_down(err, verb));
+                    return Err(slow_or_down(err, idempotent));
                 }
                 reply => return reply,
             }
@@ -2659,7 +2666,7 @@ impl Client {
                     thread::sleep(SLOW_PAUSE);
                 }
                 Err(Error::Down(err)) if timed_out(&err) => {
-                    return Err(slow_or_down(err, "GET"));
+                    return Err(slow_or_down(err, true));
                 }
                 reply => return reply,
             }
@@ -3214,6 +3221,7 @@ impl Client {
             "Accept: application/x-ndjson\r\n",
             "",
             Some(quiet),
+            true,
         )?;
         let request = body.request.clone();
         let sent = Sent {
@@ -3235,7 +3243,7 @@ impl Client {
         if self.hosted() && status == 403 {
             let mut bytes = Vec::new();
             body.read_to_end(&mut bytes)
-                .map_err(|err| slow_or_down(err, "GET"))?;
+                .map_err(|err| slow_or_down(err, true))?;
             if let Some(edge) = no_yard(status, &bytes) {
                 return Err(edge);
             }
@@ -3344,6 +3352,7 @@ impl Client {
             ),
             &body,
             Some(timeout),
+            reads(method),
         )?;
         let request = reply.request.clone();
         let sent = Sent {
@@ -3368,7 +3377,7 @@ impl Client {
         let mut bytes = Vec::new();
         reply
             .read_to_end(&mut bytes)
-            .map_err(|err| slow_or_down(err, "POST"))?;
+            .map_err(|err| slow_or_down(err, reads(method)))?;
         // Through the edge, a 403 is the router's noYard where no yard
         // is ready, before the Reply parse the edge's string-error body
         // is none of; of any other shape today's parse runs.
@@ -3458,23 +3467,51 @@ fn timed_out(err: &io::Error) -> bool {
     )
 }
 
+/// The calls this client makes that only read, as README's "It reads" table
+/// has them; a test holds the two to each other. A call is one POST whether
+/// it reads or writes, so what a timeout on it says is told by its name: a
+/// read that timed out changed nothing, and any other call, one a later
+/// change adds with no row here too, may have run.
+const READS: &[&str] = &[
+    "Head",
+    "Settings",
+    "Users",
+    "GetUser",
+    "Crew",
+    "Peers",
+    "UserInbox",
+    "UserNotifications",
+    "DeliveryFiles",
+    "UserAsks",
+    "Arrivals",
+    "Flows",
+    "SourceGrants",
+    "SessionScreen",
+    "Bead",
+    "Conversation",
+];
+
+/// Whether the call `method` only reads.
+fn reads(method: &str) -> bool {
+    READS.contains(&method)
+}
+
 /// An I/O failure of a yard connection as the call's error: one that gave
 /// up for its timeout says the yard is slow, in plain words, and not the
-/// raw OS error; anything else says the yard is down.
-fn slow_or_down(err: io::Error, verb: &str) -> Error {
+/// raw OS error; anything else says the yard is down. `idempotent` is
+/// whether the request changes nothing ([`Error::Slow`]).
+fn slow_or_down(err: io::Error, idempotent: bool) -> Error {
     match timed_out(&err) {
-        true => Error::Slow {
-            idempotent: verb == "GET",
-        },
+        true => Error::Slow { idempotent },
         false => Error::Down(err),
     }
 }
 
 /// A response reader that already turned its I/O error into `Error`:
 /// classify a timeout the same way as the connection's direct reads.
-fn slow_error(err: Error, verb: &str) -> Error {
+fn slow_error(err: Error, idempotent: bool) -> Error {
     match err {
-        Error::Down(err) => slow_or_down(err, verb),
+        Error::Down(err) => slow_or_down(err, idempotent),
         other => other,
     }
 }
@@ -7637,7 +7674,7 @@ mod tests {
             // A GET the yard never answers is asked again, then said
             // plainly.
             yard.stall("/call/Head");
-            let Err(err) = client.send("GET", "/call/Head", "", "", Some(slow)) else {
+            let Err(err) = client.send("GET", "/call/Head", "", "", Some(slow), true) else {
                 panic!("{way}: a stalled yard answered");
             };
             assert!(
@@ -7658,7 +7695,7 @@ mod tests {
             );
             // A GET that answers the second time shows no error.
             yard.stall_once("/call/Crew");
-            let Ok((status, mut body)) = client.send("GET", "/call/Crew", "", "", Some(slow))
+            let Ok((status, mut body)) = client.send("GET", "/call/Crew", "", "", Some(slow), true)
             else {
                 panic!("{way}: the second try failed");
             };
@@ -7671,13 +7708,7 @@ mod tests {
             assert_eq!(take_said(), [gave_up("GET", "/call/Crew")], "{way}");
             // Anything else is asked once, and says it may have run.
             yard.stall("/call/Mail");
-            let Err(err) = client.send(
-                "POST",
-                "/call/Mail",
-                "Content-Type: application/json\r\nContent-Length: 2\r\n",
-                "{}",
-                Some(slow),
-            ) else {
+            let Err(err) = client.call_once("Mail", &json!({}), slow) else {
                 panic!("{way}: a stalled yard answered");
             };
             assert!(
@@ -7692,6 +7723,24 @@ mod tests {
             assert!(!err.to_string().contains("os error"), "{way}: {err}");
             assert_eq!(yard.asked("Mail").len(), 1, "{way}");
             assert_eq!(take_said(), [gave_up("POST", "/call/Mail")], "{way}");
+            // A read is a POST too, and changed nothing: it is said to be
+            // slow, as a GET is, not to have maybe run. Only a GET is asked
+            // again, so it is asked once.
+            yard.stall("/call/Flows");
+            let Err(err) = client.call_once("Flows", &json!({}), slow) else {
+                panic!("{way}: a stalled yard answered");
+            };
+            assert!(
+                matches!(err, Error::Slow { idempotent: true }),
+                "{way}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the yard is slow to answer; trying again",
+                "{way}"
+            );
+            assert_eq!(yard.asked("Flows").len(), 1, "{way}");
+            assert_eq!(take_said(), [gave_up("POST", "/call/Flows")], "{way}");
             // A stream whose head never comes is said plainly too.
             yard.stall("/events");
             let before = yard.requests();
@@ -7771,6 +7820,29 @@ mod tests {
             ]
         );
         server.join().unwrap();
+
+        // A call whose head came and whose body stops is told by the call
+        // too: a read is slow, a write may have run. Neither is asked again.
+        let short = b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort".to_vec();
+        for (method, idempotent) in [("Flows", true), ("Mail", false)] {
+            let (address, finished) = holding(short.clone());
+            let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+            let Err(err) = client.call_once(method, &json!({}), Duration::from_millis(100)) else {
+                panic!("{method}: a body that stops answered");
+            };
+            finished.join().unwrap();
+            assert!(
+                matches!(&err, Error::Slow { idempotent: said } if *said == idempotent),
+                "{method}: {err:?}"
+            );
+            assert_eq!(
+                take_said(),
+                [format!(
+                    "call failed: request=none method=POST path=/call/{method} outcome=timeout status=200 timeout=100ms"
+                )],
+                "{method}"
+            );
+        }
     }
 
     /// The connection to a yard at an address asks the other end after
@@ -7929,8 +8001,9 @@ mod tests {
     /// a row in README's tables of what the window reads and writes, saying
     /// when it is made: a new call ships its row. The names are found in the
     /// text of this file, passed through one of four helpers, so there is no
-    /// list to keep. One way only: `GET /blobs/<hash>` has a row and no name
-    /// to find.
+    /// list of them to keep. One way only: `GET /blobs/<hash>` has a row and
+    /// no name to find. The row is in the table of reads exactly when
+    /// `READS` has the name, which is what a timeout on the call says.
     #[test]
     fn the_readme_rows_every_literal_helper_call() {
         let source = include_str!("api.rs");
@@ -7977,6 +8050,37 @@ mod tests {
         assert!(
             rowless.is_empty(),
             "called in src/api.rs and with no row in README's tables: {rowless:?}"
+        );
+
+        // The table a call's row is in says whether a timeout on it is a
+        // read's (`reads`). A row's first cell names its calls: the second
+        // may speak of others.
+        let named = |table: &str| -> Vec<String> {
+            table
+                .lines()
+                .filter_map(|line| line.trim_start_matches('|').split('|').next())
+                .flat_map(|cell| cell.split('`').skip(1).step_by(2))
+                .map(str::to_string)
+                .collect()
+        };
+        let (read_rows, write_rows) = tables.split_once("| It writes |").unwrap();
+        let (read_rows, write_rows) = (named(read_rows), named(write_rows));
+        let misfiled: Vec<_> = calls
+            .iter()
+            .filter(|call| {
+                let rows = if reads(call) { &read_rows } else { &write_rows };
+                !rows.iter().any(|row| row == **call)
+            })
+            .collect();
+        assert!(
+            misfiled.is_empty(),
+            "in README's table of what it reads, and not in `READS` (or the other way about): {misfiled:?}"
+        );
+        // A name nothing calls says a timeout of nothing.
+        let stale: Vec<_> = READS.iter().filter(|name| !calls.contains(name)).collect();
+        assert!(
+            stale.is_empty(),
+            "in `READS` and called by nothing: {stale:?}"
         );
     }
 }

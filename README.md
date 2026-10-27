@@ -568,7 +568,9 @@ than one already applied of its kind is dropped. A failed read is made
 again 3 seconds later while the yard answers, until it does; the two Lines
 calls of an older yard stay marked as too old, and so does `DeliveryFiles`: its
 notices show no files. A yard that is not reached
-is read whole when it is back.
+is read whole when it is back. A read that gave up for its timeout says the
+yard is slow to answer, since it changed nothing; a write that did says the
+action may or may not have happened, and is not asked again.
 
 A stream says nothing while nothing happens, and so does one that a proxy
 or a tunnel holds open after the yard behind it went away. After a minute
