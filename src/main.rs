@@ -26,6 +26,7 @@ mod draft;
 mod fake;
 mod fetch;
 mod input;
+mod log;
 mod markdown;
 mod model;
 mod notify;

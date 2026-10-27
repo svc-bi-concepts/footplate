@@ -117,8 +117,9 @@ has the rest, a yard in WSL2 included).
    once for that file.
 
 To update, replace `footplate.exe` with the new one. To remove it, delete the
-folder you extracted, and `%APPDATA%\footplate`, where footplate keeps its
-settings and the token of each yard it is paired with.
+folder you extracted, `%APPDATA%\footplate`, where footplate keeps its
+settings and the token of each yard it is paired with, and
+`%LOCALAPPDATA%\footplate`, where it keeps its log.
 
 ## Building
 
@@ -959,9 +960,10 @@ the session itself stays signed in at the edge until it expires or is
 revoked, and the device stays at the yard until its operator removes it.
 
 A request that fails, at a hosted yard or any other, leaves one line on
-stderr, so that it can be found in the log the edge keeps of its own
-requests: the edge echoes its id for a request in `X-Edge-Request`, and the
-line names it, `none` where the answer carried none or never came:
+stderr and in footplate's own log (below), so that it can be found in the log
+the edge keeps of its own requests: the edge echoes its id for a request in
+`X-Edge-Request`, and the line names it, `none` where the answer carried none
+or never came:
 
     footplate: call failed: request=r-3f9a2c4d81b07e5a6c1d9e02 method=POST path=/call/Flows outcome=timeout status=none timeout=30s
 
@@ -974,6 +976,26 @@ fails leaves a line, so a GET asked again after a timeout leaves one for
 each, and so does a call that a server replacing itself refuses and that is
 made again. A request that answers leaves none, nor does a reply that came
 whole and is not the shape asked for. No token and no body is in a line.
+
+An app started by the Finder or by launchd has its stderr on `/dev/null`,
+and a Windows release has none, so the line is kept in a log of footplate's
+own as well, led by the time it was said:
+
+    2026-10-26T21:47:03.512+01:00 call failed: request=r-3f9a2c4d81b07e5a6c1d9e02 method=POST path=/call/Flows outcome=timeout status=none timeout=30s
+
+The time is the person's own clock, with its offset, to the millisecond. It
+is when the call gave up, so a timeout began its `timeout` earlier; where the
+edge gave no id (a connect that failed, a head that never came) it is what
+the edge's own log is found by. The log is
+`$XDG_STATE_HOME/footplate/footplate.log` when `XDG_STATE_HOME` is set,
+`~/Library/Logs/footplate/footplate.log` on macOS otherwise, and
+`~/.local/state/footplate/footplate.log` on Linux otherwise; on Windows
+`%LOCALAPPDATA%\footplate\footplate.log`, and nothing else. A relative
+`XDG_STATE_HOME` is ignored. A line that would take the file past 1 MiB moves
+it to `footplate.log.1` first, in the place of the one before, so between 1
+and 2 MiB of lines are kept once the log has grown so far. A line that cannot
+be kept is said so on stderr, and the call that failed is no more failed for
+it. The log stays on the machine: footplate sends it nowhere.
 
 The sign-in is Kratos's API login flow at the origin's `/kratos` path, as
 a native client uses it: one flow is opened
@@ -1009,7 +1031,9 @@ file beside them, `yard-<name>.token`, or the whole path a yard's
 profile folder is private to that user by default (other users cannot read
 it; administrators can), which is what mode 0600 stands for on a Mac or on
 Linux, where a token file others can read is refused. Keep a token file in
-the profile, and not in a folder others share.
+the profile, and not in a folder others share. The line a failed call leaves
+([A hosted yard](#a-hosted-yard)) is kept in `%LOCALAPPDATA%\footplate\footplate.log`,
+this machine's own and not the roaming profile the settings are in.
 
 **A yard on another machine.** As [A yard at an address](#a-yard-at-an-address)
 has it: "add a yard at an address", the `https://` address and the code its

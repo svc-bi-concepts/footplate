@@ -63,6 +63,10 @@ Platform surface:
 - `src/titlebar.rs`: the window's title bar options per platform, and on
   macOS, where the content reaches up into it, the drag and double-click on
   the window's top strip, which gpui has no call for there.
+- `src/log.rs`: what footplate says on stderr, kept as well in a file in the
+  platform's log directory, with the time, where an app started by the
+  Finder or launchd has no stderr to find it on; the path rules as plain
+  functions, then the file and its cap.
 
 Setup, release and tests:
 
@@ -100,9 +104,11 @@ Setup, release and tests:
   `src/window/firstrun.rs`.
 - A setting: `src/settings.rs`, then where it takes effect.
 - Platform surface (badge, tray, notifications, Linux icon, the Mac's
-  unlock, title bar): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
-  `src/taskbar.rs`, `src/unlock.rs`, `src/titlebar.rs`; rules stay plain
-  functions, system calls stay behind `cfg`.
+  unlock, title bar, log): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
+  `src/taskbar.rs`, `src/unlock.rs`, `src/titlebar.rs`, `src/log.rs`; rules
+  stay plain functions, system calls stay behind `cfg`. A test never writes
+  the person's own log: `api::say` keeps in the file its test's thread was
+  given (`tests::keep_in`), or none.
 - Screenshots: states in `src/shot.rs`, taken by `scripts/shot-linux.sh`;
   the states are named in `README.md`.
 - Releases: `scripts/release.sh` builds and lists each archive, stopping at

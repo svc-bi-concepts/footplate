@@ -31,6 +31,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::log;
+
 /// What footplate says it is to the yard. Nothing is decided by it today.
 const CLIENT: &str = concat!("footplate/", env!("CARGO_PKG_VERSION"));
 
@@ -3560,8 +3562,8 @@ fn slow_error(err: Error, idempotent: bool) -> Error {
 
 /// A request as it went out, with what is known of it when it fails. A
 /// failed request leaves one line on stderr, as `notify` and `tray` say what
-/// they could not do, so that the edge's own line for it, which names the
-/// same id, can be found:
+/// they could not do, and in the log beside it, led by the time ([`log`]),
+/// so that the edge's own line for it, which names the same id, can be found:
 ///
 /// `footplate: call failed: request=<id|none> method=<verb> path=<path> outcome=<outcome> status=<status|none> timeout=<limit|none>`
 ///
@@ -3603,11 +3605,19 @@ impl Sent<'_> {
     }
 }
 
-/// Says `line` on stderr, led by the program's name as its other lines are.
+/// Says `line` on stderr, led by the program's name as its other lines are,
+/// and keeps it in the log with the time ([`log`]): an app started by the
+/// Finder or by launchd has its stderr on /dev/null, and would lose it.
 fn say(line: &str) {
     #[cfg(test)]
     tests::said(line);
-    eprintln!("footplate: {line}");
+    // A test leaves the person's own log alone, and keeps in the file its
+    // thread was given, where it was given one.
+    #[cfg(test)]
+    let file = tests::log_file();
+    #[cfg(not(test))]
+    let file = log::file();
+    log::say(|text| eprintln!("{text}"), file.as_deref(), line);
 }
 
 /// Reads the status and the headers of a response, and gives its body.
@@ -3869,6 +3879,9 @@ mod tests {
     thread_local! {
         /// The lines the requests of this test said on stderr.
         static SAID: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// The file the requests of this test keep their lines in, where it
+        /// set one ([`keep_in`]).
+        static LOG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     }
 
     /// Where [`say`] leaves a line in a test, beside stderr, for the test
@@ -3880,6 +3893,21 @@ mod tests {
     /// The lines said since this was last asked, in order.
     fn take_said() -> Vec<String> {
         SAID.with(|said| std::mem::take(&mut *said.borrow_mut()))
+    }
+
+    /// The file [`say`] keeps its line in during a test: the one this test
+    /// set for its thread, else none, so that no test writes the person's
+    /// own log.
+    pub(super) fn log_file() -> Option<PathBuf> {
+        LOG.with(|file| file.borrow().clone())
+    }
+
+    /// Has the requests of this test keep their lines in a log under `dir`,
+    /// which is not there yet, and gives its file.
+    fn keep_in(dir: &std::path::Path) -> PathBuf {
+        let file = dir.join("footplate/footplate.log");
+        LOG.with(|kept| *kept.borrow_mut() = Some(file.clone()));
+        file
     }
 
     /// A port of this machine that answers every connection with `reply`
@@ -7407,9 +7435,16 @@ mod tests {
     /// no edge in front, an edge from before the header, a value that is no
     /// id): refused by the yard or by the edge, cut off, slow after its
     /// head, answered by the edge's own gateway error, and not answered at
-    /// all. One that answers leaves none.
+    /// all. One that answers leaves none. Each line is kept in the log as
+    /// well, led by the time, and a log at its cap is moved aside for a new
+    /// one ([`log`]).
     #[test]
     fn a_failed_call_leaves_one_line_with_the_edge_s_request_id() {
+        use chrono::SubsecRound as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = keep_in(dir.path());
+        let started = chrono::Local::now().trunc_subsecs(3).fixed_offset();
+        let mut said_all = Vec::new();
         let answer = |status: &str, headers: &str, body: &str| {
             format!(
                 "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -7552,13 +7587,15 @@ mod tests {
                 finished.join().unwrap();
             }
             assert_eq!(err.outcome(), outcome, "{name}: {err:?}");
+            let said = take_said();
             assert_eq!(
-                take_said(),
+                said,
                 [format!(
                     "call failed: request={id} method=POST path=/call/Head outcome={outcome} status={status} timeout={wait:?}"
                 )],
                 "{name}"
             );
+            said_all.extend(said);
         }
 
         let address = answering(answer(
@@ -7569,6 +7606,36 @@ mod tests {
         let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
         assert!(client.call_once("Head", &json!({}), ample).is_ok());
         assert_eq!(take_said(), Vec::<String>::new());
+
+        // The log has each line said, in order, led by the time it was
+        // said, and nothing of the call that answered.
+        let kept = std::fs::read_to_string(&file).unwrap();
+        let mut kept_lines = Vec::new();
+        for entry in kept.lines() {
+            let (at, line) = entry.split_once(' ').unwrap();
+            let at = chrono::DateTime::parse_from_rfc3339(at).unwrap();
+            assert!(started <= at && at <= chrono::Local::now(), "{entry}");
+            kept_lines.push(line.to_string());
+        }
+        assert_eq!(kept_lines, said_all);
+
+        // A log at its cap is moved aside whole when a line comes, and the
+        // line begins another: the history is there, and the log is not
+        // left to grow.
+        let full = "a".repeat(usize::try_from(log::CAP).unwrap());
+        std::fs::write(&file, &full).unwrap();
+        let address = answering(Vec::new());
+        let client = Client::remote(Address::parse(&address).unwrap(), TOKEN);
+        assert!(client.call_once("Head", &json!({}), ample).is_err());
+        let said = take_said();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let kept = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(kept.lines().count(), 1, "{kept}");
+        assert!(kept.ends_with(&format!(" {}\n", said[0])), "{kept}");
+        assert_eq!(
+            std::fs::read_to_string(file.with_extension("log.1")).unwrap(),
+            full
+        );
     }
 
     /// A 401 is told by its head, never by its words. Only the yard's own
