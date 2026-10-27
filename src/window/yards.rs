@@ -2167,46 +2167,56 @@ impl Footplate {
             .p_8()
             .child(img(self.icon.clone()).size(rems(4.5)))
             .child(
-                div()
-                    .max_w(rems(32.5))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(self.away_why().map(|told| {
+                // The words in the ways' own column, so the whole block
+                // is centred as one and the ways stand on the text's
+                // left edge. Three divs, as the ways have it below: the
+                // max stands on a block of its own, so the column under
+                // it has its width before its texts measure.
+                div().w_full().child(
+                    div().max_w(rems(32.5)).mx_auto().child(
                         div()
-                            .debug_selector(|| "away why".to_string())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(told)
-                    }))
-                    .children((!answers).then(|| {
-                        div()
-                            .debug_selector(|| "away lead".to_string())
-                            .child(self.away_lead(why))
-                    }))
-                    // Where no yard was ever made the socket, the error and
-                    // the hint at yardr status hide under details, shut at
-                    // first; anywhere else they stand as they did.
-                    .children(setup_here.then(|| self.away_details_line(palette, cx)))
-                    .children(
-                        (setup_here && self.away_details)
-                            .then(|| self.away_details_body(why, place.clone(), palette)),
-                    )
-                    .children(
-                        (!setup_here)
-                            .then(|| place.clone())
-                            .flatten()
-                            .map(|place| div().text_color(palette.faint).child(place)),
-                    )
-                    // Where the yard answers under a way's open fields,
-                    // one line says so, with the key that opens it, in
-                    // place of whether it is tried again.
-                    .children(answers.then(|| {
-                        div()
-                            .debug_selector(|| "away answers".to_string())
-                            .text_color(palette.faint)
-                            .child("This yard answers again: esc opens it.")
-                    }))
-                    .children((!answers).then(|| div().text_color(palette.faint).child(again))),
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(self.away_why().map(|told| {
+                                div()
+                                    .debug_selector(|| "away why".to_string())
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(told)
+                            }))
+                            .children((!answers).then(|| {
+                                div()
+                                    .debug_selector(|| "away lead".to_string())
+                                    .child(self.away_lead(why))
+                            }))
+                            // Where no yard was ever made the socket, the error and
+                            // the hint at yardr status hide under details, shut at
+                            // first; anywhere else they stand as they did.
+                            .children(setup_here.then(|| self.away_details_line(palette, cx)))
+                            .children(
+                                (setup_here && self.away_details)
+                                    .then(|| self.away_details_body(why, place.clone(), palette)),
+                            )
+                            .children(
+                                (!setup_here)
+                                    .then(|| place.clone())
+                                    .flatten()
+                                    .map(|place| div().text_color(palette.faint).child(place)),
+                            )
+                            // Where the yard answers under a way's open fields,
+                            // one line says so, with the key that opens it, in
+                            // place of whether it is tried again.
+                            .children(answers.then(|| {
+                                div()
+                                    .debug_selector(|| "away answers".to_string())
+                                    .text_color(palette.faint)
+                                    .child("This yard answers again: esc opens it.")
+                            }))
+                            .children(
+                                (!answers).then(|| div().text_color(palette.faint).child(again)),
+                            ),
+                    ),
+                ),
             )
             // The ways to a yard: one entry each, and a further way is one
             // more. The environment's yard is the one there is, and has
@@ -2279,11 +2289,13 @@ impl Footplate {
             })
             // The actions stand in their own row under the ways, in the
             // ways' own column, so no button ever stands on a way's
-            // lines. A yard at an address that is away for whatever
-            // reason: the device can be paired again, which is what
-            // helps when the yard no longer knows it. Where the session
-            // is what is out, pairing again helps nothing, so it is not
-            // offered. A hosted yard that is away: its session can be
+            // lines. Apart from the ways on purpose: pairing rights the
+            // yard that is away, where a way opens another. A yard at
+            // an address that is away for whatever reason: the device
+            // can be paired again, which is what helps when the yard no
+            // longer knows it. Where the session is what is out,
+            // pairing again helps nothing, so it is not offered. A hosted
+            // yard that is away: its session can be
             // signed in again, which is what helps when the edge no
             // longer knows it. The one yard the environment names is
             // reached direct, and is signed in nowhere.

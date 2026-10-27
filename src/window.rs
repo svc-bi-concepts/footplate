@@ -19625,7 +19625,8 @@ yardr.dev
         );
     }
 
-    /// On the away screen of a yard at an address, with a way's fields
+    /// On the away screen of a yard at an address, the ways and pair
+    /// again share the text column's left edge; with a way's fields
     /// open, the pair-again row stands fully below the help text: with
     /// the short help and the long, at the window's size and a narrow
     /// one.
@@ -19669,6 +19670,17 @@ yardr.dev
             view.read_with(cx, |v, _| v.away == Away::Out)
         });
         assert!(drawn(cx, "pair again"));
+        // The ways and pair again share the text column's left edge: one
+        // block, centred as one.
+        let text = bounds_of(cx, "away lead");
+        for at in ["way near", "way far", "way hosted", "pair again"] {
+            assert!(drawn(cx, at), "{at}");
+            let el = bounds_of(cx, at);
+            assert!(
+                (el.left() - text.left()).abs() < px(1.),
+                "{at} stands left of the text column: {el:?} {text:?}"
+            );
+        }
         for way in ["way near", "way far"] {
             click_on(cx, way);
             assert!(drawn(cx, "yard help"), "{way}");
@@ -19701,6 +19713,72 @@ yardr.dev
             assert!(
                 again.top() >= help.bottom() - px(1.),
                 "pair again stands on the help's lines ({way}, narrow): {again:?} {help:?}"
+            );
+        }
+    }
+
+    /// A hosted yard the edge turns away before it was ever reached: the
+    /// away screen's words are short, and the ways and pair again still
+    /// share the text column's left edge, one block centred as one.
+    // Unix: asserts the way to a yard of this machine by its socket, which
+    // Windows does not offer.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_hosted_yard_the_edge_turns_away_shares_one_left_edge(cx: &mut TestAppContext) {
+        use crate::fake::{Router, SESSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        let edge = Router::start(&far, SESSION);
+        edge.away("the yard is away");
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default()
+            .with_yard(
+                None,
+                settings::Yard::hosted(
+                    "south",
+                    edge.address(),
+                    "yard-south.token",
+                    "yard-south.session",
+                ),
+                Some(&file),
+            )
+            .unwrap()
+            .opening("south")
+            .write(&file)
+            .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-south.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let env = Env {
+            socket: near.socket().to_path_buf(),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| {
+                v.down
+                    .as_deref()
+                    .is_some_and(|why| why.starts_with("The yard is away"))
+            })
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.away), Away::Trying);
+        // A wide window, as the report's: the text is short, and the
+        // columns it would shrink beside are at their max.
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        let text = bounds_of(cx, "away lead");
+        for at in ["way near", "way far", "way hosted", "pair again"] {
+            assert!(drawn(cx, at), "{at}");
+            let el = bounds_of(cx, at);
+            assert!(
+                (el.left() - text.left()).abs() < px(1.),
+                "{at} stands left of the text column: {el:?} {text:?}"
             );
         }
     }

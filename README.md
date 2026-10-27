@@ -749,6 +749,9 @@ of the list is said under the fields, and Esc leaves them. The ways stand
 under any yard that is away, also one that no longer lets this device in,
 but not in a window of the one yard `FOOTPLATE_YARD` names, which has no
 list to add to. None of these three creates a yard or starts one. Where
+the yard that is away is one at an address, "pair again" stands under the
+ways on their edge, apart from them: it rights the yard that is away,
+where a way opens another. Where
 the yard that is away answers while a way's fields are open, the fields
 and the screen stand until `esc` leaves them, and the screen says the
 yard answers again: what is typed stays in the field.
@@ -903,7 +906,7 @@ settings, or `cmd+1` to `cmd+9`, open another.
 removed the device (`yardr user device rm`), or the token is another
 yard's. That does not pass by itself, so footplate says so and stops
 asking: no call, no stream, until the device has a token again. "pair
-again" under the words opens the settings on that yard, for a new code. A
+again" under the ways opens the settings on that yard, for a new code. A
 yard that has no device at all answers 404 under
 `/user/`, to a token as to none, and so does an address that is no yard's
 listener: the window says that, offers the same, and goes on trying every
