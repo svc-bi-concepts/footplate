@@ -2129,10 +2129,9 @@ impl Footplate {
         let alone = self.env.yard.is_some();
         let setup_here = self.sets_up_here();
         let again = match self.away {
-            Away::Trying => format!(
-                "footplate tries again every {} seconds.",
-                session::RETRY.as_secs()
-            ),
+            Away::Trying => {
+                "footplate tries again, waiting longer between tries.".to_string()
+            }
             Away::Out => {
                 "footplate does not ask again until this device has a token again.".to_string()
             }

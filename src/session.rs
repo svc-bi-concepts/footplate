@@ -1,17 +1,36 @@
 //! Following a yard: who the window is for, the state it starts from, and
 //! the stream from then on, on a thread of its own. When the yard is not
-//! there, or goes away, it says so and tries again every few seconds.
+//! there, or goes away, it says so and tries again, waiting longer between
+//! tries.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+#[cfg(test)]
 use std::thread;
 use std::time::Duration;
 
 use crate::api::{self, Arrivals, Client, Event, Flows};
 use crate::model::{self, State};
 
-/// How long until the yard is tried again.
+/// How long until the yard is tried again after a failed read: the first
+/// wait, doubled for each failure in a row up to [`BACKOFF_CAP`].
 pub const RETRY: Duration = Duration::from_secs(3);
+
+/// The longest a failed state read waits before the yard is tried again.
+/// On a slow yard every call is work, so retrying at the fixed retry adds
+/// load exactly when the yard is slowest; waiting longer between tries
+/// asks a yard that stays away about once a minute, not twenty times.
+pub const BACKOFF_CAP: Duration = Duration::from_secs(60);
+
+/// How long until the yard is tried again after `failed` state reads in a
+/// row failed: the retry, doubled for each failure past the first, up to
+/// [`BACKOFF_CAP`]. A read that answers resets the count, so a yard that
+/// flaps is tried at the retry again.
+fn backoff(retry: Duration, failed: u32) -> Duration {
+    retry
+        .saturating_mul(1 << failed.saturating_sub(1).min(30))
+        .min(BACKOFF_CAP)
+}
 
 /// A stream that ends is opened again at once when the server only replaces
 /// itself with a newer build; this is the moment between the two.
@@ -22,18 +41,18 @@ const REPLACING_PAUSE: Duration = Duration::from_millis(100);
 /// tunnel holds open after the yard behind it went away, while the yard
 /// moves on. After `quiet` with nothing the yard is asked its head, on a
 /// connection of its own. A head beyond the last event read gives that
-/// event `late` more to come, since it may be on its way; after that the
-/// stream is stuck, and is replaced as when a stream ends.
+/// event `quiet` more to come, since it may be on its way: a stream that
+/// is late but not broken is waited for, not replaced at once, since on
+/// a slow yard replacing it only adds calls. After that the stream is
+/// stuck, and is replaced as when a stream ends.
 #[derive(Debug, Clone, Copy)]
 pub struct Watch {
     pub quiet: Duration,
-    pub late: Duration,
 }
 
-/// A stuck stream is replaced within about a minute and a few seconds.
+/// A stuck stream is replaced within about two minutes and a few seconds.
 pub const WATCH: Watch = Watch {
     quiet: Duration::from_secs(60),
-    late: Duration::from_secs(5),
 };
 
 /// What the thread tells the window.
@@ -62,31 +81,52 @@ struct Following {
     stream: Option<api::EventStop>,
 }
 
-/// Stops a yard follower, including an event stream blocked waiting for the
-/// next event. The window keeps one for each yard it follows, which is every
-/// yard of its settings.
+#[derive(Default)]
+struct FollowState {
+    following: Mutex<Following>,
+    changed: Condvar,
+}
+
+/// Stops a yard follower, waking it from a retry wait or an event stream
+/// blocked waiting for the next event. The window keeps one for each yard
+/// it follows, which is every yard of its settings.
 #[derive(Clone, Default)]
-pub struct FollowControl(Arc<Mutex<Following>>);
+pub struct FollowControl(Arc<FollowState>);
 
 impl FollowControl {
     pub fn stop(&self) {
         let stream = {
-            let mut following = self.0.lock().unwrap();
+            let mut following = self.0.following.lock().unwrap();
             following.stopped = true;
             following.stream.take()
         };
+        self.0.changed.notify_all();
         if let Some(stream) = stream {
             stream.stop();
         }
     }
 
     fn stopped(&self) -> bool {
-        self.0.lock().unwrap().stopped
+        self.0.following.lock().unwrap().stopped
+    }
+
+    /// Waits for `duration`, or until the window no longer follows this yard.
+    fn wait(&self, duration: Duration) -> bool {
+        let following = self.0.following.lock().unwrap();
+        if following.stopped {
+            return true;
+        }
+        self.0
+            .changed
+            .wait_timeout_while(following, duration, |following| !following.stopped)
+            .unwrap()
+            .0
+            .stopped
     }
 
     fn follow_stream(&self, stream: api::EventStop) {
         let stop = {
-            let mut following = self.0.lock().unwrap();
+            let mut following = self.0.following.lock().unwrap();
             if following.stopped {
                 Some(stream)
             } else {
@@ -100,7 +140,7 @@ impl FollowControl {
     }
 
     fn stream_ended(&self) {
-        self.0.lock().unwrap().stream = None;
+        self.0.following.lock().unwrap().stream = None;
     }
 }
 
@@ -402,7 +442,7 @@ fn stream(
                     behind = false;
                 }
                 Ok(_) if !behind => {
-                    if events.set_quiet(watch.late).is_err() {
+                    if events.set_quiet(watch.quiet).is_err() {
                         break;
                     }
                     behind = true;
@@ -438,7 +478,8 @@ fn stream(
 /// again that is the one last told, with nothing heard since, is not told
 /// again, so that a quiet yard whose stream cannot be kept changes nothing
 /// in the window. When the state cannot be read the window is told why, and
-/// the yard is tried again after `retry`. A yard that does not let the
+/// the yard is tried again, waiting longer between tries: `retry`, doubled
+/// for each failure in a row, up to a minute. A yard that does not let the
 /// device in, or the edge that does not let the session in, is not tried
 /// again: the window is told, and this returns.
 /// The handle stops the current stream from another thread, so switching
@@ -455,12 +496,16 @@ pub fn follow_with_control(
 ) {
     // The state last told as the window's, until the yard is away from it.
     let mut told: Option<State> = None;
+    // How many state reads in a row failed: the wait before the next try
+    // doubles with it, so a yard that stays away is asked less and less.
+    let mut failed: u32 = 0;
     loop {
         if control.stopped() {
             return;
         }
         let trouble = match load(client, name) {
             Ok(state) => {
+                failed = 0;
                 let mut read = state.head;
                 if told.as_ref() != Some(&state) {
                     told = Some(state.clone());
@@ -487,11 +532,14 @@ pub fn follow_with_control(
                     // A stream that ended: a server that replaces itself is
                     // back in a moment. One that gave nothing before it
                     // ended is not asked again in a loop without a pause.
-                    thread::sleep(if streamed.heard {
+                    let pause = if streamed.heard {
                         REPLACING_PAUSE
                     } else {
                         retry
-                    });
+                    };
+                    if control.wait(pause) {
+                        return;
+                    }
                     // A yard that is at or past what was read has all that
                     // came after it to send again.
                     if !streamed.resumes || !client.head().is_ok_and(|at| at >= read) {
@@ -519,7 +567,10 @@ pub fn follow_with_control(
         if control.stopped() {
             return;
         }
-        thread::sleep(retry);
+        failed = failed.saturating_add(1);
+        if control.wait(backoff(retry, failed)) {
+            return;
+        }
     }
 }
 
@@ -1154,7 +1205,6 @@ mod tests {
         a_yard_of_jo(&yard);
         let watch = Watch {
             quiet: Duration::from_millis(100),
-            late: Duration::from_millis(100),
         };
         let rx = following(&yard, watch);
         yard.mute();
@@ -1261,7 +1311,6 @@ mod tests {
         yard.stall_once("/events");
         let watch = Watch {
             quiet: Duration::from_millis(100),
-            late: Duration::from_millis(100),
         };
         let rx = following(&yard, watch);
         assert_eq!(yard.asked("UserInbox").len(), 2);
@@ -1286,7 +1335,6 @@ mod tests {
         a_yard_of_jo(&yard);
         let watch = Watch {
             quiet: Duration::from_millis(50),
-            late: Duration::from_millis(50),
         };
         let rx = following(&yard, watch);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1305,14 +1353,16 @@ mod tests {
     }
 
     /// A head beyond what the stream brought gives the event a moment
-    /// more to come: one that comes in it leaves the stream as it is.
+    /// more to come: one that comes in it leaves the stream as it is. A
+    /// stream that is late but not broken is waited for up to the quiet
+    /// limit: an event that arrives after a quiet of lateness still comes
+    /// down the stream it was waited for on, with the state left as it was.
     #[test]
     fn an_event_on_its_way_is_given_a_moment_to_come() {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let watch = Watch {
-            quiet: Duration::from_millis(100),
-            late: Duration::from_secs(5),
+            quiet: Duration::from_millis(300),
         };
         let rx = following(&yard, watch);
         yard.answer("Head", r#"{"result": 21}"#);
@@ -1333,6 +1383,23 @@ mod tests {
         }
         assert_eq!(yard.streams_asked(), vec![20]);
         assert!(rx.try_recv().is_err());
+
+        // Late: the head moves again, and the event is most of a quiet
+        // behind it. The stream is waited for, not replaced, and the state
+        // is not read again.
+        yard.answer("Head", r#"{"result": 22}"#);
+        let asked = yard.asked("Head").len();
+        while yard.asked("Head").len() < asked + 1 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(200));
+        yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "newer"}}"#);
+        let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the late event, down the stream it was waited for on")
+        };
+        assert_eq!(event.seq, 22);
+        assert_eq!(yard.streams_asked(), vec![20]);
+        assert_eq!(yard.asked("UserInbox").len(), 1);
     }
 
     /// The yard's last device removed: it answers 404 then, to a token as
@@ -1403,6 +1470,24 @@ mod tests {
         }
     }
 
+    /// A failed state read waits the retry, doubled for each failure in a
+    /// row, up to a minute: a yard that flaps is tried at the retry again,
+    /// one that stays away about once a minute.
+    #[test]
+    fn a_failed_state_read_waits_longer_between_tries_up_to_a_minute() {
+        let retry = Duration::from_secs(3);
+        assert_eq!(backoff(retry, 1), Duration::from_secs(3));
+        assert_eq!(backoff(retry, 2), Duration::from_secs(6));
+        assert_eq!(backoff(retry, 3), Duration::from_secs(12));
+        assert_eq!(backoff(retry, 5), Duration::from_secs(48));
+        assert_eq!(backoff(retry, 6), Duration::from_secs(60));
+        assert_eq!(backoff(retry, 60), Duration::from_secs(60));
+        assert_eq!(backoff(retry, u32::MAX), Duration::from_secs(60));
+        let quick = Duration::from_millis(20);
+        assert_eq!(backoff(quick, 1), Duration::from_millis(20));
+        assert_eq!(backoff(quick, 4), Duration::from_millis(160));
+    }
+
     #[test]
     fn nothing_answering_at_an_address_is_said_as_it_is_there_and_tried_again() {
         let yard = Yard::start_tcp();
@@ -1431,8 +1516,48 @@ mod tests {
             assert_eq!(short, NOTHING_ANSWERS);
             assert!(!why.contains("socket"), "{why}");
         }
+        // And waiting longer between tries: in half a second a yard that
+        // answers nothing is asked a handful of times, not every retry.
+        // The waits double from the retry, so five reads fall in 500 of
+        // those milliseconds; six still pass, and a thread that is slow to
+        // wake only asks less.
+        let start = std::time::Instant::now();
+        let mut downs = 2;
+        while start.elapsed() < Duration::from_millis(500) {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Update::Down(..)) => downs += 1,
+                Ok(update) => panic!("the yard is not there: {update:?}"),
+                Err(_) => {}
+            }
+        }
+        assert!(downs <= 6, "{downs}");
         drop(rx);
         follower.join().unwrap();
+
+        // Replacing this yard while its next retry is backed off wakes the
+        // follower at once instead of keeping its thread around for five
+        // seconds.
+        let yard = Yard::start_tcp();
+        let client = yard.client();
+        yard.stop();
+        let control = FollowControl::default();
+        let follower_control = control.clone();
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn(move || {
+            follow_with_control(
+                &client,
+                "jo",
+                Duration::from_secs(5),
+                WATCH,
+                follower_control,
+                |update| tx.send(update).is_ok(),
+            )
+        });
+        assert!(matches!(rx.recv_timeout(wait).unwrap(), Update::Down(..)));
+        let stopped = std::time::Instant::now();
+        control.stop();
+        follower.join().unwrap();
+        assert!(stopped.elapsed() < Duration::from_secs(2));
     }
 
     #[cfg(unix)]

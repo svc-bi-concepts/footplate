@@ -16890,7 +16890,6 @@ yardr.dev
         let file = two_yards(dir.path(), &second);
         let watch = session::Watch {
             quiet: Duration::from_millis(300),
-            late: Duration::from_millis(300),
         };
         let (view, cx) = watched(&near, &file, watch, cx);
         wait(cx, "this machine's yard", |cx| {
@@ -16919,7 +16918,7 @@ yardr.dev
         // at once when found stuck, not after a retry's pause.
         let took = raised.elapsed();
         assert!(
-            took < watch.quiet + watch.late + Duration::from_secs(2),
+            took < watch.quiet + watch.quiet + Duration::from_secs(2),
             "{took:?}"
         );
         assert_eq!(open_yard(&view, cx), "this machine");
