@@ -1271,10 +1271,21 @@ mod tests {
         assert!(signed_out.starts_with("Pairing failed:"));
         assert!(signed_out.contains("Sign in again, then pair this device."));
 
-        let slow = pairing_failure(api::Error::Slow { idempotent: false });
+        let slow = pairing_failure(api::Error::Slow {
+            idempotent: false,
+            sent: true,
+        });
         assert!(slow.starts_with("The yard did not answer in time"));
         assert!(slow.contains("pairing may or may not have happened"));
         assert!(slow.contains("Check whether this device is paired"));
+
+        let unsent = pairing_failure(api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        });
+        assert!(unsent.starts_with("Pairing failed because the yard did not answer in time"));
+        assert!(unsent.contains("Nothing was paired"));
+        assert!(unsent.contains("try the code again"));
     }
 
     #[test]

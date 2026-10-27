@@ -5790,13 +5790,21 @@ pub fn given_line(given: &api::Given) -> String {
 
 /// Why a secret was not given, for the card. A call that ended without an
 /// answer may have written the value all the same, so it is never said to
-/// be sent or not sent; a yard that does not have the call sends its person
-/// to a terminal. The words hold what the yard said and never a value.
+/// be sent or not sent, unless the connect gave up, which sent nothing; a
+/// yard that does not have the call sends its person to a terminal. The
+/// words hold what the yard said and never a value.
 pub fn not_given(err: &api::Error, bead: &str, ask: u64) -> String {
     match err {
-        api::Error::Down(_) | api::Error::Protocol(_) | api::Error::Slow { idempotent: false } => {
-            "the yard did not answer. The value may be written. Give it again.".to_string()
-        }
+        api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        } => "the yard did not answer. The value was not written. Give it again.".to_string(),
+        api::Error::Down(_)
+        | api::Error::Protocol(_)
+        | api::Error::Slow {
+            idempotent: false,
+            sent: true,
+        } => "the yard did not answer. The value may be written. Give it again.".to_string(),
         err if err.may_have_run() => {
             "the yard did not answer. The value may be written. Give it again.".to_string()
         }
@@ -6214,13 +6222,21 @@ pub fn setup_approve_command(bead: &str, ask: u64, setup: &Setup) -> String {
 
 /// Why a run or setup ask was not approved, for the card. A call that
 /// ended without an answer may have run all the same, so it is never said
-/// to be approved or not: the card, read again, says which. A refusal is
-/// the yard's words, whole.
+/// to be approved or not: the card, read again, says which, unless the
+/// connect gave up, which sent nothing. A refusal is the yard's words,
+/// whole.
 pub fn not_approved(err: &api::Error) -> String {
     match err {
-        api::Error::Down(_) | api::Error::Protocol(_) | api::Error::Slow { idempotent: false } => {
-            "the yard did not answer; read the card again".to_string()
-        }
+        api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        } => "the yard did not answer; nothing was approved. Approve it again.".to_string(),
+        api::Error::Down(_)
+        | api::Error::Protocol(_)
+        | api::Error::Slow {
+            idempotent: false,
+            sent: true,
+        } => "the yard did not answer; read the card again".to_string(),
         err if err.may_have_run() => "the yard did not answer; read the card again".to_string(),
         _ => format!("not approved: {err}"),
     }
@@ -14060,7 +14076,10 @@ mod tests {
         for none in [
             api::Error::Down(std::io::Error::other("the yard went away")),
             api::Error::Protocol("ApproveAsk: status 200, and no JSON object".into()),
-            api::Error::Slow { idempotent: false },
+            api::Error::Slow {
+                idempotent: false,
+                sent: true,
+            },
             // The edge heard nothing back in time; away and busy never sent it.
             api::Error::Refused {
                 code: "no_answer".into(),
@@ -14073,6 +14092,16 @@ mod tests {
                 "the yard did not answer; read the card again"
             );
         }
+        // A connect that gave up sent nothing: it is safe to approve again.
+        let unsent = api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        };
+        assert!(!approves_elsewhere(&unsent));
+        assert_eq!(
+            not_approved(&unsent),
+            "the yard did not answer; nothing was approved. Approve it again."
+        );
         // A refusal is the yard's words, whole.
         let stale = "ask 2710 says the link with airy takes 30 mails an hour now, and it takes 100: the card is from before that changed. Nothing ran. Decline it; it is asked again if it is still wanted.";
         assert!(!approves_elsewhere(&refused(stale)));
@@ -14630,7 +14659,10 @@ mod tests {
         for err in [
             api::Error::Down(gone),
             api::Error::Protocol("GiveSecret: status 200, and no JSON object".into()),
-            api::Error::Slow { idempotent: false },
+            api::Error::Slow {
+                idempotent: false,
+                sent: true,
+            },
             api::Error::Refused {
                 code: "no_answer".into(),
                 message: "the yard gave no answer in time".into(),
@@ -14642,6 +14674,15 @@ mod tests {
                 "the yard did not answer. The value may be written. Give it again."
             );
         }
+        // A connect that gave up sent nothing: the value was not written.
+        let unsent = api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        };
+        assert_eq!(
+            not_given(&unsent, "yd-crm", 18),
+            "the yard did not answer. The value was not written. Give it again."
+        );
         // A yard that does not have the call: the terminal on its machine.
         assert_eq!(
             not_given(&refused("no such method GiveSecret"), "yd-crm", 18),

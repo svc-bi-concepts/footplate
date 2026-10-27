@@ -92,7 +92,9 @@ pub enum Error {
     /// again first, and a read is read again by the window. Anything else
     /// was asked once, and may have run. A call is a POST whether it reads
     /// or writes, so it is told by the call (`reads`) and not by the verb.
-    Slow { idempotent: bool },
+    /// `sent` says the request went out: a connect that gave up sent
+    /// nothing, so its write is said to be unsent and safe to send again.
+    Slow { idempotent: bool, sent: bool },
     /// The call reached the yard, and the yard said no. `message` is a
     /// sentence for a person: shown, never read.
     Refused { code: String, message: String },
@@ -167,10 +169,19 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Down(err) => write!(f, "the yard does not answer ({err})"),
-            Error::Slow { idempotent: true } => {
-                f.write_str("the yard is slow to answer; trying again")
-            }
-            Error::Slow { idempotent: false } => f.write_str(
+            Error::Slow {
+                idempotent: true, ..
+            } => f.write_str("the yard is slow to answer; trying again"),
+            Error::Slow {
+                idempotent: false,
+                sent: false,
+            } => f.write_str(
+                "the yard did not answer in time, and nothing was sent; it is safe to send again",
+            ),
+            Error::Slow {
+                idempotent: false,
+                sent: true,
+            } => f.write_str(
                 "the yard did not answer in time, and the action may or may not have happened",
             ),
             Error::Refused { message, .. } => f.write_str(message),
@@ -2081,10 +2092,11 @@ fn pair_with(
     timeout: Duration,
 ) -> Result<Paired> {
     let body = json!({ "code": code }).to_string();
-    // A pairing is no read: a timed out one may already have made the device.
+    // A pairing is no read: a timed out one may already have made the
+    // device, unless the connect gave up, which sent nothing.
     let mut conn = address
         .connect(Some(timeout))
-        .map_err(|err| slow_or_down(err, false))?;
+        .map_err(|err| connect_error(err.into(), false))?;
     let edge = session
         .filter(|session| is_token(session))
         .map(|session| format!("X-Edge-Token: {session}\r\n"))
@@ -2652,7 +2664,13 @@ impl Client {
     ) -> Result<(u16, Body)> {
         let mut tries = if verb == "GET" { SLOW_RETRIES + 1 } else { 1 };
         loop {
-            match self.send_once(verb, path, headers, body, timeout) {
+            match self.send_once(verb, path, headers, body, timeout, idempotent) {
+                // A GET whose connect gave up is asked again too: it sent
+                // nothing, and only a GET has another try.
+                Err(Error::Slow { sent: false, .. }) if tries > 1 => {
+                    tries -= 1;
+                    thread::sleep(SLOW_PAUSE);
+                }
                 Err(Error::Down(err)) if timed_out(&err) && tries > 1 => {
                     tries -= 1;
                     thread::sleep(SLOW_PAUSE);
@@ -2681,7 +2699,7 @@ impl Client {
         let mut tries = SLOW_RETRIES + 1;
         loop {
             let result = (|| {
-                let (status, mut body) = self.send_once("GET", path, headers, "", timeout)?;
+                let (status, mut body) = self.send_once("GET", path, headers, "", timeout, true)?;
                 let mut bytes = Vec::new();
                 if read_body(status) {
                     let request = body.request.clone();
@@ -2698,6 +2716,12 @@ impl Client {
                 Ok((status, bytes, body.request))
             })();
             match result {
+                // A GET whose connect gave up is asked again too: it sent
+                // nothing.
+                Err(Error::Slow { sent: false, .. }) if tries > 1 => {
+                    tries -= 1;
+                    thread::sleep(SLOW_PAUSE);
+                }
                 Err(Error::Down(err)) if timed_out(&err) && tries > 1 => {
                     tries -= 1;
                     thread::sleep(SLOW_PAUSE);
@@ -2716,9 +2740,11 @@ impl Client {
     /// yard the session token in `X-Edge-Token` beside that, naming which
     /// of the account's yards in `X-Edge-Yard` where one is set.
     /// `headers` are whole lines. A call's answer is waited for `timeout`
-    /// long. A request that fails before its answer is in hand, and a 401,
-    /// leave their line ([`Sent`]) here; what a caller refuses of an answer
-    /// it has, it leaves.
+    /// long. `idempotent` is whether the request changes nothing: a
+    /// connect that gave up sent nothing, and is said so
+    /// ([`connect_error`]). A request that fails before its answer is in
+    /// hand, and a 401, leave their line ([`Sent`]) here; what a caller
+    /// refuses of an answer it has, it leaves.
     fn send_once(
         &self,
         verb: &str,
@@ -2726,6 +2752,7 @@ impl Client {
         headers: &str,
         body: &str,
         timeout: Option<Duration>,
+        idempotent: bool,
     ) -> Result<(u16, Body)> {
         let sent = Sent {
             verb,
@@ -2745,7 +2772,7 @@ impl Client {
         };
         let (mut conn, head) = self
             .open(verb, path, timeout)
-            .map_err(|err| connecting.failed(err))?;
+            .map_err(|err| connecting.failed(connect_error(err, idempotent)))?;
         // In one write: over TLS each write is a record of its own.
         conn.write_all(format!("{head}X-Yardr-Client: {CLIENT}\r\n{headers}\r\n{body}").as_bytes())
             .and_then(|()| conn.flush())
@@ -3494,7 +3521,10 @@ impl Iterator for Events {
                     return Some(Err(Error::Silent));
                 }
                 Err(err) if timed_out(&err) => {
-                    return Some(Err(Error::Slow { idempotent: true }));
+                    return Some(Err(Error::Slow {
+                        idempotent: true,
+                        sent: true,
+                    }));
                 }
                 Err(err) => return Some(Err(Error::Down(err))),
             }
@@ -3543,11 +3573,29 @@ fn reads(method: &str) -> bool {
 /// An I/O failure of a yard connection as the call's error: one that gave
 /// up for its timeout says the yard is slow, in plain words, and not the
 /// raw OS error; anything else says the yard is down. `idempotent` is
-/// whether the request changes nothing ([`Error::Slow`]).
+/// whether the request changes nothing ([`Error::Slow`]). The request went
+/// out: this is past the connect.
 fn slow_or_down(err: io::Error, idempotent: bool) -> Error {
     match timed_out(&err) {
-        true => Error::Slow { idempotent },
+        true => Error::Slow {
+            idempotent,
+            sent: true,
+        },
         false => Error::Down(err),
+    }
+}
+
+/// A connect that failed as the call's error: one that gave up for its
+/// timeout sent nothing, so its write is said to be unsent and safe to
+/// send again ([`Error::Slow`]); anything else says the yard is down, as
+/// ever. `idempotent` is whether the request changes nothing.
+fn connect_error(err: Error, idempotent: bool) -> Error {
+    match err {
+        Error::Down(io) if timed_out(&io) => Error::Slow {
+            idempotent,
+            sent: false,
+        },
+        other => other,
     }
 }
 
@@ -6060,7 +6108,16 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("the stalled pairing answered"),
         };
-        assert!(matches!(&err, Error::Slow { idempotent: false }), "{err:?}");
+        assert!(
+            matches!(
+                &err,
+                Error::Slow {
+                    idempotent: false,
+                    sent: true
+                }
+            ),
+            "{err:?}"
+        );
         assert_eq!(
             err.to_string(),
             "the yard did not answer in time, and the action may or may not have happened"
@@ -7737,7 +7794,20 @@ mod tests {
             (Error::Down(io::ErrorKind::ConnectionReset.into()), "down"),
             (Error::Down(io::ErrorKind::TimedOut.into()), "timeout"),
             (Error::Down(io::ErrorKind::WouldBlock.into()), "timeout"),
-            (Error::Slow { idempotent: true }, "timeout"),
+            (
+                Error::Slow {
+                    idempotent: true,
+                    sent: true,
+                },
+                "timeout",
+            ),
+            (
+                Error::Slow {
+                    idempotent: false,
+                    sent: false,
+                },
+                "timeout",
+            ),
             (Error::Silent, "timeout"),
             (Error::NotLetIn, "refused"),
             (Error::NotSignedIn, "refused"),
@@ -7913,7 +7983,16 @@ mod tests {
         let Err(err) = events.next().unwrap() else {
             panic!("the partial event was complete");
         };
-        assert!(matches!(&err, Error::Slow { idempotent: true }), "{err:?}");
+        assert!(
+            matches!(
+                &err,
+                Error::Slow {
+                    idempotent: true,
+                    sent: true
+                }
+            ),
+            "{err:?}"
+        );
         assert_eq!(err.to_string(), "the yard is slow to answer; trying again");
     }
 
@@ -7934,7 +8013,16 @@ mod tests {
         let Err(err) = client.events(20, Duration::from_millis(100)) else {
             panic!("a held stream opened");
         };
-        assert!(matches!(err, Error::Slow { idempotent: true }), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                Error::Slow {
+                    idempotent: true,
+                    sent: true
+                }
+            ),
+            "{err:?}"
+        );
         assert_eq!(err.to_string(), "the yard is slow to answer; trying again");
         assert!(asked.elapsed() < Duration::from_secs(1));
         held.join().unwrap();
@@ -7973,7 +8061,13 @@ mod tests {
                 panic!("{way}: a stalled yard answered");
             };
             assert!(
-                matches!(err, Error::Slow { idempotent: true }),
+                matches!(
+                    err,
+                    Error::Slow {
+                        idempotent: true,
+                        sent: true
+                    }
+                ),
                 "{way}: {err:?}"
             );
             assert_eq!(
@@ -8007,7 +8101,13 @@ mod tests {
                 panic!("{way}: a stalled yard answered");
             };
             assert!(
-                matches!(err, Error::Slow { idempotent: false }),
+                matches!(
+                    err,
+                    Error::Slow {
+                        idempotent: false,
+                        sent: true
+                    }
+                ),
                 "{way}: {err:?}"
             );
             assert_eq!(
@@ -8026,7 +8126,13 @@ mod tests {
                 panic!("{way}: a stalled yard answered");
             };
             assert!(
-                matches!(err, Error::Slow { idempotent: true }),
+                matches!(
+                    err,
+                    Error::Slow {
+                        idempotent: true,
+                        sent: true
+                    }
+                ),
                 "{way}: {err:?}"
             );
             assert_eq!(
@@ -8043,7 +8149,13 @@ mod tests {
                 panic!("{way}: a stalled stream opened");
             };
             assert!(
-                matches!(err, Error::Slow { idempotent: true }),
+                matches!(
+                    err,
+                    Error::Slow {
+                        idempotent: true,
+                        sent: true
+                    }
+                ),
                 "{way}: {err:?}"
             );
             assert_eq!(
@@ -8127,7 +8239,13 @@ mod tests {
             };
             finished.join().unwrap();
             assert!(
-                matches!(&err, Error::Slow { idempotent: said } if *said == idempotent),
+                matches!(
+                    &err,
+                    Error::Slow {
+                        idempotent: said,
+                        sent: true
+                    } if *said == idempotent
+                ),
                 "{method}: {err:?}"
             );
             assert_eq!(
@@ -8138,6 +8256,59 @@ mod tests {
                 "{method}"
             );
         }
+    }
+
+    /// A connect that gave up for its timeout sent nothing: a write says
+    /// so, and that it is safe to send again, while a read is slow, as any
+    /// other of its timeouts. A connect refused any other way says the
+    /// yard is down, as ever. (No test waits out the connect's own ten
+    /// seconds against a network that drops: this drives the mapping a
+    /// failed connect takes.)
+    #[test]
+    fn a_connect_that_gave_up_says_nothing_was_sent() {
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::WouldBlock] {
+            let err = connect_error(Error::Down(io::Error::new(kind, "the test gave up")), false);
+            assert!(
+                matches!(
+                    err,
+                    Error::Slow {
+                        idempotent: false,
+                        sent: false
+                    }
+                ),
+                "{kind:?}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the yard did not answer in time, and nothing was sent; it is safe to send again",
+                "{kind:?}"
+            );
+            assert!(!err.to_string().contains("gave up"), "{kind:?}: {err}");
+            let err = connect_error(Error::Down(io::Error::new(kind, "the test gave up")), true);
+            assert!(
+                matches!(
+                    err,
+                    Error::Slow {
+                        idempotent: true,
+                        sent: false
+                    }
+                ),
+                "{kind:?}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the yard is slow to answer; trying again",
+                "{kind:?}"
+            );
+        }
+        // Anything else of a connect is down, as ever.
+        let err = connect_error(
+            Error::Down(io::Error::new(io::ErrorKind::ConnectionRefused, "refused")),
+            false,
+        );
+        assert!(matches!(err, Error::Down(_)), "{err:?}");
+        let err = connect_error(Error::Protocol("no".into()), false);
+        assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     }
 
     /// The connection to a yard at an address asks the other end after

@@ -1558,8 +1558,8 @@ mod tests {
     /// trouble stays the yard's on either.
     #[test]
     fn a_slow_yard_is_said_so() {
-        for idempotent in [true, false] {
-            let trouble = Trouble::Yard(api::Error::Slow { idempotent });
+        for (idempotent, sent) in [(true, true), (false, true), (true, false), (false, false)] {
+            let trouble = Trouble::Yard(api::Error::Slow { idempotent, sent });
             assert_eq!(
                 trouble.to_string(),
                 "The yard is slow to answer: it did not answer in time. The window tries again shortly."
@@ -1594,9 +1594,9 @@ mod tests {
             Trouble::Yard(api::Error::Protocol("x".into())).short(),
             "cannot be read"
         );
-        for idempotent in [true, false] {
+        for (idempotent, sent) in [(true, true), (false, true), (true, false), (false, false)] {
             assert_eq!(
-                Trouble::Yard(api::Error::Slow { idempotent }).short(),
+                Trouble::Yard(api::Error::Slow { idempotent, sent }).short(),
                 "slow to answer"
             );
         }
