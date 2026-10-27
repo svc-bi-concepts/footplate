@@ -1195,6 +1195,48 @@ mod tests {
         );
     }
 
+    /// Moves the yard's head to `head` and waits until the follower, finding
+    /// its stream silent, has asked for it. The follower is held in that
+    /// ask, and reads no stream in it: no quiet runs there, whatever the
+    /// speed of this machine, until [`Yard::release_calls`] lets it go on.
+    /// The call is held before the head moves, so that an ask that came
+    /// first was answered with the old head and found the stream level.
+    fn hold_the_follower(yard: &Yard, head: u64) {
+        yard.hold_calls("Head");
+        yard.answer("Head", &json!({ "result": head }).to_string());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.calls_held("Head") == 0 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(
+            yard.calls_held("Head"),
+            1,
+            "the follower asked for the head"
+        );
+    }
+
+    /// Waits until the yard has been asked for its head `n` times.
+    fn heads_asked(yard: &Yard, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.asked("Head").len() < n && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let asked = yard.asked("Head").len();
+        assert!(asked >= n, "the head was asked for {asked} times, not {n}");
+    }
+
+    /// Emits `event` and waits until the yard's stream has written it: a
+    /// follower that reads has it at once.
+    fn emit_to_the_wire(yard: &Yard, event: &str) {
+        let sent = yard.events_sent();
+        yard.emit(event);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.events_sent() == sent && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(yard.events_sent() > sent, "the stream wrote the event");
+    }
+
     /// A stream that stays open and brings nothing while the yard moves
     /// on is replaced: the stream is opened again after the last seq read,
     /// and what happened meanwhile comes down it, with the state left as
@@ -1357,6 +1399,12 @@ mod tests {
     /// stream that is late but not broken is waited for up to the quiet
     /// limit: an event that arrives after a quiet of lateness still comes
     /// down the stream it was waited for on, with the state left as it was.
+    /// The test holds the follower in its ask for the head while it puts the
+    /// event on the wire, so that how late the event is is not up to how
+    /// fast this machine is. The moment itself is shown from the side a slow
+    /// machine cannot move: a stream not given its event is asked about
+    /// again, and then replaced, no sooner than most of a quiet after the
+    /// head was found ahead.
     #[test]
     fn an_event_on_its_way_is_given_a_moment_to_come() {
         let yard = Yard::start();
@@ -1365,40 +1413,56 @@ mod tests {
             quiet: Duration::from_millis(300),
         };
         let rx = following(&yard, watch);
-        yard.answer("Head", r#"{"result": 21}"#);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while yard.asked("Head").len() < 2 && std::time::Instant::now() < deadline {
-            thread::yield_now();
-        }
-        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        hold_the_follower(&yard, 21);
+        emit_to_the_wire(
+            &yard,
+            r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#,
+        );
+        yard.release_calls("Head");
         let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
             panic!("the event on its way")
         };
         assert_eq!(event.seq, 21);
         // Read level with the head again: the stream stays past several
         // more of its silences.
-        let asked = yard.asked("Head").len();
-        while yard.asked("Head").len() < asked + 3 && std::time::Instant::now() < deadline {
-            thread::yield_now();
-        }
+        heads_asked(&yard, yard.asked("Head").len() + 3);
         assert_eq!(yard.streams_asked(), vec![20]);
         assert!(rx.try_recv().is_err());
 
-        // Late: the head moves again, and the event is most of a quiet
-        // behind it. The stream is waited for, not replaced, and the state
-        // is not read again.
-        yard.answer("Head", r#"{"result": 22}"#);
-        let asked = yard.asked("Head").len();
-        while yard.asked("Head").len() < asked + 1 && std::time::Instant::now() < deadline {
-            thread::yield_now();
-        }
-        thread::sleep(Duration::from_millis(200));
-        yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "newer"}}"#);
+        // Late: the head moves again, and the event comes after the ask for
+        // it, as the quiet runs out. The stream is waited for, not replaced,
+        // and the state is not read again.
+        hold_the_follower(&yard, 22);
+        emit_to_the_wire(
+            &yard,
+            r#"{"seq": 22, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "newer"}}"#,
+        );
+        yard.release_calls("Head");
         let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
             panic!("the late event, down the stream it was waited for on")
         };
         assert_eq!(event.seq, 22);
         assert_eq!(yard.streams_asked(), vec![20]);
+        assert_eq!(yard.asked("UserInbox").len(), 1);
+
+        // No event comes. Level with the head once more, the follower waits
+        // for none; then it finds the head ahead and is given its moment, and
+        // asks again, to replace the stream, only when that is over: no
+        // sooner than most of a quiet after it was let go, and a slow
+        // machine only makes it later.
+        heads_asked(&yard, yard.asked("Head").len() + 1);
+        hold_the_follower(&yard, 23);
+        let asked = yard.asked("Head").len();
+        let ahead = std::time::Instant::now();
+        yard.release_calls("Head");
+        heads_asked(&yard, asked + 1);
+        assert!(
+            ahead.elapsed() >= watch.quiet * 2 / 3,
+            "asked again after {:?}",
+            ahead.elapsed()
+        );
+        streams_opened(&yard, 2);
+        assert_eq!(yard.streams_asked(), vec![20, 22]);
         assert_eq!(yard.asked("UserInbox").len(), 1);
     }
 

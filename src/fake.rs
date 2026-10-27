@@ -135,12 +135,19 @@ struct State {
     /// The requests held once: the first whose target starts with one of
     /// these is held, and the rule is gone.
     stall_once: Vec<String>,
+    /// The methods whose calls are held before they are answered
+    /// ([`Yard::hold_calls`]), and the calls held now, one entry each.
+    hold_calls: Vec<String>,
+    calls_held: Vec<String>,
     asked: Vec<(String, Value)>,
     last_request: String,
     /// Every request that came, let in or not.
     requests: usize,
     events: Vec<String>,
     streams: Vec<u64>,
+    /// How many event lines the streams have written, those of every
+    /// stream counted ([`Yard::events_sent`]).
+    events_sent: usize,
     /// The streams opened before this many stay open and bring nothing,
     /// as one a proxy holds open after what was behind it went away: what
     /// is emitted meanwhile is the yard's all the same, its calls answer
@@ -425,6 +432,41 @@ impl Yard {
             .push(target.into());
     }
 
+    /// From now on a call of the method is asked and held before it is
+    /// answered, until [`Yard::release_calls`]: its caller waits as one of a
+    /// yard that is slow, and does nothing else meanwhile. It is answered
+    /// when it is let through, as the yard answers then. A test with
+    /// something to do while a caller is in its call (a follower in a call
+    /// reads no stream, so no quiet of its stream runs) holds the call and
+    /// waits for [`Yard::calls_held`]. The client's own timeout still ends
+    /// the wait, so a call is held for seconds, not for ever.
+    pub fn hold_calls(&self, method: &str) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .hold_calls
+            .push(method.into());
+    }
+
+    /// The calls of the method that are held are answered, and so are those
+    /// that come after.
+    pub fn release_calls(&self, method: &str) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .hold_calls
+            .retain(|held| held != method);
+        self.shared.changed.notify_all();
+    }
+
+    /// How many calls of the method are held now.
+    pub fn calls_held(&self, method: &str) -> usize {
+        let state = self.shared.state.lock().unwrap();
+        state.calls_held.iter().filter(|m| *m == method).count()
+    }
+
     fn set(&self, method: &str, reply: Reply) {
         let mut state = self.shared.state.lock().unwrap();
         state.silent.retain(|silent| silent != method);
@@ -528,6 +570,14 @@ impl Yard {
     /// The `after` of every stream opened so far.
     pub fn streams_asked(&self) -> Vec<u64> {
         self.shared.state.lock().unwrap().streams.clone()
+    }
+
+    /// How many event lines the streams have written so far, each stream's
+    /// counted. [`Yard::emit`] only hands an event to the streams: when this
+    /// has gone up for it, the event is on the wire, and a client that reads
+    /// has it at once.
+    pub fn events_sent(&self) -> usize {
+        self.shared.state.lock().unwrap().events_sent
     }
 
     /// The server goes away: its streams end and nothing listens any more.
@@ -771,12 +821,23 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
     let reply = {
         let mut state = shared.state.lock().unwrap();
         let args: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        state.asked.push((method.clone(), args.clone()));
+        // A held call is asked and not answered yet: it waits here, with the
+        // lock let go, for the test to let it through.
+        if state.hold_calls.contains(&method) {
+            state.calls_held.push(method.clone());
+            while !state.stopped && state.hold_calls.contains(&method) {
+                state = shared.changed.wait_timeout(state, LOOK).unwrap().0;
+            }
+            if let Some(at) = state.calls_held.iter().position(|m| *m == method) {
+                state.calls_held.remove(at);
+            }
+        }
         let by_arg = state
             .answers_for
             .iter()
             .find(|((m, arg, is), _)| *m == method && args[arg.as_str()] == is.as_str())
             .map(|(_, reply)| reply.clone());
-        state.asked.push((method.clone(), args.clone()));
         if state.silent.contains(&method) {
             return Ok(());
         }
@@ -918,6 +979,7 @@ fn stream(
                 let line = format!("{event}\n");
                 write!(conn, "{:x}\r\n{line}\r\n", line.len())?;
                 conn.flush()?;
+                state.events_sent += 1;
             }
         }
         // Cut off, as a server that is killed cuts it: no last chunk. So is
@@ -1423,5 +1485,35 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    /// A call that is held is asked and not answered: its caller waits in it
+    /// until the call is let through, and is answered then as the yard
+    /// answers then. Calls that come after are not held.
+    #[test]
+    fn a_held_call_is_answered_when_it_is_let_through() {
+        let yard = Yard::start();
+        yard.answer("Head", r#"{"result": 20}"#);
+        yard.hold_calls("Head");
+        let (answered, answer) = std::sync::mpsc::channel();
+        let caller = thread::spawn({
+            let client = yard.client();
+            move || answered.send(client.head()).unwrap()
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.calls_held("Head") == 0 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(yard.calls_held("Head"), 1);
+        assert_eq!(yard.asked("Head").len(), 1);
+        assert!(answer.try_recv().is_err(), "a held call is not answered");
+
+        yard.answer("Head", r#"{"result": 21}"#);
+        yard.release_calls("Head");
+        let head = answer.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(head.unwrap(), 21);
+        assert_eq!(yard.calls_held("Head"), 0);
+        assert_eq!(yard.client().head().unwrap(), 21);
+        caller.join().unwrap();
     }
 }
