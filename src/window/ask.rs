@@ -99,6 +99,14 @@ pub(crate) fn ask_preview_head(kind: &str, ask: u64, waits: &str) -> String {
     .join(" · ")
 }
 
+/// What the line on an open card says, beside its disclosure: the bead's id
+/// and the ask's number, the two that `yardr bead answer <bead> <ask> <n>`
+/// takes. The number is the yard's, from the one counter of every note, so
+/// a decision named by it in mail, chat or a terminal is found by it here.
+pub(crate) fn ask_line(bead: &str, ask: u64) -> String {
+    format!("{bead} · ask {ask}")
+}
+
 /// The head of a bead's open asks: the yard, the bead and the topic, once
 /// for every ask of the bead. The yard's dot stands before it, in its
 /// colour. No card is read without its yard.

@@ -1202,10 +1202,10 @@ fn expanded_text_key(card_key: u64, section: &str, index: usize, text: &str) -> 
 mod tests {
     use super::ask::{
         ANSWER_WORDS, Approval, DECLINE_IS_NO_PICK, PAIRING_GIVES, SEND_WORDS, answer_label,
-        approval, approve_label, approve_unlock_label, asked_age, candidate_choice_line, card_head,
-        decided_keys, decision_head, description_line, fenced, give_label, give_unlock_label,
-        recommended_line, run_keys, run_runs, run_texts, secret_keys, setup_keys, take_back_label,
-        texts_label, typeback_line, typeback_mismatch, words_send,
+        approval, approve_label, approve_unlock_label, ask_line, asked_age, candidate_choice_line,
+        card_head, decided_keys, decision_head, description_line, fenced, give_label,
+        give_unlock_label, recommended_line, run_keys, run_runs, run_texts, secret_keys,
+        setup_keys, take_back_label, texts_label, typeback_line, typeback_mismatch, words_send,
     };
     use super::asks::{dir_url, file_url};
     use super::bead::{bar_top, hover_clock};
@@ -1310,7 +1310,8 @@ mod tests {
 
     /// The recommendation stands under its own option with its why, and the
     /// ask's age beside its question; the head names the yard, the bead and
-    /// the topic once.
+    /// the topic once; the line beside the disclosure names the bead and the
+    /// ask's number, as `yardr bead answer` takes them.
     #[test]
     fn the_card_names_the_recommendation_its_age_and_its_head_once() {
         assert_eq!(
@@ -1325,6 +1326,14 @@ mod tests {
             decision_head("plantime", "yd-ymkt", "Writing"),
             "plantime · bead yd-ymkt · Writing"
         );
+        assert_eq!(ask_line("bead-a", 3), "bead-a · ask 3");
+        // The number comes from the one counter of every note in the yard,
+        // and a bead of another yard keeps its `@peer`.
+        assert_eq!(
+            ask_line("footplate-e09j", 14603),
+            "footplate-e09j · ask 14603"
+        );
+        assert_eq!(ask_line("yd-ymkt@north", 7), "yd-ymkt@north · ask 7");
         assert_eq!(
             DECLINE_IS_NO_PICK,
             "Say no to all options. The asker finds another way."
@@ -9740,6 +9749,35 @@ yardr.dev
             Some("The sketch landed yesterday.")
         );
 
+        // Each open card names its bead and its ask's number, on the
+        // disclosure's row and to the right of it. A drag over the line
+        // selects them, the key copies them, and the press that selected
+        // opened no details.
+        for ask in [3, 4, 5] {
+            assert!(drawn(cx, &format!("ask line bead-a {ask}")), "ask {ask}");
+        }
+        let line = bounds_of(cx, "ask line bead-a 3");
+        let disclosure = bounds_of(cx, "expand bead-a 3");
+        assert_eq!(line.top(), disclosure.top());
+        assert!(
+            disclosure.right() <= line.left(),
+            "the line is not to the right of the disclosure: {line:?} {disclosure:?}"
+        );
+        drag(
+            cx,
+            gpui::point(line.left(), line.top() + px(2.)),
+            gpui::point(line.right() - px(2.), line.bottom() - px(2.)),
+        );
+        assert_eq!(selected(&view, cx).as_deref(), Some("bead-a · ask 3"));
+        cx.simulate_keystrokes("secondary-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("bead-a · ask 3"));
+        assert!(!expanded_of(&view, cx, "bead-a", 3));
+        // The disclosure still opens from its own row.
+        click_on(cx, "expand bead-a 3");
+        assert!(expanded_of(&view, cx, "bead-a", 3));
+        click_on(cx, "expand bead-a 3");
+        assert!(!expanded_of(&view, cx, "bead-a", 3));
+
         // Clicking an option still picks it.
         click_on(cx, "pick bead-a 3 2");
         assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
@@ -9755,6 +9793,87 @@ yardr.dev
         assert_eq!(selected(&view, cx).as_deref(), Some("Merge the docs?"));
         cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("Merge the docs?"));
+
+        // The same card path at the narrowest window keeps a long bead id
+        // and ask number inside the card.
+        a_long_bead_id_s_line_drops_under_the_disclosure_at_the_narrowest_window(cx);
+    }
+
+    /// The line of a card that names the bead of another yard and an ask
+    /// number as long as the yard counts them is too wide for the narrowest
+    /// window beside the disclosure: it drops under it, and wraps inside
+    /// the card instead of running past the pane.
+    fn a_long_bead_id_s_line_drops_under_the_disclosure_at_the_narrowest_window(
+        cx: &mut VisualTestContext,
+    ) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let bead = "footplate-e09j@northern-yard";
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [
+                {"bead": bead, "bead_title": "Show the number", "topic": "",
+                 "ask": 14603, "question": "Pick one?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"}
+            ], "decided": []}})
+            .to_string(),
+        );
+        yard.answer(
+            "Bead",
+            &json!({"result": {
+                "id": bead, "title": "Show the number", "body": "", "stage": "new",
+                "labels": [], "notes": [],
+                "asks": [{
+                    "ask": 14603, "to": "jo", "asker": "yardmaster",
+                    "since": "2026-10-10T10:00:00Z", "question": "Pick one?",
+                    "context": [],
+                    "options": [{"label": "One", "consequence": "it is one"}],
+                    "recommend": 1, "why": "", "state": "open"
+                }]
+            }})
+            .to_string(),
+        );
+        cx.update(|_, cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        // The narrowest window the application opens (main.rs).
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
+        wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision(bead.into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, bead));
+
+        let line = bounds_of(cx, &format!("ask line {bead} 14603"));
+        let disclosure = bounds_of(cx, &format!("expand {bead} 14603"));
+        assert!(
+            line.right() <= px(WINDOW_MIN),
+            "the line runs past the pane: {line:?}"
+        );
+        assert!(
+            disclosure.bottom() <= line.top(),
+            "the line is not under the disclosure: {line:?} {disclosure:?}"
+        );
+        // Wrapped in the card, it still selects and copies whole.
+        drag(
+            cx,
+            gpui::point(line.left(), line.top() + px(2.)),
+            gpui::point(line.right() - px(2.), line.bottom() - px(2.)),
+        );
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("footplate-e09j@northern-yard · ask 14603")
+        );
     }
 
     /// Words alone on an ordinary card have a Send button where Enter sends

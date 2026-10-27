@@ -14,10 +14,10 @@ use super::Footplate;
 use super::ask::{
     ANSWER_WORDS, APPROVE_ELSEWHERE, Approval, DECLINE_IS_NO_PICK, RUN_PROPOSED, RunText,
     SECRET_GOES, SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, answer_label, approval, approve_button,
-    asked_age, candidate_choice_line, card_head, carried_texts, decided_keys, decision_head,
-    description_line, fenced, give_label, give_unlock_label, recommended_line, run_keys, run_runs,
-    run_texts, secret_keys, section_head, send_button, setup_keys, setup_runs, show_button,
-    take_back_label, texts_label, typeback_line, typeback_mismatch, words_send,
+    ask_line, asked_age, candidate_choice_line, card_head, carried_texts, decided_keys,
+    decision_head, description_line, fenced, give_label, give_unlock_label, recommended_line,
+    run_keys, run_runs, run_texts, secret_keys, section_head, send_button, setup_keys, setup_runs,
+    show_button, take_back_label, texts_label, typeback_line, typeback_mismatch, words_send,
 };
 use super::expanded_text_key;
 use super::keys::{APPROVE_KEY, SETUP_SECRET_CONTEXT};
@@ -2520,20 +2520,42 @@ impl Footplate {
             }
         }
         // The bead whole, one disclosure away: beside the context it opens
-        // from, not at the card's end.
+        // from, not at the card's end. On its row stands the bead's id and
+        // the ask's number, to select and copy, so a decision named by
+        // number is found on its card. The line is no part of the
+        // disclosure: pressing to select it opens nothing. The row wraps,
+        // so a card too narrow for both puts the line under the disclosure
+        // and squeezes neither.
         let mark = if ask.expanded { "▾" } else { "▸" };
         let bead_click = bead_id.clone();
+        let line = ask_line(&bead_id, ask_seq);
+        let line_key = expanded_text_key(card_key, "ask", 0, &line);
         card = card.child(
             div()
-                .id(SharedString::from(format!("expand {bead_id} {ask_seq}")))
-                .debug_selector(|| format!("expand {bead_id} {ask_seq}"))
-                .text_sm()
-                .text_color(palette.faint)
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.expand_for(bead_click.clone(), ask_seq, cx)
-                }))
-                .child(format!("{mark} bead details (e)")),
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("expand {bead_id} {ask_seq}")))
+                        .debug_selector(|| format!("expand {bead_id} {ask_seq}"))
+                        .flex_grow()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.expand_for(bead_click.clone(), ask_seq, cx)
+                        }))
+                        .child(format!("{mark} bead details (e)")),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| format!("ask line {bead_id} {ask_seq}"))
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child(select::verbatim(line_key, line, &self.selection)),
+                ),
         );
         if ask.expanded {
             card = card.child(self.expanded_body(

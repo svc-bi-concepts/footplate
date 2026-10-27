@@ -2363,6 +2363,14 @@ mod tests {
                 }
                 "plain" | "plain-select" | "lines" | "keys" => {
                     assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    // The card these shots open carries the line
+                    // `bead-a · ask 3` beside its disclosure: the bead's id
+                    // and the ask's number.
+                    assert_eq!(
+                        (loaded.asks.open[0].bead.as_str(), loaded.asks.open[0].ask),
+                        ("bead-a", 3),
+                        "{state}"
+                    );
                     let bead = yard.client().bead("bead-a").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].options.len(), 3, "{state}");

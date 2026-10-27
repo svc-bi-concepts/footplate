@@ -1344,7 +1344,12 @@ answers the whole conversation at once.
 Above the cards the head names the yard, the bead and the topic once. A
 card shows, in this order: the question, the largest text, with how long it
 waits beside it; the asker; the context, with the bead whole one disclosure
-away; the options numbered, each with its consequence, `you decide` last;
+away and, on the disclosure's row, a faint line with the bead's id and the
+ask's number (`bead-a · ask 3`), the two that `yardr bead answer` takes, so a
+decision named by its number in mail, chat or a terminal is found on its
+card; the line is text to select and copy, and drops under the disclosure on
+a card too narrow for both; the options numbered, each with its consequence,
+`you decide` last;
 a line for words; the Answer button with ask-about-this, Later and Decline
 beside it. The recommended option stands preselected, marked with its why
 under its own row, and the Answer button names it (`Answer: 1 · Move them
