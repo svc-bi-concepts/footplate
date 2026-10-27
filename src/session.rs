@@ -23,7 +23,7 @@ const REPLACING_PAUSE: Duration = Duration::from_millis(100);
 /// moves on. After `quiet` with nothing the yard is asked its head, on a
 /// connection of its own. A head beyond the last event read gives that
 /// event `late` more to come, since it may be on its way; after that the
-/// stream is stuck, and the yard is read again as when a stream ends.
+/// stream is stuck, and is replaced as when a stream ends.
 #[derive(Debug, Clone, Copy)]
 pub struct Watch {
     pub quiet: Duration,
@@ -345,12 +345,102 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     })
 }
 
+/// What came of following one stream.
+struct Streamed {
+    /// The last seq read.
+    read: u64,
+    /// Whether the stream brought anything, or was found stuck while the
+    /// yard answered beside it.
+    heard: bool,
+    /// Whether the stream opened again after `read` takes up where this one
+    /// stopped. An event that cannot be read, or a stream that cannot be
+    /// opened, would meet the same again, and the state read again is past
+    /// both.
+    resumes: bool,
+}
+
+/// Follows the stream after the seq `after` until it ends, telling each
+/// event; `None` when the window is gone.
+fn stream(
+    client: &Client,
+    after: u64,
+    watch: Watch,
+    control: &FollowControl,
+    tell: &mut impl FnMut(Update) -> bool,
+) -> Option<Streamed> {
+    let Ok(mut events) = client.events(after, watch.quiet) else {
+        return Some(Streamed {
+            read: after,
+            heard: false,
+            resumes: false,
+        });
+    };
+    control.follow_stream(events.stop_handle());
+    // The last seq read, and whether the yard's head was beyond it when the
+    // stream last said nothing.
+    let (mut read, mut behind) = (after, false);
+    let (mut heard, mut resumes) = (false, true);
+    // An event that cannot be read ends the stream: the yard would send it
+    // again after `read`, so it is the state read again that gets past it.
+    // A stuck stream, and one whose yard does not say its head, end as any
+    // other does.
+    while !control.stopped() {
+        match events.next() {
+            Some(Ok(event)) => {
+                heard = true;
+                read = read.max(event.seq);
+                if !tell(Update::Event(event)) {
+                    control.stream_ended();
+                    return None;
+                }
+            }
+            Some(Err(api::Error::Silent)) => match client.head() {
+                Ok(at) if at <= read => {
+                    if behind && events.set_quiet(watch.quiet).is_err() {
+                        break;
+                    }
+                    behind = false;
+                }
+                Ok(_) if !behind => {
+                    if events.set_quiet(watch.late).is_err() {
+                        break;
+                    }
+                    behind = true;
+                }
+                Ok(_) => {
+                    heard = true;
+                    break;
+                }
+                Err(_) => break,
+            },
+            Some(Err(api::Error::Protocol(_))) => {
+                resumes = false;
+                break;
+            }
+            Some(Err(_)) | None => break,
+        }
+    }
+    control.stream_ended();
+    Some(Streamed {
+        read,
+        heard,
+        resumes,
+    })
+}
+
 /// Follows the yard until `tell` answers false (the window is gone): the
-/// state, then every event after it. When the stream ends the state is read
-/// again, so nothing in between is lost; when that fails the window is told
-/// why, and the yard is tried again after `retry`. A yard that does not let
-/// the device in, or the edge that does not let the session in, is not
-/// tried again: the window is told, and this returns.
+/// state, then every event after it. When the stream ends, or is found
+/// stuck, it is opened again after the last seq read, as the yard's API
+/// says, so nothing in between is lost and nothing is read again; the state
+/// is read again only when that cannot be done: the stream cannot be opened,
+/// or brings an event that cannot be read, or the yard does not say its
+/// head, or its head is behind what was read (a yard rewound). A state read
+/// again that is the one last told, with nothing heard since, is not told
+/// again, so that a quiet yard whose stream cannot be kept changes nothing
+/// in the window. When the state cannot be read the window is told why, and
+/// the yard is tried again after `retry`. A yard that does not let the
+/// device in, or the edge that does not let the session in, is not tried
+/// again: the window is told, and this returns.
 /// The handle stops the current stream from another thread, so switching
 /// yards does not leave an idle old yard's connection alive indefinitely.
 /// A stream that says nothing while the yard moves on is watched as
@@ -363,73 +453,51 @@ pub fn follow_with_control(
     control: FollowControl,
     mut tell: impl FnMut(Update) -> bool,
 ) {
+    // The state last told as the window's, until the yard is away from it.
+    let mut told: Option<State> = None;
     loop {
         if control.stopped() {
             return;
         }
         let trouble = match load(client, name) {
             Ok(state) => {
-                let head = state.head;
-                if !tell(Update::Up(Box::new(state))) {
-                    return;
-                }
-                if control.stopped() {
-                    return;
-                }
-                // Whether the stream brought anything, or was found stuck
-                // while the yard answered beside it.
-                let mut heard = false;
-                if let Ok(mut events) = client.events(head, watch.quiet) {
-                    control.follow_stream(events.stop_handle());
-                    // The last seq read, and whether the yard's head was
-                    // beyond it when the stream last said nothing.
-                    let (mut read, mut behind) = (head, false);
-                    // An event that cannot be read ends the stream as its
-                    // end does: the state is read again. So does a stuck
-                    // one, and one whose yard does not say its head.
-                    while !control.stopped() {
-                        match events.next() {
-                            Some(Ok(event)) => {
-                                heard = true;
-                                read = read.max(event.seq);
-                                if !tell(Update::Event(event)) {
-                                    control.stream_ended();
-                                    return;
-                                }
-                            }
-                            Some(Err(api::Error::Silent)) => match client.head() {
-                                Ok(at) if at <= read => {
-                                    if behind && events.set_quiet(watch.quiet).is_err() {
-                                        break;
-                                    }
-                                    behind = false;
-                                }
-                                Ok(_) if !behind => {
-                                    if events.set_quiet(watch.late).is_err() {
-                                        break;
-                                    }
-                                    behind = true;
-                                }
-                                Ok(_) => {
-                                    heard = true;
-                                    break;
-                                }
-                                Err(_) => break,
-                            },
-                            Some(Err(_)) | None => break,
-                        }
+                let mut read = state.head;
+                if told.as_ref() != Some(&state) {
+                    told = Some(state.clone());
+                    if !tell(Update::Up(Box::new(state))) {
+                        return;
                     }
-                    control.stream_ended();
                 }
-                if control.stopped() {
-                    return;
+                loop {
+                    if control.stopped() {
+                        return;
+                    }
+                    let Some(streamed) = stream(client, read, watch, &control, &mut tell) else {
+                        return;
+                    };
+                    // The events told moved the window on from the state it
+                    // was told: a state read again is told, whatever it is.
+                    if streamed.read > read {
+                        told = None;
+                    }
+                    read = streamed.read;
+                    if control.stopped() {
+                        return;
+                    }
+                    // A stream that ended: a server that replaces itself is
+                    // back in a moment. One that gave nothing before it
+                    // ended is not asked again in a loop without a pause.
+                    thread::sleep(if streamed.heard {
+                        REPLACING_PAUSE
+                    } else {
+                        retry
+                    });
+                    // A yard that is at or past what was read has all that
+                    // came after it to send again.
+                    if !streamed.resumes || !client.head().is_ok_and(|at| at >= read) {
+                        break;
+                    }
                 }
-                // A stream that ended: a server that replaces itself is
-                // back in a moment, and the state is read again, as it is
-                // at once of a yard that answered beside a stuck stream.
-                // One that gave nothing before it ended is not asked again
-                // in a loop without a pause.
-                thread::sleep(if heard { REPLACING_PAUSE } else { retry });
                 continue;
             }
             Err(Trouble::NotLetIn) => {
@@ -442,6 +510,9 @@ pub fn follow_with_control(
             }
             Err(trouble) => trouble.with(client),
         };
+        // Down is something the window shows: the state read when the yard
+        // answers again is told, whatever it is.
+        told = None;
         if !tell(Update::Down(trouble.to_string(), trouble.short())) {
             return;
         }
@@ -1060,9 +1131,23 @@ mod tests {
         rx
     }
 
+    /// Waits until the yard has been asked for `n` streams.
+    fn streams_opened(yard: &Yard, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while yard.streams_asked().len() < n && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            yard.streams_asked().len() >= n,
+            "{:?}",
+            yard.streams_asked()
+        );
+    }
+
     /// A stream that stays open and brings nothing while the yard moves
-    /// on is replaced: the yard is read again, as when a stream ends, and
-    /// what happened meanwhile is in what it reads.
+    /// on is replaced: the stream is opened again after the last seq read,
+    /// and what happened meanwhile comes down it, with the state left as
+    /// it was.
     #[test]
     fn a_stream_that_says_nothing_while_the_yard_moves_on_is_replaced() {
         let yard = Yard::start();
@@ -1075,16 +1160,122 @@ mod tests {
         yard.mute();
         yard.answer("Head", r#"{"result": 21}"#);
         yard.emit(r#"{"seq": 21, "kind": "noted", "actor": "yardmaster", "bead": "yd-shed", "data": {"note": 7}}"#);
+        let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the event the stuck stream held back, and no state read again")
+        };
+        assert_eq!(event.seq, 21);
+        assert_eq!(yard.streams_asked(), vec![20, 20]);
+        assert_eq!(yard.asked("UserInbox").len(), 1);
+    }
+
+    /// A stream that ends is opened again after the last seq read, and the
+    /// state is not read again: nothing is told but what the stream brings,
+    /// so no view of the window is rebuilt for a stream that was cut and
+    /// came back with nothing new, as an edge cuts one.
+    #[test]
+    fn a_stream_that_ends_is_opened_again_after_the_last_seq_and_tells_nothing() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let rx = following(&yard, WATCH);
+
+        // Cut with nothing read: opened again after the head it began from.
+        yard.end_streams();
+        streams_opened(&yard, 2);
+        assert_eq!(yard.streams_asked(), vec![20, 20]);
+
+        // An event down the new stream; cut again with the yard's head at
+        // it: opened again after that event.
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the event down the stream that came back")
+        };
+        assert_eq!(event.seq, 21);
+        yard.answer("Head", r#"{"result": 21}"#);
+        yard.end_streams();
+        streams_opened(&yard, 3);
+        assert_eq!(yard.streams_asked(), vec![20, 20, 21]);
+
+        // Down that one, another event: the stream is live. And nothing was
+        // told in between, nor was the state read again.
+        yard.emit(r#"{"seq": 22, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "newer"}}"#);
+        let Update::Event(event) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the event down the stream that came back again")
+        };
+        assert_eq!(event.seq, 22);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(yard.asked("UserInbox").len(), 1);
+    }
+
+    /// A yard whose head is behind what was read is not the one that was
+    /// followed (it was rewound, or restored from a backup): the state is
+    /// read again and told, and the stream is opened after its head.
+    #[test]
+    fn a_stream_that_ends_on_a_yard_behind_what_was_read_reads_the_state_again() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let rx = following(&yard, WATCH);
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "text": "new"}}"#);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Update::Event(_)
+        ));
+        // Its head still says 20, as the state it was told did.
+        yard.end_streams();
         let Update::Up(state) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
-            panic!("the yard read again, and no event before it")
+            panic!("the state read again")
+        };
+        assert_eq!(state.head, 20);
+        streams_opened(&yard, 2);
+        assert_eq!(yard.streams_asked(), vec![20, 20]);
+    }
+
+    /// An event that cannot be read ends the stream, and the stream opened
+    /// again after the last seq read would meet it again: the state is read
+    /// again, which is past it, and the stream is opened after that head.
+    #[test]
+    fn an_event_that_cannot_be_read_has_the_state_read_again_past_it() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let rx = following(&yard, WATCH);
+        yard.answer("Head", r#"{"result": 21}"#);
+        yard.emit(r#"{"seq": 21, "kind": 7}"#);
+        let Update::Up(state) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the state read again")
         };
         assert_eq!(state.head, 21);
-        // The stream after it is opened from the head read again.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while yard.streams_asked().len() < 2 && std::time::Instant::now() < deadline {
-            thread::yield_now();
-        }
+        streams_opened(&yard, 2);
         assert_eq!(yard.streams_asked(), vec![20, 21]);
+    }
+
+    /// A stream that cannot be opened has the state read again, which is
+    /// told only when it is not the state the window has: a quiet yard
+    /// whose stream is refused is asked over and over and changes nothing
+    /// in the window, and one that moved is told as ever.
+    #[test]
+    fn a_state_read_again_that_is_the_one_told_is_not_told_again() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The stream is held twice over: the second is the retry of the
+        // first. So it is not opened, and the state is read again.
+        yard.stall_once("/events");
+        yard.stall_once("/events");
+        let watch = Watch {
+            quiet: Duration::from_millis(100),
+            late: Duration::from_millis(100),
+        };
+        let rx = following(&yard, watch);
+        assert_eq!(yard.asked("UserInbox").len(), 2);
+        assert!(rx.try_recv().is_err());
+
+        // The yard moves while its stream cannot be had: told.
+        yard.stall_once("/events");
+        yard.stall_once("/events");
+        yard.answer("Head", r#"{"result": 21}"#);
+        yard.end_streams();
+        let Update::Up(state) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("the state read again, which is not the one told")
+        };
+        assert_eq!(state.head, 21);
     }
 
     /// A stream that says nothing while the yard says nothing either is

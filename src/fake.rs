@@ -146,6 +146,9 @@ struct State {
     /// is emitted meanwhile is the yard's all the same, its calls answer
     /// as they did, and a stream opened since brings what it asks for.
     muted: usize,
+    /// The streams opened before this many have ended, the server staying
+    /// ([`Yard::end_streams`]).
+    ended: usize,
     /// The streams stay open when their client hangs up ([`Yard::hold_streams`]).
     held: bool,
     /// The images the yard holds, by hash, and every hash asked for.
@@ -467,6 +470,16 @@ impl Yard {
     pub fn mute(&self) {
         let mut state = self.shared.state.lock().unwrap();
         state.muted = state.streams.len();
+    }
+
+    /// The streams that are open end and the server stays: an edge or a
+    /// proxy that cuts them, or a link that drops and comes back. A stream
+    /// opened since brings what it asks for.
+    pub fn end_streams(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.ended = state.streams.len();
+        drop(state);
+        self.shared.changed.notify_all();
     }
 
     /// The streams stay open when their client hangs up, from here on: the
@@ -910,7 +923,7 @@ fn stream(
         // Cut off, as a server that is killed cuts it: no last chunk. So is
         // the stream of a device that was removed.
         let removed = device.as_ref().is_some_and(|d| !state.devices.contains(d));
-        if state.stopped || removed {
+        if state.stopped || removed || opened < state.ended {
             return Ok(());
         }
         state = shared.changed.wait_timeout(state, LOOK).unwrap().0;

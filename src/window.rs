@@ -16756,8 +16756,8 @@ yardr.dev
     /// A run ask raised in a yard whose stream stays open and brings
     /// nothing, as one a proxy or a tunnel holds open after the yard
     /// behind it went away, is counted by the switcher once the stream
-    /// has said nothing for its watch's while: the yard is read again,
-    /// with no restart.
+    /// has said nothing for its watch's while: the stream is opened
+    /// again, and the ask's event comes down it, with no restart.
     #[gpui::test]
     fn a_run_ask_raised_behind_a_stream_that_says_nothing_is_counted_without_a_restart(
         cx: &mut TestAppContext,
@@ -16796,8 +16796,8 @@ yardr.dev
         wait(cx, "the run ask counted in the second home", |cx| {
             state_of(&view, cx, "second home") == "2 mail, 1 decision"
         });
-        // Within the watch's while and a little: the yard is read at once
-        // once the stream is found stuck, not after a retry's pause.
+        // Within the watch's while and a little: the stream is opened again
+        // at once when found stuck, not after a retry's pause.
         let took = raised.elapsed();
         assert!(
             took < watch.quiet + watch.late + Duration::from_secs(2),
@@ -16862,6 +16862,40 @@ yardr.dev
         cx.run_until_parked();
         assert_eq!(second.asked("UserAsks").len(), asked + 2);
         assert_eq!(second.streams_asked().len(), 1);
+    }
+
+    /// A stream that is cut and comes back with nothing new leaves the
+    /// window as it was: the yard is asked its head, and for the stream
+    /// again after the last seq read, and for nothing else, so no view is
+    /// rebuilt and filled again over the edge. An event down the stream
+    /// that came back is shown as one down the first.
+    #[gpui::test]
+    fn a_stream_that_is_cut_and_comes_back_leaves_the_window_as_it_was(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let file = dir.path().join("footplate/settings.json");
+        Settings::default().write(&file).unwrap();
+        let env = env_on(&yard, &file);
+        let (view, cx) = watching_at(env, &file, cx);
+        wait(cx, "the conversation, acknowledged, and the stream", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+                && !yard.asked("AckUserInbox").is_empty()
+                && yard.streams_asked().len() == 1
+        });
+
+        let asked = yard.calls().len();
+        yard.end_streams();
+        wait(cx, "the stream again", |_| yard.streams_asked().len() == 2);
+        cx.run_until_parked();
+        assert_eq!(yard.streams_asked(), vec![20, 20]);
+        assert_eq!(yard.calls().split_off(asked), ["Head"]);
+        assert_eq!(texts(&view, cx), ["Shall I land it?"]);
+
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "yardmaster", "data": {"to": "jo", "to_user": true, "text": "Still there?"}, "at": "2026-10-08T09:31:00Z"}"#);
+        wait(cx, "the mail down the stream that came back", |cx| {
+            texts(&view, cx) == ["Shall I land it?", "Still there?"]
+        });
     }
 
     fn a_far_yard_of_jo(yard: &Yard) {

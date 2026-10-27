@@ -575,8 +575,17 @@ or a tunnel holds open after the yard behind it went away. After a minute
 of silence the yard's head is asked beside the stream, on a connection of
 its own, and once a minute from then on: a head level with the last event
 read leaves the stream as it is, and one still beyond it five seconds later
-replaces the stream, with the yard read again as when a stream ends. A link
+replaces the stream, as when a stream ends. A link
 that went away is found by the system's keepalive within about a minute.
+
+A stream that ends, whether the server replaces itself or a proxy or the edge
+cuts it, is opened again after the last event read, as the API says, and the
+yard sends what came after it: nothing is read again and no view is drawn
+again for it. The state is read whole only where the stream cannot be taken
+up there: it cannot be opened, the yard does not say its head or its head is
+behind the last event read (a yard rewound), or an event cannot be read. A
+state read again that is the one the window has, with nothing heard since,
+changes nothing in the window.
 
 **Who you are** is not typed. The window acts as `yardr chat` does: as the
 user named in `$YARDR_ACTOR`, else as your login name, when the yard has a
