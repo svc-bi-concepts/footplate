@@ -36,10 +36,17 @@ impl Footplate {
         let opened = self.settings.opened();
         match (self.env.address(&self.settings), &self.said) {
             (Some(address), Some(me)) => {
-                let mut told = format!(
-                    "the yard {} at {address}, as its device {}",
-                    me.yard, me.said_by
-                );
+                let yard = match self.env.yard.is_none() && opened.is_hosted() {
+                    true => match opened.member() {
+                        Some((owner, _)) => {
+                            format!("{} — member of {}'s yard", me.yard, owner)
+                        }
+                        None => me.yard.clone(),
+                    },
+                    false => me.yard.clone(),
+                };
+                let mut told =
+                    format!("the yard {yard} at {address}, as its device {}", me.said_by);
                 if self.env.yard.is_none() && opened.is_hosted() && !opened.account.is_empty() {
                     told.push_str(&format!(", signed in as {}", opened.account));
                 }
@@ -56,7 +63,11 @@ impl Footplate {
     pub(crate) fn which_yard_short(&self) -> String {
         match self.env.yard {
             Some(_) => self.which_yard(),
-            None => self.yard.clone(),
+            None => self
+                .settings
+                .yard(&self.yard)
+                .map(|yard| yard.title())
+                .unwrap_or_else(|| self.yard.clone()),
         }
     }
     pub(crate) fn yard_identity(&self, name: &str) -> Option<YardIdentity> {
@@ -791,22 +802,26 @@ impl Footplate {
                             (None, Adding::Again(name)) => {
                                 // The pairing's QR code named which of the
                                 // account's yards where it holds a third
-                                // segment: the yard names it from here on.
-                                // Where it cannot stand, the pairing stands
-                                // without it, with the yard's own.
+                                // segment: the yard names it from here on,
+                                // an own yard spelled with its handle as its
+                                // bare name. Where it cannot stand, the
+                                // pairing stands without it, with the yard's
+                                // own.
                                 let mut settings = this.settings.clone();
                                 if let Some(named) = payload.as_ref()
                                     && let Some(mut listed) = settings.yard(name).cloned()
                                     && listed.is_hosted()
-                                    && listed.edge_yard != *named
                                 {
-                                    listed.edge_yard = named.clone();
-                                    if let Ok(pinned) = settings.clone().with_yard(
-                                        Some(name),
-                                        listed,
-                                        this.kept.as_deref(),
-                                    ) {
-                                        settings = pinned;
+                                    let kept = api::kept_edge_yard(named, &listed.handle);
+                                    if listed.edge_yard != kept {
+                                        listed.edge_yard = kept;
+                                        if let Ok(pinned) = settings.clone().with_yard(
+                                            Some(name),
+                                            listed,
+                                            this.kept.as_deref(),
+                                        ) {
+                                            settings = pinned;
+                                        }
                                     }
                                 }
                                 settings
@@ -951,7 +966,7 @@ impl Footplate {
                             file.display()
                         )
                     })?;
-                    Ok::<_, String>(signed.account)
+                    Ok::<_, String>((signed.account, signed.handle))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -960,8 +975,8 @@ impl Footplate {
                 // The password is sent: it stands in no field any longer,
                 // whatever the sign-in came to.
                 this.password.update(cx, |line, cx| line.set_text("", cx));
-                let account = match answer {
-                    Ok(account) => account,
+                let (account, handle) = match answer {
+                    Ok(signed) => signed,
                     Err(why) => {
                         this.yard_said = Some(why);
                         return;
@@ -980,6 +995,7 @@ impl Footplate {
                             .cloned()
                             .and_then(|mut yard| {
                                 yard.account = account.clone();
+                                yard.handle = handle.clone();
                                 let name = yard.name.clone();
                                 this.settings
                                     .clone()
@@ -1023,6 +1039,7 @@ impl Footplate {
                             .and_then(|mut yard| match yard.is_hosted() {
                                 true => {
                                     yard.account = account.clone();
+                                    yard.handle = handle.clone();
                                     this.settings
                                         .clone()
                                         .with_yard(Some(name), yard, this.kept.as_deref())
@@ -1258,7 +1275,7 @@ impl Footplate {
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .truncate()
-                                    .child(name.clone()),
+                                    .child(listed.title()),
                             )
                             .child(
                                 div()
@@ -1896,7 +1913,7 @@ impl Footplate {
                                     .min_w_0()
                                     .truncate()
                                     .when(open, |el| el.font_weight(FontWeight::SEMIBOLD))
-                                    .child(yard.name.clone()),
+                                    .child(yard.title()),
                             )
                             .child(
                                 div()

@@ -68,9 +68,17 @@ pub struct Yard {
     /// reached direct.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub account: String,
+    /// Of a hosted yard: the handle Kratos gives the signed-in account, as
+    /// the sign-in answered it. Empty where none signed in, and on every
+    /// yard reached direct. What tells an own yard from another account's
+    /// where `edge_yard` names `Handle/Name`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub handle: String,
     /// Of a hosted yard: which of the account's yards at the edge, as the
     /// pairing named it or as it was typed. Empty is the account's own
-    /// yard, and every call goes without naming one.
+    /// yard, and every call goes without naming one. Another account's is
+    /// `owner/yard`; an own yard spelled with the account's own handle is
+    /// kept as its bare name.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub edge_yard: String,
     /// The web view's base address, through which this yard's pages and
@@ -139,6 +147,34 @@ impl Yard {
         }
     }
 
+    /// A hosted yard of another account, one the account is a member of, as
+    /// its `edge_yard` names it: its owner's handle and the yard's name.
+    /// None for any other yard: one reached direct, the account's own yard
+    /// (empty, bare, or spelled with the account's own handle), or a name
+    /// that is no `owner/yard`. Empty handle tells nothing from an own
+    /// yard, so a slash there is another's.
+    pub fn member(&self) -> Option<(String, String)> {
+        match self.is_hosted() {
+            false => None,
+            true => match crate::api::member_yard(&self.edge_yard) {
+                Some((owner, yard)) if owner != self.handle.trim() => {
+                    Some((owner.to_string(), yard.to_string()))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// What the list calls it: its name, and beside a yard of another
+    /// account whose it is, so a member never takes it for one of their
+    /// own. An own yard keeps its bare name.
+    pub fn title(&self) -> String {
+        match self.member() {
+            Some((owner, _)) => format!("{} — member of {}'s yard", self.name, owner),
+            None => self.name.clone(),
+        }
+    }
+
     /// The web view's base address where none is set for the yard: the
     /// view's default for a yard of this machine reached by this run's
     /// socket, and none for any other yard — one with another socket, a
@@ -170,6 +206,7 @@ impl Yard {
             && self.token_file == other.token_file
             && self.session_file == other.session_file
             && self.account == other.account
+            && self.handle == other.handle
             && self.edge_yard == other.edge_yard
     }
 
@@ -777,7 +814,9 @@ impl Settings {
                     let mut kept =
                         Yard::hosted(&name, yard.address.trim(), yard.token_file.trim(), session);
                     kept.account = yard.account.trim().to_string();
-                    kept.edge_yard = yard.edge_yard.trim().to_string();
+                    kept.handle = yard.handle.trim().to_string();
+                    kept.edge_yard =
+                        crate::api::kept_edge_yard(yard.edge_yard.trim(), kept.handle.trim());
                     kept
                 }
             }
@@ -1820,8 +1859,8 @@ mod tests {
         let file = dir.path().join("settings.json");
         let set = two_far(&file);
 
-        // The account and which of its yards stand with the hosted yard,
-        // trimmed, and read back.
+        // The account, its handle and which of its yards stand with the
+        // hosted yard, trimmed, and read back.
         let mut south = Yard::hosted(
             "south",
             "https://south.example.net",
@@ -1829,30 +1868,102 @@ mod tests {
             "yard-south.session",
         );
         south.account = " jo@example.net ".to_string();
+        south.handle = " jo ".to_string();
         south.edge_yard = " airy ".to_string();
         let hosted = set.clone().with_yard(None, south, Some(&file)).unwrap();
         assert_eq!(hosted.yard("south").unwrap().account, "jo@example.net");
+        assert_eq!(hosted.yard("south").unwrap().handle, "jo");
         assert_eq!(hosted.yard("south").unwrap().edge_yard, "airy");
         hosted.write(&file).unwrap();
         let read = Settings::read(&file);
         assert_eq!(read.yard("south").unwrap().account, "jo@example.net");
+        assert_eq!(read.yard("south").unwrap().handle, "jo");
         assert_eq!(read.yard("south").unwrap().edge_yard, "airy");
         let kept = fs::read_to_string(&file).unwrap();
         assert!(kept.contains("\"account\": \"jo@example.net\""), "{kept}");
+        assert!(kept.contains("\"handle\": \"jo\""), "{kept}");
         assert!(kept.contains("\"edge_yard\": \"airy\""), "{kept}");
+
+        // An own yard spelled with its handle is kept as its bare name;
+        // another account's stays owner/yard.
+        let mut own = Yard::hosted(
+            "own",
+            "https://south.example.net",
+            "yard-own.token",
+            "yard-own.session",
+        );
+        own.account = "jo@example.net".to_string();
+        own.handle = "jo".to_string();
+        own.edge_yard = "jo/lab".to_string();
+        let kept = set.clone().with_yard(None, own, Some(&file)).unwrap();
+        assert_eq!(kept.yard("own").unwrap().edge_yard, "lab");
+        let mut member = Yard::hosted(
+            "member",
+            "https://south.example.net",
+            "yard-member.token",
+            "yard-member.session",
+        );
+        member.account = "jo@example.net".to_string();
+        member.handle = "jo".to_string();
+        member.edge_yard = "alice/lab".to_string();
+        let kept = set.clone().with_yard(None, member, Some(&file)).unwrap();
+        assert_eq!(kept.yard("member").unwrap().edge_yard, "alice/lab");
+        assert_eq!(
+            kept.yard("member").unwrap().member(),
+            Some(("alice".to_string(), "lab".to_string()))
+        );
+        assert_eq!(
+            kept.yard("member").unwrap().title(),
+            "member — member of alice's yard"
+        );
+
+        // A bare own yard, and one of another account, are distinguished
+        // by the signed-in handle; a missing handle cannot tell the two.
+        for (edge_yard, handle, marked) in [
+            ("", "jo", false),
+            ("airy", "jo", false),
+            ("jo/lab", "jo", false),
+            ("alice/lab", "jo", true),
+            ("alice/lab", "", true),
+            ("airy", "", false),
+        ] {
+            let mut yard = Yard::hosted(
+                "south",
+                "https://south.example.net",
+                "yard-south.token",
+                "yard-south.session",
+            );
+            yard.handle = handle.to_string();
+            yard.edge_yard = edge_yard.to_string();
+            assert_eq!(yard.member().is_some(), marked, "{edge_yard} {handle}");
+            match marked {
+                true => assert!(
+                    yard.title().starts_with("south — member of "),
+                    "{}",
+                    yard.title()
+                ),
+                false => assert_eq!(yard.title(), "south", "{edge_yard} {handle}"),
+            }
+        }
 
         // A yard reached direct keeps neither, whatever it was given.
         let mut shop = Yard::far("shop", "https://shop.example.net", "yard-shop.token");
         shop.account = "jo@example.net".to_string();
+        shop.handle = "jo".to_string();
         shop.edge_yard = "airy".to_string();
         let direct = set.clone().with_yard(None, shop, Some(&file)).unwrap();
         assert_eq!(direct.yard("shop").unwrap().account, "");
+        assert_eq!(direct.yard("shop").unwrap().handle, "");
         assert_eq!(direct.yard("shop").unwrap().edge_yard, "");
+        assert_eq!(direct.yard("shop").unwrap().member(), None);
+        assert_eq!(direct.yard("shop").unwrap().title(), "shop");
         let mut near = Yard::near("home", "");
         near.account = "jo@example.net".to_string();
+        near.handle = "jo".to_string();
         near.edge_yard = "airy".to_string();
         let direct = set.clone().with_yard(None, near, Some(&file)).unwrap();
         assert_eq!(direct.yard("home").unwrap().account, "");
+        assert_eq!(direct.yard("home").unwrap().handle, "");
         assert_eq!(direct.yard("home").unwrap().edge_yard, "");
     }
 

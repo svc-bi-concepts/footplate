@@ -60,7 +60,8 @@ use crate::yard::Env;
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, that list shut a second after it drew, as a click
-/// outside it shuts it, the yardmaster's conversation naming an ask and
+/// outside it shuts it, that list over an own and a member hosted yard,
+/// the member marked, the yardmaster's conversation naming an ask and
 /// two bead ids, the cheatsheet open over an open card, the About card open
 /// over the yardmaster's conversation, with the yardr the shot script
 /// keeps and with none kept, and the
@@ -88,7 +89,9 @@ use crate::yard::Env;
 /// config, with a device the yard no longer knows; the
 /// switcher's four yards, in both its states, from settings the state
 /// writes itself, with adventuretime open, this machine second, plantime
-/// live at its listener, and droplet away; the
+/// live at its listener, and droplet away; the member switcher's own and
+/// member hosted yards, from settings the state writes itself, with this
+/// machine open; the
 /// settings open over a running yard, each state on its section;
 /// the page's card stands expanded at
 /// its end, with the web view taken as answering, so the row carries Open
@@ -148,6 +151,7 @@ pub const STATES: &[&str] = &[
     "secret-refused",
     "switcher",
     "switcher-shut",
+    "switcher-member",
     "refs",
     "decisions",
     "decisions-filtered",
@@ -347,6 +351,22 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
             std::sync::Arc::new(adventuretime),
             std::sync::Arc::new(plantime),
         ];
+    }
+    if state == "switcher-member" {
+        // The member shot's hosted yards, held from the start: an own yard
+        // and a member yard of another account's behind one edge, each with
+        // one mail, so the list marks the member with its operator's
+        // handle beside the own yard's bare name.
+        let far = Yard::start_tcp();
+        populate(&far, state);
+        far.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [{"seq": 11, "from": "yardmaster", "to": "jo", "text": "From afar.", "read": false}], "unread": 1, "last": 11, "from": ["yardmaster"]}}"#,
+        );
+        far.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        let edge = Router::start(&far, crate::fake::SESSION);
+        write_member_settings(edge.address());
+        shot.edge = Some((far, edge));
     }
     if state == "reconnecting" {
         // The yard answers, the window reads it, and then its server is
@@ -575,6 +595,75 @@ fn write_switcher_settings(adventuretime_at: &str, plantime_at: &str) {
     }
 }
 
+/// The settings the `switcher-member` shot opens: this machine at the
+/// shot's socket and open, an own hosted yard and a member yard of
+/// another account's at the edge, with the account, its handle and which
+/// of its yards each names, and the device tokens and sessions in files
+/// beside them. The shot script runs against a throwaway config, which
+/// keeps no settings; where a settings file already stands, the state is
+/// refused rather than overwrite it. The window opens in the look the
+/// script asked for, with the switcher's list standing.
+fn write_member_settings(edge_at: &str) {
+    let Some(file) = crate::settings::file() else {
+        eprintln!("footplate: the switcher-member shot keeps no settings without a home");
+        std::process::exit(1);
+    };
+    if file.exists() {
+        eprintln!(
+            "footplate: the switcher-member shot writes its own settings, and {} already stands: shoot it against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
+            file.display()
+        );
+        std::process::exit(2);
+    }
+    let mut own =
+        crate::settings::Yard::hosted("own", edge_at, "yard-own.token", "yard-own.session");
+    own.account = crate::fake::KRATOS_EMAIL.to_string();
+    own.handle = crate::fake::KRATOS_HANDLE.to_string();
+    own.edge_yard = "airy".to_string();
+    let mut south =
+        crate::settings::Yard::hosted("south", edge_at, "yard-south.token", "yard-south.session");
+    south.account = crate::fake::KRATOS_EMAIL.to_string();
+    south.handle = crate::fake::KRATOS_HANDLE.to_string();
+    south.edge_yard = "alice/lab".to_string();
+    crate::settings::Settings {
+        look: look_asked(),
+        ..Default::default()
+    }
+    .with_yard(None, own, Some(&file))
+    .and_then(|set| set.with_yard(None, south, Some(&file)))
+    .and_then(|set| {
+        set.opening(crate::settings::HERE)
+            .write(&file)
+            .map_err(|error| error.to_string())
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("footplate: the switcher-member shot keeps no settings: {error}");
+        std::process::exit(1);
+    });
+    let edge = crate::api::Address::parse(edge_at).unwrap_or_else(|error| {
+        eprintln!("footplate: the switcher-member shot's edge has no address: {error}");
+        std::process::exit(1);
+    });
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    for (token, session) in [
+        ("yard-own.token", "yard-own.session"),
+        ("yard-south.token", "yard-south.session"),
+    ] {
+        crate::yard::token_place(&dir.join(token))
+            .and_then(|place| place.keep(crate::fake::TOKEN, &edge))
+            .unwrap_or_else(|error| {
+                eprintln!("footplate: the switcher-member shot keeps no token: {error}");
+                std::process::exit(1);
+            });
+        crate::yard::keep_session(&dir.join(session), crate::fake::SESSION, &edge).unwrap_or_else(
+            |error| {
+                eprintln!("footplate: the switcher-member shot keeps no session: {error}");
+                std::process::exit(1);
+            },
+        );
+    }
+}
+
 /// The adventuretime yard of the `switcher` shot: jo's, with two mails
 /// and one open decision, so its row carries 3 with
 /// "1 decision · 2 mail" in its tooltip.
@@ -782,7 +871,8 @@ fn populate(yard: &Yard, state: &str) {
         // opens on the panel, the board, the bead and the flow, the
         // switcher's, which the window opens with the switcher's list
         // standing, as it does for the one that shuts it by a click
-        // outside, the notice's, whose flows view does not answer, the
+        // outside and the member one, the notice's, whose flows view
+        // does not answer, the
         // screen's, whose session's screen opens over it, the
         // hosted screen's, whose card opens over it with no call, and
         // the refused screen's, whose card opens over it with the
@@ -807,6 +897,7 @@ fn populate(yard: &Yard, state: &str) {
         | "old-lines"
         | "switcher"
         | "switcher-shut"
+        | "switcher-member"
         | "about"
         | "about-unfetched"
         | "notice"
@@ -2176,6 +2267,7 @@ mod tests {
                 | "away"
                 | "switcher"
                 | "switcher-shut"
+                | "switcher-member"
                 | "about"
                 | "about-unfetched" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

@@ -171,12 +171,13 @@ impl Footplate {
         // The switcher shots open with the switcher's list standing, on
         // the open yard's row: four yards are paired, one of them away,
         // and the shot is the list; the second shuts it a second after it
-        // drew, as a press outside it does (yards.rs). A debug build's
-        // alone, as above.
+        // drew, as a press outside it does (yards.rs); the member one
+        // stands over an own and a member yard, the member marked. A debug
+        // build's alone, as above.
         #[cfg(debug_assertions)]
         if matches!(
             std::env::var("FOOTPLATE_SHOT").as_deref(),
-            Ok("switcher") | Ok("switcher-shut")
+            Ok("switcher") | Ok("switcher-shut") | Ok("switcher-member")
         ) {
             let open = this
                 .settings
@@ -600,6 +601,7 @@ impl Footplate {
     ) -> Held {
         self.sessions += 1;
         let session = self.sessions;
+        let is_member = entry.as_ref().is_some_and(|e| e.member().is_some());
         let mut held = Held {
             session,
             entry,
@@ -633,9 +635,15 @@ impl Footplate {
             let (client, name, watch, retry) =
                 (client.clone(), self.name.clone(), self.watch, self.retry);
             move || {
-                session::follow_with_control(&client, &name, retry, watch, stop, |update| {
-                    tell.send_blocking(update).is_ok()
-                })
+                session::follow_with_control(
+                    &client,
+                    &name,
+                    retry,
+                    watch,
+                    stop,
+                    is_member,
+                    |update| tell.send_blocking(update).is_ok(),
+                )
             }
         });
         held.following = Some(cx.spawn(async move |this, cx| {
@@ -865,6 +873,7 @@ impl Footplate {
         };
         let yard = yard.clone();
         let mut baseline_to_save = None;
+        let mut removed = false;
         match update {
             Update::Up(state) => {
                 let mut state = *state;
@@ -915,18 +924,25 @@ impl Footplate {
             Update::Down(why, short) => {
                 held.down = Some(why);
                 held.away = Away::Trying;
-                self.unreached.insert(yard, short);
+                self.unreached.insert(yard.clone(), short);
             }
             Update::Out(why) => {
                 held.down = Some(why);
                 held.away = Away::Out;
-                self.unreached.insert(yard, session::PAIR_AGAIN);
+                self.unreached.insert(yard.clone(), session::PAIR_AGAIN);
             }
             Update::SignedOut(why) => {
                 held.down = Some(why);
                 held.away = Away::SignedOut;
-                self.unreached.insert(yard, session::SIGN_IN_AGAIN);
+                self.unreached.insert(yard.clone(), session::SIGN_IN_AGAIN);
             }
+            Update::Removed => {
+                removed = true;
+            }
+        }
+        if removed {
+            self.yard_removed(&yard, cx);
+            return;
         }
         if let Some((yard, looked)) = baseline_to_save {
             self.set(self.settings.clone().with_timetable_seen(&yard, looked), cx);
@@ -1207,6 +1223,11 @@ impl Footplate {
                 self.unreached
                     .insert(self.yard.clone(), session::SIGN_IN_AGAIN);
                 self.switch_question = None;
+            }
+            Update::Removed => {
+                let yard = self.yard.clone();
+                self.yard_removed(&yard, cx);
+                return;
             }
         }
         // The follower asks a yard that is away every few seconds: the
@@ -3762,7 +3783,6 @@ impl Footplate {
         if self.pairing || self.signing_in || self.env.yard.is_some() {
             return;
         }
-        self.shut_menu();
         // Who the device is there is what the yard said when it was read.
         let (model, said) = match self.held.get(name) {
             _ if name == self.yard => (self.model.as_ref(), self.said.as_ref()),
@@ -3781,6 +3801,44 @@ impl Footplate {
             said.push(' ');
             said.push_str(&sessions);
         }
+        self.forget_yard(name, settings, said, cx);
+    }
+
+    /// A yard of another account whose owner removed the account's access,
+    /// which its follower found: forgotten as removing it forgets one,
+    /// rather than left standing as a yard that always fails, and the yard
+    /// said is the one sentence that says why. The operator already removed
+    /// the device with the user, so no token sentence stands beside it.
+    pub(crate) fn yard_removed(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.env.yard.is_some() {
+            return;
+        }
+        let Some(listed) = self.settings.yard(name).cloned() else {
+            return;
+        };
+        let Some((owner, _)) = listed.member() else {
+            return;
+        };
+        let (settings, _, _) = self.settings.clone().without(name, self.kept.as_deref());
+        self.forget_yard(
+            name,
+            settings,
+            format!("{owner} removed your access to {name}."),
+            cx,
+        );
+    }
+
+    /// Forgets the yard called `name` for the settings `settings` already
+    /// without it, saying `said`: what removing and a removal share. Where
+    /// it was the open one another is shown.
+    fn forget_yard(
+        &mut self,
+        name: &str,
+        settings: Settings,
+        said: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.shut_menu();
         self.yard_said = Some(said);
         if matches!(&self.adding, Some(Adding::Again(at) | Adding::SignInAgain(at) | Adding::Rename(at)) if at == name)
         {
@@ -4851,9 +4909,14 @@ impl Footplate {
         // The one yard the environment names has no switcher, but it
         // still has its chip, with its name alone for its words.
         let letters: String = self.yard.chars().take(2).collect();
+        let shown = self
+            .settings
+            .yard(&self.yard)
+            .map(|yard| yard.title())
+            .unwrap_or_else(|| self.yard.clone());
         let tip = match self.env.yard.is_some() {
-            true => self.yard.clone(),
-            false => format!("{} — switch yards ({}+y)", self.yard, SECONDARY),
+            true => shown,
+            false => format!("{shown} — switch yards ({SECONDARY}+y)"),
         };
         rail = rail.child(
             div()

@@ -2174,12 +2174,52 @@ fn pair_with(
 }
 
 /// What signing in at the edge answers: the session token, kept as the
-/// device's is, and the account it signed in as.
+/// device's is, the account it signed in as, and the handle Kratos gives
+/// that account. The handle tells an own yard from another account's where
+/// a hosted yard names `Handle/Name`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignedIn {
     pub session: String,
     pub account: String,
+    pub handle: String,
 }
+
+/// A yard of another account, one the account is a member of, as the edge
+/// names it in `X-Edge-Yard`: its owner's handle, a slash and the yard's
+/// name. None for any other name: the account's own yard's, or a slash with
+/// a part missing, a third part, or a space.
+pub fn member_yard(edge_yard: &str) -> Option<(&str, &str)> {
+    let named = edge_yard.trim();
+    if named.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut parts = named.split('/');
+    let (owner, yard, end) = (parts.next()?, parts.next()?, parts.next());
+    match end.is_some() || owner.is_empty() || yard.is_empty() {
+        true => None,
+        false => Some((owner, yard)),
+    }
+}
+
+/// The name the edge's yard `named` is kept under. A yard of another
+/// account stays `owner/yard`; one spelled with the account's own handle is
+/// the account's own yard, kept by its bare name, so the list never calls a
+/// yard of its own another's. Empty handle keeps what was named: with no
+/// handle there is nothing to tell it by.
+pub fn kept_edge_yard(named: &str, handle: &str) -> String {
+    let named = named.trim();
+    let handle = handle.trim();
+    match member_yard(named) {
+        Some((owner, yard)) if !handle.is_empty() && owner == handle => yard.to_string(),
+        _ => named.to_string(),
+    }
+}
+
+/// The edge's sentence, in its 403, for a pick that names no yard the
+/// account holds. A yard of another account is the account's while its
+/// membership is active, so this is also the answer to a member the owner
+/// removed, before any yard is reached.
+pub const HOLDS_NO_YARD: &str = "the account holds no yard of that name";
 
 /// Signs the Kratos account in at the edge's `/kratos` path, with the API
 /// flow a native client uses: one flow is opened, and the password method
@@ -2293,9 +2333,17 @@ fn submit_login(address: &Address, flow: &str, email: &str, password: &str) -> R
                 .map(|held| held.lines().next().unwrap_or_default().trim().to_string())
                 .filter(|held| !held.is_empty())
                 .unwrap_or_else(|| email.to_string());
+            let handle = traits["handle"]
+                .as_str()
+                .map(str::trim)
+                .filter(|held| !held.is_empty())
+                .map(|held| held.lines().next().unwrap_or_default().trim().to_string())
+                .filter(|held| !held.is_empty())
+                .unwrap_or_default();
             Ok(SignedIn {
                 session: session.to_string(),
                 account,
+                handle,
             })
         }
         400 => {
@@ -4007,7 +4055,7 @@ mod tests {
             ("https://example.com", "/?x=1")
         );
     }
-    use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router, SESSION, TOKEN, Yard};
+    use crate::fake::{KRATOS_EMAIL, KRATOS_HANDLE, KRATOS_PASSWORD, Router, SESSION, TOKEN, Yard};
 
     #[test]
     fn socket_is_under_yardr_home_else_the_home() {
@@ -5814,6 +5862,38 @@ mod tests {
         assert!(no_yard(200, r#"{"error":"edge: the yard is building"}"#.as_bytes()).is_none());
     }
 
+    /// A yard of another account is `owner/yard`, and an own yard spelled
+    /// with its handle is kept as its bare name.
+    #[test]
+    fn a_member_yard_is_owner_slash_yard_and_an_own_one_is_kept_bare() {
+        assert_eq!(member_yard("alice/lab"), Some(("alice", "lab")));
+        assert_eq!(member_yard(" alice/lab "), Some(("alice", "lab")));
+        for named in [
+            "",
+            "airy",
+            "jo/",
+            "/lab",
+            "a/b/c",
+            "alice /lab",
+            "alice/ lab",
+            "alice/lab ",
+            " Jo/lab",
+        ] {
+            let read = member_yard(named);
+            match named.trim() {
+                "alice/lab" | "Jo/lab" => assert!(read.is_some(), "{named}"),
+                _ => assert_eq!(read, None, "{named}"),
+            }
+        }
+        assert_eq!(kept_edge_yard("alice/lab", "jo"), "alice/lab");
+        assert_eq!(kept_edge_yard("jo/lab", "jo"), "lab");
+        assert_eq!(kept_edge_yard(" jo/lab ", " jo "), "lab");
+        assert_eq!(kept_edge_yard("airy", "jo"), "airy");
+        assert_eq!(kept_edge_yard("", "jo"), "");
+        assert_eq!(kept_edge_yard("alice/lab", ""), "alice/lab");
+        assert_eq!(HOLDS_NO_YARD, "the account holds no yard of that name");
+    }
+
     /// The edge's refuseCall is told by its status with its header and its
     /// body's key: a 503 with away, a 504, and a 429 with busy, each of
     /// `{"error": "<sentence>"}`, with one leading "edge: " stripped.
@@ -5928,6 +6008,7 @@ mod tests {
         assert!(is_token(&signed.session));
         assert_ne!(signed.session, SESSION);
         assert_eq!(signed.account, KRATOS_EMAIL);
+        assert_eq!(signed.handle, KRATOS_HANDLE);
         let submit = edge.last_request();
         assert!(
             submit.starts_with("POST /kratos/self-service/login?flow=test-flow-id HTTP/1.1\r\n"),

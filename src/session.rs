@@ -73,6 +73,10 @@ pub enum Update {
     /// yard is not asked again; the thread has ended. In a word or two it
     /// is [`SIGN_IN_AGAIN`].
     SignedOut(String),
+    /// The edge no longer lets the account into this yard of another
+    /// account's: its owner removed the membership. Never asked again; the
+    /// window forgets the yard.
+    Removed,
 }
 
 #[derive(Default)]
@@ -508,7 +512,10 @@ fn stream(
 /// the yard is tried again, waiting longer between tries: `retry`, doubled
 /// for each failure in a row, up to a minute. A yard that does not let the
 /// device in, or the edge that does not let the session in, is not tried
-/// again: the window is told, and this returns.
+/// again: the window is told, and this returns. Where `is_member` says the
+/// yard is another account's, the edge answering it holds no such yard is
+/// the owner having removed the membership: told once as removed, never
+/// tried again, and any other refusal is tried as any yard's is.
 /// The handle stops the current stream from another thread, so switching
 /// yards does not leave an idle old yard's connection alive indefinitely.
 /// A stream that says nothing while the yard moves on is watched as
@@ -519,6 +526,7 @@ pub fn follow_with_control(
     retry: Duration,
     watch: Watch,
     control: FollowControl,
+    is_member: bool,
     mut tell: impl FnMut(Update) -> bool,
 ) {
     // The state last told as the window's, until the yard is away from it.
@@ -581,6 +589,12 @@ pub fn follow_with_control(
             }
             Err(Trouble::NotSignedIn) => {
                 tell(Update::SignedOut(Trouble::NotSignedIn.to_string()));
+                return;
+            }
+            Err(Trouble::Yard(api::Error::Refused { code, message }))
+                if is_member && code == "no_yard" && message == api::HOLDS_NO_YARD =>
+            {
+                tell(Update::Removed);
                 return;
             }
             Err(trouble) => trouble.with(client),
@@ -1004,6 +1018,7 @@ mod tests {
                     Duration::from_millis(20),
                     WATCH,
                     FollowControl::default(),
+                    false,
                     |update| tx.send(update).is_ok(),
                 )
             }
@@ -1019,6 +1034,7 @@ mod tests {
                 Update::Out(why) | Update::SignedOut(why) => {
                     panic!("the edge and yard let the device in: {why}")
                 }
+                Update::Removed => panic!("no member yard here"),
             }
         };
         assert_eq!(state.me, "jo");
@@ -1037,6 +1053,7 @@ mod tests {
                 Update::SignedOut(why) => panic!("no edge stands here: {why}"),
                 Update::Down(why, _) => panic!("it is there, and says no: {why}"),
                 Update::Up(_) | Update::Event(_) => continue,
+                Update::Removed => panic!("no member yard here"),
             }
         };
         assert!(why.starts_with("This device is no longer let in"), "{why}");
@@ -1072,6 +1089,7 @@ mod tests {
                     Duration::from_millis(20),
                     WATCH,
                     FollowControl::default(),
+                    false,
                     |update| tx.send(update).is_ok(),
                 )
             }
@@ -1109,6 +1127,7 @@ mod tests {
                 Update::Out(why) => panic!("a gateway's 401 is not the device refused: {why}"),
                 Update::SignedOut(why) => panic!("the session is good: {why}"),
                 Update::Up(_) | Update::Event(_) => continue,
+                Update::Removed => panic!("no member yard here"),
             }
         };
         assert!(
@@ -1127,6 +1146,7 @@ mod tests {
                 }
                 Update::Down(..) | Update::Event(_) => continue,
                 Update::Out(why) | Update::SignedOut(why) => panic!("it passes again: {why}"),
+                Update::Removed => panic!("no member yard here"),
             }
         }
 
@@ -1139,6 +1159,7 @@ mod tests {
                 Update::Out(why) => panic!("the device is still paired: {why}"),
                 Update::Down(why, _) => panic!("it is there, and says no: {why}"),
                 Update::Up(_) | Update::Event(_) => continue,
+                Update::Removed => panic!("no member yard here"),
             }
         };
         assert!(
@@ -1155,6 +1176,115 @@ mod tests {
         assert_eq!(edge.proxied(), proxied);
         assert_eq!(yard.requests(), asked);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Through the edge, a member yard the edge answers holds no longer is
+    /// told once as removed and never asked again; any other refusal of
+    /// such a yard, and the same sentence of an own yard, are told as
+    /// trouble that passes, and the yard is asked again.
+    #[test]
+    fn a_member_yard_the_edge_holds_no_longer_is_removed_and_nothing_else_is() {
+        use crate::fake::{Router, SESSION, TOKEN};
+
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        let edge = Router::start(&yard, SESSION);
+        let wait = Duration::from_secs(10);
+
+        // A member yard, working.
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn({
+            let client = edge.client_with_yard(TOKEN, SESSION, "alice/lab");
+            move || {
+                follow_with_control(
+                    &client,
+                    "mac-login",
+                    Duration::from_millis(20),
+                    WATCH,
+                    FollowControl::default(),
+                    true,
+                    |update| tx.send(update).is_ok(),
+                )
+            }
+        });
+        let Update::Up(state) = rx.recv_timeout(wait).unwrap() else {
+            panic!("the yard is there")
+        };
+        assert_eq!(state.me, "jo");
+
+        // Any other 403 of a member yard is trouble that passes: the yard
+        // is said down and asked again, never removed.
+        edge.no_yard("the yard is building");
+        yard.end_streams();
+        let (why, _) = loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Down(why, short) => break (why, short),
+                Update::Up(_) | Update::Event(_) => continue,
+                Update::Out(why) | Update::SignedOut(why) => {
+                    panic!("it is there, and says no: {why}")
+                }
+                Update::Removed => panic!("a building yard is not a removal"),
+            }
+        };
+        assert!(why.contains("the yard is building"), "{why}");
+        // Still asked: another Down comes.
+        loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Down(..) => break,
+                Update::Up(_) | Update::Event(_) => continue,
+                update => panic!("still asked, not removed: {update:?}"),
+            }
+        }
+
+        // The holds-no-yard answer is the removal: told once, never asked
+        // again.
+        edge.no_yard(crate::api::HOLDS_NO_YARD);
+        loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Removed => break,
+                Update::Down(..) | Update::Up(_) | Update::Event(_) => continue,
+                Update::Out(why) | Update::SignedOut(why) => {
+                    panic!("it is there, and says no: {why}")
+                }
+            }
+        }
+        follower.join().unwrap();
+        let (proxied, asked) = (edge.proxied(), yard.requests());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(edge.proxied(), proxied);
+        assert_eq!(yard.requests(), asked);
+        assert!(rx.try_recv().is_err());
+
+        // The same sentence of an own yard is trouble that passes, not a
+        // removal.
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn({
+            let client = edge.client_with(TOKEN, SESSION);
+            move || {
+                follow_with_control(
+                    &client,
+                    "mac-login",
+                    Duration::from_millis(20),
+                    WATCH,
+                    FollowControl::default(),
+                    false,
+                    |update| tx.send(update).is_ok(),
+                )
+            }
+        });
+        let (why, _) = loop {
+            match rx.recv_timeout(wait).unwrap() {
+                Update::Down(why, short) => break (why, short),
+                Update::Up(_) | Update::Event(_) => continue,
+                Update::Out(why) | Update::SignedOut(why) => {
+                    panic!("it is there, and says no: {why}")
+                }
+                Update::Removed => panic!("an own yard is not removed"),
+            }
+        };
+        assert!(why.contains(crate::api::HOLDS_NO_YARD), "{why}");
+        drop(rx);
+        follower.join().unwrap();
     }
 
     /// A follower that is stopped while its read waits on a quiet stream
@@ -1181,6 +1311,7 @@ mod tests {
                         Duration::from_secs(10),
                         WATCH,
                         stop,
+                        false,
                         |update| updates.send(update).is_ok(),
                     );
                     finished.send(()).unwrap();
@@ -1230,9 +1361,15 @@ mod tests {
         let client = yard.client();
         thread::spawn(move || {
             let retry = Duration::from_millis(20);
-            follow_with_control(&client, "jo", retry, watch, FollowControl::default(), |u| {
-                tx.send(u).is_ok()
-            })
+            follow_with_control(
+                &client,
+                "jo",
+                retry,
+                watch,
+                FollowControl::default(),
+                false,
+                |u| tx.send(u).is_ok(),
+            )
         });
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(10)).unwrap(),
@@ -1680,6 +1817,7 @@ mod tests {
                 Duration::from_millis(20),
                 WATCH,
                 FollowControl::default(),
+                false,
                 |update| tx.send(update).is_ok(),
             )
         });
@@ -1729,6 +1867,7 @@ mod tests {
                 Duration::from_secs(5),
                 WATCH,
                 follower_control,
+                false,
                 |update| tx.send(update).is_ok(),
             )
         });
@@ -1754,6 +1893,7 @@ mod tests {
                     Duration::from_millis(20),
                     WATCH,
                     FollowControl::default(),
+                    false,
                     |update| tx.send(update).is_ok(),
                 )
             }
@@ -1785,6 +1925,7 @@ mod tests {
                 Update::Out(why) | Update::SignedOut(why) => {
                     panic!("the socket lets everyone in: {why}")
                 }
+                Update::Removed => panic!("no member yard here"),
             }
         };
         assert_eq!((state.me.as_str(), state.head), ("jo", 20));
@@ -1803,6 +1944,7 @@ mod tests {
                 Update::Out(why) | Update::SignedOut(why) => {
                     panic!("the socket lets everyone in: {why}")
                 }
+                Update::Removed => panic!("no member yard here"),
             }
         };
         assert!(why.starts_with("No yard"), "{why}");

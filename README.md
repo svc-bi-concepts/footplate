@@ -460,7 +460,9 @@ shown), `secret-refused` (that card with the yard's refusal of
 its answer), `switcher` (the switcher's list open over four
 yards, one of them away), `switcher-shut` (that list, shut a second after
 it drew as a click outside it shuts it: the scripts drive no pointer, so
-the state asks the window for what the click asks), `refs` (the conversation with the
+the state asks the window for what the click asks), `switcher-member`
+(that list over an own and a member hosted yard, the member marked with
+its operator's handle), `refs` (the conversation with the
 yardmaster, naming an ask and two bead ids: the ask's chip with its
 preview under the mail), `decisions` (the decisions list with one
 open ask and the 156-item history open: day groups and a folded

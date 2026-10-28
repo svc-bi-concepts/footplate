@@ -19452,6 +19452,233 @@ yardr.dev
         assert!(near.at_listener() || !drawn(cx, "pair again"));
     }
 
+    /// A hosted yard of another account stands in the settings' list and the
+    /// switcher marked with its operator's handle; an own yard stands bare.
+    /// A member of two yards gets the picker with both.
+    #[gpui::test]
+    fn a_member_yard_is_marked_in_the_list_and_switcher_and_two_get_the_picker(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::fake::{KRATOS_EMAIL, KRATOS_HANDLE, Router, SESSION, TOKEN};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        let file = dir.path().join("footplate/settings.json");
+        let mut own =
+            settings::Yard::hosted("own", edge.address(), "yard-own.token", "yard-own.session");
+        own.account = KRATOS_EMAIL.to_string();
+        own.handle = KRATOS_HANDLE.to_string();
+        own.edge_yard = "airy".to_string();
+        let mut member = settings::Yard::hosted(
+            "south",
+            edge.address(),
+            "yard-south.token",
+            "yard-south.session",
+        );
+        member.account = KRATOS_EMAIL.to_string();
+        member.handle = KRATOS_HANDLE.to_string();
+        member.edge_yard = "alice/lab".to_string();
+        Settings::default()
+            .with_yard(None, own, Some(&file))
+            .unwrap()
+            .with_yard(None, member, Some(&file))
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        yard::keep_token(&dir.path().join("footplate/yard-own.token"), TOKEN).unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-own.session"), SESSION).unwrap();
+        yard::keep_token(&dir.path().join("footplate/yard-south.token"), TOKEN).unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let env = env_on(&near, &file);
+        let (view, cx) = watching_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the hosted yards", |cx| {
+            state_of(&view, cx, "own") == "1 mail" && state_of(&view, cx, "south") == "1 mail"
+        });
+
+        // The member yard is marked with its operator's handle, the own yard
+        // bare, as the list calls them.
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.settings.yard("own").unwrap().title(), "own");
+            assert_eq!(
+                v.settings.yard("south").unwrap().title(),
+                "south — member of alice's yard"
+            );
+        });
+
+        // The switcher lists both: the picker a member of two yards gets.
+        click_on(cx, "yard chip");
+        assert!(drawn(cx, "switch own"));
+        assert!(drawn(cx, "switch south"));
+        assert!(drawn(cx, "switch kind own"));
+        assert!(drawn(cx, "switch kind south"));
+
+        // The settings' list rows stand under their local names, marked as
+        // the switcher marks them.
+        click_on(cx, "switch add");
+        assert!(settings_open(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.section),
+            Section::Yards
+        );
+        assert!(drawn(cx, "yard row own"));
+        assert!(drawn(cx, "yard row south"));
+    }
+
+    /// An account holding one member yard alone opens it straight in, with
+    /// no picker.
+    #[gpui::test]
+    fn an_account_holding_one_member_yard_alone_opens_it_straight_in(cx: &mut TestAppContext) {
+        use crate::fake::{KRATOS_EMAIL, KRATOS_HANDLE, Router, SESSION, TOKEN};
+
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        let file = dir.path().join("footplate/settings.json");
+        let mut member = settings::Yard::hosted(
+            "south",
+            edge.address(),
+            "yard-south.token",
+            "yard-south.session",
+        );
+        member.account = KRATOS_EMAIL.to_string();
+        member.handle = KRATOS_HANDLE.to_string();
+        member.edge_yard = "alice/lab".to_string();
+        Settings::default()
+            .with_yard(None, member, Some(&file))
+            .unwrap()
+            .without("this machine", Some(&file))
+            .0
+            .write(&file)
+            .unwrap();
+        yard::keep_token(&dir.path().join("footplate/yard-south.token"), TOKEN).unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let (view, cx) = watching_at(Env::default(), &file, cx);
+
+        // Straight in: the member yard opens, marked, with no picker.
+        wait(cx, "the member yard's conversations", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        assert_eq!(open_yard(&view, cx), "south — member of alice's yard");
+        view.read_with(cx, |v, _| assert_eq!(v.yard, "south"));
+        assert_eq!(switching(&view, cx), None);
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.settings.yard("south").unwrap().title(),
+                "south — member of alice's yard"
+            );
+        });
+
+        // If the one member yard stops being held, the open-yard update
+        // forgets it too and leaves the fallback yard open.
+        edge.no_yard(crate::api::HOLDS_NO_YARD);
+        far.end_streams();
+        wait(cx, "the open member yard forgotten", |cx| {
+            view.read_with(cx, |v, _| v.settings.yard("south").is_none())
+        });
+        assert_eq!(open_yard(&view, cx), "this machine");
+        assert_eq!(yard_said(&view, cx), "alice removed your access to south.");
+        assert!(!dir.path().join("footplate/yard-south.token").exists());
+        assert!(!dir.path().join("footplate/yard-south.session").exists());
+    }
+
+    /// A member yard the edge refuses as held no longer leaves the list and
+    /// is forgotten, with the removal said; another 403 does not forget it.
+    #[gpui::test]
+    fn a_member_yard_the_edge_holds_no_longer_leaves_and_is_forgotten(cx: &mut TestAppContext) {
+        use crate::fake::{KRATOS_EMAIL, KRATOS_HANDLE, Router, SESSION, TOKEN};
+
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let own_far = Yard::start_tcp();
+        a_far_yard_of_jo(&own_far);
+        let own_edge = Router::start(&own_far, SESSION);
+        let member_far = Yard::start_tcp();
+        a_far_yard_of_jo(&member_far);
+        let member_edge = Router::start(&member_far, SESSION);
+        let file = dir.path().join("footplate/settings.json");
+        let mut own = settings::Yard::hosted(
+            "own",
+            own_edge.address(),
+            "yard-own.token",
+            "yard-own.session",
+        );
+        own.account = KRATOS_EMAIL.to_string();
+        own.handle = KRATOS_HANDLE.to_string();
+        own.edge_yard = "airy".to_string();
+        let mut member = settings::Yard::hosted(
+            "south",
+            member_edge.address(),
+            "yard-south.token",
+            "yard-south.session",
+        );
+        member.account = KRATOS_EMAIL.to_string();
+        member.handle = KRATOS_HANDLE.to_string();
+        member.edge_yard = "alice/lab".to_string();
+        Settings::default()
+            .with_yard(None, own, Some(&file))
+            .unwrap()
+            .with_yard(None, member, Some(&file))
+            .unwrap()
+            .write(&file)
+            .unwrap();
+        yard::keep_token(&dir.path().join("footplate/yard-own.token"), TOKEN).unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-own.session"), SESSION).unwrap();
+        yard::keep_token(&dir.path().join("footplate/yard-south.token"), TOKEN).unwrap();
+        yard::keep_session_token(&dir.path().join("footplate/yard-south.session"), SESSION)
+            .unwrap();
+        let env = env_on(&near, &file);
+        let (view, cx) = watching_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the hosted yards", |cx| {
+            state_of(&view, cx, "own") == "1 mail" && state_of(&view, cx, "south") == "1 mail"
+        });
+
+        // Another 403 of the member yard is trouble that passes: the yard
+        // stays, said down, and is asked again.
+        member_edge.no_yard("the yard is building");
+        member_far.end_streams();
+        wait(cx, "the member yard building", |cx| {
+            state_of(&view, cx, "south").starts_with("not reached:")
+        });
+        view.read_with(cx, |v, _| {
+            assert!(v.settings.yard("south").is_some());
+        });
+
+        // The holds-no-yard answer is the removal: the yard leaves the list
+        // and is forgotten, with the removal said, and the window shows
+        // what is left.
+        member_edge.no_yard(crate::api::HOLDS_NO_YARD);
+        member_far.end_streams();
+        wait(cx, "the member yard forgotten", |cx| {
+            view.read_with(cx, |v, _| v.settings.yard("south").is_none())
+        });
+        assert_eq!(yard_said(&view, cx), "alice removed your access to south.");
+        view.read_with(cx, |v, _| {
+            assert!(v.settings.yard("own").is_some());
+            assert!(v.settings.yard("south").is_none());
+        });
+        // The token and session files go with it, as removing does.
+        assert!(!dir.path().join("footplate/yard-south.token").exists());
+        assert!(!dir.path().join("footplate/yard-south.session").exists());
+        // The own yard goes on as it was.
+        wait(cx, "what waits in the own yard", |cx| {
+            state_of(&view, cx, "own") == "1 mail"
+        });
+    }
+
     /// A hosted yard whose stream a gateway turns away while its calls
     /// pass, as the edge's router did a vps yard's (yardr-hosted-c0sb):
     /// the timetable's catch-up asks that stream when the head has moved

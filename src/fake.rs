@@ -1008,7 +1008,7 @@ pub const KRATOS_EMAIL: &str = "jo@example.net";
 pub const KRATOS_PASSWORD: &str = "sign-me-in-1";
 /// The handle Kratos answers the account has.
 #[cfg(any(test, debug_assertions))]
-const KRATOS_HANDLE: &str = "jo";
+pub const KRATOS_HANDLE: &str = "jo";
 /// The login flow the stand-in answers: any other is expired.
 #[cfg(any(test, debug_assertions))]
 const KRATOS_FLOW: &str = "test-flow-id";
