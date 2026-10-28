@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, AskWeight, Asks, Bead, BeadAsk, BeadNote, BlobRef,
     CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven, Identity, Letter,
-    Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant, User,
+    Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant,
+    TelemetryPreview, User,
 };
 use crate::markdown;
 use crate::select;
@@ -101,6 +102,18 @@ pub struct State {
     /// link from its edge: it is read on the yard's machine. The window
     /// offers no Screen, and the call is not made.
     pub screen_on_the_yard: bool,
+    /// The yard's telemetry switch with the install id and the next
+    /// request, as read: `None` where the window is not the operator's,
+    /// which reads none, where the yard serves the calls to no such
+    /// window, and where the read failed.
+    pub telemetry: Option<TelemetryPreview>,
+    /// Why the telemetry preview is empty, in the window's words; `None`
+    /// where it was read, or the yard serves no such call here.
+    pub telemetry_notice: Option<String>,
+    /// The yard serves the telemetry calls to no such window: one from
+    /// before them, or one reached down the link from its edge. The
+    /// Telemetry section is not offered, and the calls are not made.
+    pub telemetry_unserved: bool,
     /// Of a yard at an address: who it says this device is. The window
     /// names the yard by it; the model reads nothing of it.
     pub yard: Option<Me>,
@@ -869,6 +882,8 @@ pub enum Effect {
     Flows,
     /// `SourceGrants`; answered to [`Model::grants`].
     Grants,
+    /// `TelemetryShow`; answered to [`Model::telemetry`].
+    Telemetry,
     /// Which of the person's beads were added or closed after `from`
     /// through `until`, by bead; answered to [`Model::timetable_seeded`].
     Timetable { from: u64, until: u64 },
@@ -898,6 +913,7 @@ pub enum Read {
     Arrivals,
     Flows,
     Grants,
+    Telemetry,
 }
 
 impl Read {
@@ -912,6 +928,7 @@ impl Read {
             Read::Arrivals => Effect::Arrivals,
             Read::Flows => Effect::Flows,
             Read::Grants => Effect::Grants,
+            Read::Telemetry => Effect::Telemetry,
         }
     }
 }
@@ -1095,6 +1112,26 @@ pub struct Model {
     /// says the request came down the link sets it, and the model of a state
     /// read again keeps it.
     screen_on_the_yard: bool,
+    /// The yard's telemetry switch with the install id and the next
+    /// request, as read: `None` where the window is not the operator's,
+    /// which reads none, where the yard serves the calls to no such
+    /// window, and where the read failed.
+    telemetry: Option<TelemetryPreview>,
+    /// Why the telemetry preview is empty, in the window's words; `None`
+    /// where it was read, or the yard serves no such call here. A preview
+    /// read again clears it.
+    telemetry_notice: Option<String>,
+    /// The yard serves the telemetry calls to no such window: one from
+    /// before them, or one reached down the link from its edge. The
+    /// Telemetry section is not offered, and no call is made for it. A
+    /// preview read again clears it, as one read at the start never sets
+    /// it.
+    telemetry_unserved: bool,
+    /// The switch is read-only in this window: the yard refused its change
+    /// from where this window reaches it, and the switch is changed in the
+    /// yard's web view instead. Set again clears nothing: the section
+    /// stays read-only until the yard is read whole.
+    telemetry_read_only: bool,
     /// The yard has no React call: one from before reactions. The row
     /// the reactions are tapped on is hidden, and no notice is raised.
     /// A reaction answered clears it.
@@ -1280,6 +1317,9 @@ impl Model {
             grants_too_old: state.grants_too_old,
             grants_on_the_yard: state.grants_on_the_yard,
             screen_on_the_yard: state.screen_on_the_yard,
+            telemetry: state.telemetry,
+            telemetry_notice: state.telemetry_notice,
+            telemetry_unserved: state.telemetry_unserved,
             cursor: state.cursor,
             asked: state.cursor,
             notifications: state.notifications,
@@ -1511,8 +1551,8 @@ impl Model {
     }
 
     /// Whether the window is the operator's: it runs as the yard's
-    /// operator, who alone is offered the grants view. A yard that names
-    /// no operator offers it to no one.
+    /// operator, who alone is offered the grants view and the Telemetry
+    /// section. A yard that names no operator offers them to no one.
     pub fn is_operator(&self) -> bool {
         !self.operator.is_empty() && self.me == self.operator
     }
@@ -2249,6 +2289,91 @@ impl Model {
                 self.notice = format!("the grants could not be read: {err}");
             }
         }
+    }
+
+    /// Whether the settings offer the Telemetry section: the window runs
+    /// as the yard's operator, and the yard serves the calls to such a
+    /// window. A read that failed is offered still: the section says so,
+    /// and tries again.
+    pub fn telemetry_offered(&self) -> bool {
+        self.is_operator() && !self.telemetry_unserved
+    }
+
+    /// The telemetry preview as read: the switch, the install id and the
+    /// next request. `None` where none was read.
+    pub fn telemetry_preview(&self) -> Option<&TelemetryPreview> {
+        self.telemetry.as_ref()
+    }
+
+    /// Why the telemetry preview is empty, in the window's words; `None`
+    /// where it was read, or the yard serves no such call here.
+    pub fn telemetry_notice(&self) -> Option<&str> {
+        self.telemetry_notice.as_deref()
+    }
+
+    /// Whether the switch is read-only in this window: the yard refused
+    /// its change from where this window reaches it.
+    pub fn telemetry_read_only(&self) -> bool {
+        self.telemetry_read_only
+    }
+
+    /// The preview as read again. The yard has the calls and serves them
+    /// to this window, so it is neither unserved nor unread: a preview
+    /// read again clears both, and keeps the section read-only where the
+    /// switch's change was refused.
+    pub fn telemetry(&mut self, preview: TelemetryPreview) {
+        self.telemetry = Some(preview);
+        self.telemetry_notice = None;
+        self.telemetry_unserved = false;
+    }
+
+    /// The call for the preview where the yard serves it to this window,
+    /// and none where it serves no such call here.
+    fn read_telemetry(&self) -> Vec<Effect> {
+        match self.telemetry_unserved {
+            true => Vec::new(),
+            false => vec![Effect::Telemetry],
+        }
+    }
+
+    /// The preview could not be read again. A yard without the calls, or
+    /// one that says the request came down the link, has none to give
+    /// this window: the section is not offered, and no notice is raised.
+    /// Anything else drops the old preview and is said in the section,
+    /// which tries again.
+    pub fn telemetry_failed(&mut self, err: &api::Error) {
+        match telemetry_too_old(err) || telemetry_over_the_link(err) {
+            true => {
+                self.telemetry = None;
+                self.telemetry_notice = None;
+                self.telemetry_unserved = true;
+            }
+            false => {
+                self.telemetry = None;
+                self.telemetry_notice =
+                    Some(format!("the telemetry switch could not be read: {err}"));
+            }
+        }
+    }
+
+    /// The switch's change was refused. One refused from where this window
+    /// reaches the yard is read-only here: the section keeps the state,
+    /// the id and the payload, and says the switch is changed in the
+    /// yard's web view. One refused down the link, or one with no such
+    /// call, hides the section, as a preview refused so does. Whether
+    /// either was: anything else is the window's to say of the press.
+    pub fn telemetry_set_refused(&mut self, err: &api::Error) -> bool {
+        if telemetry_too_old(err) || telemetry_over_the_link(err) {
+            self.telemetry = None;
+            self.telemetry_notice = None;
+            self.telemetry_unserved = true;
+            return true;
+        }
+        if telemetry_router_refused(err) {
+            self.telemetry_read_only = true;
+            return true;
+        }
+        false
     }
 
     /// One line's flows as served, when the yard serves the line.
@@ -4790,8 +4915,17 @@ impl Model {
                 self.operator = e.text("value").to_string();
                 self.grants.clear();
                 self.grants_too_old = false;
+                // A former operator's window keeps none of the preview.
+                // Unserved stays as it was: a yard that serves the calls
+                // to no such window is not asked for them on a change of
+                // operator either, and one read whole reads them again.
+                self.telemetry = None;
+                self.telemetry_notice = None;
+                self.telemetry_read_only = false;
                 if self.is_operator() {
-                    self.read_grants()
+                    let mut effects = self.read_grants();
+                    effects.extend(self.read_telemetry());
+                    effects
                 } else if self.selected == Some(Selected::Grants) {
                     self.selected = self.row_in(Mode::Decisions, None);
                     self.opened();
@@ -4800,6 +4934,13 @@ impl Model {
                     Vec::new()
                 }
             }
+            // The telemetry switch moved: the preview carries less than
+            // what changed, so it is read again, where the window is the
+            // operator's and the yard serves the calls to it.
+            "setting_changed" if e.text("key") == "telemetry" => match self.is_operator() {
+                true => self.read_telemetry(),
+                false => Vec::new(),
+            },
             // A grant given: the event carries less than what changed, so
             // the grants are read again, where the window is the
             // operator's. A revoke tells no event; opening the grants
@@ -5935,6 +6076,111 @@ pub fn screen_over_the_link(err: &api::Error) -> bool {
 /// plain words, never in red, since nothing is wrong. A window reaches a
 /// hosted yard by its edge, and the yard serves no such call down the link.
 pub const SCREEN_ON_THE_YARD: &str = "the screen is read on the yard's machine";
+
+/// Whether the yard has no telemetry calls: one from before them, or one
+/// whose listener serves them to no such device, which it says in the
+/// same words. That is no error: the Telemetry section is not offered,
+/// and no notice is raised. Its words are read here, as above, and when
+/// they change this is shown as any refusal.
+pub fn telemetry_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
+/// Whether the yard refused the telemetry preview or its change because
+/// the request came down the link from its edge: it serves neither to a
+/// device that comes so, whoever holds it. That is no error either: the
+/// section is not offered, and no notice is raised. Its words are read
+/// here, as above, and when they change this is shown as any refusal.
+pub fn telemetry_over_the_link(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. }
+        if message.starts_with("the telemetry switch is not read over the link")
+            || message.starts_with("the telemetry switch is not changed over the link"))
+}
+
+/// Whether the yard refused the switch's change from where this window
+/// reaches it, while it reads the preview there: the yard's router takes
+/// the read over https and no change. That is no fault of the device's:
+/// the section keeps the state, the id and the payload read-only, and
+/// says the switch is changed in the yard's web view. Its words are read
+/// here, as above, and when they change this is shown as any refusal.
+pub fn telemetry_router_refused(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("the telemetry switch is taken over https only"))
+}
+
+/// What the Telemetry section says where the yard refused the switch's
+/// change from where the window reaches it: one sentence, never in red,
+/// since nothing is wrong, with Open beside it where the yard's web view
+/// answers.
+pub const TELEMETRY_READ_ONLY: &str = "the switch is changed in the yard's web view";
+
+/// The consent words the switch is turned on under, as every surface
+/// shares them: copied from yardr's `internal/telemetry` (`Questions`,
+/// `Profile`, `IDSentence`, `DeletionSentence`), which the on and off
+/// help and the web control say too. The four questions the batch
+/// answers, and where it goes.
+pub const TELEMETRY_QUESTIONS: &str = "When telemetry is on, the daemon sends one batch a day to https://eu.i.posthog.com/batch/ answering four questions: which yardr versions and OS are running; which harnesses and models do the work; where beads fail, as counts by kind; whether yards keep running after 1, 7 and 30 days.";
+
+/// The id-only PostHog profile, as the consent words say it.
+pub const TELEMETRY_PROFILE: &str = "The batch carries the yard's random install id as PostHog's distinct_id, and PostHog keeps an id-only person profile for it — no name, no email — so a yard's data is deleted by install id.";
+
+/// The pseudonymous sentence, as the consent words say it.
+pub const TELEMETRY_ID_SENTENCE: &str = "This id is pseudonymous, not anonymous: anyone you give it to can find this yard's events, and giving it is your act.";
+
+/// How the operator has the yard's data deleted, said wherever a batch
+/// is previewed.
+pub const TELEMETRY_DELETION: &str =
+    "To have this yard's data deleted, send the project this install id.";
+
+/// The switch as it stands, in the section's words: `on (since …)` with
+/// the grant's date, else `off — nothing is sent`. As `yardr telemetry
+/// show` and the web control say it.
+pub fn telemetry_state(preview: &TelemetryPreview) -> String {
+    match preview.telemetry.as_str() {
+        "on" if preview.since.is_empty() => "on".to_string(),
+        "on" => format!("on (since {})", preview.since),
+        _ => "off — nothing is sent".to_string(),
+    }
+}
+
+/// The next request's line, as `yardr telemetry show` renders it: the
+/// sending day and the source days the batch holds.
+pub fn telemetry_next_request(preview: &TelemetryPreview) -> String {
+    format!(
+        "sending day {} (UTC); {}",
+        preview.sending_day,
+        telemetry_source_days(&preview.source_days)
+    )
+}
+
+/// The source days of the next request line, as `yardr telemetry show`
+/// renders them.
+pub fn telemetry_source_days(days: &[String]) -> String {
+    match days.len() {
+        0 => "no eligible source days".to_string(),
+        1 => format!("source day {}", days[0]),
+        _ => format!("source days {}..{}", days[0], days[days.len() - 1]),
+    }
+}
+
+/// Why a preview has no batch, in words: the same line the CLI and the
+/// web view print.
+pub fn telemetry_no_batch(reason: &str) -> String {
+    match reason {
+        "off" => "no batch available until telemetry is enabled".to_string(),
+        "attempted" => "no batch available until the next UTC day".to_string(),
+        "empty" => "no batch available: nothing to send".to_string(),
+        _ => "no batch available: no install id (run yardr telemetry on again)".to_string(),
+    }
+}
+
+/// The next payload as the yard returned it, as indented JSON, as show
+/// renders it; `None` where there is no batch to send.
+pub fn telemetry_payload(preview: &TelemetryPreview) -> Option<String> {
+    preview
+        .request
+        .as_ref()
+        .and_then(|request| serde_json::to_string_pretty(request).ok())
+}
 
 /// Whether the yard has no DeliveryFiles call: one from before a device
 /// could learn a hook delivery's files, which says it has no such method.
@@ -11189,6 +11435,295 @@ mod tests {
             assert_eq!(m.notice, format!("the grants could not be read: {err}"));
             m.notice.clear();
         }
+    }
+
+    /// The Telemetry section is the operator's alone, on a yard that serves
+    /// the calls: a preview read, a refusal that says the yard has no such
+    /// calls or serves them down no link, and anything else the read fails
+    /// with. The first is offered, the second hides the section with no
+    /// notice, and the third is offered still, with why in the section. A
+    /// preview read again clears either. The switch's move reads the
+    /// preview again, and a change of operator drops what a former
+    /// operator's window had and reads where the window is the operator's
+    /// still.
+    #[test]
+    fn telemetry_is_offered_to_the_operator_on_a_yard_that_serves_the_calls() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        // The yard's own words, as it refuses the preview down the link.
+        let link = refused(
+            "the telemetry switch is not read over the link: this request came down the link from the edge. Read it on the yard's machine (`yardr telemetry show`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm).",
+        );
+        assert!(telemetry_too_old(&refused("no such method TelemetryShow")));
+        assert!(telemetry_too_old(&refused("no such method TelemetrySet")));
+        assert!(!telemetry_too_old(&refused("the switch is closed")));
+        assert!(!telemetry_too_old(&api::Error::Protocol(
+            "TelemetryShow: status 200, and no JSON object".into()
+        )));
+        assert!(telemetry_over_the_link(&link));
+        assert!(telemetry_over_the_link(&refused(
+            "the telemetry switch is not changed over the link: this request came down the link from the edge."
+        )));
+        assert!(!telemetry_over_the_link(&refused(
+            "no such method TelemetryShow"
+        )));
+        assert!(!telemetry_too_old(&link));
+
+        let preview = || TelemetryPreview {
+            telemetry: "on".into(),
+            install_id: "3f6d1c2e".into(),
+            ..Default::default()
+        };
+        // Not the operator's: not offered, whatever was read.
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert!(!m.is_operator());
+        assert!(!m.telemetry_offered());
+        m.telemetry(preview());
+        assert!(!m.telemetry_offered());
+
+        // The operator's: offered with the preview, and still offered
+        // where the read failed, with why in the section.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.telemetry = Some(preview());
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        assert!(m.is_operator());
+        assert!(m.telemetry_offered());
+        assert_eq!(m.telemetry_preview().unwrap().install_id, "3f6d1c2e");
+        assert!(m.telemetry_notice().is_none());
+        assert!(!m.telemetry_read_only());
+
+        // A yard without the calls hides the section, in no notice; a
+        // preview read again clears it.
+        m.telemetry_failed(&refused("no such method TelemetryShow"));
+        assert!(!m.telemetry_offered());
+        assert!(m.telemetry_preview().is_none());
+        assert!(m.telemetry_notice().is_none());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+        m.telemetry(preview());
+        assert!(m.telemetry_offered());
+
+        // The link's refusal hides it too, in no notice, and a preview
+        // read again clears that as well.
+        m.telemetry_failed(&link);
+        assert!(!m.telemetry_offered());
+        assert!(m.telemetry_preview().is_none());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+        m.telemetry(preview());
+        assert!(m.telemetry_offered());
+
+        // Any other failure is the section's, as ever, and not a notice
+        // of the yard's: the section is offered still, and tries again.
+        for err in [
+            refused("the switch is closed"),
+            api::Error::Protocol("TelemetryShow: status 200, and no JSON object".into()),
+            api::Error::Down(std::io::Error::other("the yard went away")),
+        ] {
+            m.telemetry_failed(&err);
+            assert!(m.telemetry_offered());
+            assert_eq!(
+                m.telemetry_notice(),
+                Some(format!("the telemetry switch could not be read: {err}").as_str())
+            );
+            assert!(m.telemetry_preview().is_none());
+            assert!(m.notice.is_empty(), "{}", m.notice);
+        }
+        m.telemetry(preview());
+        assert!(m.telemetry_notice().is_none());
+
+        // The switch's move reads the preview again for the operator, and
+        // nothing for anyone else nor where the yard serves no such call.
+        let moved = event(21, "setting_changed", "", json!({"key": "telemetry"}));
+        assert_eq!(m.event(&moved), vec![Effect::Telemetry]);
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        assert!(m.event(&moved).is_empty());
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.telemetry_unserved = true;
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        assert!(m.event(&moved).is_empty());
+
+        // A change of operator drops the preview, and reads where the
+        // window is the operator's still.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.telemetry = Some(preview());
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        let changed = event(
+            22,
+            "setting_changed",
+            "",
+            json!({"key": "operator", "value": "ada"}),
+        );
+        let effects = m.event(&changed);
+        assert!(!effects.contains(&Effect::Telemetry));
+        assert!(!effects.contains(&Effect::Grants));
+        assert!(!m.is_operator());
+        assert!(m.telemetry_preview().is_none());
+        assert!(!m.telemetry_offered());
+        let changed = event(
+            23,
+            "setting_changed",
+            "",
+            json!({"key": "operator", "value": "jo"}),
+        );
+        let effects = m.event(&changed);
+        assert!(effects.contains(&Effect::Grants));
+        assert!(effects.contains(&Effect::Telemetry));
+        assert!(m.is_operator());
+
+        // Where the yard serves the calls to no such window, a newly
+        // named operator reads none either: unserved stays as it was.
+        let mut state = yard(&[]);
+        state.operator = "ada".into();
+        state.telemetry_unserved = true;
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        let changed = event(
+            24,
+            "setting_changed",
+            "",
+            json!({"key": "operator", "value": "jo"}),
+        );
+        let effects = m.event(&changed);
+        assert!(!effects.contains(&Effect::Telemetry));
+        assert!(m.is_operator());
+        assert!(!m.telemetry_offered());
+    }
+
+    /// A refused change of the switch is read-only here, refused down the
+    /// link, or any other refusal: the first keeps the section with no
+    /// buttons, the second hides it, and the third is the window's to say
+    /// of the press. The section's words say the state, the next request
+    /// and why no batch, as `yardr telemetry show` does.
+    #[test]
+    fn a_refused_change_is_read_only_down_the_link_or_said_of_the_press() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        // The yard's own words, as it refuses the change from its
+        // router's peer and down the link.
+        let router = refused(
+            "the telemetry switch is taken over https only, or from the yard's own machine: this request reached the yard's listener in plain HTTP from another machine. Put the proxy or tunnel that ends TLS on the yard's machine, or Change it on the yard's machine (`yardr telemetry on` or `yardr telemetry off`). The device's token was sent with it and may have crossed a network in the clear: if it did, remove the device and add it again (yardr user device rm).",
+        );
+        let set_link = refused(
+            "the telemetry switch is not changed over the link: this request came down the link from the edge. Change it on the yard's machine (`yardr telemetry on` or `yardr telemetry off`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm).",
+        );
+        assert!(telemetry_router_refused(&router));
+        assert!(!telemetry_router_refused(&set_link));
+        assert!(!telemetry_router_refused(&refused(
+            "no such method TelemetrySet"
+        )));
+        assert!(!telemetry_router_refused(&api::Error::Protocol(
+            "TelemetrySet: status 200, and no JSON object".into()
+        )));
+        // Plain words, and never the wire's method name.
+        assert!(TELEMETRY_READ_ONLY.contains("changed in the yard's web view"));
+        assert!(!TELEMETRY_READ_ONLY.contains("TelemetrySet"));
+
+        let preview = || TelemetryPreview {
+            telemetry: "on".into(),
+            install_id: "3f6d1c2e".into(),
+            ..Default::default()
+        };
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.telemetry = Some(preview());
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        // Anything else is the window's to say of the press: offered
+        // still, with the preview and the buttons.
+        assert!(!m.telemetry_set_refused(&refused("the switch is stuck")));
+        assert!(!m.telemetry_set_refused(&api::Error::Protocol(
+            "TelemetrySet: status 200, and no JSON object".into()
+        )));
+        assert!(m.telemetry_offered());
+        assert!(!m.telemetry_read_only());
+        assert!(m.telemetry_preview().is_some());
+        // A yard that answered Show but has no Set call cannot change the
+        // switch; once known, it no longer offers the section.
+        assert!(m.telemetry_set_refused(&refused("no such method TelemetrySet")));
+        assert!(!m.telemetry_offered());
+        assert!(m.telemetry_preview().is_none());
+        m.telemetry(preview());
+        assert!(m.telemetry_offered());
+        // The router's refusal keeps the section with no buttons, and a
+        // preview read again keeps it read-only.
+        assert!(m.telemetry_set_refused(&router));
+        assert!(m.telemetry_read_only());
+        assert!(m.telemetry_offered());
+        assert!(m.telemetry_preview().is_some());
+        m.telemetry(preview());
+        assert!(m.telemetry_read_only());
+        // Down the link hides the section, as a preview refused so does.
+        assert!(m.telemetry_set_refused(&set_link));
+        assert!(!m.telemetry_offered());
+        assert!(m.telemetry_preview().is_none());
+
+        // The section's words, as `yardr telemetry show` says them.
+        let on = TelemetryPreview {
+            telemetry: "on".into(),
+            since: "2026-10-26".into(),
+            sending_day: "2026-10-28".into(),
+            source_days: vec!["2026-10-27".into()],
+            request: Some(json!({"api_key": "phc_write", "batch": [{"event": "yardr_daily"}]})),
+            ..Default::default()
+        };
+        assert_eq!(telemetry_state(&on), "on (since 2026-10-26)");
+        let payload = telemetry_payload(&on).unwrap();
+        assert!(payload.contains("\"event\": \"yardr_daily\""), "{payload}");
+        assert!(payload.contains('\n'), "{payload}");
+        assert!(telemetry_payload(&TelemetryPreview::default()).is_none());
+        let on = TelemetryPreview {
+            telemetry: "on".into(),
+            ..Default::default()
+        };
+        assert_eq!(telemetry_state(&on), "on");
+        assert_eq!(
+            telemetry_state(&TelemetryPreview {
+                telemetry: "off".into(),
+                ..Default::default()
+            }),
+            "off — nothing is sent"
+        );
+        assert_eq!(
+            telemetry_next_request(&TelemetryPreview {
+                sending_day: "2026-10-28".into(),
+                source_days: vec!["2026-10-27".into()],
+                ..Default::default()
+            }),
+            "sending day 2026-10-28 (UTC); source day 2026-10-27"
+        );
+        assert_eq!(telemetry_source_days(&[]), "no eligible source days");
+        assert_eq!(
+            telemetry_source_days(&["2026-10-26".into(), "2026-10-27".into()]),
+            "source days 2026-10-26..2026-10-27"
+        );
+        assert_eq!(
+            telemetry_no_batch("off"),
+            "no batch available until telemetry is enabled"
+        );
+        assert_eq!(
+            telemetry_no_batch("attempted"),
+            "no batch available until the next UTC day"
+        );
+        assert_eq!(
+            telemetry_no_batch("empty"),
+            "no batch available: nothing to send"
+        );
+        assert_eq!(
+            telemetry_no_batch("no-id"),
+            "no batch available: no install id (run yardr telemetry on again)"
+        );
+        // The consent words every surface shares: the four questions,
+        // the id-only profile, the pseudonymous sentence, and how the
+        // yard's data is deleted.
+        assert!(TELEMETRY_QUESTIONS.contains("four questions"));
+        assert!(TELEMETRY_QUESTIONS.contains("https://eu.i.posthog.com/batch/"));
+        assert!(TELEMETRY_PROFILE.contains("id-only person profile"));
+        assert!(TELEMETRY_ID_SENTENCE.contains("pseudonymous, not anonymous"));
+        assert!(TELEMETRY_DELETION.contains("send the project this install id"));
     }
 
     /// The grants view is the operator's alone: its row stands in

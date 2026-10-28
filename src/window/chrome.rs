@@ -584,6 +584,7 @@ impl Footplate {
         self.put(held);
         self.switch_reset();
         self.agents_reset(cx);
+        self.telemetry_reset();
         self.refresh_switch(cx);
     }
 
@@ -601,6 +602,7 @@ impl Footplate {
         self.retarget_addresses(cx);
         self.switch_reset();
         self.agents_reset(cx);
+        self.telemetry_reset();
         self.refresh_switch(cx);
     }
 
@@ -2623,6 +2625,37 @@ impl Footplate {
                         },
                     )
                 }
+                Effect::Telemetry => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.telemetry_show(),
+                        move |this, preview, cx| match preview {
+                            Ok(preview) => {
+                                this.fresh_in(session, Read::Telemetry, stamp, cx, |m| {
+                                    m.telemetry(preview);
+                                    Vec::new()
+                                });
+                            }
+                            Err(err) => {
+                                if this.read_failed_in(
+                                    session,
+                                    Read::Telemetry,
+                                    stamp,
+                                    !model::telemetry_too_old(&err)
+                                        && !model::telemetry_over_the_link(&err),
+                                    cx,
+                                ) {
+                                    this.change_in(session, cx, |m| {
+                                        m.telemetry_failed(&err);
+                                        Vec::new()
+                                    });
+                                }
+                            }
+                        },
+                    )
+                }
                 Effect::Timetable { from, until } => self.ask_in(
                     session,
                     cx,
@@ -3081,6 +3114,11 @@ impl Footplate {
         self.shown(cx);
         // "Agents and you" reads once the settings show.
         self.read_agents(cx);
+        // Telemetry opens onto its section: its read-only sentence
+        // carries Open where the yard's web view answers.
+        if self.settings_open && self.settings.section == Section::Telemetry {
+            self.view_probe(cx);
+        }
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
             Some(_) if !self.settings_open => self.line.focus_handle(cx),
@@ -3635,6 +3673,11 @@ impl Footplate {
             },
             cx,
         );
+        // Telemetry's read-only sentence carries Open where the yard's
+        // web view answers: asked when the section is picked.
+        if section == Section::Telemetry {
+            self.view_probe(cx);
+        }
     }
 
     /// A yard is to be added, in the settings or from where there is no
@@ -4021,6 +4064,7 @@ impl Footplate {
         let view = self.view_setting(setting, palette, cx);
         let run = self.run_setting(setting, palette, cx);
         let agents = self.agents_setting(setting, palette, cx);
+        let telemetry = self.telemetry_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
         // and what the system said if it does not let footplate notify.
         let notify = self.settings.notifications;
@@ -4130,7 +4174,12 @@ impl Footplate {
         );
         // The sheet's own sections down the left side, as chat's rows are:
         // the open one stands out, and a click shows that section alone.
-        let open = self.settings.section;
+        // Telemetry kept open past the operator or the yard that offered
+        // it shows the first section's, until it is offered again.
+        let open = match self.settings.section {
+            Section::Telemetry if !self.telemetry_offered() => Section::ThisWindow,
+            open => open,
+        };
         let mut list = div()
             .id("settings sections")
             .flex_none()
@@ -4142,6 +4191,11 @@ impl Footplate {
             .border_color(palette.line)
             .py_2();
         for section in Section::ALL {
+            // Telemetry stands in the list for the operator alone, on a
+            // yard that serves the calls to such a window.
+            if section == Section::Telemetry && !self.telemetry_offered() {
+                continue;
+            }
             let at = format!("settings section {}", section.name());
             list = list.child(
                 div()
@@ -4279,6 +4333,7 @@ impl Footplate {
                                     Section::Yards => vec![yard],
                                     Section::Agents => vec![agents],
                                     Section::Connection => vec![view, run],
+                                    Section::Telemetry => vec![telemetry],
                                 }),
                         ),
                     )
@@ -4551,6 +4606,300 @@ impl Footplate {
             );
         }
         section
+    }
+
+    /// Whether the settings offer the Telemetry section: the window runs
+    /// as the shown yard's operator, and the yard serves the calls to
+    /// such a window.
+    pub(crate) fn telemetry_offered(&self) -> bool {
+        self.model
+            .as_ref()
+            .is_some_and(|model| model.telemetry_offered())
+    }
+
+    /// The yard's telemetry page in its web view, where the view answers:
+    /// what the read-only sentence's Open takes to the browser. None
+    /// where the yard has no view, or it does not answer.
+    fn telemetry_page_url(&self) -> Option<String> {
+        // The probe answered at this address, so it parses: the same
+        // reading, not another.
+        match (self.view_base(), self.view_up_now()) {
+            (Some(base), Some(true)) => Some(
+                Address::parse_view(&base)
+                    .expect("the web view answered at this address")
+                    .telemetry_url(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// The yard's telemetry switch in the settings, for the operator's
+    /// window alone on a yard that serves the calls. Off: the consent
+    /// words and Turn on; on: the install id with the pseudonymous
+    /// sentence and a copy of it, the next payload as the yard returns
+    /// it, and Turn off. Nothing turns on without the press. Where the
+    /// yard refused the change from where the window reaches it, the
+    /// state, the id and the payload stand read-only, with the yard's
+    /// web view to change the switch in. Where the preview could not be
+    /// read, why, with try again.
+    pub(crate) fn telemetry_setting(
+        &self,
+        setting: impl Fn(String, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut section = setting(
+            format!("telemetry of {}", self.yard),
+            "the yard's opt-in telemetry switch".to_string(),
+        );
+        let Some(model) = self.model.as_ref() else {
+            return section.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("the yard is not open yet"),
+            );
+        };
+        let Some(preview) = model.telemetry_preview() else {
+            let said = model
+                .telemetry_notice()
+                .unwrap_or("reading the telemetry switch…");
+            return section
+                .child(
+                    div()
+                        .debug_selector(|| "telemetry notice".to_string())
+                        .child(said.to_string()),
+                )
+                .child(
+                    div().flex().child(
+                        small_button("try again".to_string(), palette)
+                            .id("telemetry again")
+                            .debug_selector(|| "telemetry again".to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.telemetry_retry(cx))),
+                    ),
+                );
+        };
+        let on = preview.telemetry == "on";
+        section = section.child(
+            div()
+                .debug_selector(|| "telemetry state".to_string())
+                .when(!on, |el| el.text_color(palette.faint))
+                .child(model::telemetry_state(preview)),
+        );
+        // The consent words the switch is turned on under, as every
+        // surface shares them.
+        section = section.child(
+            div()
+                .debug_selector(|| "telemetry consent".to_string())
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(model::TELEMETRY_QUESTIONS.to_string())
+                .child(model::TELEMETRY_PROFILE.to_string())
+                .child(model::TELEMETRY_ID_SENTENCE.to_string()),
+        );
+        if on {
+            if !preview.install_id.is_empty() {
+                let copied = self.telemetry_copied.as_deref() == Some(preview.install_id.as_str());
+                section = section.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_color(palette.faint).child("install id"))
+                        .child(
+                            div()
+                                .debug_selector(|| "telemetry id".to_string())
+                                .child(preview.install_id.clone()),
+                        )
+                        .child(
+                            small_button(
+                                match copied {
+                                    true => "copied".to_string(),
+                                    false => "copy".to_string(),
+                                },
+                                palette,
+                            )
+                            .id("telemetry copy")
+                            .debug_selector(|| "telemetry copy".to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.telemetry_copy(cx))),
+                        ),
+                );
+            }
+            section = section.child(div().debug_selector(|| "telemetry next".to_string()).child(
+                format!("next request: {}", model::telemetry_next_request(preview)),
+            ));
+            match model::telemetry_payload(preview) {
+                Some(payload) => {
+                    section = section.child(
+                        div()
+                            .debug_selector(|| "telemetry payload".to_string())
+                            .child(select::text(
+                                select::key(("telemetry", "payload", &payload)),
+                                super::ask::fenced(&payload),
+                                &self.selection,
+                            )),
+                    );
+                }
+                None => {
+                    section = section.child(
+                        div()
+                            .debug_selector(|| "telemetry no batch".to_string())
+                            .child(model::telemetry_no_batch(&preview.no_batch)),
+                    );
+                }
+            }
+            section = section.child(
+                div()
+                    .debug_selector(|| "telemetry deletion".to_string())
+                    .child(model::TELEMETRY_DELETION.to_string()),
+            );
+        }
+        // The switch's buttons, or what its change is underway as, or
+        // the read-only sentence where the yard refused the change.
+        match (model.telemetry_read_only(), self.telemetry_busy) {
+            (true, _) => {
+                let mut row = div().flex().flex_wrap().items_center().gap_2().child(
+                    div()
+                        .debug_selector(|| "telemetry read only".to_string())
+                        .child(model::TELEMETRY_READ_ONLY.to_string()),
+                );
+                if let Some(url) = self.telemetry_page_url() {
+                    let open = self.means.open.clone();
+                    row = row.child(
+                        div()
+                            .id("telemetry open")
+                            .debug_selector(|| "telemetry open".to_string())
+                            .text_sm()
+                            .text_color(palette.link)
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| (open)(&url, cx))
+                            .child("Open"),
+                    );
+                }
+                section = section.child(row);
+            }
+            (false, Some(turning)) => {
+                section = section.child(
+                    div()
+                        .debug_selector(|| "telemetry busy".to_string())
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .child(match turning {
+                            true => "Turning on…",
+                            false => "Turning off…",
+                        }),
+                );
+            }
+            (false, None) => {
+                let (id, label, turns) = match on {
+                    true => ("telemetry off", "Turn off", false),
+                    false => ("telemetry on", "Turn on", true),
+                };
+                section = section.child(
+                    div().flex().child(
+                        small_button(label.to_string(), palette)
+                            .id(id)
+                            .debug_selector(move || id.to_string())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.telemetry_turn(turns, cx)),
+                            ),
+                    ),
+                );
+            }
+        }
+        if let Some(said) = &self.telemetry_said {
+            section = section.child(
+                div()
+                    .debug_selector(|| "telemetry said".to_string())
+                    .text_color(palette.warn)
+                    .child(said.clone()),
+            );
+        }
+        section
+    }
+
+    /// Turns the yard's telemetry on or off, as the section's button
+    /// names: the call is made only from this press, never on a read.
+    /// Answered, the preview is read again for what changed; refused,
+    /// the section stands read-only where the yard takes no change from
+    /// here, hides where both calls are refused down the link, and
+    /// otherwise says the refusal of the press. Nothing underway is
+    /// started twice, and a refused change is never made again by
+    /// another path.
+    pub(crate) fn telemetry_turn(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.telemetry_busy.is_some() || !self.telemetry_offered() {
+            return;
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.telemetry_read_only())
+        {
+            return;
+        }
+        self.telemetry_busy = Some(on);
+        self.telemetry_said = None;
+        cx.notify();
+        self.ask(
+            cx,
+            move |client, me| client.telemetry_set(on, me),
+            move |this, changed, cx| {
+                this.telemetry_busy = None;
+                match changed {
+                    Ok(_) => {
+                        this.telemetry_said = None;
+                        this.run(vec![Effect::Telemetry], cx);
+                    }
+                    Err(err) => {
+                        let handled = this
+                            .model
+                            .as_mut()
+                            .is_some_and(|model| model.telemetry_set_refused(&err));
+                        if handled {
+                            this.telemetry_said = None;
+                            // Read-only wants the web view's probe for
+                            // its Open: asked now that the sentence
+                            // stands.
+                            if this.telemetry_offered() {
+                                this.view_probe(cx);
+                            }
+                        } else {
+                            this.telemetry_said = Some(err.to_string());
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
+    /// Copies the install id to the clipboard: the button reads copied
+    /// while the id stands. Nothing where no preview is read.
+    pub(crate) fn telemetry_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .model
+            .as_ref()
+            .and_then(|model| model.telemetry_preview())
+            .map(|preview| preview.install_id.clone())
+        else {
+            return;
+        };
+        if id.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+        self.telemetry_copied = Some(id);
+        cx.notify();
+    }
+
+    /// Tries the preview again, after it could not be read.
+    pub(crate) fn telemetry_retry(&mut self, cx: &mut Context<Self>) {
+        if !self.telemetry_offered() {
+            return;
+        }
+        self.run(vec![Effect::Telemetry], cx);
     }
 
     /// The question before stopping: the agents in the middle of
@@ -5636,6 +5985,7 @@ fn shot_section() -> Option<Section> {
         Ok("settings-agents") => Some(Section::Agents),
         Ok("settings-notifications") => Some(Section::Notifications),
         Ok("settings-connection") => Some(Section::Connection),
+        Ok("settings-telemetry") | Ok("settings-telemetry-off") => Some(Section::Telemetry),
         _ => None,
     }
 }

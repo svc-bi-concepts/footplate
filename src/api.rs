@@ -730,6 +730,69 @@ pub struct SessionScreen {
     pub screen: String,
 }
 
+/// What `TelemetryShow` answers: the switch, the install id, and the exact
+/// next request the daemon would send from the current state, without
+/// sending it or advancing anything. What `yardr telemetry show` prints.
+/// The operator's to read: on the listener to a device of theirs alone,
+/// since the id groups the yard's events across time.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TelemetryPreview {
+    /// The yard's random install id, as PostHog sees it; absent while none
+    /// is minted.
+    #[serde(default)]
+    pub install_id: String,
+    /// `on` or `off`.
+    #[serde(default)]
+    pub telemetry: String,
+    /// The UTC date of the latest consent grant; absent while none was
+    /// given.
+    #[serde(default)]
+    pub since: String,
+    /// The UTC day the batch is built for.
+    #[serde(default)]
+    pub sending_day: String,
+    /// The eligible completed source days in the batch, oldest first;
+    /// absent while none are eligible.
+    #[serde(default, deserialize_with = "or_default")]
+    pub source_days: Vec<String>,
+    /// Whether the yard is a hosted one, which sends no daily snapshot.
+    #[serde(default)]
+    pub hosted: bool,
+    /// The exact next request; null when there is no batch to send, and
+    /// `no_batch` says why.
+    #[serde(default)]
+    pub request: Option<Value>,
+    /// Why there is no batch, where there is none: `off`, `attempted`,
+    /// `empty` or `no-id`.
+    #[serde(default)]
+    pub no_batch: String,
+}
+
+/// What `TelemetrySet` answers: the switch as it stands now.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TelemetryChange {
+    /// `on` or `off`, as it stands now.
+    #[serde(default)]
+    pub telemetry: String,
+    /// Whether the switch moved.
+    #[serde(default)]
+    pub changed: bool,
+    /// The yard's install id; absent while none is minted.
+    #[serde(default)]
+    pub install_id: String,
+    /// The UTC date of the latest consent grant; absent while none was
+    /// given.
+    #[serde(default)]
+    pub since: String,
+    /// The first full UTC day the latest grant counts from; absent while
+    /// none was given.
+    #[serde(default)]
+    pub eligible_from: String,
+    /// Where the daemon posts the daily batch.
+    #[serde(default)]
+    pub endpoint: String,
+}
+
 /// What `GiveSecret` answers: the names that were written and where, never
 /// a value.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -1693,6 +1756,13 @@ impl Address {
                 encode_name(id)
             )),
         }
+    }
+
+    /// The browser's URL for the yard's telemetry page at this base
+    /// address: the `/telemetry` route under it, for Open. The route is
+    /// the view's own word and takes no argument, so it always opens.
+    pub fn telemetry_url(&self) -> String {
+        format!("{}{}/telemetry", self.origin(), self.path)
     }
 
     /// The browser's URL for the file `hash` under `name` at this base
@@ -3180,6 +3250,26 @@ impl Client {
         self.answer("SessionScreen", json!({ "session": session }))
     }
 
+    /// The yard's telemetry switch with the install id and the exact next
+    /// request, as `yardr telemetry show` prints them: what the operator's
+    /// Telemetry section shows. The operator's to read: on the listener to
+    /// a device of theirs alone. A yard from before the call, and one that
+    /// serves it to no device that comes down the link from its edge, says
+    /// so; the section is then not offered.
+    pub fn telemetry_show(&self) -> Result<TelemetryPreview> {
+        self.answer("TelemetryShow", json!({}))
+    }
+
+    /// Turns the yard's telemetry on or off, as `yardr telemetry on` and
+    /// `off` do; `actor` is the operator's name. Only an explicit `true`
+    /// turns on. The operator's to change: on the listener to a device of
+    /// theirs alone, and never down the link from the edge nor from the
+    /// router's peer. Made only from the Telemetry section's own button,
+    /// never on a read.
+    pub fn telemetry_set(&self, on: bool, actor: &str) -> Result<TelemetryChange> {
+        self.answer("TelemetrySet", json!({ "on": on, "actor": actor }))
+    }
+
     /// One bead whole: body, stage, labels, notes, its asks with their
     /// options, recommendation and state, and the about-beads.
     pub fn bead(&self, bead: &str) -> Result<Bead> {
@@ -3779,6 +3869,7 @@ const READS: &[&str] = &[
     "Flows",
     "SourceGrants",
     "SessionScreen",
+    "TelemetryShow",
     "Bead",
     "Conversation",
 ];
@@ -4406,6 +4497,26 @@ mod tests {
         assert_eq!(
             address.page_url(&"ab".repeat(32)),
             Some(format!("http://127.0.0.1:8789/blobs/{}", "ab".repeat(32)))
+        );
+    }
+
+    #[test]
+    fn telemetry_s_url_is_the_view_s_telemetry_route_under_its_base() {
+        let address = Address::parse_view("http://127.0.0.1:8791/").unwrap();
+        assert_eq!(
+            address.telemetry_url(),
+            "http://127.0.0.1:8791/telemetry".to_string()
+        );
+        // With no slash, and under a proxy's path, alike.
+        let address = Address::parse_view("http://127.0.0.1:8791").unwrap();
+        assert_eq!(
+            address.telemetry_url(),
+            "http://127.0.0.1:8791/telemetry".to_string()
+        );
+        let address = Address::parse_view("https://mac.example.net/yard/").unwrap();
+        assert_eq!(
+            address.telemetry_url(),
+            "https://mac.example.net/yard/telemetry".to_string()
         );
     }
 
@@ -6970,6 +7081,80 @@ mod tests {
             vec![json!({"session": "yardmaster"})]
         );
         assert_eq!(screen.screen, "\x1b[1mYardr yardmaster\x1b[0m\n❯ ");
+    }
+
+    #[test]
+    fn telemetry_show_asks_empty_and_answers_the_switch_the_id_and_the_next_request() {
+        // A yard from before the call says so, as of any method.
+        let old = Yard::start();
+        let err = old.client().telemetry_show().unwrap_err();
+        assert_eq!(err.to_string(), "no such method TelemetryShow");
+        let yard = Yard::start();
+        yard.answer(
+            "TelemetryShow",
+            r#"{"result": {"install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90", "telemetry": "on", "since": "2026-10-26", "sending_day": "2026-10-28", "source_days": ["2026-10-27"], "hosted": false, "request": {"api_key": "phc_write", "batch": [{"event": "yardr_daily", "distinct_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90"}]}}}"#,
+        );
+        let preview = yard.client().telemetry_show().unwrap();
+        assert_eq!(yard.asked("TelemetryShow"), vec![json!({})]);
+        assert_eq!(preview.telemetry, "on");
+        assert_eq!(preview.install_id, "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90");
+        assert_eq!(preview.since, "2026-10-26");
+        assert_eq!(preview.sending_day, "2026-10-28");
+        assert_eq!(preview.source_days, ["2026-10-27"]);
+        assert!(!preview.hosted);
+        assert_eq!(
+            preview.request.as_ref().unwrap()["batch"][0]["event"],
+            json!("yardr_daily")
+        );
+        assert!(preview.no_batch.is_empty());
+        // Off: no batch, and why; the id and the grant date are absent
+        // where none was ever given.
+        yard.answer(
+            "TelemetryShow",
+            r#"{"result": {"telemetry": "off", "sending_day": "2026-10-28", "hosted": false, "request": null, "no_batch": "off"}}"#,
+        );
+        let preview = yard.client().telemetry_show().unwrap();
+        assert_eq!(preview.telemetry, "off");
+        assert!(preview.install_id.is_empty());
+        assert!(preview.since.is_empty());
+        assert!(preview.source_days.is_empty());
+        assert!(preview.request.is_none());
+        assert_eq!(preview.no_batch, "off");
+    }
+
+    #[test]
+    fn telemetry_set_names_on_and_the_operator_and_answers_the_switch() {
+        // A yard from before the call says so, as of any method.
+        let old = Yard::start();
+        let err = old.client().telemetry_set(true, "jo").unwrap_err();
+        assert_eq!(err.to_string(), "no such method TelemetrySet");
+        let yard = Yard::start();
+        yard.answer(
+            "TelemetrySet",
+            r#"{"result": {"telemetry": "on", "changed": true, "install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90", "since": "2026-10-28", "eligible_from": "2026-10-29", "endpoint": "https://eu.i.posthog.com/batch/"}}"#,
+        );
+        let change = yard.client().telemetry_set(true, "jo").unwrap();
+        assert_eq!(
+            yard.asked("TelemetrySet"),
+            vec![json!({"on": true, "actor": "jo"})]
+        );
+        assert_eq!(change.telemetry, "on");
+        assert!(change.changed);
+        assert_eq!(change.install_id, "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90");
+        assert_eq!(change.since, "2026-10-28");
+        assert_eq!(change.eligible_from, "2026-10-29");
+        assert_eq!(change.endpoint, "https://eu.i.posthog.com/batch/");
+        // Off names false: only an explicit true turns on.
+        yard.answer(
+            "TelemetrySet",
+            r#"{"result": {"telemetry": "off", "changed": true, "install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90", "endpoint": "https://eu.i.posthog.com/batch/"}}"#,
+        );
+        let change = yard.client().telemetry_set(false, "jo").unwrap();
+        assert_eq!(
+            yard.asked("TelemetrySet").last(),
+            Some(&json!({"on": false, "actor": "jo"}))
+        );
+        assert_eq!(change.telemetry, "off");
     }
 
     #[test]

@@ -33,7 +33,9 @@ use crate::yard::Env;
 /// run ask's card beside a routine one's,
 /// a weighty mapping ask's card beside a routine one's, a yard that is
 /// stopped, a yard at an
-/// address, the settings on each of their sections, the yards with a
+/// address, the settings on each of their sections, the telemetry
+/// section on with the install id and the next payload and off with
+/// the consent words, the yards with a
 /// far yard's rename form open in its card, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page, an image and a file, a
@@ -134,6 +136,8 @@ pub const STATES: &[&str] = &[
     "settings-agents",
     "settings-notifications",
     "settings-connection",
+    "settings-telemetry",
+    "settings-telemetry-off",
     "reconnecting",
     "page",
     "mail",
@@ -991,6 +995,8 @@ fn populate(yard: &Yard, state: &str) {
         | "settings-agents"
         | "settings-notifications"
         | "settings-connection"
+        | "settings-telemetry"
+        | "settings-telemetry-off"
         | "reconnecting"
         | "answered"
         | "signedout"
@@ -1068,6 +1074,49 @@ fn populate(yard: &Yard, state: &str) {
                 yard.answer(
                     "SessionScreen",
                     &json!({"error": {"code": "error", "message": SCREEN_REFUSAL}}).to_string(),
+                );
+            }
+            // The switch the telemetry shots open on: on with the
+            // install id and the next payload, off with the consent
+            // words and Turn on.
+            if state == "settings-telemetry" {
+                yard.answer(
+                    "TelemetryShow",
+                    &json!({"result": {
+                        "install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90",
+                        "telemetry": "on",
+                        "since": "2026-10-26",
+                        "sending_day": "2026-10-28",
+                        "source_days": ["2026-10-27"],
+                        "hosted": false,
+                        "request": {
+                            "api_key": "phc_shot_fake_write_only_key",
+                            "batch": [
+                                {"event": "yardr_daily",
+                                 "distinct_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90",
+                                 "timestamp": "2026-10-28T00:00:00Z",
+                                 "uuid": "0e3c8b2a-1432-4a51-9f39-1bc7a1b1d001",
+                                 "properties": {"$process_person_profile": true,
+                                    "$geoip_disable": true, "version": "v0.9.1",
+                                    "os": "darwin", "telemetry_age_days": 2}},
+                                {"event": "yardr_crew_day",
+                                 "distinct_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90",
+                                 "timestamp": "2026-10-28T00:00:00Z",
+                                 "uuid": "451d5fc1-4a12-4c20-9d7b-1f9df88ca004",
+                                 "properties": {"$process_person_profile": true,
+                                    "$geoip_disable": true, "kind": "claude",
+                                    "model": "default", "running_crew_sessions": 2,
+                                    "hosted": false}},
+                            ],
+                        },
+                    }})
+                    .to_string(),
+                );
+            }
+            if state == "settings-telemetry-off" {
+                yard.answer(
+                    "TelemetryShow",
+                    r#"{"result": {"telemetry": "off", "sending_day": "2026-10-28", "hosted": false, "request": null, "no_batch": "off"}}"#,
                 );
             }
         }
@@ -2369,6 +2418,8 @@ mod tests {
                 | "settings-agents"
                 | "settings-notifications"
                 | "settings-connection"
+                | "settings-telemetry"
+                | "settings-telemetry-off"
                 | "reconnecting"
                 | "answered"
                 | "signedout"
@@ -2385,6 +2436,22 @@ mod tests {
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 6, "{state}");
                     assert_eq!(letters[1].from, "jo", "{state}");
+                    // The switch the telemetry shots open on: the
+                    // section's install id and next payload, or the
+                    // consent words and Turn on.
+                    if *state == "settings-telemetry" {
+                        let preview = loaded.telemetry.as_ref().unwrap();
+                        assert_eq!(preview.telemetry, "on", "{state}");
+                        assert!(!preview.install_id.is_empty(), "{state}");
+                        assert!(preview.request.is_some(), "{state}");
+                        assert!(!loaded.telemetry_unserved, "{state}");
+                    }
+                    if *state == "settings-telemetry-off" {
+                        let preview = loaded.telemetry.as_ref().unwrap();
+                        assert_eq!(preview.telemetry, "off", "{state}");
+                        assert!(preview.request.is_none(), "{state}");
+                        assert!(!loaded.telemetry_unserved, "{state}");
+                    }
                 }
                 "arrivals" | "departures" | "arrival" | "flow" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

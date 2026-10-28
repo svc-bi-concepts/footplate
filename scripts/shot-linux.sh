@@ -28,8 +28,10 @@
 # invite), `stopped` (a stopped yard), `far`
 # (a yard at an address, away), `settings` (the settings on each of
 # their sections: `settings` is this window, and `settings-appearance`,
-# `settings-yards`, `settings-agents`, `settings-notifications` and
-# `settings-connection` the rest), `settings-yards-rename` (the yards
+# `settings-yards`, `settings-agents`, `settings-notifications`,
+# `settings-connection` and `settings-telemetry` the rest, with
+# `settings-telemetry-off` the telemetry section off),
+# `settings-yards-rename` (the yards
 # with the far yard's rename form open in its card), `reconnecting` (a
 # running yard whose server
 # is then stopped, with a draft in the composer), `refusal` (the
@@ -109,7 +111,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-unfetched feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-telemetry settings-telemetry-off reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-unfetched feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

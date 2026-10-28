@@ -431,7 +431,9 @@ card beside a routine one's), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
 on each of their sections: `settings` is this window, and
 `settings-appearance`, `settings-yards`, `settings-agents`,
-`settings-notifications` and `settings-connection` the rest),
+`settings-notifications`, `settings-connection` and
+`settings-telemetry` the rest, with `settings-telemetry-off` the
+telemetry section off),
 `settings-yards-rename` (the yards with the far yard's rename form open
 in its card), `reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
@@ -547,6 +549,7 @@ press Send, and never otherwise.
 | `SourceGrants` | the Grants row's pane, where the window runs as the yard's operator: every source × holder × call. Read with the state, when the row is opened, and on a `source_granted` event or a change of operator; a revoke tells no event. Not made for a hosted yard, which serves the list to no request that comes down the link from its edge, nor again once a yard has refused it so: the row and the pane say the grants are read on the yard's machine |
 | `Bead` | the open bead whole: each ask's options, recommendation and words, the body, notes and about-beads. Also once for each id the open mail names that looks like a bead's and that no list holds, to learn whether the yard has it: a bead that closed still chips |
 | `SessionScreen` | the Screen control, where the window runs as the yard's operator (a crew member's conversation, a bead a session works): what that session's pane shows, read when the screen opens and at its Refresh. Not made for a hosted yard, which reads a screen to no request that comes down the link from its edge, nor again once a yard has refused it so: the card says the screen is read on the yard's machine |
+| `TelemetryShow` | the settings' Telemetry section, where the window runs as the yard's operator: the switch, the install id and the next payload. Read with the state, and again when the switch is turned and on the event that says it changed. Not made for a hosted yard, which serves the preview to no request that comes down the link from its edge, nor again once a yard has refused it so or said it has no such call: the section is then not offered |
 | `Conversation` | the mail both ways with the one whose row is open, and with each name trusted as them; on the `yard` row with the yard and with each sender who has no row |
 | `GET /blobs/<hash>` | an image a mail of the open conversation or of the open `yard` row carries, or a hook delivery of the open `yard` row, once for each hash |
 
@@ -564,6 +567,7 @@ press Send, and never otherwise.
 | `GiveSecret` | Enter, in the field of a secret ask's card: each name the ask asks for with the value typed |
 | `ApproveAsk` | `cmd+enter` (`ctrl+enter` on Linux) or the Approve button, on a run ask's card: the ask named, and nothing of the command |
 | `ApproveSetup` | the same key and button, on a setup ask's card: the preset pick with the account together — the typed values, or the candidate taken. A value is in the call's body and in nothing else of the window |
+| `TelemetrySet` | the Telemetry section's Turn on or Turn off button, and nothing else: the switch named, with the operator. Where the yard refuses the change the section says the switch is changed in the yard's web view, and the call is not made again by another path |
 | `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read; shift-`x` or the head's button: every notice read |
 
@@ -1633,6 +1637,12 @@ folder. A change is drawn at once and kept for the next start:
   open in the browser, and the run base, through which they run. Each
   names the address in effect, the default where nothing is set, with a
   reset once it is overridden.
+- Telemetry: the yard's opt-in telemetry switch, for the operator's
+  window alone on a yard that serves the calls. Off, the consent words
+  and Turn on; on, the install id with a copy of it, the next payload
+  as the yard returns it, and Turn off. Where the yard takes no change
+  from where the window reaches it, the section stands read-only, with
+  the yard's web view to change the switch in.
 
 They are kept in one file footplate writes on every change:
 `$XDG_CONFIG_HOME/footplate/settings.json` when

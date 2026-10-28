@@ -259,13 +259,13 @@ pub fn host_of(address: &str) -> String {
     host.split('.').next().unwrap_or_default().to_string()
 }
 
-/// One of the settings' six sections, as the sheet's side list shows
+/// One of the settings' seven sections, as the sheet's side list shows
 /// them: this window, how it looks, what the system tells of, the yards
-/// it shows, how this yard's agents work with the operator, and the
-/// addresses a note's pages go through. Kept as the open one, this
-/// window where none was chosen. A file naming one that is gone (the
-/// crew's, from before it went) opens the first: the rest of the file is
-/// still read.
+/// it shows, how this yard's agents work with the operator, the
+/// addresses a note's pages go through, and the yard's telemetry switch.
+/// Kept as the open one, this window where none was chosen. A file
+/// naming one that is gone (the crew's, from before it went) opens the
+/// first: the rest of the file is still read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String")]
 pub enum Section {
@@ -282,6 +282,8 @@ pub enum Section {
     Agents,
     #[serde(rename = "connection")]
     Connection,
+    #[serde(rename = "telemetry")]
+    Telemetry,
 }
 
 impl From<String> for Section {
@@ -295,20 +297,24 @@ impl From<String> for Section {
             "yards" => Section::Yards,
             "agents" => Section::Agents,
             "connection" => Section::Connection,
+            "telemetry" => Section::Telemetry,
             _ => Section::default(),
         }
     }
 }
 
 impl Section {
-    /// The six, as the side list shows them.
-    pub const ALL: [Section; 6] = [
+    /// The seven, as the side list shows them: telemetry only where
+    /// the window runs as the yard's operator and the yard serves the
+    /// calls to such a window.
+    pub const ALL: [Section; 7] = [
         Section::ThisWindow,
         Section::Appearance,
         Section::Notifications,
         Section::Yards,
         Section::Agents,
         Section::Connection,
+        Section::Telemetry,
     ];
 
     /// The section's name, as the side list and the file say it.
@@ -320,6 +326,7 @@ impl Section {
             Section::Yards => "yards",
             Section::Agents => "agents",
             Section::Connection => "connection",
+            Section::Telemetry => "telemetry",
         }
     }
 
@@ -332,6 +339,7 @@ impl Section {
             Section::Yards => "Yards",
             Section::Agents => "Agents & you",
             Section::Connection => "Connection",
+            Section::Telemetry => "Telemetry",
         }
     }
 

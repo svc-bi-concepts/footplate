@@ -558,6 +558,15 @@ impl Footplate {
         self.agents_read = false;
         self.agents_said = None;
     }
+
+    /// The open yard is another: what Telemetry said of the last is gone
+    /// with it. The preview itself is the model's, and goes with the
+    /// yard's own.
+    pub(crate) fn telemetry_reset(&mut self) {
+        self.telemetry_busy = None;
+        self.telemetry_said = None;
+        self.telemetry_copied = None;
+    }
     /// The device of the yard called `name` is to be paired again: the
     /// settings, with a code to type for that yard's address. From where a
     /// yard said this device is not let in, it is the open one.

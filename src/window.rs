@@ -536,6 +536,13 @@ pub struct Footplate {
     agents_busy: Option<AgentsBusy>,
     agents_read: bool,
     agents_said: Option<String>,
+    /// Telemetry in the settings: the switch's change underway, if one
+    /// is, what came of the last press, and the install id as last
+    /// copied, if it still stands. The preview itself is the model's,
+    /// read with the yard.
+    telemetry_busy: Option<bool>,
+    telemetry_said: Option<String>,
+    telemetry_copied: Option<String>,
     /// The yard whose ⋯ menu stands open on its card, if one does:
     /// pair again, rename and remove, and the sign-in again of a hosted
     /// yard.
@@ -902,6 +909,9 @@ impl Footplate {
             agents_busy: None,
             agents_read: false,
             agents_said: None,
+            telemetry_busy: None,
+            telemetry_said: None,
+            telemetry_copied: None,
             yard_menu: None,
             wanted_row: None,
             system,
@@ -10726,7 +10736,13 @@ yardr.dev
         // This window opens, and alone: the text size, the item and the
         // item's mark. The look is its own section's. No rows stand
         // beside the sheet: the list's status row is gone with it.
+        // Telemetry stands in the list for the operator alone, on a yard
+        // that serves the calls: this yard serves none.
         for section in Section::ALL {
+            if section == Section::Telemetry {
+                assert!(!drawn(cx, "settings section telemetry"));
+                continue;
+            }
             assert!(
                 drawn(cx, &format!("settings section {}", section.name())),
                 "{}",
@@ -11383,6 +11399,364 @@ yardr.dev
         assert_eq!(screen_of(&view, cx), model::SCREEN_ON_THE_YARD);
         assert_eq!(notice(&view, cx), "");
         assert!(far.asked("SessionScreen").is_empty());
+    }
+
+    /// The settings offer Telemetry to the operator on a yard that serves
+    /// the calls: on, the state, the consent words, the install id with a
+    /// copy of it, the next request and payload, and Turn off. Turn off
+    /// sends the off call only on the press, and reads the preview again;
+    /// off, Turn on sends the on call the same way. The switch's move
+    /// reads the preview again too. The window of another user is
+    /// offered no section, and asks nothing.
+    #[gpui::test]
+    fn telemetry_stands_in_the_settings_for_the_operator_with_the_switch(cx: &mut TestAppContext) {
+        let on = || {
+            json!({"result": {
+                "install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90",
+                "telemetry": "on", "since": "2026-10-26",
+                "sending_day": "2026-10-28", "source_days": ["2026-10-27"],
+                "hosted": false,
+                "request": {"api_key": "phc_test", "batch": [{"event": "yardr_daily"}]},
+            }})
+            .to_string()
+        };
+        let off = || {
+            json!({"result": {
+                "telemetry": "off", "sending_day": "2026-10-28",
+                "hosted": false, "request": null, "no_batch": "off",
+            }})
+            .to_string()
+        };
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("TelemetryShow", &on());
+        yard.answer(
+            "TelemetrySet",
+            r#"{"result": {"telemetry": "off", "changed": true}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The preview is read with the yard; the change waits for the
+        // press.
+        assert_eq!(yard.asked("TelemetryShow"), vec![json!({})]);
+        assert!(yard.asked("TelemetrySet").is_empty());
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "settings section telemetry"));
+        click_on(cx, "settings section telemetry");
+        // On: the state, the consent words, the id with its copy, the
+        // next request and payload as the yard returns them, and Turn
+        // off.
+        assert!(drawn(cx, "telemetry state"));
+        assert!(drawn(cx, "telemetry consent"));
+        assert!(drawn(cx, "telemetry id"));
+        assert!(drawn(cx, "telemetry copy"));
+        assert!(drawn(cx, "telemetry next"));
+        assert!(drawn(cx, "telemetry payload"));
+        assert!(!drawn(cx, "telemetry no batch"));
+        assert!(drawn(cx, "telemetry deletion"));
+        assert!(drawn(cx, "telemetry off"));
+        assert!(!drawn(cx, "telemetry on"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.telemetry_offered());
+            assert!(!model.telemetry_read_only());
+            let preview = model.telemetry_preview().unwrap();
+            assert_eq!(preview.install_id, "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90");
+            assert_eq!(
+                preview.request.as_ref().unwrap()["batch"][0]["event"],
+                json!("yardr_daily")
+            );
+        });
+        assert_eq!(notice(&view, cx), "");
+        // Copy puts the install id on the clipboard.
+        cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+        click_on(cx, "telemetry copy");
+        cx.run_until_parked();
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90")
+        );
+        // Turn off sends the off call with the operator, and reads the
+        // preview again: off, with the switch off.
+        yard.answer("TelemetryShow", &off());
+        click_on(cx, "telemetry off");
+        wait(cx, "the switch turned off", |cx| drawn(cx, "telemetry on"));
+        assert_eq!(
+            yard.asked("TelemetrySet"),
+            vec![json!({"on": false, "actor": "jo"})]
+        );
+        assert_eq!(yard.asked("TelemetryShow").len(), 2);
+        view.read_with(cx, |v, _| {
+            let preview = v.model.as_ref().unwrap().telemetry_preview().unwrap();
+            assert_eq!(preview.telemetry, "off");
+        });
+        // Turn on sends the on call only on the press, and reads again.
+        assert_eq!(yard.asked("TelemetrySet").len(), 1);
+        yard.answer("TelemetryShow", &on());
+        yard.answer(
+            "TelemetrySet",
+            r#"{"result": {"telemetry": "on", "changed": true}}"#,
+        );
+        click_on(cx, "telemetry on");
+        wait(cx, "the switch turned on", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.telemetry_preview().is_some_and(|p| p.telemetry == "on"))
+            })
+        });
+        assert_eq!(
+            yard.asked("TelemetrySet").last(),
+            Some(&json!({"on": true, "actor": "jo"}))
+        );
+        assert_eq!(yard.asked("TelemetryShow").len(), 3);
+        assert_eq!(notice(&view, cx), "");
+        // The switch's move reads the preview again.
+        yard.answer("TelemetryShow", &off());
+        yard.emit(r#"{"seq": 21, "kind": "setting_changed", "actor": "jo", "data": {"key": "telemetry"}}"#);
+        wait(cx, "the preview read again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.telemetry_preview().is_some_and(|p| p.telemetry == "off"))
+            })
+        });
+        assert_eq!(yard.asked("TelemetryShow").len(), 4);
+        // Off from the start: the consent words and Turn on, with no id,
+        // no payload and no Turn off.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("TelemetryShow", &off());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "settings section telemetry"));
+        click_on(cx, "settings section telemetry");
+        assert!(drawn(cx, "telemetry state"));
+        assert!(drawn(cx, "telemetry consent"));
+        assert!(drawn(cx, "telemetry on"));
+        assert!(!drawn(cx, "telemetry id"));
+        assert!(!drawn(cx, "telemetry next"));
+        assert!(!drawn(cx, "telemetry payload"));
+        assert!(!drawn(cx, "telemetry off"));
+        assert_eq!(notice(&view, cx), "");
+        // Another user's window: no section, and no call.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Settings", r#"{"result": {"operator": "mckean"}}"#);
+        yard.answer("TelemetryShow", &on());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(!drawn(cx, "settings section telemetry"));
+        view.read_with(cx, |v, _| {
+            assert!(!v.model.as_ref().unwrap().telemetry_offered());
+        });
+        assert!(yard.asked("TelemetryShow").is_empty());
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// A yard from before the telemetry calls, and one that refuses the
+    /// preview as a request come down the link from its edge, offer no
+    /// Telemetry section: with no notice, and the refusal is not asked
+    /// again, by the window's second try of a failed read or by the
+    /// switch's move. A hosted yard is not asked at all. Telemetry kept
+    /// open past the yard that offered it shows the first section's. A
+    /// preview that could not be read is offered still, with why and try
+    /// again.
+    #[gpui::test]
+    fn telemetry_hides_where_the_yard_serves_no_calls(cx: &mut TestAppContext) {
+        // A yard from before the calls: asked once, with no section and
+        // no notice, and not asked again.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "TelemetryShow",
+            r#"{"error": {"code": "error", "message": "no such method TelemetryShow"}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        assert_eq!(yard.asked("TelemetryShow").len(), 1);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(!drawn(cx, "settings section telemetry"));
+        view.read_with(cx, |v, _| {
+            assert!(!v.model.as_ref().unwrap().telemetry_offered());
+        });
+        assert_eq!(notice(&view, cx), "");
+        cx.executor().advance_clock(session::RETRY + session::RETRY);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("TelemetryShow").len(), 1);
+        yard.emit(r#"{"seq": 21, "kind": "setting_changed", "actor": "jo", "data": {"key": "telemetry"}}"#);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("TelemetryShow").len(), 1);
+        assert_eq!(notice(&view, cx), "");
+        // The link's refusal hides it too, in no notice.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "TelemetryShow",
+            &json!({"error": {"code": "error", "message": "the telemetry switch is not read over the link: this request came down the link from the edge. Read it on the yard's machine (`yardr telemetry show`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        assert_eq!(yard.asked("TelemetryShow").len(), 1);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(!drawn(cx, "settings section telemetry"));
+        assert_eq!(notice(&view, cx), "");
+        // A hosted yard is not asked at all.
+        use crate::fake::{Router, SESSION, TOKEN};
+        let far = Yard::start_tcp();
+        a_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(edge.client_with(TOKEN, SESSION), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the hosted yard's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert!(!model.telemetry_offered());
+        });
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(!drawn(cx, "settings section telemetry"));
+        assert!(far.asked("TelemetryShow").is_empty());
+        assert_eq!(notice(&view, cx), "");
+        // Telemetry kept open past the yard that offered it shows the
+        // first section's.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            section: Section::Telemetry,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(!drawn(cx, "settings section telemetry"));
+        assert!(drawn(cx, "text size"));
+        // A preview that could not be read is offered still, with why
+        // and try again; the retry reads it.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("TelemetryShow", r#"{"result": {"telemetry": 7}}"#);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        assert!(drawn(cx, "settings section telemetry"));
+        click_on(cx, "settings section telemetry");
+        assert!(drawn(cx, "telemetry notice"));
+        assert!(drawn(cx, "telemetry again"));
+        assert!(!drawn(cx, "telemetry state"));
+        yard.answer(
+            "TelemetryShow",
+            r#"{"result": {"telemetry": "off", "sending_day": "2026-10-28", "hosted": false, "request": null, "no_batch": "off"}}"#,
+        );
+        click_on(cx, "telemetry again");
+        wait(cx, "the preview read again", |cx| {
+            drawn(cx, "telemetry state")
+        });
+        assert!(drawn(cx, "telemetry on"));
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// A yard that reads the preview but refuses the switch's change
+    /// stands the section read-only: the state, the id and the payload
+    /// with no buttons, and the sentence that the switch is changed in
+    /// the yard's web view, with Open where the view answers and none
+    /// where it does not. The refused change is made once, and never
+    /// again by another path. Any other refusal is said of the press,
+    /// with the buttons to try again.
+    #[gpui::test]
+    fn a_refused_change_stands_read_only_with_the_web_view(cx: &mut TestAppContext) {
+        let on = || {
+            json!({"result": {
+                "install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90",
+                "telemetry": "on", "since": "2026-10-26",
+                "sending_day": "2026-10-28", "source_days": ["2026-10-27"],
+                "hosted": false,
+                "request": {"api_key": "phc_test", "batch": [{"event": "yardr_daily"}]},
+            }})
+            .to_string()
+        };
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("TelemetryShow", &on());
+        yard.answer(
+            "TelemetrySet",
+            &json!({"error": {"code": "error", "message": "the telemetry switch is taken over https only, or from the yard's own machine: this request reached the yard's listener in plain HTTP from another machine. Put the proxy or tunnel that ends TLS on the yard's machine, or Change it on the yard's machine (`yardr telemetry on` or `yardr telemetry off`). The device's token was sent with it and may have crossed a network in the clear: if it did, remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        // The press's refusal stands the section read-only: made once.
+        view.update_in(cx, |v, _, cx| v.telemetry_turn(false, cx));
+        wait(cx, "the change refused", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.telemetry_read_only())
+            })
+        });
+        assert_eq!(
+            yard.asked("TelemetrySet"),
+            vec![json!({"on": false, "actor": "jo"})]
+        );
+        // Where the view does not answer: the sentence with no Open.
+        let down = view_down();
+        set_view(&view, cx, &down);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        click_on(cx, "settings section telemetry");
+        wait(cx, "the web view down", |cx| {
+            view_answered(&view, cx) == Some(false)
+        });
+        assert!(drawn(cx, "telemetry state"));
+        assert!(drawn(cx, "telemetry id"));
+        assert!(drawn(cx, "telemetry payload"));
+        assert!(drawn(cx, "telemetry read only"));
+        assert!(!drawn(cx, "telemetry open"));
+        assert!(!drawn(cx, "telemetry on"));
+        assert!(!drawn(cx, "telemetry off"));
+        assert_eq!(notice(&view, cx), "");
+        // Where the view answers: Open takes the telemetry page to the
+        // browser. The refused change is made no second time.
+        let base = view_up();
+        set_view(&view, cx, &base);
+        let pages = opened_pages(&view, cx);
+        click_on(cx, "settings section telemetry");
+        wait(cx, "the web view", |cx| {
+            view_answered(&view, cx) == Some(true)
+        });
+        assert!(drawn(cx, "telemetry open"));
+        click_on(cx, "telemetry open");
+        cx.run_until_parked();
+        assert_eq!(pages.borrow().as_slice(), [format!("{base}/telemetry")]);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("TelemetrySet").len(), 1);
+        assert_eq!(notice(&view, cx), "");
+        // Any other refusal is said of the press, with the buttons to
+        // try again.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("TelemetryShow", &on());
+        yard.answer(
+            "TelemetrySet",
+            r#"{"error": {"code": "error", "message": "the switch is stuck"}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section telemetry");
+        click_on(cx, "telemetry off");
+        wait(cx, "the refusal said", |cx| drawn(cx, "telemetry said"));
+        assert!(drawn(cx, "telemetry off"));
+        assert!(!drawn(cx, "telemetry read only"));
+        assert_eq!(yard.asked("TelemetrySet").len(), 1);
+        assert_eq!(notice(&view, cx), "");
     }
 
     /// Chat's groups hold their rows in order, each under its head: the

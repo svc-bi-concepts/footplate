@@ -382,6 +382,25 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
     // so after all is no error either: the grants are read on its machine.
     let operator = client.settings().map(|s| s.operator).unwrap_or_default();
     let is_operator = !operator.is_empty() && operator == user.name;
+    // Who the Telemetry section is offered to: the yard's operator, and
+    // no one else, on a yard that serves the calls to such a window. The
+    // yard serves neither call to a device that comes down the link from
+    // its edge, so a hosted yard is not asked for the preview; a yard
+    // from before the calls, and one that refuses the preview so after
+    // all, offer no section either.
+    let (telemetry, telemetry_notice, telemetry_unserved) = match is_operator && !client.hosted() {
+        false => (None, None, client.hosted()),
+        true => match client.telemetry_show() {
+            Ok(preview) => (Some(preview), None, false),
+            Err(err) if model::telemetry_too_old(&err) => (None, None, true),
+            Err(err) if model::telemetry_over_the_link(&err) => (None, None, true),
+            Err(err) => (
+                None,
+                Some(format!("the telemetry switch could not be read: {err}")),
+                false,
+            ),
+        },
+    };
     let mut grants_on_the_yard = client.hosted();
     let (grants, grants_notice, grants_too_old) = match is_operator && !grants_on_the_yard {
         false => (Vec::new(), None, false),
@@ -426,6 +445,9 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         // way the client reaches the yard is all there is to go by, and a
         // refusal later teaches the window the rest.
         screen_on_the_yard: client.hosted(),
+        telemetry,
+        telemetry_notice,
+        telemetry_unserved,
         yard,
     })
 }
@@ -930,6 +952,115 @@ mod tests {
         );
         assert!(!state.grants_too_old);
         assert!(!state.grants_on_the_yard);
+    }
+
+    /// The preview is read where the window is the operator's: a yard
+    /// from before the calls reads as unserved with no notice, one that
+    /// refuses the preview as a request come down the link from its edge
+    /// reads as unserved too, and an unreadable one with why. Anywhere
+    /// else no call is made: not for another user, and not for the
+    /// operator's window of a hosted yard, which the yard serves neither
+    /// call down the link, where the same yard asked at its address with
+    /// no edge before it is asked, and answers. The window still opens.
+    #[test]
+    fn load_reads_the_telemetry_preview_for_the_operator_on_a_yard_that_serves_it() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The operator's: the preview is read.
+        yard.answer(
+            "TelemetryShow",
+            r#"{"result": {"install_id": "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90", "telemetry": "on", "since": "2026-10-26", "sending_day": "2026-10-28", "hosted": false, "request": {"batch": []}}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.me, "jo");
+        assert_eq!(state.operator, "jo");
+        assert_eq!(
+            state.telemetry.as_ref().unwrap().install_id,
+            "3f6d1c2e-9a4b-4e7a-b5c1-2d8f0a6e4b90"
+        );
+        assert_eq!(state.telemetry_notice, None);
+        assert!(!state.telemetry_unserved);
+        assert_eq!(yard.asked("TelemetryShow"), vec![json!({})]);
+
+        // A yard from before the calls: unserved, with no notice.
+        yard.answer(
+            "TelemetryShow",
+            r#"{"error": {"code": "error", "message": "no such method TelemetryShow"}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.telemetry.is_none());
+        assert_eq!(state.telemetry_notice, None);
+        assert!(state.telemetry_unserved);
+
+        // A yard that says the request came down the link from its edge:
+        // unserved too, with no notice.
+        yard.answer(
+            "TelemetryShow",
+            &json!({"error": {"code": "error", "message": "the telemetry switch is not read over the link: this request came down the link from the edge. Read it on the yard's machine (`yardr telemetry show`). The edge saw the device's token with it: remove the device and add it again (yardr user device rm)."}}).to_string(),
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.telemetry.is_none());
+        assert_eq!(state.telemetry_notice, None);
+        assert!(state.telemetry_unserved);
+
+        // An unreadable one: empty, with why, and served still.
+        yard.answer("TelemetryShow", r#"{"result": {"telemetry": 7}}"#);
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.telemetry.is_none());
+        assert!(
+            state
+                .telemetry_notice
+                .as_deref()
+                .unwrap()
+                .starts_with("the telemetry switch could not be read: ")
+        );
+        assert!(!state.telemetry_unserved);
+
+        // Another user: the operator's call is never made.
+        yard.answer(
+            "TelemetryShow",
+            r#"{"result": {"telemetry": "off", "sending_day": "2026-10-28", "hosted": false, "request": null, "no_batch": "off"}}"#,
+        );
+        yard.answer(
+            "GetUser",
+            r#"{"result": {"name": "ada", "cursor": 9, "notification_cursor": 4}}"#,
+        );
+        yard.answer(
+            "Users",
+            r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0},
+                           {"name": "ada", "cursor": 9, "notification_cursor": 4}]}"#,
+        );
+        let asked = yard.asked("TelemetryShow").len();
+        let state = load(&yard.client(), "ada").unwrap();
+        assert_eq!(state.me, "ada");
+        assert_eq!(state.operator, "jo");
+        assert!(state.telemetry.is_none());
+        assert_eq!(state.telemetry_notice, None);
+        assert!(!state.telemetry_unserved);
+        assert_eq!(yard.asked("TelemetryShow").len(), asked);
+
+        // The operator's window of a hosted yard: no call, no notice, and
+        // unserved. The same yard at its address, with no edge before it,
+        // is asked, and answers.
+        use crate::fake::{Router, SESSION, TOKEN};
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "TelemetryShow",
+            r#"{"result": {"telemetry": "off", "sending_day": "2026-10-28", "hosted": false, "request": null, "no_batch": "off"}}"#,
+        );
+        let direct = load(&yard.client(), "jo").unwrap();
+        assert_eq!(direct.me, "jo");
+        assert!(!direct.telemetry_unserved);
+        assert_eq!(yard.asked("TelemetryShow"), vec![json!({})]);
+        let edge = Router::start(&yard, SESSION);
+        let hosted = load(&edge.client_with(TOKEN, SESSION), "jo").unwrap();
+        assert_eq!(hosted.me, "jo");
+        assert_eq!(hosted.operator, "jo");
+        assert!(hosted.telemetry.is_none());
+        assert_eq!(hosted.telemetry_notice, None);
+        assert!(hosted.telemetry_unserved);
+        assert_eq!(yard.asked("TelemetryShow"), vec![json!({})]);
     }
 
     /// Anywhere but the operator's, the window reads no grants: not for
