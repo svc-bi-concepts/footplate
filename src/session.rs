@@ -219,6 +219,20 @@ impl Trouble {
             Trouble::Yard(_) => "cannot be read",
         }
     }
+
+    /// What the follower tells the window for this trouble: on a yard of
+    /// another account's, a refused device is told to pair this device
+    /// again from the yard's card, in the member's own session — never to
+    /// ask the operator for a code, which a member can never be given (the
+    /// operator never holds a member's code). Every other trouble, on any
+    /// yard, is told as it is said.
+    fn told(&self, is_member: bool) -> String {
+        match (self, is_member) {
+            (Trouble::NotLetIn, true) => "This device is no longer let in: the yard refuses its token, or your access was removed. Pair this device again from the yard's card, in your own session.".into(),
+            (Trouble::Yard(api::Error::NoDevice), true) => "Nothing of a yard is under /user/ at this address: the yard has no device any more, or the address is not a yard's listener. Pair this device again from the yard's card, in your own session.".into(),
+            _ => self.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Trouble {
@@ -584,7 +598,7 @@ pub fn follow_with_control(
                 continue;
             }
             Err(Trouble::NotLetIn) => {
-                tell(Update::Out(Trouble::NotLetIn.to_string()));
+                tell(Update::Out(Trouble::NotLetIn.told(is_member)));
                 return;
             }
             Err(Trouble::NotSignedIn) => {
@@ -602,7 +616,7 @@ pub fn follow_with_control(
         // Down is something the window shows: the state read when the yard
         // answers again is told, whatever it is.
         told = None;
-        if !tell(Update::Down(trouble.to_string(), trouble.short())) {
+        if !tell(Update::Down(trouble.told(is_member), trouble.short())) {
             return;
         }
         if control.stopped() {
@@ -1005,6 +1019,8 @@ mod tests {
     /// removed is told once and never asked after again.
     #[test]
     fn a_device_that_is_removed_is_told_so_and_the_yard_is_not_asked_again() {
+        use crate::fake::{Router, SESSION, TOKEN};
+
         let yard = Yard::start_tcp();
         a_yard_of_jo(&yard);
         let (tx, rx) = mpsc::channel();
@@ -1056,8 +1072,10 @@ mod tests {
                 Update::Removed => panic!("no member yard here"),
             }
         };
-        assert!(why.starts_with("This device is no longer let in"), "{why}");
-        assert!(why.contains("yardr user device pair"), "{why}");
+        assert_eq!(
+            why,
+            "This device is no longer let in: the yard refuses its token. Its operator removed the device, or the token is not this yard's. Pair it again, with a code the operator opens: yardr user device pair <user> <device>"
+        );
         // The thread has ended with the window still there, and many of its
         // 20 milliseconds later nothing more was asked.
         follower.join().unwrap();
@@ -1065,6 +1083,39 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         assert_eq!(yard.requests(), asked);
         assert!(rx.try_recv().is_err());
+
+        // A member yard refuses the same device without a code the member
+        // cannot get from its operator.
+        let member_yard = Yard::start_tcp();
+        a_yard_of_jo(&member_yard);
+        member_yard.add_device("yardr-dev-phone");
+        member_yard.remove_device(TOKEN);
+        let edge = Router::start(&member_yard, SESSION);
+        let (tx, rx) = mpsc::channel();
+        let follower = thread::spawn({
+            let client = edge.client_with_yard(TOKEN, SESSION, "alice/lab");
+            move || {
+                follow_with_control(
+                    &client,
+                    "mac-login",
+                    Duration::from_millis(20),
+                    WATCH,
+                    FollowControl::default(),
+                    true,
+                    |update| tx.send(update).is_ok(),
+                )
+            }
+        });
+        let Update::Out(why) = rx.recv_timeout(Duration::from_secs(10)).unwrap() else {
+            panic!("a refused member device is out, not down")
+        };
+        follower.join().unwrap();
+        assert_eq!(
+            why,
+            "This device is no longer let in: the yard refuses its token, or your access was removed. Pair this device again from the yard's card, in your own session."
+        );
+        assert!(!why.contains("operator"), "{why}");
+        assert!(!why.contains("yardr user device pair"), "{why}");
     }
 
     /// Through the edge: a session that is revoked is told so and never
@@ -1672,6 +1723,8 @@ mod tests {
     /// address that is no yard's answers the same.
     #[test]
     fn a_yard_with_no_device_left_is_said_so() {
+        use crate::fake::{Router, SESSION, TOKEN};
+
         let yard = Yard::start_tcp();
         a_yard_of_jo(&yard);
         let client = yard.client();
@@ -1688,6 +1741,56 @@ mod tests {
         );
         assert!(why.contains("yardr user device pair"), "{why}");
         assert_eq!(trouble.short(), PAIR_AGAIN);
+
+        // Both kinds of yard reach the same 404, but a member gets the
+        // pairing route in its own session while an own yard keeps today's
+        // operator instructions.
+        let tell_first = |client, is_member| {
+            let (tx, rx) = mpsc::channel();
+            let follower = thread::spawn(move || {
+                follow_with_control(
+                    &client,
+                    "mac-login",
+                    Duration::from_millis(20),
+                    WATCH,
+                    FollowControl::default(),
+                    is_member,
+                    |update| {
+                        let _ = tx.send(update);
+                        false
+                    },
+                )
+            });
+            let update = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            follower.join().unwrap();
+            update
+        };
+
+        let Update::Down(own_why, short) = tell_first(yard.client(), false) else {
+            panic!("an own yard with no device is down")
+        };
+        assert_eq!(
+            own_why,
+            "Nothing of a yard is under /user/ at this address: the yard has no device any more, or the address is not a yard's listener. Pair this device again, with a code the yard's operator opens: yardr user device pair <user> <device>"
+        );
+        assert_eq!(short, PAIR_AGAIN);
+
+        let edge = Router::start(&yard, SESSION);
+        let Update::Down(member_why, short) =
+            tell_first(edge.client_with_yard(TOKEN, SESSION, "alice/lab"), true)
+        else {
+            panic!("a member yard with no device is down")
+        };
+        assert_eq!(
+            member_why,
+            "Nothing of a yard is under /user/ at this address: the yard has no device any more, or the address is not a yard's listener. Pair this device again from the yard's card, in your own session."
+        );
+        assert_eq!(short, PAIR_AGAIN);
+        assert!(!member_why.contains("operator"), "{member_why}");
+        assert!(
+            !member_why.contains("yardr user device pair"),
+            "{member_why}"
+        );
     }
 
     /// A yard that is slow to answer is said so, in plain words, by its
