@@ -405,9 +405,10 @@ impl Footplate {
     /// The open card's ask: the current one of a decision, or the dealt
     /// with itself.
     pub(crate) fn card(&self) -> Option<(String, u64)> {
-        // The settings stand where the card does: its keys are not for a
-        // card that is not in view.
-        if self.settings_open {
+        // The settings stand where the card does, and the Feedback form
+        // over it: its keys are not for a card that is not in view, and
+        // the arrows in the form's rows are the form's.
+        if self.settings_open || self.feedback.is_some() {
             return None;
         }
         self.open_ask()

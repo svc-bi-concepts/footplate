@@ -5,7 +5,9 @@
 //! under `/user/` for a device's token, `/user/me`, and a pairing that
 //! gives a token for a code. Windows has no socket, so the yard there is at
 //! its listener alone, and the yard a test starts with, [`Yard::start`], is
-//! that one there: a test that never names its socket runs on both.
+//! that one there: a test that never names its socket runs on both. Beside
+//! the yard, [`Router`] stands for the edge in front of it and [`Posthog`]
+//! for the capture that feedback is sent to.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -1538,6 +1540,136 @@ fn relay_inner(conn: &mut TcpStream, head: &str, body: &[u8], target: &str) -> i
     conn.flush()?;
     io::copy(&mut yard, conn)?;
     Ok(())
+}
+
+/// What a [`Posthog`] keeps of the requests and answers them with.
+#[cfg(any(test, debug_assertions))]
+struct PosthogShared {
+    /// The head and the body of each request, in the order they came.
+    sent: Mutex<Vec<(String, String)>>,
+    /// What every request is answered with.
+    status: Mutex<u16>,
+    stopped: Mutex<bool>,
+}
+
+/// PostHog's capture for the tests and the shots, which is no yard: a port of
+/// this machine that reads each request whole, keeps it, and answers every
+/// one with the status it was told to, 200 until then. It checks nothing of
+/// a request: the test reads what came ([`Posthog::sent`]), so that the
+/// real host and the real key are never needed.
+#[cfg(any(test, debug_assertions))]
+pub struct Posthog {
+    /// `http://127.0.0.1:<port>`.
+    address: String,
+    shared: Arc<PosthogShared>,
+    accept: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl Posthog {
+    pub fn start() -> Posthog {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let shared = Arc::new(PosthogShared {
+            sent: Mutex::new(Vec::new()),
+            status: Mutex::new(200),
+            stopped: Mutex::new(false),
+        });
+        let accept = thread::spawn({
+            let shared = shared.clone();
+            move || {
+                while !*shared.stopped.lock().unwrap() {
+                    match listener.accept() {
+                        Ok((conn, _)) => {
+                            let conn = at_once(conn);
+                            let shared = shared.clone();
+                            thread::spawn(move || {
+                                let _ = serve_posthog(conn, &shared);
+                            });
+                        }
+                        Err(_) => thread::sleep(Duration::from_millis(2)),
+                    }
+                }
+            }
+        });
+        Posthog {
+            address,
+            shared,
+            accept: Mutex::new(Some(accept)),
+        }
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// Every request from now on is answered with `status`.
+    pub fn answer(&self, status: u16) {
+        *self.shared.status.lock().unwrap() = status;
+    }
+
+    /// The head and the body of each request that came, in order.
+    pub fn sent(&self) -> Vec<(String, String)> {
+        self.shared.sent.lock().unwrap().clone()
+    }
+
+    /// Nothing listens any more.
+    pub fn stop(&self) {
+        *self.shared.stopped.lock().unwrap() = true;
+        if let Some(accept) = self.accept.lock().unwrap().take() {
+            accept.join().unwrap();
+        }
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+impl Drop for Posthog {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// One request at the capture: kept whole, and answered.
+#[cfg(any(test, debug_assertions))]
+fn serve_posthog(conn: TcpStream, shared: &PosthogShared) -> io::Result<()> {
+    // The listener is nonblocking so it can be stopped, and what it
+    // accepts inherits that: served blocking, as the yard is.
+    conn.set_nonblocking(false)?;
+    let mut reader = BufReader::new(conn.try_clone()?);
+    let mut conn = conn;
+    let mut head = String::new();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        head.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    shared
+        .sent
+        .lock()
+        .unwrap()
+        .push((head, String::from_utf8_lossy(&body).into_owned()));
+    let status = *shared.status.lock().unwrap();
+    let answer = r#"{"status":1}"#;
+    write!(
+        conn,
+        "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+        answer.len()
+    )?;
+    conn.flush()
 }
 
 #[cfg(test)]

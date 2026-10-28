@@ -21,7 +21,8 @@ The window, its state and the yard:
   runs it).
 - `src/window.rs`: draws the window and makes the calls the model asks for;
   no protocol, no state of its own. `src/window/firstrun.rs` draws the
-  first run where the yard will be.
+  first run where the yard will be, and `src/window/feedback.rs` the
+  Feedback form over the window.
 - `src/model.rs`: what the window shows, without the window (rows, the open
   conversation, unread); never calls the yard, it answers an `Effect` the
   window performs.
@@ -70,6 +71,12 @@ Platform surface:
 
 Setup, release and tests:
 
+- `src/feedback.rs`: what the Feedback form sends, and where: one survey
+  answer to yardr's PostHog (EU) with the project's write key, carrying the
+  message, the version, the OS and the email where given, from an id made for
+  that send; the key and the survey's id are two plain constants, and with
+  either empty there is no project, so no button. It sends by
+  `api::post_json`, the post to a site that is no yard.
 - `src/fetch.rs`: fetches yardr's release from yardr.dev (minisign over
   checksums against the built-in key, archive against checksums), plus
   `yardr doctor`-named programs by checksum alone; and asks the kept yardr
@@ -79,8 +86,8 @@ Setup, release and tests:
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for
   screenshots, named by `FOOTPLATE_SHOT`.
 - `src/fake.rs`: a yard for tests (socket or TCP, scripted JSON, tokens and
-  pairing; no TLS). `Yard::start()` is the socket's on unix and the TCP
-  one's on Windows.
+  pairing; no TLS), and a stand-in for PostHog's capture (`Posthog`).
+  `Yard::start()` is the socket's on unix and the TCP one's on Windows.
 - `src/fixtures/`: `shot-page.png`, and the published yardr v0.10.0 checksums
   plus signature the built-in key is held to.
 

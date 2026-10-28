@@ -22,6 +22,7 @@ use gpui::{
 };
 
 use super::small_button;
+use crate::feedback::Project;
 use crate::fetch;
 use crate::input::{Line, Submitted};
 use crate::setup::{self, Doctor, Form, Item, Login, Need, Offer, Yardr};
@@ -38,8 +39,8 @@ pub type Opens = Rc<dyn Fn(&str, &mut App)>;
 /// What the window does for a gesture on its top strip: moves, or zooms.
 pub type Strip = Rc<dyn Fn(Gesture, &mut Window, &mut App)>;
 
-/// What the first run, and the window's top strip, reach outside the window
-/// with. A test has a stand-in for each.
+/// What the first run, the window's top strip and its Feedback form reach
+/// outside the window with. A test has a stand-in for each.
 #[derive(Clone)]
 pub struct Means {
     pub yardr: Fetches,
@@ -57,6 +58,9 @@ pub struct Means {
     /// the desktop draws a title bar above the window, and in a test, whose
     /// window has none.
     pub titlebar: Option<Strip>,
+    /// Where feedback goes, if it is offered: yardr's PostHog project, none
+    /// while its survey is. A form is never offered that sends nowhere.
+    pub feedback: Option<Project>,
 }
 
 impl Means {
@@ -87,6 +91,9 @@ impl Means {
             apple: cfg!(target_os = "macos"),
             titlebar: (cfg!(target_os = "macos") && !cfg!(test))
                 .then(|| Rc::new(titlebar::perform) as Strip),
+            // Tests send nothing: a test that sends feedback stands in for
+            // PostHog.
+            feedback: Project::yardr().filter(|_| !cfg!(test)),
         }
     }
 }

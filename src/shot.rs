@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, Duration, Local};
 use serde_json::json;
 
-use crate::fake::{Router, Yard};
+use crate::fake::{Posthog, Router, Yard};
 use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
@@ -64,7 +64,9 @@ use crate::yard::Env;
 /// the member marked, the yardmaster's conversation naming an ask and
 /// two bead ids, the cheatsheet open over an open card, the About card open
 /// over the yardmaster's conversation, with the yardr the shot script
-/// keeps and with none kept, and the
+/// keeps and with none kept, the Feedback form open over it, with a message
+/// typed, against a capture of this machine's that stands in for PostHog,
+/// and the
 /// yardmaster's conversation with the parties' reactions under three
 /// mails, with the bar of reactions to tap floating over one of them, the
 /// yardmaster's conversation with the notice a flows view that did not
@@ -158,6 +160,7 @@ pub const STATES: &[&str] = &[
     "keys",
     "about",
     "about-unfetched",
+    "feedback",
     "reactions",
     "reactions-hover",
     "reactions-zoom",
@@ -277,7 +280,24 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
         );
         std::process::exit(2);
     }
+    // The feedback shot's window sends to a capture of this machine's, held
+    // for the run: a press on Send in a window left up (scripts/shot-mac.sh
+    // hold) goes nowhere else. The tests start none, so none polls its port
+    // for the rest of their run.
+    if state == "feedback" {
+        let _ = POSTHOG.set(Posthog::start());
+    }
     start_for_state(env, &state)
+}
+
+/// The capture the feedback shot sends to, which stands in for PostHog.
+static POSTHOG: std::sync::OnceLock<Posthog> = std::sync::OnceLock::new();
+
+/// The project the feedback shot offers, whatever the constants of the tree
+/// are: that capture, with a key and a survey that are none of the real
+/// ones. None in every other state.
+pub(crate) fn feedback() -> Option<crate::feedback::Project> {
+    crate::feedback::Project::at(POSTHOG.get()?.address(), "phc_shot", "shot-survey")
 }
 
 /// The run for `state`: the fake yard serves it, and the run's socket
@@ -900,6 +920,7 @@ fn populate(yard: &Yard, state: &str) {
         | "switcher-member"
         | "about"
         | "about-unfetched"
+        | "feedback"
         | "notice"
         | "screen"
         | "screen-hosted"
@@ -2269,7 +2290,8 @@ mod tests {
                 | "switcher-shut"
                 | "switcher-member"
                 | "about"
-                | "about-unfetched" => {
+                | "about-unfetched"
+                | "feedback" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();
                     assert_eq!(letters.len(), 6, "{state}");

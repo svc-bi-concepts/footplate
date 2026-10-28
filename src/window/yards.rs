@@ -2070,6 +2070,7 @@ impl Footplate {
         if self.down.is_none()
             || self.adding.is_some()
             || self.settings_open
+            || self.feedback.is_some()
             || self.first_run.is_some()
             || self.switching.is_some()
             || !self.sets_up_here()

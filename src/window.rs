@@ -32,6 +32,7 @@ mod ask;
 mod asks;
 mod bead;
 mod chrome;
+mod feedback;
 mod firstrun;
 mod keys;
 mod metrics;
@@ -43,6 +44,7 @@ mod ui;
 mod words;
 mod yards;
 
+use feedback::Feedback;
 use firstrun::{FirstRun, Means};
 use keys::{APPROVE_KEY, CONTEXT, NO_LINE_CONTEXT, SETUP_SECRET_CONTEXT, SWITCH_CONTEXT};
 use metrics::READING_WIDTH;
@@ -394,6 +396,8 @@ pub struct Footplate {
     /// The About card stands over the window, with what it says of the
     /// yardr footplate keeps.
     about: Option<About>,
+    /// The Feedback form stands over the window, with what is typed in it.
+    feedback: Option<Feedback>,
     /// The rail's mode icon the pointer stands on, if any: its glyph
     /// brightens, as quiet text does.
     rail_hover: Option<Mode>,
@@ -836,6 +840,7 @@ impl Footplate {
             switching: None,
             show_keys: false,
             about: None,
+            feedback: None,
             rail_hover: None,
             react_hover: None,
             emoji_hover: None,
@@ -1002,6 +1007,9 @@ impl Render for Footplate {
             _ if self.image_open.is_some() => CONTEXT,
             // Nor with a session's screen over it, as above.
             _ if self.screen_open.is_some() => CONTEXT,
+            // Nor with the Feedback form over it, whose fields take any
+            // letter a card's keys are.
+            _ if self.feedback.is_some() => CONTEXT,
             // Nor are they for the first run, whose fields take names.
             _ if self.first_run.is_some() => CONTEXT,
             // Nor for the question before stopping, which stands where
@@ -1181,8 +1189,13 @@ impl Render for Footplate {
             Some(open) => shown.child(self.screen_layer(open, window, cx)),
             None => shown,
         };
-        // The About card over that, and the cheatsheet over everything
-        // else, as esc shuts it first.
+        // The Feedback form over that, the About card over it, which the
+        // application menu opens from anywhere, and the cheatsheet over
+        // everything else, as esc shuts it first.
+        let shown = match &self.feedback {
+            Some(form) => shown.child(self.feedback_layer(form, top, palette, cx)),
+            None => shown,
+        };
         let shown = match &self.about {
             Some(about) => shown.child(self.about_layer(about, top, palette, cx)),
             None => shown,
@@ -1222,7 +1235,7 @@ mod tests {
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
-    use crate::fake::Yard;
+    use crate::fake::{Posthog, Yard};
     use crate::fetch::{self, Kept};
     use crate::input;
     use crate::model::{
@@ -12421,6 +12434,387 @@ yardr.dev
         assert_eq!(kept_of(&view, cx), None);
     }
 
+    /// The project a test sends feedback to: the stand-in's, with a key and
+    /// a survey that are none of the real ones.
+    fn feedback_to(posthog: &Posthog) -> Option<crate::feedback::Project> {
+        crate::feedback::Project::at(posthog.address(), "phc_test_key", "survey-test")
+    }
+
+    /// What the Feedback form holds: the message and the email as typed, and
+    /// what it says of the last send.
+    fn form_of(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(String, String, Option<String>)> {
+        view.read_with(cx, |v, cx| {
+            v.feedback.as_ref().map(|form| {
+                (
+                    form.message.read(cx).text().to_string(),
+                    form.email.read(cx).text().to_string(),
+                    form.said.clone(),
+                )
+            })
+        })
+    }
+
+    /// Which of the form's fields has the keys: the message, the email, or
+    /// neither.
+    fn form_focus(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> &'static str {
+        cx.update(|window, cx| {
+            let form = view.read(cx).feedback.as_ref().expect("the form is open");
+            match (
+                form.message.focus_handle(cx).is_focused(window),
+                form.email.focus_handle(cx).is_focused(window),
+            ) {
+                (true, _) => "message",
+                (_, true) => "email",
+                _ => "neither",
+            }
+        })
+    }
+
+    /// The Feedback button stands in the rail's foot only where there is a
+    /// project to send to, and opens the form over the window, the keys in
+    /// its message: the form says plainly what it sends, takes a message and
+    /// an email, and Enter sends the one request, with exactly what is
+    /// typed. It says thanks in place of its fields, and nothing of it is
+    /// kept: esc shuts it, and the next one stands empty, and sends under an
+    /// id of its own.
+    #[gpui::test]
+    fn the_feedback_form_sends_what_is_typed_and_says_thanks(cx: &mut TestAppContext) {
+        let posthog = Posthog::start();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+
+        // A test offers none unless it stands one in, as no build does
+        // while the survey's id is none: no button, and no form.
+        assert!(!drawn(cx, "feedback tile"));
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&posthog));
+        assert!(drawn(cx, "feedback tile"));
+
+        click_on(cx, "feedback tile");
+        for drawn_now in [
+            "feedback card",
+            "feedback message",
+            "feedback email",
+            "feedback plain",
+            "feedback cancel",
+            "feedback send",
+        ] {
+            assert!(drawn(cx, drawn_now), "{drawn_now}");
+        }
+        assert!(!drawn(cx, "feedback thanks"));
+        assert_eq!(form_focus(&view, cx), "message");
+
+        // Nothing goes while the message is blank: Enter says so.
+        cx.simulate_keystrokes("enter");
+        assert!(drawn(cx, "feedback said"));
+        assert!(posthog.sent().is_empty());
+
+        // Tab and shift+Tab move between the two fields and step nothing
+        // behind the form.
+        let open_row = view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned());
+        cx.simulate_input("The rail hides my longest depot name.");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(form_focus(&view, cx), "email");
+        cx.simulate_input("ada@example.com");
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(form_focus(&view, cx), "message");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+            open_row
+        );
+        assert_eq!(
+            form_of(&view, cx),
+            Some((
+                "The rail hides my longest depot name.".into(),
+                "ada@example.com".into(),
+                None
+            ))
+        );
+
+        let form_card = bounds_of(cx, "feedback card");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the capture has it", |_| posthog.sent().len() == 1);
+        wait(cx, "the thanks", |cx| drawn(cx, "feedback thanks"));
+        // Exactly the survey's answer: no other property, and no other call
+        // went anywhere.
+        let body: Value = serde_json::from_str(&posthog.sent()[0].1).unwrap();
+        let id = body["distinct_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            body,
+            json!({
+                "api_key": "phc_test_key",
+                "event": "survey sent",
+                "distinct_id": id,
+                "properties": {
+                    "$survey_id": "survey-test",
+                    "$survey_response": "The rail hides my longest depot name.",
+                    "footplate_version": env!("CARGO_PKG_VERSION"),
+                    "os": std::env::consts::OS,
+                    "email": "ada@example.com",
+                },
+            })
+        );
+        // The thanks stand where the fields did, which are no longer
+        // drawn: the card is the height of its head, its line and Close.
+        // (A frame keeps the bounds of what it drew once, so what is gone
+        // is told by the card's height and not by what is drawn.) What was
+        // typed is gone from the fields.
+        assert!(view.read_with(cx, |v, _| v.feedback.as_ref().is_some_and(|form| form.sent)));
+        assert!(drawn(cx, "feedback close"));
+        let thanks_card = bounds_of(cx, "feedback card");
+        assert!(
+            thanks_card.size.height * 2. < form_card.size.height,
+            "the fields stand under the thanks: {thanks_card:?} {form_card:?}"
+        );
+        assert_eq!(
+            form_of(&view, cx),
+            Some((String::new(), String::new(), None))
+        );
+        // Esc is the window's with the fields gone, and shuts the form.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(form_of(&view, cx), None);
+
+        // The next form stands empty, and its message goes under an id of
+        // its own, with no email property where none was given.
+        click_on(cx, "feedback tile");
+        assert_eq!(
+            form_of(&view, cx),
+            Some((String::new(), String::new(), None))
+        );
+        cx.simulate_input("Dark mode, please.");
+        click_on(cx, "feedback send");
+        wait(cx, "the second one", |_| posthog.sent().len() == 2);
+        wait(cx, "the second thanks", |cx| drawn(cx, "feedback thanks"));
+        let second: Value = serde_json::from_str(&posthog.sent()[1].1).unwrap();
+        assert_ne!(second["distinct_id"], body["distinct_id"]);
+        assert_eq!(
+            second["properties"]["$survey_response"],
+            "Dark mode, please."
+        );
+        assert!(second["properties"].get("email").is_none());
+        // Close shuts it.
+        click_on(cx, "feedback close");
+        assert_eq!(form_of(&view, cx), None);
+
+        // Cancel and a click outside shut a form with its words, which are
+        // kept nowhere; a send goes once, however many times Enter is
+        // pressed before its answer.
+        click_on(cx, "feedback tile");
+        cx.simulate_input("Not this.");
+        click_on(cx, "feedback cancel");
+        assert_eq!(form_of(&view, cx), None);
+        click_on(cx, "feedback tile");
+        assert_eq!(
+            form_of(&view, cx),
+            Some((String::new(), String::new(), None))
+        );
+        let card = bounds_of(cx, "feedback card");
+        cx.simulate_click(
+            gpui::point(card.left() - px(4.), card.top() - px(4.)),
+            gpui::Modifiers::default(),
+        );
+        assert_eq!(form_of(&view, cx), None);
+        click_on(cx, "feedback tile");
+        cx.simulate_input("Once.");
+        view.update(cx, |v, cx| {
+            v.send_feedback(cx);
+            v.send_feedback(cx);
+        });
+        wait(cx, "the third one", |_| posthog.sent().len() == 3);
+        wait(cx, "the third thanks", |cx| drawn(cx, "feedback thanks"));
+        assert_eq!(posthog.sent().len(), 3);
+    }
+
+    /// A message PostHog does not take stays in the form, with the email,
+    /// and the form says it could not be sent and to try again; Send is
+    /// there again, and the same words go when it is pressed. A send is
+    /// never made again by itself.
+    #[gpui::test]
+    fn a_feedback_that_did_not_go_keeps_what_was_typed_and_says_so(cx: &mut TestAppContext) {
+        let posthog = Posthog::start();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&posthog));
+        click_on(cx, "feedback tile");
+        cx.simulate_input("Wrap the depot names.");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_input("ada@example.com");
+
+        posthog.answer(503);
+        click_on(cx, "feedback send");
+        wait(cx, "what the form says", |cx| drawn(cx, "feedback said"));
+        assert_eq!(
+            form_of(&view, cx),
+            Some((
+                "Wrap the depot names.".into(),
+                "ada@example.com".into(),
+                Some(
+                    "It could not be sent: PostHog answered 503. What you wrote is still here; try again."
+                        .into()
+                )
+            ))
+        );
+        // The form stands as it was: fields, Send, and the keys where they
+        // were. Nothing is sent again by itself.
+        assert!(drawn(cx, "feedback message") && drawn(cx, "feedback send"));
+        assert!(!drawn(cx, "feedback thanks"));
+        assert_eq!(form_focus(&view, cx), "email");
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(posthog.sent().len(), 1);
+
+        // Where nothing answers at all, that is said as well, with the
+        // fields as they were.
+        let gone = Posthog::start();
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&gone));
+        gone.stop();
+        click_on(cx, "feedback send");
+        wait(cx, "what the form says of the lost address", |cx| {
+            form_of(&view, cx)
+                .and_then(|(_, _, said)| said)
+                .is_some_and(|said| {
+                    said.starts_with("It could not be sent: PostHog does not answer (")
+                })
+        });
+        assert_eq!(form_of(&view, cx).unwrap().0, "Wrap the depot names.");
+
+        // PostHog takes it the next time, and the words are the same.
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&posthog));
+        posthog.answer(200);
+        click_on(cx, "feedback send");
+        wait(cx, "the thanks", |cx| drawn(cx, "feedback thanks"));
+        let sent = posthog.sent();
+        assert_eq!(sent.len(), 2);
+        for (_, body) in &sent {
+            let body: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                body["properties"]["$survey_response"],
+                "Wrap the depot names."
+            );
+            assert_eq!(body["properties"]["email"], "ada@example.com");
+        }
+    }
+
+    /// While the form stands, what is typed is its field's: a card behind it
+    /// keeps its pick and its keys (a number, `d`, `x`, `?`, the arrows are
+    /// letters and rows of the message), and Tab steps no row.
+    #[gpui::test]
+    fn the_feedback_form_takes_every_key_a_card_behind_it_has(cx: &mut TestAppContext) {
+        let posthog = Posthog::start();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks_three());
+        yard.answer("Bead", &bead_three());
+        yard.answer("AnswerAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the decision", |cx| {
+            to_decisions(&view, cx);
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.selected() == Some(&Selected::Decision("bead-a".into())))
+            })
+        });
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-a"));
+        let (ask, chosen) = (current_ask_of(&view, cx), chosen_of(&view, cx, "bead-a", 3));
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&posthog));
+
+        click_on(cx, "feedback tile");
+        assert_eq!(form_focus(&view, cx), "message");
+        cx.simulate_input("2d x? ia/e 1");
+        cx.simulate_keystrokes("up down up");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(form_focus(&view, cx), "email");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(form_focus(&view, cx), "message");
+        assert_eq!(form_of(&view, cx).unwrap().0, "2d x? ia/e 1");
+        // The card is as it was: its ask, its pick, its answer unsent, no
+        // cheatsheet over it.
+        assert_eq!(current_ask_of(&view, cx), ask);
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), chosen);
+        assert!(!view.read_with(cx, |v, _| v.show_keys));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+            Some(Selected::Decision("bead-a".into()))
+        );
+        assert_eq!(
+            yard.asked("AnswerAsk").len() + yard.asked("DeclineAsk").len(),
+            0
+        );
+        assert!(posthog.sent().is_empty());
+
+        // Esc shuts the form, and the card has its keys again: a number
+        // picks.
+        cx.simulate_keystrokes("escape");
+        assert_eq!(form_of(&view, cx), None);
+        cx.simulate_keystrokes("2");
+        assert_eq!(chosen_of(&view, cx, "bead-a", 3), 2);
+    }
+
+    /// With feedback offered, the foot of the rail holds Feedback above the
+    /// gear, a label and no glyph, and still fits the narrowest window the
+    /// application opens under the traffic lights of a Mac, 360 pixels
+    /// high; and with none offered the foot is the gear alone.
+    #[gpui::test]
+    fn the_rail_s_foot_holds_feedback_above_the_gear_and_fits_the_narrowest_window(
+        cx: &mut TestAppContext,
+    ) {
+        let posthog = Posthog::start();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        let (strip, _) = strip_stand_in();
+        view.update(cx, |v, _| v.means.titlebar = Some(strip));
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
+        assert!(!drawn(cx, "feedback tile"));
+        let gear_alone = bounds_of(cx, "settings");
+
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&posthog));
+        let (timetable, tile, label, gear) = (
+            bounds_of(cx, "rail timetable"),
+            bounds_of(cx, "feedback tile"),
+            bounds_of(cx, "feedback tile label"),
+            bounds_of(cx, "settings"),
+        );
+        let rail = bounds_of(cx, "rail");
+        assert!(
+            (tile.size.width - px(52.)).abs() < px(1.),
+            "the tile is {tile:?}, not 52 wide like the others"
+        );
+        assert!(
+            timetable.bottom() <= tile.top() && tile.bottom() <= gear.top() + px(1.),
+            "the foot is out of order: {timetable:?} {tile:?} {gear:?}"
+        );
+        assert!(
+            tile.left() <= label.left() && label.right() <= tile.right() + px(1.),
+            "the label leaves its tile: {label:?} {tile:?}"
+        );
+        assert!(
+            rail.left() <= tile.left() && tile.right() <= rail.right() + px(1.),
+            "the tile leaves the rail: {tile:?} {rail:?}"
+        );
+        // The gear has not moved for the tile above it, and the whole foot
+        // is inside the window, which is 360 high.
+        assert_eq!(gear.bottom(), gear_alone.bottom());
+        assert!(
+            gear.bottom() <= px(360.),
+            "the gear is {gear:?}: under the window's foot"
+        );
+    }
+
     /// The About card's words: this footplate as a release's tag, which a
     /// tag parses as, and the yardr's line as it says itself, or that it is
     /// being asked, not fetched, or silent.
@@ -20790,6 +21184,7 @@ yardr.dev
             open: Rc::new(move |url, _| pages.borrow_mut().push(url.to_string())),
             apple,
             titlebar: None,
+            feedback: None,
         };
         (means, program, opened)
     }
@@ -22300,6 +22695,16 @@ yardr.dev
         assert!(drawn(cx, "away details why"));
         cx.simulate_keystrokes("enter");
         assert!(!view.read_with(cx, |v, _| v.away_details));
+
+        // With the Feedback form open, Enter is its message's, and opens
+        // nothing behind it.
+        let posthog = Posthog::start();
+        view.update(cx, |v, _| v.means.feedback = feedback_to(&posthog));
+        click_on(cx, "feedback tile");
+        cx.simulate_keystrokes("enter");
+        assert!(!view.read_with(cx, |v, _| v.away_details));
+        assert!(posthog.sent().is_empty());
+        assert!(form_of(&view, cx).is_some_and(|(_, _, said)| said.is_some()));
     }
 
     /// A yard that is only stopped keeps its words, and offers Start

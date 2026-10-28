@@ -1,7 +1,10 @@
 //! The small pieces the window draws with: its glyphs, the band of its
 //! top, its buttons, its segments and its checkboxes.
 
-use gpui::{Context, Div, FontWeight, Pixels, Rgba, Stateful, Window, div, prelude::*, px, rems};
+use gpui::{
+    AnyElement, App, ClickEvent, Context, Div, FontWeight, Pixels, Rgba, SharedString, Stateful,
+    Window, div, prelude::*, px, relative, rems,
+};
 
 use super::Footplate;
 use crate::theme::Palette;
@@ -171,6 +174,64 @@ pub(crate) fn band(top: f32, palette: Palette) -> Div {
         .min_h(px(top))
         .border_b_1()
         .border_color(palette.line)
+}
+
+/// A card standing over the window, as the About card and the Feedback form
+/// do: `rows` in a card of the kit's popover shadow, centred, over an overlay
+/// of the whole window that takes the mouse, so that a click outside the card
+/// is `shut`'s and no click on what stands under it. Where the content
+/// reaches up into the title bar (`top` pixels) the overlay starts under that
+/// strip, which stays the window's handle: a drag there still moves it. The
+/// overlay is found by `name`, and the card by `name card`.
+pub(crate) fn card_layer(
+    name: &'static str,
+    top: f32,
+    palette: Palette,
+    shut: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    rows: Vec<AnyElement>,
+) -> impl IntoElement {
+    let card = format!("{name} card");
+    div()
+        .id(SharedString::from(format!("{name} overlay")))
+        .debug_selector(move || name.to_string())
+        // A click outside the card shuts it and is no click on what
+        // stands under it.
+        .block_mouse_except_scroll()
+        .absolute()
+        .top(px(top))
+        .left(px(0.))
+        .right(px(0.))
+        .bottom(px(0.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .on_click(shut)
+        .child(
+            div()
+                .id(SharedString::from(card.clone()))
+                .debug_selector(move || card.clone())
+                .w(rems(28.))
+                .max_w(relative(0.9))
+                .rounded_lg()
+                .border_1()
+                .border_color(palette.line)
+                .bg(palette.side)
+                // The kit's popover shadow, as the bar of reactions
+                // has it: the card floats over the conversation's
+                // lines, which it does not cover.
+                .shadow(vec![gpui::BoxShadow {
+                    color: palette.shadow.into(),
+                    offset: gpui::point(px(0.), px(6.)),
+                    blur_radius: px(20.),
+                    spread_radius: px(0.),
+                }])
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .children(rows),
+        )
 }
 
 /// Words that take a click, without the border: the status row at the

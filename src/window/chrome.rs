@@ -46,8 +46,8 @@ use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
-    band, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented, semaphore_glyph,
-    small_button, track_glyph,
+    band, card_layer, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
+    semaphore_glyph, small_button, track_glyph,
 };
 use super::words::{footplate_words, unread_words, yardr_words};
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
@@ -208,6 +208,34 @@ impl Footplate {
                 this.show_about(window, cx);
             }
             _ => {}
+        }
+        // The feedback shot opens with the form standing over the
+        // yardmaster's conversation, a message typed in it, and a capture
+        // of this machine's to send to: the form is offered whatever the
+        // tree's constants are. A debug build's alone, as above.
+        #[cfg(all(debug_assertions, unix))]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("feedback") {
+            this.means.feedback = crate::shot::feedback();
+            // Once the window has put the focus in the composer, as it
+            // does when the view is made: the form takes it then, as a
+            // click on the rail's Feedback has it.
+            let handle = this.handle;
+            cx.spawn(async move |view, cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.show_feedback(window, cx);
+                        if let Some(form) = this.feedback.as_ref() {
+                            form.message.update(cx, |line, cx| {
+                                line.set_text(
+                                    "The rail hides my longest depot name.\nCould it wrap, or show the whole name in its tip?",
+                                    cx,
+                                )
+                            });
+                        }
+                    })
+                });
+            })
+            .detach();
         }
         // The reactions-hover shot poses the pointer on the last mail,
         // which reads under the one above's head: its bar of reactions
@@ -2815,6 +2843,10 @@ impl Footplate {
     }
 
     pub(crate) fn step(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        // The Feedback form's keys are its own: Tab moves between its fields.
+        if self.feedback.is_some() {
+            return self.feedback_step(window, cx);
+        }
         self.settings_open = false;
         let mode = self.mode();
         self.change(cx, |m| m.step_in(mode, by));
@@ -2892,9 +2924,9 @@ impl Footplate {
         self.change(cx, |m| m.dismiss_all());
     }
 
-    /// Esc leaves what it can: the cheatsheet, the About card, the image
-    /// over the window, a decline asked for words, the words for the
-    /// card's keys, the pick, then the words.
+    /// Esc leaves what it can: the cheatsheet, the About card, the Feedback
+    /// form, the image over the window, a decline asked for words, the
+    /// words for the card's keys, the pick, then the words.
     pub(crate) fn leave(&mut self, _: &Leave, window: &mut Window, cx: &mut Context<Self>) {
         if self.show_keys {
             self.show_keys = false;
@@ -2903,6 +2935,9 @@ impl Footplate {
         }
         if self.about.is_some() {
             return self.shut_about(cx);
+        }
+        if self.feedback.is_some() {
+            return self.shut_feedback(window, cx);
         }
         if self.screen_open.is_some() {
             return self.shut_screen(window, cx);
@@ -4709,91 +4744,60 @@ impl Footplate {
                         .child(words),
                 )
         };
-        div()
-            .id("about overlay")
-            .debug_selector(|| "about".to_string())
-            // A click outside the card shuts it and is no click on what
-            // stands under it.
-            .block_mouse_except_scroll()
-            .absolute()
-            .top(px(top))
-            .left(px(0.))
-            .right(px(0.))
-            .bottom(px(0.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_click(cx.listener(|this, _, _, cx| this.shut_about(cx)))
-            .child(
+        card_layer(
+            "about",
+            top,
+            palette,
+            cx.listener(|this, _, _, cx| this.shut_about(cx)),
+            vec![
                 div()
-                    .id("about card")
-                    .debug_selector(|| "about card".to_string())
-                    .w(rems(28.))
-                    .max_w(relative(0.9))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(palette.line)
-                    .bg(palette.side)
-                    // The kit's popover shadow, as the bar of reactions
-                    // has it: the card floats over the conversation's
-                    // lines, which it does not cover.
-                    .shadow(vec![gpui::BoxShadow {
-                        color: palette.shadow.into(),
-                        offset: gpui::point(px(0.), px(6.)),
-                        blur_radius: px(20.),
-                        spread_radius: px(0.),
-                    }])
-                    .p_4()
                     .flex()
-                    .flex_col()
+                    .flex_row()
+                    .items_center()
                     .gap_3()
-                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(img(self.icon.clone()).size(rems(4.5)).flex_none())
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_3()
-                            .child(img(self.icon.clone()).size(rems(4.5)).flex_none())
+                            .flex_col()
+                            .gap_1()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("About footplate"),
-                                    )
-                                    .child(row(
-                                        "footplate",
-                                        "about footplate",
-                                        footplate_words(),
-                                        palette.text,
-                                    ))
-                                    // Windows fetches no yardr, so "not
-                                    // fetched yet" would promise one.
-                                    .when(!cfg!(windows), |lines| {
-                                        lines.child(row(
-                                            "yardr",
-                                            "about yardr",
-                                            yardr_words(about.kept.as_ref()),
-                                            kept_color,
-                                        ))
-                                    }),
-                            ),
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("About footplate"),
+                            )
+                            .child(row(
+                                "footplate",
+                                "about footplate",
+                                footplate_words(),
+                                palette.text,
+                            ))
+                            // Windows fetches no yardr, so "not fetched
+                            // yet" would promise one.
+                            .when(!cfg!(windows), |lines| {
+                                lines.child(row(
+                                    "yardr",
+                                    "about yardr",
+                                    yardr_words(about.kept.as_ref()),
+                                    kept_color,
+                                ))
+                            }),
                     )
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .justify_end()
                     .child(
-                        div().flex().justify_end().child(
-                            small_button("close (esc)".to_string(), palette)
-                                .id("about close")
-                                .debug_selector(|| "about close".to_string())
-                                .on_click(cx.listener(|this, _, _, cx| this.shut_about(cx))),
-                        ),
-                    ),
-            )
+                        small_button("close (esc)".to_string(), palette)
+                            .id("about close")
+                            .debug_selector(|| "about close".to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.shut_about(cx))),
+                    )
+                    .into_any_element(),
+            ],
+        )
     }
 
     /// Opens the away screen's details, or shuts them again.
@@ -4843,8 +4847,9 @@ impl Footplate {
     }
 
     /// The rail on the window's far left: the open yard's chip on top,
-    /// the three mode icons with their labels, and at the foot the
-    /// settings' gear with its. Where the content reaches up into the
+    /// the three mode icons with their labels, and at the foot, where
+    /// feedback is offered, Feedback, then the settings' gear with its
+    /// label. Where the content reaches up into the
     /// title bar it starts with the band, `top` pixels of nothing for the
     /// traffic lights to stand over, with its hairline at the foot; the
     /// rail's own line down its right edge starts under the band, where
@@ -5048,9 +5053,16 @@ impl Footplate {
                 );
         }
         rail = rail.child(div().flex_1().min_h_0());
-        // The foot: the settings' gear with its label. The yards are
-        // switched from the chip at the rail's head.
-        rail.child(
+        // The foot: Feedback where it is offered, then the settings' gear
+        // with its label. The yards are switched from the chip at the
+        // rail's head.
+        rail.children(
+            self.means
+                .feedback
+                .is_some()
+                .then(|| self.feedback_tile(palette, cx)),
+        )
+        .child(
             div()
                 .id("settings")
                 .debug_selector(|| "settings".to_string())

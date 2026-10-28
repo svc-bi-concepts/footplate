@@ -68,7 +68,10 @@
 # with `docs` in its filter), `keys` (the cheatsheet open over an
 # open card), `about` (the About card open over the yardmaster's
 # conversation, naming footplate's version and the kept yardr's),
-# `about-unfetched` (that card with no yardr kept), `reactions` (the
+# `about-unfetched` (that card with no yardr kept), `feedback` (the
+# Feedback form open over the yardmaster's conversation, with a message
+# typed, against a capture of this machine's that stands in for
+# PostHog), `reactions` (the
 # conversation with the parties' reactions under three mails),
 # `reactions-hover` (that
 # conversation with the bar of reactions to tap floating over one mail),
@@ -102,7 +105,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut switcher-member refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut switcher-member refs decisions decisions-filtered keys about about-unfetched feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

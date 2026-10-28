@@ -2436,6 +2436,31 @@ pub fn read(address: &Address, path: &str, most: u64) -> Result<(u16, Vec<u8>)> 
     Ok((status, bytes))
 }
 
+/// Posts `body`, a JSON text, to `path` at a site that is no yard, and gives
+/// the status it answers with: one request with no token and none of the
+/// headers a yard's or an edge's carry, as [`read`] asks for a file. The
+/// answer's body is not read, and a redirect is not followed: it is such a
+/// status. The post is asked once, since the site may have taken it when the
+/// answer is slow ([`Error::Slow`] says whether the request went out).
+pub fn post_json(address: &Address, path: &str, body: &str) -> Result<u16> {
+    let mut conn = address
+        .connect(Some(CALL_TIMEOUT))
+        .map_err(|err| connect_error(err.into(), false))?;
+    conn.write_all(
+        format!(
+            "POST {}{path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {CLIENT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            address.path,
+            address.authority,
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .map_err(|err| slow_or_down(err, false))?;
+    conn.flush().map_err(|err| slow_or_down(err, false))?;
+    let (status, _) = respond(conn).map_err(|err| slow_error(err, false))?;
+    Ok(status)
+}
+
 /// How often a download is sent on to another address before it is given
 /// up: a maker's release address answers with one or two.
 const HOPS: usize = 5;

@@ -24,6 +24,7 @@ mod draft;
 #[cfg(any(test, debug_assertions))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod fake;
+mod feedback;
 mod fetch;
 mod input;
 mod log;

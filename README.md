@@ -470,7 +470,9 @@ look-alike row), `decisions-filtered` (that history with `docs`
 in its filter), `keys` (the cheatsheet open over an open card),
 `about` (the About card open over the yardmaster's conversation,
 naming footplate's version and the kept yardr's), `about-unfetched`
-(that card with no yardr kept), `reactions` (the conversation with
+(that card with no yardr kept), `feedback` (the Feedback form open over
+the yardmaster's conversation, with a message typed, against a capture of
+this machine's that stands in for PostHog), `reactions` (the conversation with
 the parties' reactions under three mails), `reactions-hover` (that
 conversation with the bar of reactions to tap floating over one
 mail), `reactions-zoom`
@@ -521,6 +523,11 @@ JSON object a line. `src/api.rs` is the whole client.
 
 Or a yard that is not on this machine, at the address of its listener: see
 [A yard at an address](#a-yard-at-an-address). The calls are the same ones.
+
+Beside the yard it speaks to two sites that are no yard's: yardr.dev, for
+yardr's release ([yardr, fetched](#yardr-fetched)), and PostHog's EU
+capture, to which [the Feedback form](#feedback) sends a message when you
+press Send, and never otherwise.
 
 | It reads | For |
 |---|---|
@@ -1573,6 +1580,7 @@ its card under "Decided".
 | `cmd+y` (`ctrl+y` on Linux), a click on the line under your name | lists the yards under the head: the arrows move, Enter opens the yard they are on, `esc` or a click outside the list leaves |
 | `cmd+1`–`cmd+9` (`ctrl` on Linux) | opens the yard at that place in the list, from anywhere |
 | `cmd+,` (`ctrl+,` on Linux), a click on "settings" | shows the settings where the conversation is, and what was open again; so does `esc` there |
+| a click on "Feedback", at the rail's foot above "settings", where it is offered | opens [the Feedback form](#feedback) over the window; Enter sends it, `esc` or a click outside shuts it |
 | `cmd+=`, `cmd+-`, `cmd+0` (`ctrl` on Linux) | the text a pixel larger, smaller, the usual size |
 | `cmd+shift+l` (`ctrl+shift+l` on Linux) | the next of auto, light, dark |
 | `cmd+q` (`ctrl+q` on Linux) | quits. On Linux so does closing the window, with the tray's item on or off; on macOS closing hides footplate while the menu bar item is on, and quits while it is off ([Closing the window](#closing-the-window)) |
@@ -1633,6 +1641,42 @@ footplate has no application menu.
   footplate fetches none, and the card names footplate alone.
 
 The card looks for nothing newer, of either, and offers no update.
+
+## Feedback
+
+The Feedback button stands at the foot of the rail, above the settings'
+gear, and opens a form over the window: a message, an email if you would
+like an answer, and what it sends, said plainly under them: "Sends your
+message, the footplate version and this system (OS), and your email if you
+add it, to yardr's PostHog in the EU. Nothing else is sent." Enter in either
+field, or Send, sends it; Tab moves between the fields, and esc, Cancel or a
+click outside the form shuts it, and what was typed goes with it. A message
+is required, and the email is not.
+
+A message goes as one answer to yardr's PostHog survey "footplate feedback":
+a `survey sent` event, one POST to `https://eu.i.posthog.com/i/v0/e/` with
+the project's write key (a `phc_` key, public, which only writes) and
+nothing of a yard's: no token, no session, no device. Its properties are the
+survey's id (`$survey_id`), the message (`$survey_response`, the form of a
+one-question survey), the footplate version (`footplate_version`), the
+system (`os`: `macos`, `linux` or `windows`) and your email (`email`) where
+you gave one. Its sender is an id made for that one message and kept
+nowhere, so that nothing ties two messages of one person together. The yard
+hears the answers through the posthog pack's feedback destination, which its
+setup has. (The shape is PostHog's, read 28 Oct 2026 in its Capture API,
+"Survey", and "Implementing custom surveys".)
+
+It goes once, when you press Send, off the window's thread and with the
+usual wait for an answer: nothing is queued, retried or kept, in the
+settings or on disk. A send PostHog does not take leaves the form as it was,
+with what you wrote in it, and says it could not be sent, why, and to try
+again; one it takes closes the fields to say thanks, with Close.
+
+The key and the survey's id are two constants in `src/feedback.rs`. While
+either is empty the button is not shown, so that no build offers a form that
+sends nowhere, and there is no override at build time: a fork or a build of
+the source sends to yardr's project too, on purpose, as the place feedback
+goes. The phones are not this footplate.
 
 ## Closing the window
 
@@ -1824,7 +1868,8 @@ options have no icon, so the program sees to it when it starts
 
 | File | Holds |
 |---|---|
-| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a Kratos account signed in at a hosted edge |
+| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a Kratos account signed in at a hosted edge; a file read from a site, and a JSON post to one, that is no yard |
+| `src/feedback.rs` | what the Feedback form sends, and where: one survey answer to yardr's PostHog (EU), made as plain functions (the payload, a fresh id for each send, the words of a refusal) and sent by `api::post_json`; the write key and the survey's id are two constants, and with either empty there is no project to offer |
 | `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one; the kept one asked its version for the About card. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
 | `src/setup.rs` | the first run as yardr's commands, with no window: each run with its arguments and its JSON read, the PATH made from doctor's data, the import's questions answered, a login led by what yardr prints |
 | `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode, a hosted yard's session file beside it |
@@ -1833,6 +1878,7 @@ options have no icon, so the program sees to it when it starts
 | `src/draft.rs` | what is not sent yet, as plain functions: for each yard each conversation's attachments and text, what is refused and why |
 | `src/window.rs` | the window: draws the model and the draft, and makes the calls they ask for |
 | `src/window/firstrun.rs` | "set up a yard here": the steps of the first run, drawn where the yard will be |
+| `src/window/feedback.rs` | the Feedback form over the window: its entry at the rail's foot, its fields, and the send, off the window's thread |
 | `src/input.rs` | the line that is typed in |
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
@@ -1841,7 +1887,7 @@ options have no icon, so the program sees to it when it starts
 | `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow, which can turn a path away as the yard's web gateway does |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow, which can turn a path away as the yard's web gateway does; and a stand-in for PostHog's capture, which keeps each request whole |
 
 The tests run without a yard and without a screen. The yard a test starts
 with is the fake's socket, and on Windows, which has none, its TCP port, so
@@ -1874,6 +1920,13 @@ names is fetched from the same stand-in: sent on from one address to
 another, checked, kept or run, and refused for each reason. The kept
 yardr's version is asked of a script that stands in for it, which says
 what each test writes it to say, or ends badly, or does not end.
+
+The Feedback form is tested against a stand-in for PostHog's capture, a
+port of this machine that keeps each request whole and answers with the
+status a test gives it: the payload is held to the survey's answer and its
+four properties, no token rides on the request, each send has an id of its
+own, and a send that fails leaves the form as it was. No test uses the real
+key or host.
 
 The first run is tested against a stand-in for yardr, a script that answers
 each command with the JSON a test gives it and writes down what it was
