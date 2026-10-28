@@ -435,6 +435,103 @@ pub(crate) fn run_texts(run: &api::Run) -> Vec<RunText> {
     texts
 }
 
+/// A teammate invite or removal a run ask proposes, parsed from the
+/// command it was given: `user invite <name> --email <address>
+/// [--role operator]` or `user uninvite <name>`. The yard parsed the
+/// words when the ask was written, and an approval runs them exactly as
+/// shown, so the card reads its own fields back from them. Anything
+/// else is no teammate ask, and keeps the generic run card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Teammate {
+    Invite {
+        name: String,
+        email: String,
+        role: String,
+    },
+    Uninvite {
+        name: String,
+    },
+}
+
+/// The teammate ask the run proposes, when it proposes one. The role is
+/// `member` where the command names none: the yard stores an explicit
+/// member as none given, so the two spellings read as one.
+pub(crate) fn teammate_of(run: &api::Run) -> Option<Teammate> {
+    let line = run.line();
+    let mut words: Vec<&str> = line.split_whitespace().collect();
+    if words.first() == Some(&"yardr") {
+        words.remove(0);
+    }
+    match words.as_slice() {
+        ["user", "invite", name, rest @ ..] => {
+            let (email, role) = invite_fields(rest)?;
+            Some(Teammate::Invite {
+                name: (*name).to_string(),
+                email,
+                role,
+            })
+        }
+        ["user", "uninvite", name] => Some(Teammate::Uninvite {
+            name: (*name).to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// The address and the role of an invite's words past its name: one
+/// `--email`, and `--role` at most once. `member` where none is named.
+fn invite_fields(words: &[&str]) -> Option<(String, String)> {
+    let mut email: Option<String> = None;
+    let mut role: Option<String> = None;
+    let mut ix = 0;
+    while ix < words.len() {
+        match (words[ix], words.get(ix + 1)) {
+            ("--email", Some(value)) if email.is_none() => {
+                email = Some((*value).to_string());
+            }
+            ("--role", Some(value)) if role.is_none() => {
+                role = Some((*value).to_string());
+            }
+            _ => return None,
+        }
+        ix += 2;
+    }
+    Some((email?, role.unwrap_or_else(|| "member".to_string())))
+}
+
+/// The head of a teammate ask's card: which of the two it is.
+pub(crate) fn teammate_kind(teammate: &Teammate) -> &'static str {
+    match teammate {
+        Teammate::Invite { .. } => "Teammate invite",
+        Teammate::Uninvite { .. } => "Teammate removal",
+    }
+}
+
+/// The address an invite admits.
+pub(crate) fn teammate_email(email: &str) -> String {
+    format!("email: {}", model::plain(email))
+}
+
+/// The yard user an invite makes, or a removal removes.
+pub(crate) fn teammate_user(name: &str) -> String {
+    format!("yard user: {}", model::plain(name))
+}
+
+/// The role an invite holds: `member` by default, and an operator named
+/// as one that can approve and administer the yard, never silently.
+pub(crate) fn teammate_role(role: &str) -> String {
+    match role {
+        "operator" => "role: operator — can approve and administer this yard".to_string(),
+        role => format!("role: {}", model::plain(role)),
+    }
+}
+
+/// What an invite card says beside its fields: the name and the role are
+/// the proposer's, and an approval runs them as shown, so a correction
+/// goes by declining with words that name the corrected invite, which is
+/// then asked again.
+pub(crate) const TEAMMATE_CORRECTION: &str = "approval runs this command as shown: to change the name or role, decline with words naming the corrected invite";
+
 /// A hash the card names, or that there is none, as the terminal says it.
 pub(crate) fn or_none(sha: &str) -> String {
     match sha.is_empty() {
@@ -615,4 +712,112 @@ pub(crate) fn words_send(ask: &DecisionAsk, foreign: bool) -> bool {
         return true;
     }
     ask.recommend == 0 && !foreign
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run proposing `command`, as the yard serves it.
+    fn run_of(command: &str) -> api::Run {
+        let argv: Vec<String> = command
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect();
+        api::Run {
+            argv,
+            command: command.to_string(),
+            ..api::Run::default()
+        }
+    }
+
+    /// An invite reads its name, address and role from the command, a
+    /// member's where none is named; a removal reads its user. Anything
+    /// else is no teammate ask, and keeps the generic run card.
+    #[test]
+    fn teammate_invites_and_removals_parse_from_the_command() {
+        let eve = |role: &str| {
+            Some(Teammate::Invite {
+                name: "eve".to_string(),
+                email: "eve@example.net".to_string(),
+                role: role.to_string(),
+            })
+        };
+        let cases: &[(&str, Option<Teammate>)] = &[
+            (
+                "yardr user invite eve --email eve@example.net",
+                eve("member"),
+            ),
+            (
+                "yardr user invite eve --email eve@example.net --role operator",
+                eve("operator"),
+            ),
+            (
+                "yardr user invite eve --email eve@example.net --role member",
+                eve("member"),
+            ),
+            (
+                "yardr user invite eve --role operator --email eve@example.net",
+                eve("operator"),
+            ),
+            (
+                "yardr user uninvite eve",
+                Some(Teammate::Uninvite {
+                    name: "eve".to_string(),
+                }),
+            ),
+            ("yardr user invite eve", None),
+            ("yardr user invite", None),
+            (
+                "yardr user invite eve --email eve@example.net --email jo@example.net",
+                None,
+            ),
+            (
+                "yardr user invite eve --email eve@example.net --role operator --role member",
+                None,
+            ),
+            ("yardr user invite eve --email", None),
+            ("yardr user uninvite", None),
+            ("yardr user uninvite eve now", None),
+            ("yardr user add eve", None),
+            ("yardr user rm eve", None),
+            ("yardr source grant crm read --crew builder-1", None),
+            ("", None),
+        ];
+        for (command, wanted) in cases {
+            assert_eq!(teammate_of(&run_of(command)), *wanted, "{command}");
+        }
+        // A yard that sent the words alone has them read the same.
+        let mut words_only = run_of("yardr user invite eve --email eve@example.net");
+        words_only.command.clear();
+        assert_eq!(teammate_of(&words_only), eve("member"));
+    }
+
+    /// The head of a teammate card: which it is, its fields, and that a
+    /// correction goes by declining with words.
+    #[test]
+    fn teammate_cards_say_which_they_are_with_their_fields() {
+        let invite = Teammate::Invite {
+            name: "eve".to_string(),
+            email: "eve@example.net".to_string(),
+            role: "member".to_string(),
+        };
+        let removal = Teammate::Uninvite {
+            name: "eve".to_string(),
+        };
+        assert_eq!(teammate_kind(&invite), "Teammate invite");
+        assert_eq!(teammate_kind(&removal), "Teammate removal");
+        assert_eq!(teammate_email("eve@example.net"), "email: eve@example.net");
+        assert_eq!(teammate_user("eve"), "yard user: eve");
+        assert_eq!(teammate_role("member"), "role: member");
+        assert_eq!(
+            teammate_role("operator"),
+            "role: operator — can approve and administer this yard"
+        );
+        assert_eq!(
+            TEAMMATE_CORRECTION,
+            "approval runs this command as shown: to change the name or role, decline with words naming the corrected invite"
+        );
+    }
 }

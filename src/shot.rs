@@ -29,7 +29,8 @@ use crate::yard::Env;
 /// Screen control in the header, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
-/// card of a run ask, a weighty run ask's card beside a routine one's,
+/// card of a run ask, an open card of a teammate invite, a weighty
+/// run ask's card beside a routine one's,
 /// a weighty mapping ask's card beside a routine one's, a yard that is
 /// stopped, a yard at an
 /// address, the settings on each of their sections, the yards with a
@@ -113,6 +114,7 @@ pub const STATES: &[&str] = &[
     "plain-select",
     "lines",
     "run",
+    "teammates",
     "weighty",
     "weighty-mapping",
     "stopped",
@@ -1570,6 +1572,24 @@ fn populate(yard: &Yard, state: &str) {
                 .to_string(),
             );
         }
+        "teammates" => {
+            // An open card of a teammate invite: the address, the yard
+            // user and the role above the command, with the yard's
+            // sentences below.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [{"seq": 12, "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}], "unread": 1, "last": 12, "from": ["yardmaster"]}}"#,
+            );
+            yard.answer(
+                "Conversation",
+                r#"{"result": [{"seq": 12, "at": "2026-10-08T09:30:00Z", "from": "yardmaster", "to": "jo", "text": "Shall I land it?", "read": false}]}"#,
+            );
+            yard.answer(
+                "UserAsks",
+                &json!({"result": {"open": [queued_teammate()], "decided": []}}).to_string(),
+            );
+            yard.answer("Bead", &bead_teammate());
+        }
         _ => {
             // The run ask is the forged one of the run card's test
             // (window::tests::a_forged_run_ask_s_card_marks_every_asker_line):
@@ -1860,6 +1880,38 @@ fn bead_run(question: &str, context: &[&str]) -> String {
              "question": question,
              "context": context,
              "options": [], "state": "open", "run": run_of()}]}})
+    .to_string()
+}
+
+/// The teammate invite the teammates shot's ask proposes, with the
+/// yard's sentences for it.
+fn invite_run_of() -> serde_json::Value {
+    json!({"command": "yardr user invite eve --email eve@example.net",
+           "argv": ["user", "invite", "eve", "--email", "eve@example.net"],
+           "does": ["adds the user eve with the role member, and maps eve@example.net to eve in web_jwt_users: signed in at the edge as eve@example.net, they act as eve.",
+                   "reports the invite to the edge for the yard mckean/edgeyard (member add): until the report lands the card reads as not yet at the edge, and nobody is admitted meanwhile.",
+                   "they set a password from the mail the edge sends to this email, then sign in; nothing the operator holds admits them."],
+           "back": "yardr user uninvite eve", "back_by": "only the operator"})
+}
+
+/// The teammate invite ask 7 on bead-s as the queue lists it.
+fn queued_teammate() -> serde_json::Value {
+    json!({
+        "bead": "bead-s", "bead_title": "Teammates", "topic": "", "ask": 7,
+        "question": "Invite Eve?", "asker": "yardmaster",
+        "since": "2026-10-10T10:00:00Z", "run": invite_run_of()
+    })
+}
+
+/// The bead of that ask.
+fn bead_teammate() -> String {
+    json!({"result": {"id": "bead-s", "title": "Teammates", "body": "The body.",
+        "stage": "new", "labels": [], "notes": [], "asks": [
+            {"ask": 7, "to": "jo", "asker": "yardmaster",
+             "since": "2026-10-10T10:00:00Z",
+             "question": "Invite Eve?",
+             "context": ["she works with us daily."],
+             "options": [], "state": "open", "run": invite_run_of()}]}})
     .to_string()
 }
 
@@ -2405,6 +2457,18 @@ mod tests {
                     let bead = yard.client().bead("bead-s").unwrap();
                     assert_eq!(bead.asks.len(), 1, "{state}");
                     assert_eq!(bead.asks[0].question.lines().count(), 3, "{state}");
+                    assert!(bead.asks[0].run.is_some(), "{state}");
+                }
+                "teammates" => {
+                    assert_eq!(loaded.asks.open.len(), 1, "{state}");
+                    let run = loaded.asks.open[0].run.as_ref().unwrap();
+                    assert_eq!(
+                        run.line().as_str(),
+                        "yardr user invite eve --email eve@example.net",
+                        "{state}"
+                    );
+                    let bead = yard.client().bead("bead-s").unwrap();
+                    assert_eq!(bead.asks.len(), 1, "{state}");
                     assert!(bead.asks[0].run.is_some(), "{state}");
                 }
                 "weighty" => {

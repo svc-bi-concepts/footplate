@@ -424,7 +424,8 @@ open card whose note carries a page, an image and a file), `mail` (a mail with
 a page and an image), `image` (that mail's image open full size over
 the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
-question forges the yard's lines), `weighty` (a weighty run ask's
+question forges the yard's lines), `teammates` (an open card of a
+teammate invite), `weighty` (a weighty run ask's
 card beside a routine one's), `weighty-mapping` (a weighty mapping ask's
 card beside a routine one's), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
@@ -1465,6 +1466,11 @@ approval is live whether or not it was opened. Every card's header leads
 with the name of the open yard, before the bead and how long it waits, and
 a run ask's block leads with it too, with the user the command runs as: "in
 plantime, when you approve, the yard runs this as mckean, and nothing else:".
+A teammate invite or removal carries its own head above that lead: the
+address, the yard user and the role the command was given — an operator
+named as one that can approve and administer the yard — with the note that
+approval runs the command as shown, so a correction goes by declining with
+words that name the corrected invite.
 Directly under the block is the Approve button, which names the yard and
 its key, "Approve in plantime (⌘↵)": `cmd+enter` (`ctrl+enter` on Linux),
 which no other card answers to. Enter alone approves nothing. Approving

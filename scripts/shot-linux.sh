@@ -24,7 +24,8 @@
 # open card whose note carries a page, an image and a file), `mail` (a mail with
 # a page and an image), `image` (that mail's image open full size over
 # the window), `run` (an
-# open card of a run ask), `stopped` (a stopped yard), `far`
+# open card of a run ask), `teammates` (an open card of a teammate
+# invite), `stopped` (a stopped yard), `far`
 # (a yard at an address, away), `settings` (the settings on each of
 # their sections: `settings` is this window, and `settings-appearance`,
 # `settings-yards`, `settings-agents`, `settings-notifications` and
@@ -100,7 +101,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants secret secret-shown secret-refused switcher switcher-shut refs decisions decisions-filtered keys about about-unfetched reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

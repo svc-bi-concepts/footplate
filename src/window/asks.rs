@@ -13,11 +13,13 @@ use super::Expanded;
 use super::Footplate;
 use super::ask::{
     ANSWER_WORDS, APPROVE_ELSEWHERE, Approval, DECLINE_IS_NO_PICK, RUN_PROPOSED, RunText,
-    SECRET_GOES, SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, answer_label, approval, approve_button,
-    ask_line, asked_age, candidate_choice_line, card_head, carried_texts, decided_keys,
-    decision_head, description_line, fenced, give_label, give_unlock_label, recommended_line,
-    run_keys, run_runs, run_texts, secret_keys, section_head, send_button, setup_keys, setup_runs,
-    show_button, take_back_label, texts_label, typeback_line, typeback_mismatch, words_send,
+    SECRET_GOES, SEND_WORDS, SETUP_PROPOSED, SETUP_TAKE, TEAMMATE_CORRECTION, Teammate,
+    answer_label, approval, approve_button, ask_line, asked_age, candidate_choice_line, card_head,
+    carried_texts, decided_keys, decision_head, description_line, fenced, give_label,
+    give_unlock_label, recommended_line, run_keys, run_runs, run_texts, secret_keys, section_head,
+    send_button, setup_keys, setup_runs, show_button, take_back_label, teammate_email,
+    teammate_kind, teammate_of, teammate_role, teammate_user, texts_label, typeback_line,
+    typeback_mismatch, words_send,
 };
 use super::expanded_text_key;
 use super::keys::{APPROVE_KEY, SETUP_SECRET_CONTEXT};
@@ -3000,6 +3002,68 @@ impl Footplate {
             .child(div().text_sm().text_color(palette.faint).child(SECRET_GOES))
     }
 
+    /// The head of a teammate invite or removal ask's block: which it is,
+    /// and its fields parsed from the command. The command whole, the
+    /// yard's sentences and the take-back stand below as on any run card:
+    /// an approval runs exactly what is shown.
+    pub(crate) fn teammate_head(
+        &self,
+        bead: &str,
+        ask: u64,
+        teammate: &Teammate,
+        palette: Palette,
+    ) -> impl IntoElement + use<> {
+        let card_key = select::key((bead, ask));
+        let kind = teammate_kind(teammate).to_string();
+        let mut head = div().flex().flex_col().gap_1().child(
+            div()
+                .debug_selector(|| format!("teammate kind {bead} {ask}"))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(select::text(
+                    expanded_text_key(card_key, "teammate kind", 0, &kind),
+                    kind,
+                    &self.selection,
+                )),
+        );
+        let mut fields: Vec<(&str, String)> = Vec::new();
+        match teammate {
+            Teammate::Invite { name, email, role } => {
+                fields.push(("email", teammate_email(email)));
+                fields.push(("user", teammate_user(name)));
+                fields.push(("role", teammate_role(role)));
+            }
+            Teammate::Uninvite { name } => {
+                fields.push(("user", teammate_user(name)));
+            }
+        }
+        for (field, line) in &fields {
+            let section = format!("teammate {field}");
+            head = head.child(
+                div()
+                    .debug_selector(|| format!("teammate {field} {bead} {ask}"))
+                    .child(select::text(
+                        expanded_text_key(card_key, &section, 0, line),
+                        line.clone(),
+                        &self.selection,
+                    )),
+            );
+        }
+        if matches!(teammate, Teammate::Invite { .. }) {
+            head = head.child(
+                div()
+                    .debug_selector(|| format!("teammate correction {bead} {ask}"))
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child(select::text(
+                        expanded_text_key(card_key, "teammate correction", 0, TEAMMATE_CORRECTION),
+                        TEAMMATE_CORRECTION.to_string(),
+                        &self.selection,
+                    )),
+            );
+        }
+        head
+    }
+
     /// What a run ask proposes, in the one block of its card, which is all
     /// the yard's and none of it the asker's: the command whole, in a code
     /// block that wraps where the window is narrower and is never cut; the
@@ -3008,7 +3072,8 @@ impl Footplate {
     /// tap, for checking the yard's reading against them; and the command
     /// that takes it back, with who may run it. `open` is an ask that can
     /// still be approved. The approval is live whether or not the tap was
-    /// opened.
+    /// opened. A teammate invite or removal carries its own head above all
+    /// of it, with its fields parsed from the command.
     pub(crate) fn run_block(
         &self,
         bead: &str,
@@ -3035,7 +3100,11 @@ impl Footplate {
             .bg(palette.side)
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_1();
+        if let Some(teammate) = teammate_of(run) {
+            block = block.child(self.teammate_head(bead, ask, &teammate, palette));
+        }
+        block = block
             .child(
                 div()
                     .debug_selector(|| over.clone())

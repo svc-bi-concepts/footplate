@@ -23089,6 +23089,141 @@ yardr.dev
         (view, cx)
     }
 
+    /// A teammate run as the yard serves it: the command with its words,
+    /// the yard's sentences and the take-back.
+    fn teammate_run_of(command: &str, does: &[&str], back: &str) -> Value {
+        let argv: Vec<&str> = command.split(' ').skip(1).collect();
+        json!({"argv": argv, "command": command, "does": does, "back": back})
+    }
+
+    /// The invite of eve as a member, with the yard's sentences for it.
+    fn invite_run() -> Value {
+        teammate_run_of(
+            "yardr user invite eve --email eve@example.net",
+            &[
+                "adds the user eve with the role member, and maps eve@example.net to eve in web_jwt_users: signed in at the edge as eve@example.net, they act as eve.",
+                "reports the invite to the edge for the yard mckean/edgeyard (member add): until the report lands the card reads as not yet at the edge, and nobody is admitted meanwhile.",
+                "they set a password from the mail the edge sends to this email, then sign in; nothing the operator holds admits them.",
+            ],
+            "yardr user uninvite eve",
+        )
+    }
+
+    /// The same, as an operator.
+    fn invite_operator_run() -> Value {
+        teammate_run_of(
+            "yardr user invite eve --email eve@example.net --role operator",
+            &[
+                "adds the user eve with the role operator, and maps eve@example.net to eve in web_jwt_users: signed in at the edge as eve@example.net, they act as eve.",
+                "reports the invite to the edge for the yard mckean/edgeyard (member add): until the report lands the card reads as not yet at the edge, and nobody is admitted meanwhile.",
+                "they set a password from the mail the edge sends to this email, then sign in; nothing the operator holds admits them.",
+                "the user eve can approve and administer this yard: they hold the operator role, not only a member's.",
+            ],
+            "yardr user uninvite eve",
+        )
+    }
+
+    /// The removal of eve, with the yard's sentences for it.
+    fn uninvite_run() -> Value {
+        teammate_run_of(
+            "yardr user uninvite eve",
+            &[
+                "reports the removal to the edge first (member remove for eve@example.net): from then on that sign-in is admitted to this yard no more.",
+                "removes the user eve: their 2 subscriptions and 1 device go, and what waited to be told them; the mail stays in the log.",
+                "removes eve@example.net from web_jwt_users, so the address maps to nobody from then on.",
+                "if the edge cannot be reached the user and the mapping still go, and the report is retried until it lands: meanwhile they act as nobody here.",
+            ],
+            "yardr user invite eve --email eve@example.net",
+        )
+    }
+
+    /// The teammate ask 7 on bead-s as the queue lists it, open or in
+    /// `state`.
+    fn queued_teammate(question: &str, run: &Value, state: &str) -> Value {
+        let mut queued = json!({
+            "bead": "bead-s", "bead_title": "Teammates", "topic": "", "ask": 7,
+            "question": question, "asker": "yardmaster",
+            "since": "2026-10-10T10:00:00Z", "run": run
+        });
+        if !state.is_empty() {
+            queued["state"] = json!(state);
+        }
+        queued
+    }
+
+    /// The bead of that ask, with `context`.
+    fn bead_teammate(question: &str, context: &[&str], run: &Value) -> String {
+        json!({"result": {"id": "bead-s", "title": "Teammates", "body": "The body.",
+            "stage": "new", "labels": [], "notes": [], "asks": [
+                {"ask": 7, "to": "jo", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z",
+                 "question": question,
+                 "context": context,
+                 "options": [], "state": "open", "run": run}]}})
+        .to_string()
+    }
+
+    /// The window on a yard whose one open ask is that teammate ask, its
+    /// card open and read.
+    fn opened_on_a_teammate_ask<'a>(
+        yard: &Yard,
+        question: &str,
+        context: &[&str],
+        run: &Value,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [queued_teammate(question, run, "")], "decided": []}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_teammate(question, context, run));
+        yard.answer("DeferAsk", "{}");
+        yard.answer("DeclineAsk", "{}");
+        let at = env_on(yard, file);
+        opened_on_the_ask(at, file, cx)
+    }
+
+    /// The same, with the ask put aside among the decided.
+    fn opened_on_a_decided_teammate_ask<'a>(
+        yard: &Yard,
+        question: &str,
+        context: &[&str],
+        run: &Value,
+        file: &std::path::Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        a_yard_of_jo(yard);
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [queued_teammate(question, run, "put aside")]}})
+                .to_string(),
+        );
+        yard.answer("Bead", &bead_teammate(question, context, run));
+        let at = env_on(yard, file);
+        let (view, cx) = opened_at(at, file, cx);
+        wait(cx, "the decided", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.decided_count() == 1)
+            })
+        });
+        open_decided(&view, cx, "bead-s", 7);
+        wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-s"));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    /// The arguments `ApproveAsk` is asked with when bead-s's ask 7 is
+    /// approved on a routine card: the ask, and nothing of the command.
+    fn approval_of(yard: &Yard) -> Value {
+        match yard.at_listener() {
+            true => json!({"bead": "bead-s", "ask": 7, "actor": "jo"}),
+            false => json!(["bead-s", 7, "jo"]),
+        }
+    }
+
     /// The key of a text of the run ask's card: its command (`run`), the
     /// command that takes it back (`back`), or the one that approves in a
     /// terminal (`approve`).
@@ -23537,6 +23672,167 @@ yardr.dev
         cx.run_until_parked();
         assert_eq!(yard.asked("ApproveAsk").len(), 3);
         assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// An invite card is its own card: the address, the yard user and
+    /// the role above the command, with the yard the approval runs in
+    /// over it and the yard's sentences below. Its key calls `ApproveAsk`
+    /// with the ask and nothing of the command, and an approved ask reads
+    /// as being carried out until the yard says it ran.
+    #[gpui::test]
+    fn an_invite_card_shows_its_fields_and_approving_runs_the_invite(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let run = invite_run();
+        let command = "yardr user invite eve --email eve@example.net";
+        let (view, cx) = opened_on_a_teammate_ask(
+            &yard,
+            "Invite Eve?",
+            &["she works with us daily"],
+            &run,
+            &file,
+            cx,
+        );
+        assert!(drawn(cx, "teammate kind bead-s 7"));
+        assert!(drawn(cx, "teammate email bead-s 7"));
+        assert!(drawn(cx, "teammate user bead-s 7"));
+        assert!(drawn(cx, "teammate role bead-s 7"));
+        assert!(drawn(cx, "teammate correction bead-s 7"));
+        assert!(drawn(
+            cx,
+            "in this machine, when you approve, the yard runs this as jo, and nothing else:"
+        ));
+        assert!(drawn(cx, "run command bead-s 7"));
+        // The fields select as they were written.
+        let email = bounds_of(cx, "teammate email bead-s 7");
+        drag(
+            cx,
+            gpui::point(email.left(), email.top() + px(2.)),
+            gpui::point(email.right() - px(2.), email.bottom() - px(2.)),
+        );
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("email: eve@example.net")
+        );
+
+        // Approving names the ask, and nothing of the command.
+        let mut answered = queued_teammate("Invite Eve?", &run, "answered");
+        answered["ran"] = json!({"argv": run["argv"], "result": "approved, to be carried out"});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
+        );
+        yard.answer(
+            "ApproveAsk",
+            &json!({"result": {"argv": run["argv"], "result": "approved, to be carried out"}})
+                .to_string(),
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx) == format!("approved, being carried out: {command}")
+        });
+        assert_eq!(yard.asked("ApproveAsk"), [approval_of(&yard)]);
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+        // A command runs once for one ask: no control, and no key.
+        assert!(!approvable(&view, cx));
+        cx.simulate_keystrokes("secondary-enter enter");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("ApproveAsk").len(), 1);
+    }
+
+    /// An invite of an operator names the role as one that can approve
+    /// and administer the yard, never silently.
+    #[gpui::test]
+    fn an_operator_invite_names_administering(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let run = invite_operator_run();
+        let (view, cx) = opened_on_a_teammate_ask(
+            &yard,
+            "Invite Eve?",
+            &["she administers with us"],
+            &run,
+            &file,
+            cx,
+        );
+        assert!(drawn(cx, "teammate kind bead-s 7"));
+        assert!(drawn(cx, "teammate email bead-s 7"));
+        assert!(drawn(cx, "teammate user bead-s 7"));
+        assert!(drawn(cx, "teammate role bead-s 7"));
+        let role = bounds_of(cx, "teammate role bead-s 7");
+        drag(
+            cx,
+            gpui::point(role.left(), role.top() + px(2.)),
+            gpui::point(role.right() - px(2.), role.bottom() - px(2.)),
+        );
+        assert_eq!(
+            selected(&view, cx).as_deref(),
+            Some("role: operator — can approve and administer this yard")
+        );
+    }
+
+    /// A removal card names the user it removes, with the yard's
+    /// sentences below. Approving it calls `ApproveAsk` with the ask and
+    /// nothing of the command.
+    #[gpui::test]
+    fn a_removal_card_shows_its_user_and_approving_runs_the_uninvite(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let run = uninvite_run();
+        let command = "yardr user uninvite eve";
+        let (view, cx) =
+            opened_on_a_teammate_ask(&yard, "Remove Eve?", &["she has moved on"], &run, &file, cx);
+        assert!(drawn(cx, "teammate kind bead-s 7"));
+        assert!(!drawn(cx, "teammate email bead-s 7"));
+        assert!(drawn(cx, "teammate user bead-s 7"));
+        assert!(!drawn(cx, "teammate role bead-s 7"));
+        assert!(!drawn(cx, "teammate correction bead-s 7"));
+        assert!(drawn(cx, "run command bead-s 7"));
+
+        let mut answered = queued_teammate("Remove Eve?", &run, "answered");
+        answered["ran"] = json!({"argv": run["argv"], "result": "approved, to be carried out"});
+        yard.answer(
+            "UserAsks",
+            &json!({"result": {"open": [], "decided": [answered]}}).to_string(),
+        );
+        yard.answer(
+            "ApproveAsk",
+            &json!({"result": {"argv": run["argv"], "result": "approved, to be carried out"}})
+                .to_string(),
+        );
+        cx.simulate_keystrokes("secondary-enter");
+        wait(cx, "approved", |cx| {
+            notice(&view, cx) == format!("approved, being carried out: {command}")
+        });
+        assert_eq!(yard.asked("ApproveAsk"), [approval_of(&yard)]);
+        assert_eq!(answered_otherwise(&yard), Vec::<String>::new());
+    }
+
+    /// A teammate ask put aside keeps its head on its decided card, with
+    /// the control that approves it still under the block.
+    #[gpui::test]
+    fn a_teammate_ask_put_aside_keeps_its_head(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        let run = invite_run();
+        let (view, cx) = opened_on_a_decided_teammate_ask(
+            &yard,
+            "Invite Eve?",
+            &["she works with us daily"],
+            &run,
+            &file,
+            cx,
+        );
+        assert!(drawn(cx, "teammate kind bead-s 7"));
+        assert!(drawn(cx, "teammate email bead-s 7"));
+        assert!(drawn(cx, "teammate user bead-s 7"));
+        assert!(drawn(cx, "teammate role bead-s 7"));
+        assert!(drawn(cx, "approve bead-s 7"));
+        assert!(approvable(&view, cx));
     }
 
     /// A pack apply's card: the command's one line, every sentence of

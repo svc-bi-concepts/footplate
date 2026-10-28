@@ -5547,8 +5547,8 @@ fn shot_section() -> Option<Section> {
 
 /// The row a screenshot state opens on instead of the yard's own: the
 /// refused mail's conversation for the undelivered shot, the open card
-/// for the plain, plain-select, page, run, weighty-mapping and secret
-/// shots (the refused shot's with its refusal), the board for the
+/// for the plain, plain-select, page, run, teammates, weighty-mapping
+/// and secret shots (the refused shot's with its refusal), the board for the
 /// arrivals and departures shots, one arrival's bead for the arrival
 /// shot, yardr's line for the flow shot and the yard row for the
 /// delivery shot, else none. A debug build's alone.
@@ -5565,6 +5565,7 @@ fn shot_selected() -> Option<Selected> {
             return Some(Selected::Decision("bead-a".into()));
         }
         Ok("run")
+        | Ok("teammates")
         | Ok("weighty")
         | Ok("weighty-mapping")
         | Ok("secret")
