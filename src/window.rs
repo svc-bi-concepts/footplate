@@ -20246,6 +20246,228 @@ yardr.dev
         );
     }
 
+    /// A member's way into a yard of another account's: they open a hosted
+    /// yard naming it, sign in, and pair this device with a pairing the edge
+    /// opens for them. Their own session asks for it and redeems it beside
+    /// the yard they named, the token goes in the yard's file, and the device
+    /// calls as the member's yard user. A pairing the operator holds open is
+    /// named to them, from the form and from the yard's card, and opens
+    /// nothing. The same code presented in another account's session is
+    /// refused in the edge's words, spent, and adds no device.
+    #[gpui::test]
+    fn a_member_pairs_this_device_from_their_own_session(cx: &mut TestAppContext) {
+        use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router, TOKEN};
+        const OTHER: &str = "kratos-dev-other-account";
+        const NAMED: &str =
+            "Pairing failed: a pairing is already open for jo, try again in a few minutes";
+
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        // The member's yard user is eve, whom the yard knows by name.
+        far.answer_for(
+            "GetUser",
+            "name",
+            "eve",
+            r#"{"result": {"name": "eve", "cursor": 30, "notification_cursor": 0}}"#,
+        );
+        let edge = Router::start(&far, "kratos-dev-other");
+        edge.allow(OTHER);
+        edge.member_signs_in("eve");
+        let token = dir.path().join("footplate/yard-south.token");
+        let session = dir.path().join("footplate/yard-south.session");
+        let (view, cx) = no_yard(dir.path(), cx);
+        click_on(cx, "way hosted");
+
+        // The yard is another account's, named as the edge names it. Signed
+        // in, no ready page holds a code for this member: the form says the
+        // edge opens one, and pairing needs none typed.
+        type_sign_in(
+            &view,
+            cx,
+            "south",
+            edge.address(),
+            "alice/lab",
+            KRATOS_EMAIL,
+            KRATOS_PASSWORD,
+        );
+        click_on(cx, "yard sign in");
+        wait(cx, "the sign-in", |cx| {
+            yard_said(&view, cx).starts_with(&format!("Signed in as {KRATOS_EMAIL}: now pair"))
+        });
+        assert_eq!(
+            yard_said(&view, cx),
+            format!(
+                "Signed in as {KRATOS_EMAIL}: now pair this device, with a pairing the edge opens for you."
+            )
+        );
+        assert_eq!(
+            view.read_with(cx, |v, _| v.settings.yard("south").unwrap().member()),
+            Some(("alice".to_string(), "lab".to_string()))
+        );
+        assert!(view.read_with(cx, |v, cx| v.pairs_by_opening("south", cx)));
+
+        // The operator holds a pairing open: the member is told whose it
+        // is, nothing is opened or replaced, and the form stands as it was.
+        far.pair("ABCD-EFGH");
+        click_on(cx, "yard pair");
+        wait(cx, "the standing pairing named", |cx| {
+            yard_said(&view, cx).starts_with("Pairing failed:")
+        });
+        assert_eq!(yard_said(&view, cx), NAMED);
+        assert!(far.pairing_open() && !token.exists());
+        assert_eq!(far.devices(), [TOKEN]);
+        assert!(view.read_with(cx, |v, cx| v.pairs_by_opening("south", cx)));
+
+        // It ends, and the member's own session asks for one: the code is
+        // seen in the field, redeemed with the same session, and the
+        // device is the member's yard user's from then on.
+        far.end_pairing();
+        click_on(cx, "yard pair");
+        wait(cx, "the pairing", |cx| {
+            yard_said(&view, cx).starts_with("Paired:")
+        });
+        assert_eq!(
+            yard_said(&view, cx),
+            "Paired: this is the device test-mac of eve in the yard south."
+        );
+        wait(cx, "the yard at the origin", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        let minted = yard::read_session(&session).unwrap();
+        for head in [
+            edge.seen("POST /user/pairing ").pop().unwrap(),
+            edge.seen("POST /user/pair ").pop().unwrap(),
+        ] {
+            assert!(
+                head.contains(&format!("X-Edge-Token: {minted}\r\n")),
+                "{head}"
+            );
+            assert!(head.contains("X-Edge-Yard: alice/lab\r\n"), "{head}");
+        }
+        // The code is used up, and the field with it; the yard took the one
+        // pairing it had open, so the code that was redeemed was the edge's.
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.code.read(cx).text(), "");
+            assert_eq!(v.said.as_ref().unwrap().user, "eve");
+        });
+        assert!(far.devices().contains(&yard::read_token(&token).unwrap()));
+        assert_eq!(mode_of(&token), 0o600);
+        assert_eq!(
+            which_yard(&view, cx),
+            format!(
+                "the yard south — member of alice's yard at {}, as its device test-mac, signed in as {KRATOS_EMAIL}",
+                edge.address()
+            )
+        );
+        assert!(
+            far.asked("UserInbox")
+                .iter()
+                .any(|asked| asked["name"] == "eve"),
+            "{:?}",
+            far.asked("UserInbox")
+        );
+
+        // The yard's card offers it beside the yard, for the next device:
+        // with the operator's pairing open, it is named there too.
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section yards");
+        assert!(drawn(cx, "yard pair this south"));
+        far.pair("ABCD-EFGH");
+        click_on(cx, "yard pair this south");
+        wait(cx, "the standing pairing named by the card", |cx| {
+            yard_said(&view, cx).starts_with("Pairing failed:")
+        });
+        assert_eq!(yard_said(&view, cx), NAMED);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.adding.clone()),
+            Some(Adding::Again("south".to_string()))
+        );
+        // Each request for a pairing, the last from a yard that holds a
+        // device's token already, carried the session alone.
+        let opens = edge.seen("POST /user/pairing ");
+        assert_eq!(opens.len(), 3);
+        for head in &opens {
+            assert!(
+                !head.to_ascii_lowercase().contains("authorization:"),
+                "{head}"
+            );
+        }
+
+        // A code the member's session opened, handed to another account's:
+        // refused at the edge in its words and spent, no device is added,
+        // and the other account's yard keeps no token.
+        far.end_pairing();
+        let opened = api::open_pairing_hosted(
+            &api::Address::parse(edge.address()).unwrap(),
+            &minted,
+            "alice/lab",
+            "tablet",
+        )
+        .unwrap();
+        let mut other = settings::Yard::hosted(
+            "other",
+            edge.address(),
+            "yard-other.token",
+            "yard-other.session",
+        );
+        other.edge_yard = "alice/lab".to_string();
+        view.update(cx, |v, cx| {
+            let set = v
+                .settings
+                .clone()
+                .with_yard(None, other, v.kept.as_deref())
+                .unwrap();
+            v.set(set, cx);
+        });
+        yard::keep_session_token(&dir.path().join("footplate/yard-other.session"), OTHER).unwrap();
+        let devices = far.devices();
+        // Its menu offers no typed-code pairing, as a member yard's has
+        // none; where a code reaches it is the form, as the away screen
+        // opens it.
+        view.update_in(cx, |v, window, cx| {
+            v.pair_again(Some("other".into()), window, cx);
+            v.code
+                .update(cx, |line, cx| line.set_text(&opened.code, cx));
+        });
+        click_on(cx, "yard pair");
+        wait(cx, "the gifted code refused", |cx| {
+            yard_said(&view, cx).starts_with("Pairing failed:")
+        });
+        assert_eq!(
+            yard_said(&view, cx),
+            "Pairing failed: that pairing code was opened for another account; it is spent — open a new pairing"
+        );
+        assert_eq!(far.devices(), devices);
+        assert!(!far.pairing_open());
+        assert!(!dir.path().join("footplate/yard-other.token").exists());
+        assert_eq!(open_yard(&view, cx), "south — member of alice's yard");
+
+        // If the form changes before an opened pairing is handled, the code
+        // still goes only into the member yard's pairing field and is
+        // redeemed there. It never appears in a status sentence.
+        let opened = api::open_pairing_hosted(
+            &api::Address::parse(edge.address()).unwrap(),
+            &minted,
+            "alice/lab",
+            "tablet",
+        )
+        .unwrap();
+        let code = opened.code.clone();
+        view.update(cx, |v, cx| {
+            v.adding = Some(Adding::Hosted);
+            v.pair_opened("south", opened, cx);
+        });
+        wait(cx, "the pairing returned to its member yard", |cx| {
+            yard_said(&view, cx).starts_with("Paired:")
+        });
+        assert_eq!(
+            yard_said(&view, cx),
+            "Paired: this is the device tablet of eve in the yard south."
+        );
+        assert!(!yard_said(&view, cx).contains(&code));
+    }
+
     /// On the away screen of a yard at an address, the ways and pair
     /// again share the text column's left edge; with a way's fields
     /// open, the pair-again row stands fully below the help text: with

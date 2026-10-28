@@ -61,7 +61,10 @@ use crate::yard::Env;
 /// refusal of its answer, the switcher's list open over four yards, one
 /// of them away, that list shut a second after it drew, as a click
 /// outside it shuts it, that list over an own and a member hosted yard,
-/// the member marked, the yardmaster's conversation naming an ask and
+/// the member marked, the settings' yards with a member yard's pair this
+/// device pressed, while the operator holds a pairing open at the yard
+/// and the edge names its yard user, and with none open, the device
+/// paired as the member's yard user, the yardmaster's conversation naming an ask and
 /// two bead ids, the cheatsheet open over an open card, the About card open
 /// over the yardmaster's conversation, with the yardr the shot script
 /// keeps and with none kept, the Feedback form open over it, with a message
@@ -154,6 +157,8 @@ pub const STATES: &[&str] = &[
     "switcher",
     "switcher-shut",
     "switcher-member",
+    "member-pair",
+    "member-paired",
     "refs",
     "decisions",
     "decisions-filtered",
@@ -386,6 +391,35 @@ fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
         far.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         let edge = Router::start(&far, crate::fake::SESSION);
         write_member_settings(edge.address());
+        shot.edge = Some((far, edge));
+    }
+    if state == "member-pair" || state == "member-paired" {
+        // A member's yard of another account's behind an edge that knows
+        // their session, as the member pairing test has it: the session
+        // stands in its file and no token does, and the yard maps the
+        // member to eve. The window opens the settings' yards and presses
+        // the member yard's pair this device (chrome.rs). In the first the
+        // operator holds a pairing open at the yard, which the edge names;
+        // in the second none is, and the device is paired as eve.
+        let far = Yard::start_tcp();
+        populate(&far, state);
+        far.answer(
+            "UserInbox",
+            r#"{"result": {"mail": [{"seq": 11, "from": "yardmaster", "to": "eve", "text": "From afar.", "read": false}], "unread": 1, "last": 11, "from": ["yardmaster"]}}"#,
+        );
+        far.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        far.answer_for(
+            "GetUser",
+            "name",
+            "eve",
+            r#"{"result": {"name": "eve", "cursor": 10, "notification_cursor": 0}}"#,
+        );
+        let edge = Router::start(&far, crate::fake::SESSION);
+        edge.member(crate::fake::SESSION, "eve");
+        if state == "member-pair" {
+            far.pair("ABCD-EFGH");
+        }
+        write_member_pair_settings(edge.address());
         shot.edge = Some((far, edge));
     }
     if state == "reconnecting" {
@@ -684,6 +718,57 @@ fn write_member_settings(edge_at: &str) {
     }
 }
 
+/// The settings the member pairing shots open: this machine's yard, and a
+/// member yard of another account's at the edge, open, with the account,
+/// its handle and which of its yards the yard names, and the session in a
+/// file beside them. No device token stands: pairing this device is what
+/// the shot shows. The shot script runs against a throwaway config, which
+/// keeps no settings; where a settings file already stands, the state is
+/// refused rather than overwrite it. The window opens in the look the
+/// script asked for.
+fn write_member_pair_settings(edge_at: &str) {
+    let Some(file) = crate::settings::file() else {
+        eprintln!("footplate: the member pairing shots keep no settings without a home");
+        std::process::exit(1);
+    };
+    if file.exists() {
+        eprintln!(
+            "footplate: the member pairing shots write their own settings, and {} already stands: shoot them against a throwaway config, as scripts/shot-linux.sh and scripts/shot-mac.sh do",
+            file.display()
+        );
+        std::process::exit(2);
+    }
+    let mut south =
+        crate::settings::Yard::hosted("south", edge_at, "yard-south.token", "yard-south.session");
+    south.account = crate::fake::KRATOS_EMAIL.to_string();
+    south.handle = crate::fake::KRATOS_HANDLE.to_string();
+    south.edge_yard = "alice/lab".to_string();
+    crate::settings::Settings {
+        look: look_asked(),
+        ..Default::default()
+    }
+    .with_yard(None, south, Some(&file))
+    .and_then(|set| {
+        set.opening("south")
+            .write(&file)
+            .map_err(|error| error.to_string())
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("footplate: the member pairing shots keep no settings: {error}");
+        std::process::exit(1);
+    });
+    let edge = crate::api::Address::parse(edge_at).unwrap_or_else(|error| {
+        eprintln!("footplate: the member pairing shots' edge has no address: {error}");
+        std::process::exit(1);
+    });
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    crate::yard::keep_session(&dir.join("yard-south.session"), crate::fake::SESSION, &edge)
+        .unwrap_or_else(|error| {
+            eprintln!("footplate: the member pairing shots keep no session: {error}");
+            std::process::exit(1);
+        });
+}
+
 /// The adventuretime yard of the `switcher` shot: jo's, with two mails
 /// and one open decision, so its row carries 3 with
 /// "1 decision · 2 mail" in its tooltip.
@@ -918,6 +1003,8 @@ fn populate(yard: &Yard, state: &str) {
         | "switcher"
         | "switcher-shut"
         | "switcher-member"
+        | "member-pair"
+        | "member-paired"
         | "about"
         | "about-unfetched"
         | "feedback"
@@ -2289,6 +2376,8 @@ mod tests {
                 | "switcher"
                 | "switcher-shut"
                 | "switcher-member"
+                | "member-pair"
+                | "member-paired"
                 | "about"
                 | "about-unfetched"
                 | "feedback" => {

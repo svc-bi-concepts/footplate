@@ -45,6 +45,36 @@ pub(crate) fn yard_of(typed: &str) -> Option<String> {
     }
 }
 
+/// The name a device that pairs from this machine is given at the yard,
+/// from the machine's own: the yard holds a device's name to letters,
+/// digits and `.`, `_`, `-`, starting with a letter or a digit and no more
+/// than 64 long, so any other character becomes a dash, dashes run
+/// together to one, and the ends are trimmed. A machine that says nothing
+/// usable is `footplate`, the name the edge gives the device it pairs for an
+/// account's own yard.
+pub(crate) fn device_name(machine: &str) -> String {
+    let mut name = String::new();
+    for c in machine.trim().chars() {
+        let c = match c.is_ascii_alphanumeric() || matches!(c, '.' | '_') {
+            true => c,
+            false => '-',
+        };
+        match (name.is_empty(), c) {
+            // A name starts with a letter or a digit.
+            (true, c) if !c.is_ascii_alphanumeric() => {}
+            // A dash after a dash says nothing more.
+            (false, '-') if name.ends_with('-') => {}
+            _ => name.push(c),
+        }
+    }
+    name.truncate(64);
+    let name = name.trim_end_matches('-');
+    match name.is_empty() {
+        true => "footplate".to_string(),
+        false => name.to_string(),
+    }
+}
+
 /// A mail of the open conversation to keep in place while older mail is
 /// put in above it: its place among the children of what scrolls, and how
 /// far its top stood off the top of the view.
@@ -430,5 +460,32 @@ mod tests {
             Some("airy".to_string())
         );
         assert_eq!(yard_of("https://my.yardr.dev#K7QM-2XPD#"), None);
+    }
+
+    /// A device is named after its machine, to the yard's rule for a
+    /// device's name: letters and digits first, then those and `.`, `_`
+    /// and `-`, 64 at most.
+    #[test]
+    fn a_device_is_named_after_its_machine_to_the_yard_s_rule() {
+        for (machine, name) in [
+            ("studio-mac", "studio-mac"),
+            ("Studio-Mac.local\n", "Studio-Mac.local"),
+            ("Jo's MacBook Pro", "Jo-s-MacBook-Pro"),
+            ("  work  laptop  ", "work-laptop"),
+            ("--.odd_one--", "odd_one"),
+            ("a/b", "a-b"),
+            ("", "footplate"),
+            ("üñí", "footplate"),
+            ("---", "footplate"),
+        ] {
+            assert_eq!(device_name(machine), name, "{machine:?}");
+        }
+        let long = device_name(&"x".repeat(100));
+        assert_eq!(long.len(), 64);
+        // 63 letters and a space: the dash the space became is trimmed.
+        assert_eq!(
+            device_name(&format!("{} y", "x".repeat(63))),
+            "x".repeat(63)
+        );
     }
 }

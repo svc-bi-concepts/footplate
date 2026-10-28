@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, Context, Div, Focusable, FontWeight, MouseButton, Rgba, SharedString, Window, div,
-    img, prelude::*, px, rems,
+    AnyElement, App, Context, Div, Focusable, FontWeight, MouseButton, Rgba, SharedString, Window,
+    div, img, prelude::*, px, rems,
 };
 
 use super::Footplate;
@@ -17,7 +17,7 @@ use super::number_key;
 use super::rail::RailTip;
 use super::state::{
     Adding, AgentsBusy, Away, Counts, LoginDid, SwitchBusy, SwitchFor, SwitchRead, YardIdentity,
-    code_of, pairing_failure, yard_of,
+    code_of, device_name, pairing_failure, yard_of,
 };
 use super::ui::{keys_hint, quiet_button, segment, segmented, small_button};
 use crate::api::{self, Address, Client};
@@ -582,6 +582,119 @@ impl Footplate {
         window.focus(&self.code.focus_handle(cx));
         cx.notify();
     }
+    /// Whether pressing pair in the form of the yard called `name` asks the
+    /// edge to open a pairing, and does not try a code: the yard is another
+    /// account's, and the code field holds none.
+    pub(crate) fn pairs_by_opening(&self, name: &str, cx: &App) -> bool {
+        self.env.yard.is_none()
+            && self
+                .settings
+                .yard(name)
+                .is_some_and(|yard| yard.member().is_some())
+            && self.code.read(cx).text().trim().is_empty()
+    }
+    /// This device is to be paired with the member yard called `name`, from
+    /// where its card offers it: the settings, with the yard's form open,
+    /// and a pairing opened at once. See [`Footplate::open_pairing`]. The
+    /// away screen's pair again opens the same form, and its button opens
+    /// the pairing.
+    pub(crate) fn pair_this_device(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
+            return;
+        }
+        self.pair_again(Some(name.to_string()), window, cx);
+        self.open_pairing(name, cx);
+    }
+    /// Pairs this device with the member yard called `name` by its member
+    /// alone: the edge is asked, with the session this yard keeps, which is
+    /// the member's own, to open a pairing for a device of this machine's
+    /// name, and the same session redeems the code it answers, as a typed
+    /// one is ([`Footplate::pair`]). The yard is another account's, and its
+    /// operator never holds this device's code. The code is put in the code
+    /// field before it is used: it is seen there while the yard answers, and
+    /// one that was not used up (the yard did not answer) is tried again by
+    /// pressing pair. What the edge refuses is said in its words: no
+    /// membership, or a pairing open already, with its yard user where the
+    /// edge names it.
+    pub(crate) fn open_pairing(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.pairing || self.signing_in || self.env.yard.is_some() {
+            return;
+        }
+        cx.notify();
+        let Some(listed) = self
+            .settings
+            .yard(name)
+            .filter(|yard| yard.member().is_some())
+            .cloned()
+        else {
+            self.yard_said = Some(format!(
+                "The yard {name} is not a yard you are a member of."
+            ));
+            return;
+        };
+        let asked = Address::parse(&listed.address).and_then(|address| {
+            self.env
+                .session_of(&self.settings, name, self.kept.as_deref())
+                .and_then(|file| {
+                    file.map(|file| yard::session_for(&file, &address))
+                        .transpose()
+                })
+                .map(|session| (address, session))
+        });
+        let (address, session) = match asked {
+            Ok((address, Some(session))) => (address, session),
+            Ok((_, None)) => {
+                self.yard_said = Some(format!("The yard {name} is not a hosted yard."));
+                return;
+            }
+            Err(why) => {
+                self.yard_said = Some(why);
+                return;
+            }
+        };
+        self.pairing = true;
+        self.yard_said = Some("Asking the edge to open a pairing for this device…".to_string());
+        let (name, edge_yard) = (name.to_string(), listed.edge_yard);
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move {
+                    let device = device_name(&machine_name().unwrap_or_default());
+                    api::open_pairing_hosted(&address, &session, &edge_yard, &device)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.pairing = false;
+                cx.notify();
+                let opened = match opened {
+                    Ok(opened) => opened,
+                    Err(why) => {
+                        this.yard_said = Some(pairing_failure(why));
+                        return;
+                    }
+                };
+                this.pair_opened(&name, opened, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+    /// Puts an opened member pairing in the form that redeems it. The code
+    /// stays in the code field even if another form stood open meanwhile;
+    /// it never becomes status or error text.
+    pub(super) fn pair_opened(&mut self, name: &str, opened: api::Opened, cx: &mut Context<Self>) {
+        if !matches!(&self.adding, Some(Adding::Again(at)) if at == name) {
+            self.adding = Some(Adding::Again(name.to_string()));
+        }
+        self.code
+            .update(cx, |line, cx| line.set_text(&opened.code, cx));
+        self.pair(cx);
+    }
     /// The hosted yard called `name` is to be signed in again: the
     /// settings, with the Kratos account's email and password to type for
     /// that yard's address. From where the edge no longer knows the
@@ -1005,12 +1118,23 @@ impl Footplate {
                             });
                         match next {
                             Some((settings, name)) => {
+                                // A yard of another account's has no code
+                                // on a ready page for this member: the edge
+                                // opens the pairing for them.
+                                let member = settings
+                                    .yard(&name)
+                                    .is_some_and(|yard| yard.member().is_some());
                                 this.set(settings, cx);
                                 this.reopen(cx);
                                 this.adding = Some(Adding::Again(name));
-                                this.yard_said = Some(format!(
-                                    "Signed in as {account}: now pair this device with the code from the ready page."
-                                ));
+                                this.yard_said = Some(match member {
+                                    true => format!(
+                                        "Signed in as {account}: now pair this device, with a pairing the edge opens for you."
+                                    ),
+                                    false => format!(
+                                        "Signed in as {account}: now pair this device with the code from the ready page."
+                                    ),
+                                });
                                 let focus = this.code.focus_handle(cx);
                                 let handle = this.handle;
                                 // Afterwards: the window is not to be had
@@ -1235,6 +1359,20 @@ impl Footplate {
                     })),
             );
         }
+        // A yard of another account's is paired by its member alone: the
+        // button is theirs, beside the yard.
+        if listed.member().is_some() {
+            let at = format!("yard pair this {name}");
+            actions = actions.child(
+                small_button("pair this device".to_string(), palette)
+                    .id(SharedString::from(at.clone()))
+                    .debug_selector(move || at.clone())
+                    .on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, window, cx| this.pair_this_device(&name, window, cx)
+                    })),
+            );
+        }
         let at = format!("yard menu {name}");
         actions = actions.child(
             small_button("…".to_string(), palette)
@@ -1345,7 +1483,7 @@ impl Footplate {
                 .border_color(palette.line)
                 .bg(palette.ground)
                 .p_1();
-            if listed.is_far() {
+            if listed.is_far() && listed.member().is_none() {
                 menu = menu.child(item("again", "pair again").on_click(cx.listener({
                     let name = name.clone();
                     move |this, _, window, cx| this.pair_again(Some(name.clone()), window, cx)
@@ -2497,4 +2635,29 @@ impl Footplate {
                     .child(keys_hint("keys hint yard", palette, cx)),
             )
     }
+}
+
+/// This machine's name as it says it, which a device that pairs from here
+/// is named after ([`device_name`]). None where it says nothing. A test and
+/// a shot name no one's machine.
+fn machine_name() -> Option<String> {
+    if cfg!(test) {
+        return Some("test-mac".to_string());
+    }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("FOOTPLATE_SHOT").is_some() {
+        return Some("studio-mac".to_string());
+    }
+    // Windows says it in the environment, where a program run from a window
+    // would open a console for a moment.
+    if cfg!(windows) {
+        return std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|name| !name.is_empty());
+    }
+    let said = std::process::Command::new("hostname").output().ok()?;
+    said.status
+        .success()
+        .then(|| String::from_utf8_lossy(&said.stdout).trim().to_string())
+        .filter(|name| !name.is_empty())
 }

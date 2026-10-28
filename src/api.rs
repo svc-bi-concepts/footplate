@@ -2038,9 +2038,20 @@ fn no_yard(status: u16, bytes: &[u8]) -> Option<Error> {
     if status != 403 {
         return None;
     }
+    Some(refused("no_yard", &edge_sentence(bytes)?))
+}
+
+/// The sentence of an edge's `{"error": "<sentence>"}` body, with the one
+/// leading "edge: " that is the router's tag and not the person's words
+/// stripped. None where the body is no such object.
+fn edge_sentence(bytes: &[u8]) -> Option<String> {
     let edge: EdgeError = serde_json::from_slice(bytes.trim_ascii()).ok()?;
-    let sentence = edge.error.strip_prefix("edge: ").unwrap_or(&edge.error);
-    Some(refused("no_yard", sentence))
+    Some(
+        edge.error
+            .strip_prefix("edge: ")
+            .unwrap_or(&edge.error)
+            .to_string(),
+    )
 }
 
 /// Where the edge answers a call for its link, not its yard: the router's
@@ -2059,9 +2070,7 @@ fn edge_call_refusal(status: u16, refusal: Option<&str>, bytes: &[u8]) -> Option
         429 if refusal.is_some_and(|r| r.eq_ignore_ascii_case("busy")) => "busy",
         _ => return None,
     };
-    let edge: EdgeError = serde_json::from_slice(bytes.trim_ascii()).ok()?;
-    let sentence = edge.error.strip_prefix("edge: ").unwrap_or(&edge.error);
-    Some(refused(code, sentence))
+    Some(refused(code, &edge_sentence(bytes)?))
 }
 
 /// Redeems a pairing code at a yard's address: one request with no token,
@@ -2142,7 +2151,10 @@ fn pair_with(
         403 => {
             // Through the edge, a 403 is the router's noYard where no
             // yard is ready, told from the yard's wrong code by the
-            // body's shape; of any other shape today's arm runs.
+            // body's shape; of any other shape today's arm runs. The
+            // router's refusal of a code opened for another account's
+            // session has that shape too, and reads through here in its
+            // own sentence, which says the code is spent.
             if session.is_some() {
                 let mut bytes = Vec::new();
                 reply
@@ -2170,6 +2182,139 @@ fn pair_with(
             "No pairing is open at this yard: none was opened, or the code was used, ran out or was ended. Its operator opens one: yardr user device pair <user> <device>",
         )),
         _ => Err(Error::Protocol(format!("the pairing: status {status}"))),
+    }
+}
+
+/// What the edge answers a member's request for a pairing with: the code
+/// the yard gave, which the same session redeems with [`pair_hosted`], and
+/// whom it is for. The yard names the user, never the request.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Opened {
+    pub code: String,
+    /// The yard user the pairing is for: the one the yard maps the member's
+    /// address to.
+    #[serde(default)]
+    pub user: String,
+    /// The name the new device is given at the yard.
+    #[serde(default)]
+    pub device: String,
+}
+
+/// What a request for a pairing is told where nothing answers it as the
+/// edge's own: the edge passed it on and the yard has no such path, as an
+/// edge from before the call does.
+const NO_DOOR: &str = "This edge does not open a pairing for a member from the app yet.";
+
+/// Asks the edge to open a pairing for a new device of the member's own,
+/// at a yard of another account that the account is a member of. The
+/// session rides beside the request and is the whole of who asks: the edge
+/// checks the membership and opens the pairing for the yard user the yard
+/// maps this member to, never for one the request names. The code it
+/// answers is good once, for ten minutes, and in this session alone:
+/// [`pair_hosted`] with the same session redeems it, and another account's
+/// session that presents it is refused, and spends it. `edge_yard` is
+/// `owner/yard`, as every call to a member yard names it, and `device` the
+/// name the new device is given.
+pub fn open_pairing_hosted(
+    address: &Address,
+    session: &str,
+    edge_yard: &str,
+    device: &str,
+) -> Result<Opened> {
+    open_pairing_with(address, session, edge_yard, device, CALL_TIMEOUT)
+}
+
+fn open_pairing_with(
+    address: &Address,
+    session: &str,
+    edge_yard: &str,
+    device: &str,
+    timeout: Duration,
+) -> Result<Opened> {
+    if !is_token(session) {
+        return Err(refused(
+            "no_session",
+            "Sign in first: there is no session to open a pairing as. Then pair this device.",
+        ));
+    }
+    let body = json!({ "device": device }).to_string();
+    // Opening a pairing is no read: a timed out request may already have
+    // opened it, unless the connect gave up, which sent nothing.
+    let mut conn = address
+        .connect(Some(timeout))
+        .map_err(|err| connect_error(err.into(), false))?;
+    let named = if is_token(edge_yard) {
+        format!("X-Edge-Yard: {edge_yard}\r\n")
+    } else {
+        String::new()
+    };
+    conn.write_all(
+        format!(
+            "POST {}/user/pairing HTTP/1.1\r\nHost: {}\r\nX-Yardr-Client: {CLIENT}\r\nX-Edge-Token: {session}\r\n{named}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            address.path,
+            address.authority,
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .map_err(|err| slow_or_down(err, false))?;
+    conn.flush().map_err(|err| slow_or_down(err, false))?;
+    let (status, refuser, mut reply) = respond_call(conn).map_err(|err| slow_error(err, false))?;
+    if status == 401 {
+        // The edge's own 401 is its session check. Any other was the
+        // yard's or a gateway's, to which the edge passed on a path it
+        // does not answer.
+        return Err(match refuser {
+            Refuser::Edge => refused(
+                "no_session",
+                "Sign in first: the edge does not know this session. Then pair this device.",
+            ),
+            Refuser::Yard | Refuser::Other => refused("no_door", NO_DOOR),
+        });
+    }
+    let mut bytes = Vec::new();
+    reply
+        .read_to_end(&mut bytes)
+        .map_err(|err| slow_or_down(err, false))?;
+    match status {
+        200 => {
+            let opened: Opened = serde_json::from_slice(&bytes)
+                .map_err(|err| Error::Protocol(format!("the pairing's opening: {err}")))?;
+            if !is_token(&opened.code) {
+                return Err(Error::Protocol(
+                    "the pairing's opening: no code in the answer".into(),
+                ));
+            }
+            Ok(opened)
+        }
+        404 | 405 => Err(refused("no_door", NO_DOOR)),
+        // A yard that holds a pairing open already: the edge says whose, in
+        // its own words.
+        409 => Err(refused(
+            "pairing_open",
+            &edge_sentence(&bytes).unwrap_or_else(|| {
+                "The yard has a pairing open. Try again in a few minutes.".to_string()
+            }),
+        )),
+        _ => {
+            if status == 403
+                && let Some(edge) = no_yard(status, &bytes)
+            {
+                return Err(edge);
+            }
+            if matches!(status, 503 | 504 | 429)
+                && let Some(edge) = edge_call_refusal(status, reply.refusal.as_deref(), &bytes)
+            {
+                return Err(edge);
+            }
+            // Any other refusal the edge words itself is shown as it comes.
+            match edge_sentence(&bytes) {
+                Some(sentence) if status >= 400 => Err(refused("refused", &sentence)),
+                _ => Err(Error::Protocol(format!(
+                    "the pairing's opening: status {status}"
+                ))),
+            }
+        }
     }
 }
 
@@ -5699,6 +5844,194 @@ mod tests {
         assert!(message.starts_with("That is not the code."), "{message}");
         assert!(yard.pairing_open());
         assert_eq!(edge.proxied(), 1);
+    }
+
+    /// A member's pairing, opened at the edge with their own session: the
+    /// edge answers the request itself and the yard hears nothing of it, the
+    /// code redeems in the same session into a device that calls as the
+    /// member's yard user, and the same code in another account's session
+    /// is refused, spent, and adds no device. A pairing that stands is
+    /// refused to a second opener with the yard user who holds it, and an
+    /// edge that does not know the call is told from one that refuses it.
+    #[test]
+    fn a_member_opens_a_pairing_at_the_edge_with_their_own_session() {
+        const OTHER: &str = "kratos-dev-other-account";
+        let yard = Yard::start_tcp();
+        let edge = Router::start(&yard, SESSION);
+        edge.allow(OTHER);
+        edge.member(SESSION, "eve");
+        let address = Address::parse(edge.address()).unwrap();
+
+        // The member's session opens one, for the yard user the yard maps
+        // them to and the device they name; the yard was asked nothing.
+        let opened = open_pairing_hosted(&address, SESSION, "alice/lab", "phone").unwrap();
+        assert_eq!(
+            opened,
+            Opened {
+                code: "OPEN-0001".to_string(),
+                user: "eve".to_string(),
+                device: "phone".to_string(),
+            }
+        );
+        let head = edge.last_request();
+        assert!(
+            head.starts_with("POST /user/pairing HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert!(
+            head.contains(&format!("X-Edge-Token: {SESSION}\r\n")),
+            "{head}"
+        );
+        assert!(head.contains("X-Edge-Yard: alice/lab\r\n"), "{head}");
+        // The session alone asks: no device's token rides with it.
+        assert!(
+            !head.to_ascii_lowercase().contains("authorization:"),
+            "{head}"
+        );
+        assert_eq!((edge.proxied(), yard.requests()), (0, 0));
+        assert!(yard.pairing_open());
+
+        // A second request while it stands is told whose it is: the
+        // member's own here, and the operator's when the operator opened
+        // it. Neither replaces what stands.
+        let Err(Error::Refused { code, message }) =
+            open_pairing_hosted(&address, SESSION, "alice/lab", "tablet")
+        else {
+            panic!("a second pairing was opened");
+        };
+        assert_eq!(code, "pairing_open");
+        assert_eq!(
+            message,
+            "a pairing is already open for eve, try again in a few minutes"
+        );
+
+        // Redeemed in the same session, the device calls as the member's
+        // yard user from then on.
+        let paired = pair_hosted(&address, &opened.code, SESSION, "alice/lab").unwrap();
+        assert_eq!(
+            (paired.user.as_str(), paired.device.as_str()),
+            ("eve", "phone")
+        );
+        assert!(!yard.pairing_open());
+        let me = edge
+            .client_with_yard(&paired.token, SESSION, "alice/lab")
+            .me()
+            .unwrap();
+        assert_eq!((me.user.as_str(), me.said_by.as_str()), ("eve", "phone"));
+
+        // The same code in another account's session: refused at the edge
+        // in its own words, spent, and no device is added. The yard hears
+        // nothing of it.
+        let again = open_pairing_hosted(&address, SESSION, "alice/lab", "laptop").unwrap();
+        let (devices, proxied, asked) = (yard.devices(), edge.proxied(), yard.requests());
+        let Err(Error::Refused { code, message }) =
+            pair_hosted(&address, &again.code, OTHER, "alice/lab")
+        else {
+            panic!("another account redeemed the member's code");
+        };
+        assert_eq!(code, "no_yard");
+        assert_eq!(
+            message,
+            "that pairing code was opened for another account; it is spent — open a new pairing"
+        );
+        assert_eq!(yard.devices(), devices);
+        assert_eq!((edge.proxied(), yard.requests()), (proxied, asked));
+        assert!(!yard.pairing_open());
+        // Spent for the member too: the code is no one's now.
+        let Err(Error::Refused { code, .. }) =
+            pair_hosted(&address, &again.code, SESSION, "alice/lab")
+        else {
+            panic!("a spent code redeemed");
+        };
+        assert_eq!(code, "no_pairing");
+
+        // A device's token never opens one, the member's own included: put
+        // where the session goes it is no session the edge knows, and beside
+        // the session in Authorization it is refused too. The yard hears
+        // nothing either way, and no pairing is opened.
+        let (proxied, asked) = (edge.proxied(), yard.requests());
+        let Err(Error::Refused { code, .. }) =
+            open_pairing_hosted(&address, &paired.token, "alice/lab", "watch")
+        else {
+            panic!("a device's token opened a pairing");
+        };
+        assert_eq!(code, "no_session");
+        let body = r#"{"device": "watch"}"#;
+        let request = format!(
+            "POST /user/pairing HTTP/1.1\r\nHost: edge\r\nAuthorization: Bearer {}\r\nX-Edge-Token: {SESSION}\r\nX-Edge-Yard: alice/lab\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            paired.token,
+            body.len()
+        );
+        let mut conn = TcpStream::connect(edge.address().strip_prefix("http://").unwrap()).unwrap();
+        conn.write_all(request.as_bytes()).unwrap();
+        let mut answer = String::new();
+        conn.read_to_string(&mut answer).unwrap();
+        assert!(
+            answer.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "{answer}"
+        );
+        assert!(answer.contains("X-Edge-Refusal: session\r\n"), "{answer}");
+        assert_eq!((edge.proxied(), yard.requests()), (proxied, asked));
+        assert!(!yard.pairing_open());
+
+        // The operator's pairing stands: the member is told whose it is.
+        yard.pair("ABCD-EFGH");
+        let Err(Error::Refused { code, message }) =
+            open_pairing_hosted(&address, SESSION, "alice/lab", "phone")
+        else {
+            panic!("a pairing was opened over the operator's");
+        };
+        assert_eq!(code, "pairing_open");
+        assert!(message.contains("already open for jo"), "{message}");
+        assert!(yard.pairing_open());
+
+        // A session that is no member of the yard holds no such yard, and
+        // one the edge does not know is told to sign in; neither opens a
+        // pairing. With no session at all nothing is sent.
+        let Err(Error::Refused { code, message }) =
+            open_pairing_hosted(&address, OTHER, "alice/lab", "phone")
+        else {
+            panic!("a session with no membership opened a pairing");
+        };
+        assert_eq!(
+            (code.as_str(), message.as_str()),
+            ("no_yard", HOLDS_NO_YARD)
+        );
+        let Err(Error::Refused { code, message }) =
+            open_pairing_hosted(&address, "kratos-unknown", "alice/lab", "phone")
+        else {
+            panic!("the edge let an unknown session in");
+        };
+        assert_eq!(code, "no_session");
+        assert!(message.starts_with("Sign in first"), "{message}");
+        let before = edge.last_request();
+        let Err(Error::Refused { code, .. }) =
+            open_pairing_hosted(&address, "", "alice/lab", "phone")
+        else {
+            panic!("a pairing was opened with no session");
+        };
+        assert_eq!(code, "no_session");
+        assert_eq!(edge.last_request(), before);
+
+        // An edge from before the call passes it on, and the yard has no
+        // such path: 401 for its Bearer, 404 where it has no device. Neither
+        // is read as the device or the session refused.
+        let direct = Address::parse(yard.address()).unwrap();
+        let Err(Error::Refused { code, message }) =
+            open_pairing_hosted(&direct, SESSION, "alice/lab", "phone")
+        else {
+            panic!("the yard opened a pairing at a path it has not");
+        };
+        assert_eq!((code.as_str(), message.as_str()), ("no_door", NO_DOOR));
+        for token in yard.devices() {
+            yard.remove_device(&token);
+        }
+        let Err(Error::Refused { code, .. }) =
+            open_pairing_hosted(&direct, SESSION, "alice/lab", "phone")
+        else {
+            panic!("a yard with no device opened a pairing");
+        };
+        assert_eq!(code, "no_door");
     }
 
     /// Calls through the edge read no ready yard as the yard not ready:

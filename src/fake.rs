@@ -174,6 +174,17 @@ struct State {
     devices: Vec<String>,
     /// The pairing that is open: its code, and the wrong codes so far.
     pairing: Option<(String, u32)>,
+    /// The user and the device name the open pairing makes, where a user
+    /// of the yard opened it for their own ([`open_for`]); none where the
+    /// operator opened it, for the yard's one user and its one device.
+    pairing_for: Option<(String, String)>,
+    /// Who a paired device's token is, by token: the user and the device
+    /// name `/user/me` says from then on. The tokens of no entry are jo's
+    /// laptop.
+    who: HashMap<String, (String, String)>,
+    /// How many pairings a user of the yard opened: each has a code of its
+    /// own.
+    opened: u32,
     /// How many devices were paired: each has a token of its own.
     paired: u32,
     stopped: bool,
@@ -313,11 +324,20 @@ impl Yard {
     /// The operator opens a pairing: the next right code is answered with
     /// a token, once.
     pub fn pair(&self, code: &str) {
-        self.shared.state.lock().unwrap().pairing = Some((code.to_string(), 0));
+        let mut state = self.shared.state.lock().unwrap();
+        state.pairing = Some((code.to_string(), 0));
+        state.pairing_for = None;
     }
 
     pub fn pairing_open(&self) -> bool {
         self.shared.state.lock().unwrap().pairing.is_some()
+    }
+
+    /// The operator ends the pairing that is open, whoever opened it.
+    pub fn end_pairing(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.pairing = None;
+        state.pairing_for = None;
     }
 
     /// The tokens the yard lets in.
@@ -654,10 +674,37 @@ fn pair(conn: &mut Wire, shared: &Shared, body: &[u8]) -> io::Result<()> {
     state.paired += 1;
     let token = format!("yardr-dev-paired-{}", state.paired);
     state.devices.push(token.clone());
+    let (user, device) = state
+        .pairing_for
+        .take()
+        .unwrap_or(("jo".to_string(), "laptop".to_string()));
+    state
+        .who
+        .insert(token.clone(), (user.clone(), device.clone()));
     drop(state);
-    let answer =
-        format!(r#"{{"token": "{token}", "user": "jo", "device": "laptop", "yard": "south"}}"#);
+    let answer = format!(
+        r#"{{"token": "{token}", "user": "{user}", "device": "{device}", "yard": "south"}}"#
+    );
     plain(conn, "200 OK", JSON, &answer)
+}
+
+/// A user of the yard opens a pairing for a device of their own, as the
+/// yard's web page does for the user the edge's token maps: a code for the
+/// user and the device name. A pairing that is open already is refused with
+/// the user who holds it, the operator's included.
+fn open_for(shared: &Shared, user: &str, device: &str) -> Result<String, String> {
+    let mut state = shared.state.lock().unwrap();
+    if state.pairing.is_some() {
+        return Err(state
+            .pairing_for
+            .as_ref()
+            .map_or("jo".to_string(), |(holder, _)| holder.clone()));
+    }
+    state.opened += 1;
+    let code = format!("OPEN{:04}", state.opened);
+    state.pairing = Some((code.clone(), 0));
+    state.pairing_for = Some((user.to_string(), device.to_string()));
+    Ok(format!("{}-{}", &code[..4], &code[4..]))
 }
 
 /// Whether a request for `target` is held without answer: one whose
@@ -729,6 +776,14 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
             let known = token.as_ref().is_some_and(|t| state.devices.contains(t));
             (state.pairing.is_some(), state.devices.len(), known)
         };
+        // Who the device is: the user and the name it was paired as, jo's
+        // laptop for one the yard started with.
+        let me = token
+            .as_ref()
+            .and_then(|token| shared.state.lock().unwrap().who.get(token).cloned())
+            .map_or(ME.to_string(), |(user, device)| {
+                format!(r#"{{"user": "{user}", "said_by": "{device}", "yard": "south"}}"#)
+            });
         if target == "/user/pair" && pairing {
             if stalled(shared, &target) {
                 hold_until_stopped(shared);
@@ -761,7 +816,7 @@ fn serve_one(conn: Wire, shared: &Shared, listener: bool) -> io::Result<()> {
             }
         }
         if target == "/me" {
-            return plain(&mut conn, "200 OK", "application/json", ME);
+            return plain(&mut conn, "200 OK", "application/json", &me);
         }
     }
     // The stream of a device ends when the device is removed.
@@ -1056,6 +1111,20 @@ struct EdgeShared {
     /// The paths a request for which is turned away with the 401 of the
     /// yard's web gateway, reaching no yard.
     turned_away: Mutex<Vec<String>>,
+    /// The yard behind the edge, for the pairings the edge opens as a
+    /// member.
+    yard: Arc<Shared>,
+    /// The sessions that are active members of the yard, each with the
+    /// yard user the yard maps it to ([`Router::member`]).
+    members: Mutex<HashMap<String, String>>,
+    /// The yard user a sign-in's session is a member as, where the account
+    /// that signs in is a member ([`Router::member_signs_in`]).
+    login_member: Mutex<Option<String>>,
+    /// The head of every request that came, in order.
+    heads: Mutex<Vec<String>>,
+    /// The pairing the edge opened and the session it opened it for: the
+    /// code stands for that session alone.
+    opener: Mutex<Option<(String, String)>>,
     stopped: Mutex<bool>,
 }
 
@@ -1110,6 +1179,11 @@ impl Router {
             login_delay: Mutex::new(Duration::ZERO),
             edge_refusal: Mutex::new(None),
             turned_away: Mutex::new(Vec::new()),
+            yard: yard.shared.clone(),
+            members: Mutex::new(HashMap::new()),
+            login_member: Mutex::new(None),
+            heads: Mutex::new(Vec::new()),
+            opener: Mutex::new(None),
             stopped: Mutex::new(false),
         });
         let accept = thread::spawn({
@@ -1179,6 +1253,26 @@ impl Router {
             .lock()
             .unwrap()
             .push(session.to_string());
+    }
+
+    /// This session is an active member of the yard behind the edge, acting
+    /// there as `user`: the edge opens a pairing for a device of its own at
+    /// that user (`POST /user/pairing`, which the edge answers itself, as
+    /// the router does), and the code it gives redeems in this session
+    /// alone. A session that is no member is refused, and reaches no yard.
+    pub fn member(&self, session: &str, user: &str) {
+        self.shared
+            .members
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), user.to_string());
+    }
+
+    /// The account the stand-in signs in is an active member of the yard,
+    /// acting there as `user`: every session a sign-in mints from now on is
+    /// a member's, as [`Router::member`] makes one.
+    pub fn member_signs_in(&self, user: &str) {
+        *self.shared.login_member.lock().unwrap() = Some(user.to_string());
     }
 
     /// The edge knows this session no more, as Kratos after a revocation:
@@ -1270,6 +1364,17 @@ impl Router {
         self.shared.last_request.lock().unwrap().clone()
     }
 
+    /// The heads of the requests that came to the edge, oldest first, whose
+    /// first line starts with `line`: `POST /user/pairing `, say.
+    pub fn seen(&self, line: &str) -> Vec<String> {
+        let heads = self.shared.heads.lock().unwrap();
+        heads
+            .iter()
+            .filter(|head| head.starts_with(line))
+            .cloned()
+            .collect()
+    }
+
     /// How many requests reached the yard through the edge.
     pub fn proxied(&self) -> usize {
         *self.shared.proxied.lock().unwrap()
@@ -1327,6 +1432,7 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
     *shared.last_request.lock().unwrap() = head.clone();
+    shared.heads.lock().unwrap().push(head.clone());
     let asked = head.lines().next().unwrap_or_default().to_string();
     if asked.starts_with("GET /kratos/self-service/login/api ")
         || asked.starts_with("POST /kratos/self-service/login")
@@ -1337,12 +1443,7 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
         .as_ref()
         .is_some_and(|token| shared.sessions.lock().unwrap().contains(token));
     if !known {
-        write!(
-            conn,
-            "HTTP/1.1 401 Unauthorized\r\nX-Edge-Refusal: session\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{NO_SESSION}",
-            NO_SESSION.len()
-        )?;
-        return conn.flush();
+        return refuse_session(&mut conn);
     }
     // Past the session check, the edge's own refusal where one stands
     // in: 403 with no header, 503 with away, 504 with none, 429 with
@@ -1367,6 +1468,40 @@ fn serve_edge(conn: TcpStream, target: &str, origin: &str, shared: &EdgeShared) 
             body.len()
         )?;
         return conn.flush();
+    }
+    let asker = session.clone().unwrap_or_default();
+    // A member's request for a pairing is the edge's own to answer, as the
+    // router answers it: no part of it is the yard's path.
+    if asked.starts_with("POST /user/pairing ") {
+        return serve_pairing(conn, &head, &body, &asker, shared);
+    }
+    // A pairing's code presented in a session other than the one it was
+    // opened for is refused and spent, and the yard hears nothing of it.
+    if asked.starts_with("POST /user/pair ") {
+        let typed = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|body| body["code"].as_str().map(code_of))
+            .unwrap_or_default();
+        let mut opener = shared.opener.lock().unwrap();
+        if let Some((code, opened_for)) = opener.clone()
+            && code_of(&code) == typed
+        {
+            *opener = None;
+            if opened_for != asker {
+                drop(opener);
+                let mut yard = shared.yard.state.lock().unwrap();
+                yard.pairing = None;
+                yard.pairing_for = None;
+                drop(yard);
+                let body = "{\"error\":\"edge: that pairing code was opened for another account; it is spent — open a new pairing\"}\n";
+                write!(
+                    conn,
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )?;
+                return conn.flush();
+            }
+        }
     }
     let path = asked.split_whitespace().nth(1).unwrap_or("");
     let path = path.split('?').next().unwrap_or(path);
@@ -1479,6 +1614,9 @@ fn serve_kratos(
     *logins += 1;
     let session = format!("kratos-test-session-{}", *logins);
     shared.sessions.lock().unwrap().push(session.clone());
+    if let Some(user) = shared.login_member.lock().unwrap().clone() {
+        shared.members.lock().unwrap().insert(session.clone(), user);
+    }
     let signed = serde_json::json!({
         "session_token": session,
         "session": {
@@ -1490,6 +1628,92 @@ fn serve_kratos(
         },
     });
     reply(&mut conn, "200 OK", signed.to_string())
+}
+
+/// The edge's own 401 for a session it does not know, naming the edge and
+/// carrying `X-Edge-Refusal: session`.
+#[cfg(any(test, debug_assertions))]
+fn refuse_session(conn: &mut TcpStream) -> io::Result<()> {
+    write!(
+        conn,
+        "HTTP/1.1 401 Unauthorized\r\nX-Edge-Refusal: session\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{NO_SESSION}",
+        NO_SESSION.len()
+    )?;
+    conn.flush()
+}
+
+/// The value of the request's header `name`, from the head as it came.
+#[cfg(any(test, debug_assertions))]
+fn header_of(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|line| {
+        let (head_name, value) = line.split_once(':')?;
+        head_name
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
+}
+
+/// `POST /user/pairing`, which the edge answers itself: a session that is an
+/// active member of the yard has a pairing opened at the yard for a device
+/// of its own, for the yard user the yard maps it to, and the code stands
+/// for that session alone. Any other session is refused as holding no such
+/// yard, and a request while the yard has a pairing open is told whose it is.
+/// A device's token never opens one: a request that carries it, in
+/// `Authorization` or in place of the session, is refused as one with no
+/// session, and the yard hears nothing.
+#[cfg(any(test, debug_assertions))]
+fn serve_pairing(
+    mut conn: TcpStream,
+    head: &str,
+    body: &[u8],
+    session: &str,
+    shared: &EdgeShared,
+) -> io::Result<()> {
+    let reply = |conn: &mut TcpStream, status: &str, body: Value| -> io::Result<()> {
+        let body = format!("{body}\n");
+        write!(
+            conn,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )?;
+        conn.flush()
+    };
+    if header_of(head, "authorization").is_some() {
+        return refuse_session(&mut conn);
+    }
+    let member = shared.members.lock().unwrap().get(session).cloned();
+    let Some(user) = member else {
+        let why = format!("edge: {}", crate::api::HOLDS_NO_YARD);
+        return reply(
+            &mut conn,
+            "403 Forbidden",
+            serde_json::json!({ "error": why }),
+        );
+    };
+    let device = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body["device"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    let yard = header_of(head, "x-edge-yard").unwrap_or_default();
+    match open_for(&shared.yard, &user, &device) {
+        Ok(code) => {
+            *shared.opener.lock().unwrap() = Some((code.clone(), session.to_string()));
+            let opened = serde_json::json!({
+                "code": code, "user": user, "device": device, "yard": yard,
+            });
+            reply(&mut conn, "200 OK", opened)
+        }
+        Err(holder) => {
+            let why =
+                format!("edge: a pairing is already open for {holder}, try again in a few minutes");
+            reply(
+                &mut conn,
+                "409 Conflict",
+                serde_json::json!({ "error": why }),
+            )
+        }
+    }
 }
 
 /// One request proxied to the yard, its answer relayed byte for byte. The

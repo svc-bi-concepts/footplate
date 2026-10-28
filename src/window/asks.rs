@@ -1723,15 +1723,42 @@ impl Footplate {
                     ),
                     Err(why) => why,
                 };
+                // A yard of another account's is paired by its member
+                // alone: the edge opens the pairing for them, so no
+                // operator gives them a code, and with none typed the
+                // button asks for one.
+                let member = self
+                    .settings
+                    .yard(name)
+                    .filter(|_| self.env.yard.is_none())
+                    .and_then(|yard| Some((yard, yard.member()?.0)));
+                let opening = self.pairs_by_opening(name, cx);
+                let (line, submit, explained) = match member {
+                    Some((yard, owner)) => (
+                        format!("pair this device with {}, at {address}", yard.title()),
+                        match (self.pairing, opening) {
+                            (false, true) => "pair this device (enter)",
+                            _ => pair,
+                        },
+                        format!(
+                            "footplate asks the edge, as you, to open a pairing for this device and uses its code at once; {owner} never holds the code. {token}"
+                        ),
+                    ),
+                    None => (
+                        format!("a code for {whose}, at {address}"),
+                        pair,
+                        format!("{OPERATOR} {token}"),
+                    ),
+                };
                 asked.extend([
                     div()
                         .debug_selector(|| "yard again for".to_string())
-                        .child(format!("a code for {whose}, at {address}"))
+                        .child(line)
                         .into_any_element(),
                     yard_field("code", &self.code, palette, cx).into_any_element(),
-                    yard_submit(pair, "yard pair", busy, palette, cx).into_any_element(),
+                    yard_submit(submit, "yard pair", busy, palette, cx).into_any_element(),
                 ]);
-                help = Some(yard_help(format!("{OPERATOR} {token}"), palette).into_any_element());
+                help = Some(yard_help(explained, palette).into_any_element());
             }
             Some(Adding::Hosted) => {
                 asked.extend([

@@ -462,7 +462,10 @@ yards, one of them away), `switcher-shut` (that list, shut a second after
 it drew as a click outside it shuts it: the scripts drive no pointer, so
 the state asks the window for what the click asks), `switcher-member`
 (that list over an own and a member hosted yard, the member marked with
-its operator's handle), `refs` (the conversation with the
+its operator's handle), `member-pair` (the settings' yards, with a member
+yard's pair this device pressed while the operator holds a pairing open:
+the edge names its yard user), `member-paired` (the same with none open:
+the device paired as the member's yard user), `refs` (the conversation with the
 yardmaster, naming an ask and two bead ids: the ask's chip with its
 preview under the mail), `decisions` (the decisions list with one
 open ask and the 156-item history open: day groups and a folded
@@ -972,6 +975,24 @@ pairing again is not offered, since it helps nothing. Removing the yard
 deletes its session's file with its token's, where footplate wrote them;
 the session itself stays signed in at the edge until it expires or is
 revoked, and the device stays at the yard until its operator removes it.
+
+A yard of another account's, one the account is a member of, is named in
+the yard field as the edge names it, `owner/yard`, and stands marked
+"member of owner's yard" wherever it is listed. Its operator never holds
+the member's code, so there is no code on a ready page to type: "pair this
+device", beside the yard in the settings and in its code form, asks the
+edge to open a pairing with the member's own session, `POST /user/pairing`
+with `X-Edge-Yard: owner/yard` and a name for this device (this machine's
+name, made to the yard's rule for a device's name). The edge opens it for
+the yard user the yard maps the member to and answers the code. The code
+stands in the code field, and the same session redeems it as a typed code
+is, so that one that was not used up is tried again by pressing pair. The
+device calls as the member's yard user from then on. The edge's refusals
+are shown in its words: a pairing already open at the yard, with its yard
+user where the yard says it, and a code presented in another account's
+session, which is refused and spent. An edge that does not know the call
+answers it with the yard's 401 or a 404, and the window says the edge does
+not open a member's pairing from the app yet.
 
 A request that fails, at a hosted yard or any other, leaves one line on
 stderr and in footplate's own log (below), so that it can be found in the log
@@ -1868,7 +1889,7 @@ options have no icon, so the program sees to it when it starts
 
 | File | Holds |
 |---|---|
-| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a Kratos account signed in at a hosted edge; a file read from a site, and a JSON post to one, that is no yard |
+| `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a member's pairing opened at a hosted edge, a Kratos account signed in at a hosted edge; a file read from a site, and a JSON post to one, that is no yard |
 | `src/feedback.rs` | what the Feedback form sends, and where: one survey answer to yardr's PostHog (EU), made as plain functions (the payload, a fresh id for each send, the words of a refusal) and sent by `api::post_json`; the write key and the survey's id are two constants, and with either empty there is no project to offer |
 | `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one; the kept one asked its version for the About card. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
 | `src/setup.rs` | the first run as yardr's commands, with no window: each run with its arguments and its JSON read, the PATH made from doctor's data, the import's questions answered, a login led by what yardr prints |
@@ -1887,7 +1908,7 @@ options have no icon, so the program sees to it when it starts
 | `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |
 | `src/notify.rs` | the system's notifications: what is told of and that a burst is one, as plain functions; then macOS's notification center and Linux's `notify-send` |
-| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow, which can turn a path away as the yard's web gateway does; and a stand-in for PostHog's capture, which keeps each request whole |
+| `src/fake.rs` | a yard for the tests: a unix socket in a temp dir (what a test starts with, except on Windows, which has no socket), or a TCP port of this machine with tokens and a pairing (what a test starts with on Windows), that answers the documented JSON; a stand-in edge in front of it with the login flow, which can turn a path away as the yard's web gateway does, and with member sessions: it opens a member's pairing as the router would and refuses the code in any other session; and a stand-in for PostHog's capture, which keeps each request whole |
 
 The tests run without a yard and without a screen. The yard a test starts
 with is the fake's socket, and on Windows, which has none, its TCP port, so
