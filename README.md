@@ -595,8 +595,9 @@ A stream says nothing while nothing happens, and so does one that a proxy
 or a tunnel holds open after the yard behind it went away. After a minute
 of silence the yard's head is asked beside the stream, on a connection of
 its own, and once a minute from then on: a head level with the last event
-read leaves the stream as it is, and one still beyond it five seconds later
-replaces the stream, as when a stream ends. A link
+read leaves the stream as it is, and one still beyond it about a minute
+later replaces the stream, as when a stream ends, so a stuck stream is
+replaced within about two minutes and a few seconds. A link
 that went away is found by the system's keepalive within about a minute.
 
 A stream that ends, whether the server replaces itself or a proxy or the edge
