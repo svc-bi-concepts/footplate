@@ -20,10 +20,10 @@ use super::panel::{
 use super::rail::RailTip;
 use super::screen::screen_control;
 use super::words::{
-    bead_words, flow_words, headcode_color, lamp_dot, remark_color, stage_group_words, stage_lamp,
-    waiting_words, waits_for_seat, worker_words, working_tip, working_words,
+    bead_words, flow_words, headcode_color, lamp_dot, landed_age, remark_color, stage_group_words,
+    stage_lamp, waiting_words, waits_for_seat, worker_words, working_tip, working_words,
 };
-use crate::api::{Arrival, Flow, FlowBead, FlowDepot, FlowStage};
+use crate::api::{Arrival, Flow, FlowBead, FlowDepot, FlowLanding, FlowStage};
 use crate::model::{self, Mode, Model, Selected, backlog_count, short_bead, stage_age, you_first};
 use crate::select;
 use crate::theme::Palette;
@@ -1251,7 +1251,8 @@ impl Footplate {
 
     /// One stage's column: its name with the group words under it and
     /// the track as the head's rule, then one card per bead. The
-    /// terminal stage reads terminal with the buffer stop; an empty
+    /// terminal stage reads terminal with the buffer stop, and lists
+    /// under it what landed there in the trailing 24 hours; an empty
     /// stage says nothing stands here.
     pub(crate) fn stage_column(
         &self,
@@ -1338,9 +1339,19 @@ impl Footplate {
                     move || format!("column {flow} {stage} rule")
                 }),
             );
-        if stage.beads.is_empty() {
+        // What landed stands under the landed station alone; any
+        // other column draws the stages' beads and nothing else.
+        let landings = match stage.terminal {
+            true => flow.landings.as_slice(),
+            false => &[],
+        };
+        if stage.beads.is_empty() && landings.is_empty() {
             column = column.child(
                 div()
+                    .debug_selector({
+                        let (flow, stage) = (flow.name.clone(), stage.stage.clone());
+                        move || format!("column {flow} {stage} empty")
+                    })
                     .pt_2()
                     .text_xs()
                     .text_color(palette.faint)
@@ -1351,7 +1362,65 @@ impl Footplate {
             column =
                 column.child(self.bead_card(bead, Some(stage), now, mono.clone(), palette, cx));
         }
+        for landing in landings {
+            column = column.child(self.landing_row(landing, now, palette, cx));
+        }
         column
+    }
+
+    /// One bead that landed under the flow's landed station: its title
+    /// with its headcode and how long ago it landed faint under it, in
+    /// the served order, newest first. A tap opens the bead whole, as a
+    /// card's tap does; the Bead call serves closed beads.
+    pub(crate) fn landing_row(
+        &self,
+        landing: &FlowLanding,
+        now: &chrono::DateTime<chrono::Utc>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let bead = landing.bead.clone();
+        let sel = Selected::Bead(landing.bead.clone());
+        let meta = [
+            short_bead(&landing.bead),
+            landed_age(&model::waits(&landing.landed_at, now)),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+        div()
+            .id(SharedString::from(format!("landing {bead}")))
+            .debug_selector({
+                let bead = bead.clone();
+                move || format!("landing {bead}")
+            })
+            .pt_2()
+            .flex()
+            .flex_col()
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.hover))
+            .on_click(cx.listener(move |this, _, window, cx| this.select(sel.clone(), window, cx)))
+            .child(
+                div()
+                    .debug_selector({
+                        let bead = bead.clone();
+                        move || format!("landing title {bead}")
+                    })
+                    .truncate()
+                    .text_sm()
+                    .child(landing.title.clone()),
+            )
+            .child(
+                div()
+                    .debug_selector({
+                        let bead = bead.clone();
+                        move || format!("landing meta {bead}")
+                    })
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .child(meta),
+            )
     }
 
     /// One flow's backlog column: its name with the group words under

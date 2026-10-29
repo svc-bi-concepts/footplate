@@ -21,6 +21,15 @@ pub(crate) fn bead_words(beads: usize) -> String {
     plural(beads, "", "bead", "beads")
 }
 
+/// How long ago a landing landed, from its waits span: `landed 2h`,
+/// `landed now`. Nothing for a time that cannot be read.
+pub(crate) fn landed_age(waits: &str) -> String {
+    match waits.is_empty() {
+        true => String::new(),
+        false => format!("landed {waits}"),
+    }
+}
+
 /// What a stage column's head says under its name: the routed group's
 /// name, that it waits on a person where the group is manual, and its
 /// seats where the yard serves them. A group with no route says why,

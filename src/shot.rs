@@ -54,7 +54,8 @@ use crate::yard::Env;
 /// on the arrivals row with its lamps, headcodes and quiet lines, the
 /// departures board open under the toggle, one
 /// arrival's bead open from the panel, one
-/// line's flow open on its row, the Lines pane against a yard too old
+/// line's flow open on its row with what landed under its landed
+/// station, the Lines pane against a yard too old
 /// to serve it, saying so in plain words, the grants view open on its
 /// row with a read, an update and an `--as` grant, and a source's named
 /// read call and update call, an open card of a
@@ -1888,8 +1889,8 @@ fn populate(yard: &Yard, state: &str) {
         // yardmaster holds and a blocked bead under a fault lamp, a
         // late and a worked bead with one more in review's full group,
         // a wait and a person's turn under a turn lamp, a terminal
-        // stage with its buffer stop, an Elsewhere bead, two beads
-        // with no line, and drafts quiet.
+        // stage with its buffer stop and two landings under it, an
+        // Elsewhere bead, two beads with no line, and drafts quiet.
         // Each stage carries its terminal flag and its routed group's
         // seats, each claimed bead its worker and its stage's clock.
         // The longest names this yard's own flows have stand among them:
@@ -1957,6 +1958,12 @@ fn populate(yard: &Yard, state: &str) {
                             {"stage": "approved", "group": "shippers", "human": false,
                              "lamp": "none", "terminal": true, "limit": 2, "taken": 0,
                              "beads": []},
+                        ],
+                        "landings": [
+                            {"bead": "yd-r9pn", "title": "Serve the landings",
+                             "landed_at": landed_at(2, 15)},
+                            {"bead": "yd-points", "title": "Oil the points",
+                             "landed_at": landed_at(5, 40)},
                         ]},
                         {"name": "design.design", "type": "design", "source": "store", "stages": [
                             {"stage": "draft", "group": "mckean", "human": true,
@@ -2260,6 +2267,13 @@ fn shot_since(midnight: &DateTime<Local>, days: i64, hour: u32, min: u32) -> Str
         + Duration::hours(hour as i64)
         + Duration::minutes(min as i64))
     .to_rfc3339()
+}
+
+/// When a landing of the shot's flows landed, `hours` and `minutes`
+/// ago, as the yard serves it: from now, not from midnight, so the
+/// shot's ages read right whatever hour it runs.
+fn landed_at(hours: i64, minutes: i64) -> String {
+    (Local::now() - Duration::hours(hours) - Duration::minutes(minutes)).to_rfc3339()
 }
 
 /// The decisions states' history, newest first: 156 dealt with asks.
@@ -2579,6 +2593,20 @@ mod tests {
                             "{state}"
                         );
                         assert_eq!(loaded.flows.depots[0].flows.len(), 2, "{state}");
+                        // What landed under the landed station, newest
+                        // first.
+                        let landings = &loaded.flows.depots[0].flows[0].landings;
+                        assert_eq!(
+                            landings
+                                .iter()
+                                .map(|l| (l.bead.as_str(), l.title.as_str()))
+                                .collect::<Vec<_>>(),
+                            [
+                                ("yd-r9pn", "Serve the landings"),
+                                ("yd-points", "Oil the points"),
+                            ],
+                            "{state}"
+                        );
                         assert_eq!(loaded.flows.depots[0].elsewhere.len(), 1, "{state}");
                         assert_eq!(loaded.flows.depots[1].travelling, 2, "{state}");
                         assert_eq!(loaded.flows.depots[2].travelling, 0, "{state}");

@@ -5802,6 +5802,29 @@ mod tests {
         .to_string()
     }
 
+    /// The line's view with two landings on its default flow, newest
+    /// first, and a flow that has none.
+    fn flows_landings() -> String {
+        let mut flows: Value = serde_json::from_str(&flows_line()).unwrap();
+        flows["result"]["depots"][0]["flows"][0]["landings"] = json!([
+            {"bead": "yd-r9pn", "title": "Serve the landings",
+             "landed_at": "2026-10-10T09:30:00Z"},
+            {"bead": "yd-q04p", "title": "Overhaul the site",
+             "landed_at": "2026-10-10T08:15:00Z"},
+        ]);
+        flows["result"]["depots"][0]["flows"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "name": "no-landings", "type": "", "source": "store",
+                "stages": [{
+                    "stage": "merged", "group": "", "human": false,
+                    "lamp": "none", "terminal": true, "beads": []
+                }]
+            }));
+        flows.to_string()
+    }
+
     /// The flows view with two held beads on one stage: one the
     /// reader holds, one another holds, each remarked as the yard
     /// words it with its holder beside it.
@@ -6029,6 +6052,18 @@ yardr.dev
             "notes": [{"seq": 4, "kind": "note", "author": "yardmaster",
                        "text": "merged", "at": "2026-10-10T09:30:00Z"}],
             "asks": []
+        }})
+        .to_string()
+    }
+
+    /// One landed bead whole, as the Bead call answers it: the body,
+    /// the merged stage, and no asks.
+    fn bead_landed() -> String {
+        json!({"result": {
+            "id": "yd-r9pn", "title": "Serve the landings",
+            "body": "The yard serves what landed.",
+            "stage": "merged", "labels": [],
+            "notes": [], "asks": [],
         }})
         .to_string()
     }
@@ -13612,14 +13647,17 @@ yardr.dev
     /// stages in travel order as columns, each column its head with the
     /// group words and one card per bead. The backlog column lists its
     /// count, six titles and "+N more"; the terminal column reads
-    /// terminal with the buffer stop.
+    /// terminal with the buffer stop and lists its landings, newest
+    /// first. Tapping one opens the whole bead and back returns to the
+    /// line; a flow with none draws no landing rows.
     #[gpui::test]
     fn a_line_s_click_opens_its_stages_as_columns_with_cards(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("Arrivals", &arrivals_board());
-        yard.answer("Flows", &flows_line());
+        yard.answer("Flows", &flows_landings());
         yard.answer("Bead", &bead_zulu());
+        yard.answer_for("Bead", "bead", "yd-r9pn", &bead_landed());
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         to_timetable(&view, cx);
         click_on(cx, "row yardr");
@@ -13724,6 +13762,42 @@ yardr.dev
                 "{stage}"
             );
         }
+        // Landings stand beneath the landed station, newest first.
+        for bead in ["yd-r9pn", "yd-q04p"] {
+            assert!(drawn(cx, &format!("landing {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("landing title {bead}")), "{bead}");
+            assert!(drawn(cx, &format!("landing meta {bead}")), "{bead}");
+        }
+        let first = bounds_of(cx, "landing yd-r9pn");
+        let second = bounds_of(cx, "landing yd-q04p");
+        assert!(
+            first.top() < second.top(),
+            "the landings stand out of the served order"
+        );
+        let rule = bounds_of(cx, "column default merged rule");
+        assert!(
+            first.top() >= rule.bottom() - px(1.),
+            "the landings stand above the landed station: {rule:?} {first:?}"
+        );
+        // The flow with no landings keeps the empty-stage line and has
+        // no landing list.
+        assert!(drawn(cx, "column no-landings merged empty"));
+        // A landing's tap opens the whole bead, and back returns to
+        // the line.
+        click_on(cx, "landing yd-r9pn");
+        wait(cx, "the landed bead", |cx| drawn(cx, "bead back"));
+        assert_eq!(yard.asked("Bead"), [json!({"bead": "yd-r9pn"})]);
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(model.selected(), Some(&Selected::Bead("yd-r9pn".into())));
+            assert_eq!(model.bead_back(), Selected::Line("yardr".into()));
+        });
+        click_on(cx, "bead back");
+        wait(cx, "the line again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected() == Some(&Selected::Line("yardr".into()))
+            })
+        });
         // A card's click opens its bead, and back returns to the line.
         click_on(cx, "card yd-zulu");
         wait(cx, "the bead", |cx| drawn(cx, "bead back"));

@@ -403,7 +403,8 @@ pub struct FlowDepot {
 }
 
 /// One flow of a depot: the depot's own (an empty type) or a bead
-/// type's, with its stages in travel order.
+/// type's, with its stages in travel order and what landed under its
+/// landed station in the trailing 24 hours.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Flow {
     pub name: String,
@@ -416,6 +417,23 @@ pub struct Flow {
     pub source: String,
     #[serde(default, deserialize_with = "or_default")]
     pub stages: Vec<FlowStage>,
+    /// The beads that entered merged in the trailing 24 hours, newest
+    /// first, at most 30, as on /flows. Absent from a yard too old to
+    /// serve them.
+    #[serde(default, deserialize_with = "or_default")]
+    pub landings: Vec<FlowLanding>,
+}
+
+/// One bead that landed under a flow's landed station: its id, its
+/// title as it stands now, and when it entered merged.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct FlowLanding {
+    pub bead: String,
+    #[serde(default)]
+    pub title: String,
+    /// When the bead entered merged, as an RFC 3339 time.
+    #[serde(default)]
+    pub landed_at: String,
 }
 
 /// One stage of a flow and the open beads in it, with the stage's wait
@@ -6908,6 +6926,12 @@ mod tests {
                          "beads": []},
                         {"stage": "merged", "group": "", "human": false,
                          "lamp": "none", "terminal": true, "beads": []}
+                    ],
+                    "landings": [
+                        {"bead": "yardr-r9pn", "title": "Serve the landings",
+                         "landed_at": "2026-10-08T09:30:00Z"},
+                        {"bead": "yardr-q04p", "title": "Overhaul the site",
+                         "landed_at": "2026-10-08T08:15:00Z"}
                     ]},
                     {"name": "design", "type": "design", "source": "repo@0f415ee",
                      "stages": []}
@@ -6973,6 +6997,21 @@ mod tests {
         // no seats, absent rather than zero.
         assert!(stages[2].terminal);
         assert_eq!((stages[2].limit, stages[2].taken), (None, None));
+        // What landed under the landed station, newest first; a flow
+        // that serves none, or a yard too old to serve them, reads
+        // empty.
+        let landings = &depot.flows[0].landings;
+        assert_eq!(landings.len(), 2);
+        assert_eq!(
+            (
+                landings[0].bead.as_str(),
+                landings[0].title.as_str(),
+                landings[0].landed_at.as_str()
+            ),
+            ("yardr-r9pn", "Serve the landings", "2026-10-08T09:30:00Z")
+        );
+        assert_eq!(landings[1].bead.as_str(), "yardr-q04p");
+        assert!(depot.flows[1].landings.is_empty());
         assert_eq!(depot.elsewhere.len(), 1);
         assert_eq!(depot.elsewhere[0].bead.as_str(), "yardr-pinned");
         assert!(depot.elsewhere[0].working);

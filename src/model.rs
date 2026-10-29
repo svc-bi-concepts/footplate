@@ -9447,6 +9447,7 @@ mod tests {
                         name: "default".into(),
                         flow_type: "".into(),
                         source: "store".into(),
+                        landings: vec![],
                         stages: vec![
                             FlowStage {
                                 stage: "new".into(),
@@ -9495,6 +9496,7 @@ mod tests {
                         name: "default".into(),
                         flow_type: "".into(),
                         source: "store".into(),
+                        landings: vec![],
                         stages: vec![FlowStage {
                             stage: "new".into(),
                             group: "".into(),
@@ -9866,6 +9868,7 @@ mod tests {
             name: "default".into(),
             flow_type: "".into(),
             source: "store".into(),
+            landings: vec![],
             stages: vec![
                 FlowStage {
                     stage: "backlog".into(),
