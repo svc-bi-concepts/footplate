@@ -228,6 +228,7 @@ pub fn name(yard: &str, target: &Selected) -> String {
         Selected::Decision(bead) | Selected::Decided(bead, _) => format!("decision:{bead}"),
         Selected::Grants => "grants".to_string(),
         Selected::Teammates => "teammates".to_string(),
+        Selected::Pairing => "pairing".to_string(),
         Selected::Yard => "yard".to_string(),
         Selected::Arrivals => "arrivals".to_string(),
         Selected::Line(line) => format!("line:{line}"),
@@ -258,6 +259,9 @@ fn row_in_yard(name: &str) -> Option<Selected> {
     }
     if name == "teammates" {
         return Some(Selected::Teammates);
+    }
+    if name == "pairing" {
+        return Some(Selected::Pairing);
     }
     if name == "arrivals" {
         return Some(Selected::Arrivals);
@@ -857,6 +861,7 @@ mod tests {
             Selected::Decision("yardr-n8ta".into()),
             Selected::Grants,
             Selected::Teammates,
+            Selected::Pairing,
             Selected::Yard,
             Selected::Arrivals,
             Selected::Bead("yardr-n8ta".into()),

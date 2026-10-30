@@ -55,6 +55,12 @@ zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate
 # (tray.rs); on Linux it is scaled to a panel's sizes, and the window's
 # icon too (taskbar.rs). In gpui's tree already.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The Pair a phone pane draws the pairing's QR string as a QR code, which
+# a phone scans in place of typing: encoded by qrcode (MIT OR Apache-2.0,
+# pure Rust, no dependency of its own but image), rendered through the
+# image crate above. Its image renderer alone: the svg and pic renderers
+# draw nothing here.
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 
 # gpui's window options have no icon: on macOS the dock's is set on the
 # application, with the bindings gpui itself is built on. So is the number

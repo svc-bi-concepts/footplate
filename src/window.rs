@@ -442,6 +442,17 @@ pub struct Footplate {
     /// yet, by following session and user: no second filing goes after
     /// one.
     removing: HashSet<(u64, String)>,
+    /// The Pair a phone pane's device field: the name the pairing is
+    /// opened for. It is another than the line: what is typed here is in
+    /// no draft and with no ask's words, and it is gone when a pairing
+    /// opens.
+    device_name: Entity<Line>,
+    /// A pairing's opening is with the yard and not answered yet: no
+    /// second one goes after it, and no ending either.
+    pairing_opening: bool,
+    /// A pairing's ending is with the yard and not answered yet: no
+    /// second one goes after it, and no opening either.
+    pairing_ending: bool,
     /// What the Mac's unlock says where a test fixed it instead of the
     /// system: whether the gate is offered, and what it answers. Tests
     /// start with no gate, so a weighty card never prompts the person
@@ -660,6 +671,19 @@ impl Footplate {
             }
         })
         .detach();
+        // The Pair a phone pane's device field: Enter in it opens the
+        // pairing for the name typed. The Open button is dimmed while it
+        // is empty: the window is drawn again with what is typed.
+        let device_name = cx.new(|cx| {
+            let mut field = Line::new(cx);
+            field.set_placeholder("iphone", cx);
+            field
+        });
+        cx.subscribe(&device_name, |this, _, _: &Submitted, cx| {
+            this.open_phone_pairing(cx)
+        })
+        .detach();
+        cx.observe(&device_name, |_, _, cx| cx.notify()).detach();
         // Enter in a field of a yard adds it, or sends the pairing's code.
         let field = |hint: &'static str, cx: &mut Context<Self>| {
             let field = cx.new(|cx| {
@@ -865,6 +889,9 @@ impl Footplate {
             typeback_for: None,
             approving: None,
             removing: HashSet::new(),
+            device_name,
+            pairing_opening: false,
+            pairing_ending: false,
             test_unlock: match cfg!(test) {
                 true => Some((false, false)),
                 false => None,
@@ -1039,6 +1066,10 @@ impl Render for Footplate {
             // With the focus in the history's filter its keys are text,
             // whatever is open: a `d` or `/` typed there is no card's.
             _ if self.filter.focus_handle(cx).is_focused(window) => CONTEXT,
+            // With the focus in the Pair a phone pane's field its keys
+            // are text, whatever is open: an `i` or `e` typed there is
+            // no card's.
+            _ if self.device_name.focus_handle(cx).is_focused(window) => CONTEXT,
             Some(Selected::Decision(_)) | Some(Selected::Decided(_, _))
                 if self.line.focus_handle(cx).is_focused(window)
                     || self.secret.focus_handle(cx).is_focused(window)
@@ -1649,6 +1680,11 @@ mod tests {
         );
         yard.answer("SourceGrants", r#"{"result": []}"#);
         yard.answer("Teammates", r#"{"result": []}"#);
+        // No pairing is open on a test's yard until the test opens one.
+        yard.answer(
+            "DevicePairState",
+            r#"{"error": {"code": "not-found", "message": "an open device pairing: not found"}}"#,
+        );
         yard.answer("Mail", "{}");
         yard.answer(
             "MailPeer",
@@ -11763,6 +11799,436 @@ yardr.dev
             notice(&view, cx) == "the yard did not answer; read the queue again"
                 && yard.asked("UserAsks").len() == asks + 1
         });
+    }
+
+    /// Pair a phone opens a pairing for the name typed, and the pane
+    /// shows its QR, code and minutes left; End ends it through the yard,
+    /// and the pane offers Open again. Nothing opens with no name typed;
+    /// Enter in the field opens as the button does.
+    // The pane is the socket's: a yard at its listener stands no row.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn pair_a_phone_opens_shows_and_ends_a_pairing(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let ends =
+            (chrono::Utc::now() + chrono::TimeDelta::minutes(9) + chrono::TimeDelta::seconds(30))
+                .to_rfc3339();
+        let open = json!({"result": {"user": "jo", "device": "iphone", "state": "open",
+            "expires": ends, "code": "K7QM-2XPD",
+            "qr": "https://edge.example.com#K7QM-2XPD#jo/edgeyard"}})
+        .to_string();
+        let none =
+            r#"{"error": {"code": "not-found", "message": "an open device pairing: not found"}}"#;
+        yard.answer(
+            "DevicePairOpen",
+            &json!({"result": {"user": "jo", "device": "iphone", "state": "open",
+                "expires": ends, "code": "K7QM-2XPD"}})
+            .to_string(),
+        );
+        // The state read with the rest already holds the pairing the
+        // yard has open.
+        yard.answer("DevicePairState", &open);
+        yard.answer(
+            "DevicePairClose",
+            &json!({"result": {"user": "jo", "device": "iphone", "state": "ended",
+                "expires": ends}})
+            .to_string(),
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.pair_offered());
+            assert_eq!(model.pairing().unwrap().device.as_str(), "iphone");
+        });
+        // For the opening below the yard starts with none open.
+        yard.answer("DevicePairState", none);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row teammates"));
+        assert!(drawn(cx, "row pairing"));
+        assert_eq!(view.read_with(cx, |v, _| v.keys_view()), KeysView::Card);
+        click_on(cx, "row pairing");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Pairing));
+        assert_eq!(view.read_with(cx, |v, _| v.keys_view()), KeysView::Pairing);
+        // Opening the pane reads the pairing again: none is open, and
+        // the form stands.
+        wait(cx, "the pairing read again, none open", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.pairing().is_none())
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing head"));
+        assert!(drawn(cx, "pairing summary"));
+        assert!(drawn(cx, "pairing name"));
+        assert!(drawn(cx, "pairing help"));
+        assert!(drawn(cx, "pairing open"));
+        // Nothing opens with no name typed.
+        click_on(cx, "pairing open");
+        cx.run_until_parked();
+        assert!(yard.asked("DevicePairOpen").is_empty());
+        // The name typed, Open sends the opening with it, for the
+        // window's own user. The opening stands, so the state read for
+        // its QR string answers it.
+        yard.answer("DevicePairState", &open);
+        click_on(cx, "pairing name");
+        cx.simulate_input("iphone");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(
+                v.device_name.read(cx).text().to_string(),
+                "iphone",
+                "typed text lands in the device field"
+            );
+        });
+        click_on(cx, "pairing open");
+        wait(cx, "the opening sent", |_| {
+            yard.asked("DevicePairOpen") == [json!({"user": "jo", "name": "iphone", "actor": "jo"})]
+        });
+        // The pane shows the QR, the code and the minutes left, with End.
+        wait(cx, "the pairing read with its QR string", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.pairing().is_some_and(|p| p.qr.is_some()))
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing qr"));
+        assert!(drawn(cx, "pairing code"));
+        assert!(drawn(cx, "pairing left"));
+        assert!(drawn(cx, "pairing end"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            let pairing = model.pairing().unwrap();
+            assert_eq!(pairing.code.as_str(), "K7QM-2XPD");
+            assert_eq!(
+                pairing.qr.as_deref(),
+                Some("https://edge.example.com#K7QM-2XPD#jo/edgeyard")
+            );
+            assert_eq!(
+                crate::model::pairing_left(&pairing.expires, &chrono::Utc::now()),
+                "9 minutes left"
+            );
+            assert!(model.pairing_line().is_empty());
+        });
+        // End ends it through the yard, and the pane offers Open again.
+        click_on(cx, "pairing end");
+        wait(cx, "the ending sent", |_| {
+            yard.asked("DevicePairClose") == [json!({"actor": "jo"})]
+        });
+        wait(cx, "the pairing ended", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.pairing().is_none())
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing name"));
+        assert!(drawn(cx, "pairing open"));
+        assert_eq!(notice(&view, cx), "");
+        // Enter in the field opens as the button does.
+        yard.answer(
+            "DevicePairOpen",
+            &json!({"result": {"user": "jo", "device": "tablet", "state": "open",
+                "expires": ends, "code": "ABCD-EFGH"}})
+            .to_string(),
+        );
+        click_on(cx, "pairing name");
+        cx.simulate_input("tablet");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the opening sent by Enter", |_| {
+            yard.asked("DevicePairOpen").len() == 2
+        });
+        assert_eq!(
+            yard.asked("DevicePairOpen")[1],
+            json!({"user": "jo", "name": "tablet", "actor": "jo"})
+        );
+    }
+
+    /// Reopening the pane while a pairing lives shows it again from the
+    /// state, with the same code. A pairing opened or ended elsewhere
+    /// arrives as a device event, which reads it again too: the phone
+    /// paired ends it, and the pane offers Open again.
+    // The pane is the socket's: a yard at its listener stands no row.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn reopening_the_pane_shows_the_living_pairing_again(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let ends = (chrono::Utc::now() + chrono::TimeDelta::minutes(10)).to_rfc3339();
+        let open = json!({"result": {"user": "jo", "device": "iphone", "state": "open",
+            "expires": ends, "code": "K7QM-2XPD",
+            "qr": "https://edge.example.com#K7QM-2XPD#jo/edgeyard"}})
+        .to_string();
+        let none =
+            r#"{"error": {"code": "not-found", "message": "an open device pairing: not found"}}"#;
+        // A pairing the operator opened at a terminal: the state read
+        // with the rest holds it already.
+        yard.answer("DevicePairState", &open);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row pairing"));
+        click_on(cx, "row pairing");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Pairing));
+        assert!(drawn(cx, "pairing qr"));
+        assert!(drawn(cx, "pairing code"));
+        let reads = yard.asked("DevicePairState").len();
+        assert!(reads >= 2);
+        // Away and back: the pairing is read again, with the same code.
+        click_on(cx, "row teammates");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Teammates));
+        click_on(cx, "row pairing");
+        wait(cx, "the pairing read again", |_| {
+            yard.asked("DevicePairState").len() == reads + 1
+        });
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Pairing));
+        assert!(drawn(cx, "pairing qr"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.model.as_ref().unwrap().pairing().unwrap().code.as_str(),
+                "K7QM-2XPD"
+            );
+        });
+        // The phone pairs: the pairing ends, and the pane offers Open
+        // again.
+        yard.answer("DevicePairState", none);
+        yard.emit(r#"{"seq": 21, "kind": "device_added", "actor": "jo", "data": {"user": "jo", "device": "iphone"}}"#);
+        wait(cx, "the pairing ended by the phone", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| m.pairing().is_none())
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing name"));
+        assert!(drawn(cx, "pairing open"));
+        assert_eq!(notice(&view, cx), "");
+        // Another opened at a terminal shows on its event, unopened.
+        yard.answer("DevicePairState", &open);
+        yard.emit(r#"{"seq": 22, "kind": "device_pair_opened", "actor": "jo", "data": {"user": "jo", "device": "iphone"}}"#);
+        wait(cx, "the pairing opened elsewhere", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.pairing().is_some_and(|p| p.code.as_str() == "K7QM-2XPD"))
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing qr"));
+        assert!(drawn(cx, "pairing code"));
+    }
+
+    /// A second opening while one lives, and a name the yard will not
+    /// pair, stand as the pane's refusal line, opening nothing.
+    // The pane is the socket's: a yard at its listener stands no row.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_refused_opening_stands_as_the_pane_s_line(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        click_on(cx, "row pairing");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Pairing));
+        // A name the yard will not pair.
+        let bad = "device \"!\": use letters, digits, '.', '_', '-' or '/' (starting with a letter or digit)";
+        yard.answer(
+            "DevicePairOpen",
+            &json!({"error": {"code": "error", "message": bad}}).to_string(),
+        );
+        click_on(cx, "pairing name");
+        cx.simulate_input("!");
+        click_on(cx, "pairing open");
+        wait(cx, "the refusal", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.pairing_line() == format!("not opened: {bad}"))
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing line"));
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().pairing().is_none());
+        });
+        assert_eq!(notice(&view, cx), "");
+        // A second opening while one lives: the terminal opened one
+        // meanwhile.
+        let busy = "a pairing is open already, for the device tablet of jo until 12:30:00: a yard has one at a time";
+        yard.answer(
+            "DevicePairOpen",
+            &json!({"error": {"code": "error", "message": busy}}).to_string(),
+        );
+        click_on(cx, "pairing name");
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input("iphone");
+        click_on(cx, "pairing open");
+        wait(cx, "the refusal", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.pairing_line() == format!("not opened: {busy}"))
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "pairing line"));
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().pairing().is_none());
+        });
+        assert_eq!(notice(&view, cx), "");
+        assert_eq!(yard.asked("DevicePairOpen").len(), 2);
+    }
+
+    /// A yard from before the pairing calls has none to serve: no notice
+    /// is raised in any mode, and the pane says the yard is too old
+    /// instead, and nowhere else.
+    // The pane is the socket's: a yard at its listener stands no row.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_old_yard_says_so_in_the_pairing_pane_and_nowhere_else(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "DevicePairState",
+            r#"{"error": {"code": "error", "message": "no such method DevicePairState"}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().pairing_too_old());
+        });
+        assert_eq!(notice(&view, cx), "");
+        assert!(!drawn(cx, "pairing too old"));
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row pairing"));
+        click_on(cx, "row pairing");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Pairing));
+        assert!(drawn(cx, "pairing too old"));
+        assert_eq!(yard.asked("DevicePairState").len(), 1);
+        assert_eq!(notice(&view, cx), "");
+        to_chat(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// On a yard at an address, over the edge or paired direct, the
+    /// action is absent and no pairing call is sent: the pane is the
+    /// socket's, and a device token never opens a pairing.
+    #[gpui::test]
+    fn a_yard_at_an_address_shows_no_pairing_action_and_sends_no_pairing_call(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::fake::{Router, SESSION, TOKEN};
+
+        // Over the edge: the operator's window of a hosted yard.
+        let far = Yard::start_tcp();
+        a_yard_of_jo(&far);
+        let edge = Router::start(&far, SESSION);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(edge.client_with(TOKEN, SESSION), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the hosted yard's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row teammates"));
+        assert!(!drawn(cx, "row pairing"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert!(!model.pair_offered());
+            assert!(model.pairing().is_none());
+        });
+        assert!(far.asked("DevicePairState").is_empty());
+        assert!(far.asked("DevicePairOpen").is_empty());
+        assert!(far.asked("DevicePairClose").is_empty());
+        // A pairing's event reads the teammates, as ever, and no pairing.
+        let reads = far.asked("Teammates").len();
+        far.emit(r#"{"seq": 21, "kind": "device_added", "actor": "jo", "data": {"user": "jo", "device": "iphone"}}"#);
+        wait(cx, "the teammates read again", |_| {
+            far.asked("Teammates").len() == reads + 1
+        });
+        cx.run_until_parked();
+        assert!(far.asked("DevicePairState").is_empty());
+        assert_eq!(notice(&view, cx), "");
+
+        // Paired direct: the operator's window as the yard's device.
+        let dir = tempfile::tempdir().unwrap();
+        let far = Yard::start_tcp();
+        a_far_yard_of_jo(&far);
+        far.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            yards: vec![settings::Yard::far("far", far.address(), "yard-far.token")],
+            open: "far".to_string(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        yard::keep_token(
+            &dir.path().join("footplate/yard-far.token"),
+            crate::fake::TOKEN,
+        )
+        .unwrap();
+        let env = Env {
+            socket: dir.path().join("yard.sock"),
+            ..Env::default()
+        };
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "the far yard's conversation", |cx| {
+            texts(&view, cx) == ["From afar."]
+        });
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(!drawn(cx, "row pairing"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert!(!model.pair_offered());
+        });
+        assert!(far.asked("DevicePairState").is_empty());
+        assert!(far.asked("DevicePairOpen").is_empty());
+        assert!(far.asked("DevicePairClose").is_empty());
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// The pairing's QR string draws as a square PNG of dark modules on
+    /// a light ground: the same string draws the same bytes, and another
+    /// string another's.
+    #[test]
+    fn qr_png_draws_the_string_as_a_square_png() {
+        use super::asks::qr_png;
+        let qr = "https://edge.example.com#K7QM-2XPD#jo/edgeyard";
+        let png = qr_png(qr).unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        assert_eq!(image.width(), image.height());
+        assert!(image.width() > 0);
+        assert!(image.width() <= 240);
+        // The same string draws the same bytes; another draws another's.
+        assert_eq!(png, qr_png(qr).unwrap());
+        assert_ne!(
+            png,
+            qr_png("https://edge.example.com#AAAA-0000#jo/edgeyard").unwrap()
+        );
+        // Light ground at the corners, and dark modules within.
+        let gray = image.to_luma8();
+        assert_eq!(gray.get_pixel(0, 0).0, [255]);
+        assert_eq!(gray.get_pixel(image.width() - 1, 0).0, [255]);
+        assert!(gray.pixels().any(|pixel| pixel.0 == [0]));
     }
 
     /// The settings offer Telemetry to the operator on a yard that serves

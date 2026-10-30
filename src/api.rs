@@ -611,6 +611,32 @@ pub struct Uninvited {
     pub ask: u64,
 }
 
+/// The yard's open device pairing: the device, the code as it was shown
+/// when it opened, when it runs out, and the QR string a phone scans in
+/// place of typing. An opening answers it with no QR string, which a read
+/// of the state fills in; the state answers it whole. An empty QR string
+/// is a yard connected to no edge, whose code is typed.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct DevicePairing {
+    /// The user the pairing is for.
+    #[serde(default)]
+    pub user: String,
+    /// The device's name.
+    #[serde(default)]
+    pub device: String,
+    /// The code the device calls with, as `yardr user device pair` shows it.
+    #[serde(default)]
+    pub code: String,
+    /// When the code runs out, as an RFC 3339 time.
+    #[serde(default)]
+    pub expires: String,
+    /// What a QR code of the pairing holds: `<address>#<code>#<yard>`.
+    /// None where no state was read yet; empty while the yard is
+    /// connected to no edge.
+    #[serde(default)]
+    pub qr: Option<String>,
+}
+
 /// When one call of a grant was given and by whom, and the card it was
 /// approved on where it was: the bead, the ask and who asked it. Asker is
 /// empty where the ask's note is gone; it is never guessed.
@@ -3358,6 +3384,46 @@ impl Client {
         self.answer("UninviteTeammate", json!({ "user": user, "actor": actor }))
     }
 
+    /// Opens a pairing for the device `name` of `user`: the reply's code
+    /// is good for 10 minutes and for one device. A yard has one such
+    /// pairing open at a time: opening while one lives, for a user the
+    /// yard has not, or for a device the user has, is refused, as is a
+    /// name the yard will not pair. `actor` is the operator's name. The
+    /// operator's to open: the yard serves the call on its socket alone,
+    /// never to a device. The reply names no QR string: read the state
+    /// for it. When the call ends without a reply the pairing may have
+    /// opened: read the state, and never say it opened.
+    pub fn device_pair_open(&self, user: &str, name: &str, actor: &str) -> Result<DevicePairing> {
+        self.answer(
+            "DevicePairOpen",
+            json!({ "user": user, "name": name, "actor": actor }),
+        )
+    }
+
+    /// The yard's open device pairing back: the device, the code as it was
+    /// shown when it opened, when it runs out, and the QR string a phone
+    /// scans in place of typing. None is no pairing open. The operator's
+    /// to read: the yard serves the call on its socket alone, never to a
+    /// device.
+    pub fn device_pair_state(&self) -> Result<Option<DevicePairing>> {
+        let state: Result<DevicePairing> = self.answer("DevicePairState", json!({}));
+        match state {
+            Err(err) if err.not_found() => Ok(None),
+            result => result.map(Some),
+        }
+    }
+
+    /// Ends the yard's open device pairing: nothing is added, and the code
+    /// is good for nothing then. With no pairing open the error is
+    /// not-found. `actor` is the operator's name. The operator's to end:
+    /// the yard serves the call on its socket alone, never to a device.
+    /// When the call ends without a reply the pairing may have ended:
+    /// read the state, and never say it ended.
+    pub fn device_pair_close(&self, actor: &str) -> Result<()> {
+        self.call("DevicePairClose", json!({ "actor": actor }))
+            .map(drop)
+    }
+
     /// One bead whole: body, stage, labels, notes, its asks with their
     /// options, recommendation and state, and the about-beads.
     pub fn bead(&self, bead: &str) -> Result<Bead> {
@@ -3959,6 +4025,7 @@ const READS: &[&str] = &[
     "SessionScreen",
     "TelemetryShow",
     "Teammates",
+    "DevicePairState",
     "Bead",
     "Conversation",
 ];
@@ -7232,6 +7299,75 @@ mod tests {
         );
         assert_eq!(filed.bead.as_str(), "yd-uninvite");
         assert_eq!(filed.ask, 83);
+    }
+
+    #[test]
+    fn device_pair_open_names_the_user_and_the_device_and_answers_the_code() {
+        let yard = Yard::start();
+        yard.answer(
+            "DevicePairOpen",
+            r#"{"result": {"user": "jo", "device": "iphone", "state": "open",
+                "expires": "2026-10-30T12:30:00Z", "code": "K7QM-2XPD"}}"#,
+        );
+        let pairing = yard
+            .client()
+            .device_pair_open("jo", "iphone", "jo")
+            .unwrap();
+        assert_eq!(
+            yard.asked("DevicePairOpen"),
+            vec![json!({"user": "jo", "name": "iphone", "actor": "jo"})]
+        );
+        assert_eq!(pairing.user.as_str(), "jo");
+        assert_eq!(pairing.device.as_str(), "iphone");
+        assert_eq!(pairing.code.as_str(), "K7QM-2XPD");
+        assert_eq!(pairing.expires.as_str(), "2026-10-30T12:30:00Z");
+        // An opening names no QR string: the state is read for it.
+        assert_eq!(pairing.qr, None);
+    }
+
+    #[test]
+    fn device_pair_state_reads_the_pairing_whole_and_no_pairing_as_none() {
+        let yard = Yard::start();
+        yard.answer(
+            "DevicePairState",
+            r#"{"result": {"user": "jo", "device": "iphone", "state": "open",
+                "expires": "2026-10-30T12:30:00Z", "code": "K7QM-2XPD",
+                "qr": "https://edge.example.com#K7QM-2XPD#jo/edgeyard"}}"#,
+        );
+        let pairing = yard.client().device_pair_state().unwrap().unwrap();
+        assert_eq!(yard.asked("DevicePairState"), vec![json!({})]);
+        assert_eq!(pairing.user.as_str(), "jo");
+        assert_eq!(pairing.device.as_str(), "iphone");
+        assert_eq!(pairing.code.as_str(), "K7QM-2XPD");
+        assert_eq!(pairing.expires.as_str(), "2026-10-30T12:30:00Z");
+        assert_eq!(
+            pairing.qr.as_deref(),
+            Some("https://edge.example.com#K7QM-2XPD#jo/edgeyard")
+        );
+        // No pairing open is the yard's not-found, and reads as none.
+        yard.answer(
+            "DevicePairState",
+            r#"{"error": {"code": "not-found", "message": "an open device pairing: not found"}}"#,
+        );
+        assert!(yard.client().device_pair_state().unwrap().is_none());
+        // Any other refusal is an error still.
+        yard.answer(
+            "DevicePairState",
+            r#"{"error": {"code": "error", "message": "no such method DevicePairState"}}"#,
+        );
+        assert!(yard.client().device_pair_state().is_err());
+    }
+
+    #[test]
+    fn device_pair_close_names_the_actor() {
+        let yard = Yard::start();
+        yard.answer(
+            "DevicePairClose",
+            r#"{"result": {"user": "jo", "device": "iphone", "state": "ended",
+                "expires": "2026-10-30T12:30:00Z"}}"#,
+        );
+        yard.client().device_pair_close("jo").unwrap();
+        assert_eq!(yard.asked("DevicePairClose"), vec![json!({"actor": "jo"})]);
     }
 
     #[test]

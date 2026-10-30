@@ -59,7 +59,8 @@ use crate::yard::Env;
 /// station, the Lines pane against a yard too old
 /// to serve it, saying so in plain words, the grants view open on its
 /// row with a read, an update and an `--as` grant, and a source's named
-/// read call and update call, an open card of a
+/// read call and update call, the Pair a phone pane open on its row
+/// with a pairing's QR, code and minutes left, an open card of a
 /// secret ask posed
 /// with a value typed, hidden and shown, that card with the yard's
 /// refusal of its answer, the switcher's list open over four yards, one
@@ -158,6 +159,7 @@ pub const STATES: &[&str] = &[
     "flow",
     "old-lines",
     "grants",
+    "pairing",
     "secret",
     "secret-shown",
     "secret-refused",
@@ -977,6 +979,15 @@ fn populate(yard: &Yard, state: &str) {
         if state != "teammates-list" {
             yard.answer("Teammates", r#"{"result": []}"#);
         }
+        // The pairing every state loads: none open, but for the pairing
+        // state, which holds one for jo's iphone with its code, expiry
+        // and QR string.
+        if state != "pairing" {
+            yard.answer(
+                "DevicePairState",
+                r#"{"error": {"code": "not-found", "message": "an open device pairing: not found"}}"#,
+            );
+        }
     }
     match state {
         // The yard at an address is opened from the settings, not from
@@ -1201,6 +1212,26 @@ fn populate(yard: &Yard, state: &str) {
                             "bead": "yd-c546", "ask": 415, "asker": "yardmaster"}},
                      "kinds": {"customer": "read", "note": "update"}},
                 ]})
+                .to_string(),
+            );
+        }
+        "pairing" => {
+            // The Pair a phone pane open on its row: a pairing for jo's
+            // iphone with its code, an expiry ten minutes out, and the QR
+            // string a phone scans. No asks, so decisions opens on the
+            // pairing.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.answer("Conversation", r#"{"result": []}"#);
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            let ends = chrono::Utc::now() + Duration::seconds(630);
+            yard.answer(
+                "DevicePairState",
+                &json!({"result": {"user": "jo", "device": "iphone", "state": "open",
+                    "expires": ends.to_rfc3339(), "code": "K7QM-2XPD",
+                    "qr": "https://edge.example.com#K7QM-2XPD#jo/demo"}})
                 .to_string(),
             );
         }
@@ -3098,6 +3129,23 @@ mod tests {
                     assert_eq!(loaded.grants[3].kinds["note"], "update", "{state}");
                     assert_eq!(loaded.grants_notice, None, "{state}");
                     assert!(!loaded.grants_too_old, "{state}");
+                }
+                "pairing" => {
+                    // The pairing the pane opens on: jo's iphone with its
+                    // code, expiry and QR string. No asks, so decisions
+                    // opens on the pairing.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    assert_eq!(loaded.operator, "jo", "{state}");
+                    let pairing = loaded.pairing.as_ref().unwrap();
+                    assert_eq!(pairing.device, "iphone", "{state}");
+                    assert_eq!(pairing.code, "K7QM-2XPD", "{state}");
+                    assert_eq!(
+                        pairing.qr.as_deref(),
+                        Some("https://edge.example.com#K7QM-2XPD#jo/demo"),
+                        "{state}"
+                    );
+                    assert_eq!(loaded.pairing_notice, None, "{state}");
+                    assert!(!loaded.pairing_too_old, "{state}");
                 }
                 "screen" => {
                     // The captured pane the overlay opens with: the call

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use gpui::{
     AnyElement, Context, Div, Entity, Focusable, FontWeight, MouseButton, SharedString, Window,
-    div, prelude::*, px, relative, rems, rgba,
+    div, img, prelude::*, px, relative, rems, rgba,
 };
 
 use super::Expanded;
@@ -348,6 +348,40 @@ impl Footplate {
                 if asked == generation {
                     *read = Some(at);
                     this.change_in(session, cx, |_| vec![Effect::Asks]);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reads the pairing of the following `session` again when the open
+    /// one's code runs out: the yard ends a pairing whose time ran out on
+    /// whoever looks first, so the read flips the pane to no pairing with
+    /// Open again. Nothing waits where none is open, where its time cannot
+    /// be read, or where it ran out already. A timer whose pairing is gone
+    /// by then, or is another's (ended, opened again), reads nothing: each
+    /// read of a pairing waits its own, and only its own reads.
+    pub(crate) fn schedule_pairing_end_in(&mut self, session: u64, cx: &mut Context<Self>) {
+        let Some((code, wait)) = self.model_in(session).and_then(|m| {
+            let pairing = m.pairing()?;
+            let ends: chrono::DateTime<chrono::Utc> = pairing.expires.parse().ok()?;
+            let wait = ends.timestamp() - chrono::Utc::now().timestamp();
+            (wait > 0).then(|| (pairing.code.clone(), wait as u64 + 5))
+        }) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(wait))
+                .await;
+            this.update(cx, |this, cx| {
+                let held = this
+                    .model_in(session)
+                    .and_then(|m| m.pairing())
+                    .is_some_and(|pairing| pairing.code == code);
+                if held {
+                    this.run_in(session, vec![Effect::Pairing], cx);
                 }
             })
             .ok();
@@ -826,6 +860,98 @@ impl Footplate {
                         if reread {
                             this.run_in(session, vec![Effect::Asks], cx);
                         }
+                    }
+                }
+            },
+        );
+    }
+
+    /// Opens a pairing for the device the pane's field names, for the
+    /// window's own user: the terminal's `yardr user device pair` in the
+    /// window. The opening answers the code and its expiry; the state is
+    /// read for the QR string, and the pane shows all three. A refusal,
+    /// a second opening while one lives or a name the yard will not
+    /// pair, stands as the pane's line. A call that ended without an
+    /// answer is never said to be open or not: the state is read again,
+    /// and the pane says which. Nothing is opened where the pane is not
+    /// offered, while one is away, or with no name typed.
+    pub(crate) fn open_phone_pairing(&mut self, cx: &mut Context<Self>) {
+        let session = self.session;
+        if self.pairing_opening || self.pairing_ending {
+            return;
+        }
+        let offered = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.pair_offered() && !m.pairing_too_old() && m.pairing().is_none());
+        if !offered {
+            return;
+        }
+        let name = self.device_name.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.pairing_opening = true;
+        cx.notify();
+        // The opening is the yard's it was pressed in: what came of it is
+        // that yard's, and is said there, wherever the window is by then.
+        self.ask_in(
+            session,
+            cx,
+            move |client, me| client.device_pair_open(me, &name, me),
+            move |this, opened, cx| {
+                this.pairing_opening = false;
+                match opened {
+                    Ok(pairing) => {
+                        this.device_name
+                            .update(cx, |line, cx| line.set_text("", cx));
+                        this.change_in(session, cx, |m| m.pairing_opened(pairing));
+                        this.schedule_pairing_end_in(session, cx);
+                    }
+                    Err(err) => {
+                        this.change_in(session, cx, |m| m.pairing_open_failed(&err));
+                    }
+                }
+            },
+        );
+    }
+
+    /// Ends the yard's open pairing: nothing is added, and the code is
+    /// good for nothing then. The pane offers Open again. A refusal
+    /// stands as the pane's line. A call that ended without an answer is
+    /// never said to be ended or not: the state is read again, and the
+    /// pane says which. Nothing is ended where none is open, or while
+    /// one is away.
+    pub(crate) fn close_phone_pairing(&mut self, cx: &mut Context<Self>) {
+        let session = self.session;
+        if self.pairing_opening || self.pairing_ending {
+            return;
+        }
+        let open = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.pair_offered() && m.pairing().is_some());
+        if !open {
+            return;
+        }
+        self.pairing_ending = true;
+        cx.notify();
+        // The ending is the yard's it was pressed in, as an opening is.
+        self.ask_in(
+            session,
+            cx,
+            |client, me| client.device_pair_close(me),
+            move |this, ended, cx| {
+                this.pairing_ending = false;
+                match ended {
+                    Ok(()) => {
+                        this.change_in(session, cx, |m| {
+                            m.pairing_closed();
+                            Vec::new()
+                        });
+                    }
+                    Err(err) => {
+                        this.change_in(session, cx, |m| m.pairing_close_failed(&err));
                     }
                 }
             },
@@ -1998,6 +2124,9 @@ impl Footplate {
             body = body.child(self.grants_row(model, palette, cx));
             body = body.child(self.teammates_row(model, palette, cx));
         }
+        if model.pair_offered() {
+            body = body.child(self.pairing_row(model, palette, cx));
+        }
         self.column(body, palette, top, cx)
     }
 
@@ -2275,6 +2404,57 @@ impl Footplate {
                     .text_color(palette.faint)
                     .truncate()
                     .debug_selector(|| "teammates sub".to_string())
+                    .child(sub),
+            )
+    }
+
+    /// The pairing row, last of decisions where the window runs as
+    /// the yard's operator on its machine: the device a pairing is open
+    /// for, or that none is, or that the yard is too old to say.
+    pub(crate) fn pairing_row(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let selected = model.selected() == Some(&Selected::Pairing);
+        let sub = match (model.pairing_too_old(), model.pairing()) {
+            (true, _) => "yard too old".to_string(),
+            (false, Some(pairing)) => format!("open for {}", model::plain(&pairing.device)),
+            (false, None) => "no pairing open".to_string(),
+        };
+        div()
+            .id("row pairing")
+            .debug_selector(|| "row pairing".to_string())
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .flex_col()
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
+            .when(selected, |el| el.bg(palette.open))
+            .when(!selected, |el| {
+                el.hover(|style| style.border_color(palette.line))
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.select(Selected::Pairing, window, cx)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .debug_selector(|| "pairing head".to_string())
+                    .child(div().flex_1().truncate().child("Pair a phone")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .truncate()
+                    .debug_selector(|| "pairing sub".to_string())
                     .child(sub),
             )
     }
@@ -4426,6 +4606,261 @@ impl Footplate {
                     .child(model::teammate_state(teammate)),
             )
     }
+
+    /// The Pair a phone pane: the device's name with Open where no
+    /// pairing is open, and the open pairing's QR, code and minutes
+    /// left with End where one is. A yard too old for the calls says
+    /// so, in plain words.
+    pub(crate) fn talk_pairing(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        if model.pairing_too_old() {
+            return pane
+                .children(self.reconnect_strip(palette))
+                .child(
+                    div().p_3().border_b_1().border_color(palette.line).child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Pair a phone"),
+                    ),
+                )
+                .child(
+                    div().flex_1().min_h_0().p_4().child(
+                        div()
+                            .debug_selector(|| "pairing too old".to_string())
+                            .text_color(palette.faint)
+                            .child(model::PAIRING_TOO_OLD),
+                    ),
+                );
+        }
+        let summary = match model.pairing() {
+            Some(pairing) => format!("open for {}", model::plain(&pairing.device)),
+            None => "no pairing open".to_string(),
+        };
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .debug_selector(|| "pairing head".to_string())
+                    .child("Pair a phone"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "pairing summary".to_string())
+                    .child(summary),
+            );
+        let mut body = div()
+            .id("pairing")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
+        match model.pairing() {
+            Some(pairing) => body = body.child(self.pairing_open(pairing, palette, cx)),
+            None => body = body.child(self.pairing_form(palette, cx)),
+        }
+        if !model.pairing_line().is_empty() {
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(palette.warn)
+                    .debug_selector(|| "pairing line".to_string())
+                    .child(model.pairing_line().to_string()),
+            );
+        }
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(body)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// The open pairing: its QR for a phone to scan, its code as text,
+    /// and the minutes the code is good for, with End. Where the yard
+    /// names no address the QR is empty, and the code is typed. Where
+    /// the state was not read yet the QR is still away.
+    fn pairing_open(
+        &self,
+        pairing: &api::DevicePairing,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let mut open = div().flex().flex_col().gap_3();
+        match pairing.qr.as_deref() {
+            Some(qr) if !qr.is_empty() => match qr_png(qr) {
+                Some(png) => {
+                    let image =
+                        std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png));
+                    let faint = palette.faint;
+                    open = open.child(
+                        img(image)
+                            .w(px(240.))
+                            .h(px(240.))
+                            .debug_selector(|| "pairing qr".to_string())
+                            .with_fallback(move || {
+                                div()
+                                    .text_sm()
+                                    .text_color(faint)
+                                    .child("the QR would not draw: type the code")
+                                    .into_any_element()
+                            }),
+                    );
+                }
+                None => {
+                    open = open.child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .debug_selector(|| "pairing qr unreadable".to_string())
+                            .child("the QR would not draw: type the code"),
+                    );
+                }
+            },
+            Some(_) => {
+                open = open.child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .debug_selector(|| "pairing no address".to_string())
+                        .child("this yard names no address: type the code"),
+                );
+            }
+            None => {
+                open = open.child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .debug_selector(|| "pairing qr waiting".to_string())
+                        .child("reading the QR…"),
+                );
+            }
+        }
+        let code = pairing.code.clone();
+        open = open.child(
+            div()
+                .debug_selector(|| "pairing code".to_string())
+                .child(select::text(
+                    select::key(("pairing", "code", pairing.code.as_str())),
+                    fenced(&code),
+                    &self.selection,
+                )),
+        );
+        open = open.child(
+            div()
+                .text_sm()
+                .text_color(palette.faint)
+                .debug_selector(|| "pairing left".to_string())
+                .child(model::pairing_left(&pairing.expires, &chrono::Utc::now())),
+        );
+        if self.pairing_ending {
+            open = open.child(
+                div()
+                    .flex()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "pairing ending".to_string())
+                    .child("Ending…"),
+            );
+        } else {
+            open = open.child(
+                div().flex().child(
+                    small_button("End".to_string(), palette)
+                        .id("pairing end")
+                        .debug_selector(|| "pairing end".to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.close_phone_pairing(cx))),
+                ),
+            );
+        }
+        open
+    }
+
+    /// The form where no pairing is open: the device's name with Open.
+    /// Open is dimmed with no name typed, and while an opening is away.
+    fn pairing_form(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let focus = self.device_name.focus_handle(cx);
+        let mut form = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(rems(5.)).flex_none().child("device"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .max_w(rems(28.))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(palette.line)
+                            .bg(palette.side)
+                            .id("pairing name")
+                            .debug_selector(|| "pairing name".to_string())
+                            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                window.focus(&focus);
+                                window.prevent_default();
+                            })
+                            .child(self.device_name.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "pairing help".to_string())
+                    .child("names the phone: Open shows its code and QR for 10 minutes"),
+            );
+        if self.pairing_opening {
+            form = form.child(
+                div()
+                    .flex()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "pairing opening".to_string())
+                    .child("Opening…"),
+            );
+        } else {
+            let empty = self.device_name.read(cx).text().trim().is_empty();
+            let click = (!empty).then(|| cx.listener(|this, _, _, cx| this.open_phone_pairing(cx)));
+            let mut open = small_button("Open".to_string(), palette)
+                .id("pairing open")
+                .debug_selector(|| "pairing open".to_string())
+                .when(empty, |el| el.opacity(0.5));
+            if let Some(click) = click {
+                open = open.on_click(click);
+            }
+            form = form.child(div().flex().child(open));
+        }
+        form
+    }
 }
 
 /// A field of a yard that is asked for, with its name beside it: the
@@ -4488,6 +4923,31 @@ pub(crate) fn yard_help(text: String, palette: Palette) -> Div {
         .text_sm()
         .text_color(palette.faint)
         .child(text)
+}
+
+/// The QR string `qr` as a PNG of dark modules on a light ground:
+/// what the Pair a phone pane draws for a phone to scan. Scanners read
+/// dark on light, so the colours are black and white in both themes.
+/// None where the string is no QR code's.
+pub(crate) fn qr_png(qr: &str) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    let code = qrcode::QrCode::new(qr.as_bytes()).ok()?;
+    let image = code
+        .render::<image::Luma<u8>>()
+        .dark_color(image::Luma([0]))
+        .light_color(image::Luma([255]))
+        .max_dimensions(240, 240)
+        .build();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            &image,
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::L8,
+        )
+        .ok()?;
+    (!png.is_empty()).then_some(png)
 }
 
 /// The directory `dir` as a `file:` URL, for the settings footer's

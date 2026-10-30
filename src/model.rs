@@ -8,14 +8,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, AskWeight, Asks, Bead, BeadAsk, BeadNote, BlobRef,
-    CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven, Identity, Letter,
-    Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant, Teammate,
-    TelemetryPreview, Uninvited, User,
+    CrewMember, DecidedAsk, DevicePairing, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven,
+    Identity, Letter, Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup,
+    SourceGrant, Teammate, TelemetryPreview, Uninvited, User,
 };
 use crate::markdown;
 use crate::select;
@@ -103,6 +103,20 @@ pub struct State {
     /// The yard has no Teammates call: one from before the teammates
     /// view. The teammates pane says so, and no notice is raised.
     pub teammates_too_old: bool,
+    /// The yard is on this machine, reached by its socket: the Pair a
+    /// phone pane is offered where it is and the window is the
+    /// operator's, and the pairing calls are made nowhere else. A device
+    /// token never opens a pairing.
+    pub near: bool,
+    /// The yard's open device pairing, as read: empty where the window
+    /// is not offered the pane, which reads none.
+    pub pairing: Option<DevicePairing>,
+    /// Why the pairing is empty, in the window's words; `None` where it
+    /// was read.
+    pub pairing_notice: Option<String>,
+    /// The yard has no pairing calls: one from before the Pair a phone
+    /// pane. The pane says so, and no notice is raised.
+    pub pairing_too_old: bool,
     /// The yard serves the grant list to no device that comes down the
     /// link from its edge: it is read on the yard's machine. The grants
     /// pane says so, and the call is not made, nor a notice raised.
@@ -396,9 +410,9 @@ pub enum Target {
 }
 
 /// What the left list has open: a bead with open asks, one dealt with,
-/// the grants, the teammates, a conversation, what the yard reports, the
-/// arrivals board, a line's flows, the beads with no line, or one
-/// travelling bead whole.
+/// the grants, the teammates, the pairing, a conversation, what the yard
+/// reports, the arrivals board, a line's flows, the beads with no line,
+/// or one travelling bead whole.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selected {
     /// A bead with open asks, by its id. A bead with several is one row.
@@ -412,6 +426,11 @@ pub enum Selected {
     /// operator's window alone. It has a row where the window is the
     /// operator's, beside the grants'.
     Teammates,
+    /// The pairing: a code and a QR for a phone, for the operator's
+    /// window on the yard's own machine alone. It has a row where the
+    /// window is the operator's and the yard is near, beside the
+    /// teammates'.
+    Pairing,
     /// A conversation, by crew name, user name or `<name>@<peer>`.
     Conversation(String),
     Yard,
@@ -432,15 +451,16 @@ pub enum Selected {
 impl Selected {
     /// The mode whose list holds the row: the conversations and the yard
     /// row are chat's, the beads with open asks, the dealt with, the
-    /// grants and the teammates are decisions', the timetable's rows and
-    /// a travelling bead timetable's.
+    /// grants, the teammates and the pairing are decisions', the
+    /// timetable's rows and a travelling bead timetable's.
     pub fn mode(&self) -> Mode {
         match self {
             Selected::Conversation(_) | Selected::Yard => Mode::Chat,
             Selected::Decision(_)
             | Selected::Decided(_, _)
             | Selected::Grants
-            | Selected::Teammates => Mode::Decisions,
+            | Selected::Teammates
+            | Selected::Pairing => Mode::Decisions,
             Selected::Arrivals | Selected::Line(_) | Selected::NoLine | Selected::Bead(_) => {
                 Mode::Timetable
             }
@@ -900,6 +920,8 @@ pub enum Effect {
     Grants,
     /// `Teammates`; answered to [`Model::teammates`].
     Teammates,
+    /// `DevicePairState`; answered to [`Model::pairing_read`].
+    Pairing,
     /// `TelemetryShow`; answered to [`Model::telemetry`].
     Telemetry,
     /// Which of the person's beads were added or closed after `from`
@@ -932,6 +954,7 @@ pub enum Read {
     Flows,
     Grants,
     Teammates,
+    Pairing,
     Telemetry,
 }
 
@@ -948,6 +971,7 @@ impl Read {
             Read::Flows => Effect::Flows,
             Read::Grants => Effect::Grants,
             Read::Teammates => Effect::Teammates,
+            Read::Pairing => Effect::Pairing,
             Read::Telemetry => Effect::Telemetry,
         }
     }
@@ -1129,6 +1153,22 @@ pub struct Model {
     /// Teammates read again clear it, as ones read at the start never
     /// set it.
     teammates_too_old: bool,
+    /// The yard is on this machine, reached by its socket: the Pair a
+    /// phone pane is offered where it is and the window is the
+    /// operator's, and the pairing calls are made nowhere else.
+    near: bool,
+    /// The yard's open device pairing, as read: none where none is open,
+    /// and where the window is not offered the pane, which reads none.
+    pairing: Option<DevicePairing>,
+    /// The yard has no pairing calls: one from before the Pair a phone
+    /// pane. The pane says so, and no notice is raised. A pairing read
+    /// again clears it, as one read at the start never sets it.
+    pairing_too_old: bool,
+    /// What the Pair a phone pane says under its form or its code: a
+    /// refusal of an opening or an ending, in the yard's words, or that
+    /// the yard did not answer. Empty where nothing of the sort was
+    /// last said.
+    pairing_line: String,
     /// The grants are read on the yard's machine, since the yard serves
     /// them down no link: the pane says so, and no call is made for them.
     /// A window reached by the edge starts so; a refusal that says the
@@ -1345,6 +1385,9 @@ impl Model {
             grants_too_old: state.grants_too_old,
             teammates: state.teammates,
             teammates_too_old: state.teammates_too_old,
+            near: state.near,
+            pairing: state.pairing,
+            pairing_too_old: state.pairing_too_old,
             grants_on_the_yard: state.grants_on_the_yard,
             screen_on_the_yard: state.screen_on_the_yard,
             telemetry: state.telemetry,
@@ -1582,7 +1625,8 @@ impl Model {
 
     /// Whether the window is the operator's: it runs as the yard's
     /// operator, who alone is offered the grants view, the teammates
-    /// view and the Telemetry section. A yard that names no operator
+    /// view, the pairing pane and the Telemetry section. A yard that
+    /// names no operator
     /// offers them to no one.
     pub fn is_operator(&self) -> bool {
         !self.operator.is_empty() && self.me == self.operator
@@ -1753,8 +1797,9 @@ impl Model {
     /// Every row of one mode's list from the top: the conversations and
     /// the yard row in chat, the beads with open asks with the dealt with
     /// when "Decided" stands open and the grants with the teammates last
-    /// where the window is the operator's in decisions, the arrivals row,
-    /// the lines in the served order and No line last in timetable, while
+    /// where the window is the operator's in decisions, with the pairing
+    /// after them where the yard is near too, the arrivals row, the
+    /// lines in the served order and No line last in timetable, while
     /// unassigned beads travel. A travelling bead is open from the board,
     /// a flow, Elsewhere or No line, and has no row here.
     fn order_in(&self, mode: Mode) -> Vec<Selected> {
@@ -1780,6 +1825,9 @@ impl Model {
                 if self.is_operator() {
                     out.push(Selected::Grants);
                     out.push(Selected::Teammates);
+                    if self.near {
+                        out.push(Selected::Pairing);
+                    }
                 }
             }
             Mode::Timetable => {
@@ -2352,6 +2400,110 @@ impl Model {
             }
             false => {
                 self.notice = format!("the teammates could not be read: {err}");
+            }
+        }
+    }
+
+    /// Whether decisions offer the Pair a phone row: the window runs as
+    /// the yard's operator, on the yard's own machine. A yard at an
+    /// address, and a window that is not the operator's, are offered no
+    /// row, and no pairing call is made for them. A read that failed is
+    /// offered still, and so is a yard without the calls, whose pane
+    /// says it is too old.
+    pub fn pair_offered(&self) -> bool {
+        self.is_operator() && self.near
+    }
+
+    /// The yard's open device pairing, as read: none where none is open.
+    pub fn pairing(&self) -> Option<&DevicePairing> {
+        self.pairing.as_ref()
+    }
+
+    /// What the Pair a phone pane says under its form or its code: a
+    /// refusal of an opening or an ending, or that the yard did not
+    /// answer. Empty where nothing of the sort was last said.
+    pub fn pairing_line(&self) -> &str {
+        &self.pairing_line
+    }
+
+    /// Whether the yard has no pairing calls: one from before the Pair
+    /// a phone pane, which the pane says.
+    pub fn pairing_too_old(&self) -> bool {
+        self.pairing_too_old
+    }
+
+    /// The pairing as read again: the open one, or none where none is
+    /// open. The yard has the calls, so it is not too old for them. A
+    /// read clears the pane's line: the pane says what is, not what a
+    /// call before it was refused for.
+    pub fn pairing_read(&mut self, pairing: Option<DevicePairing>) {
+        self.pairing = pairing;
+        self.pairing_too_old = false;
+        self.pairing_line.clear();
+    }
+
+    /// The pairing could not be read again. A yard without the calls
+    /// has none to show: the pane says it is too old, and no notice is
+    /// raised. Anything else is said as a notice, as ever, and what the
+    /// pane showed stands.
+    pub fn pairing_failed(&mut self, err: &api::Error) {
+        match pairing_too_old(err) {
+            true => {
+                self.pairing = None;
+                self.pairing_too_old = true;
+            }
+            false => {
+                self.notice = format!("the pairing could not be read: {err}");
+            }
+        }
+    }
+
+    /// A pairing opened: what the yard answered, with its code and
+    /// expiry and no QR string yet. The state is read for the string,
+    /// which names the yard's address.
+    pub fn pairing_opened(&mut self, pairing: DevicePairing) -> Vec<Effect> {
+        self.pairing = Some(pairing);
+        self.pairing_too_old = false;
+        self.pairing_line.clear();
+        vec![Effect::Pairing]
+    }
+
+    /// An opening the yard refused, or that ended without an answer. A
+    /// refusal stands as the pane's line, in the yard's words. One that
+    /// may have opened after all is never said to be open or not: the
+    /// state is read again, and the pane says which.
+    pub fn pairing_open_failed(&mut self, err: &api::Error) -> Vec<Effect> {
+        match pairing_unknown(err) {
+            true => {
+                self.pairing_line = NOT_ANSWERED_READ_PAIRING.to_string();
+                vec![Effect::Pairing]
+            }
+            false => {
+                self.pairing_line = not_opened(err);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The pairing ended: none is open, and the pane offers Open again.
+    pub fn pairing_closed(&mut self) {
+        self.pairing = None;
+        self.pairing_line.clear();
+    }
+
+    /// An ending the yard refused, or that ended without an answer. A
+    /// refusal stands as the pane's line, in the yard's words. One that
+    /// may have ended after all is never said to be ended or not: the
+    /// state is read again, and the pane says which.
+    pub fn pairing_close_failed(&mut self, err: &api::Error) -> Vec<Effect> {
+        match pairing_unknown(err) {
+            true => {
+                self.pairing_line = NOT_ANSWERED_READ_PAIRING.to_string();
+                vec![Effect::Pairing]
+            }
+            false => {
+                self.pairing_line = not_ended(err);
+                Vec::new()
             }
         }
     }
@@ -4538,9 +4690,9 @@ impl Model {
     /// notices need no call. A bead, one dealt with and one travelling
     /// bead read the bead whole when it was not read before. The grants
     /// are read again whenever their row opens, so a revoke, which the
-    /// yard tells no event of, is seen, and the teammates whenever
-    /// theirs opens. The board, a line and No line need no call: their
-    /// rows came with the state, and events re-read them.
+    /// yard tells no event of, is seen, and the teammates and the pairing
+    /// whenever theirs opens. The board, a line and No line need no call:
+    /// their rows came with the state, and events re-read them.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
             Some(sel @ Selected::Conversation(_)) => {
@@ -4585,6 +4737,11 @@ impl Model {
             },
             Some(Selected::Teammates) => match self.is_operator() {
                 true if !self.teammates_too_old => vec![Effect::Teammates],
+                false => Vec::new(),
+                true => Vec::new(),
+            },
+            Some(Selected::Pairing) => match self.pair_offered() {
+                true if !self.pairing_too_old => vec![Effect::Pairing],
                 false => Vec::new(),
                 true => Vec::new(),
             },
@@ -4984,12 +5141,19 @@ impl Model {
             }
             // A teammate added, changed or paired: the event carries less
             // than what changed, so the teammates are read again, where
-            // the window is the operator's.
+            // the window is the operator's. A pairing opened, used or
+            // refused elsewhere arrives as one of these too, so the
+            // pairing is read again beside them, where its pane is
+            // offered.
             kind if kind.starts_with("user_") || kind.starts_with("device_") => {
-                match self.is_operator() {
-                    true => vec![Effect::Teammates],
-                    false => Vec::new(),
+                let mut effects = Vec::new();
+                if self.is_operator() {
+                    effects.push(Effect::Teammates);
                 }
+                if self.pair_offered() {
+                    effects.push(Effect::Pairing);
+                }
+                effects
             }
             kind if kind.starts_with("peer_") => self.link(e),
             // The operator is the only person whose device may read the
@@ -5004,6 +5168,9 @@ impl Model {
                 self.grants_too_old = false;
                 self.teammates.clear();
                 self.teammates_too_old = false;
+                self.pairing = None;
+                self.pairing_too_old = false;
+                self.pairing_line.clear();
                 // A former operator's window keeps none of the preview.
                 // Unserved stays as it was: a yard that serves the calls
                 // to no such window is not asked for them on a change of
@@ -5014,10 +5181,14 @@ impl Model {
                 if self.is_operator() {
                     let mut effects = self.read_grants();
                     effects.push(Effect::Teammates);
+                    if self.pair_offered() && !self.pairing_too_old {
+                        effects.push(Effect::Pairing);
+                    }
                     effects.extend(self.read_telemetry());
                     effects
                 } else if self.selected == Some(Selected::Grants)
                     || self.selected == Some(Selected::Teammates)
+                    || self.selected == Some(Selected::Pairing)
                 {
                     self.selected = self.row_in(Mode::Decisions, None);
                     self.opened();
@@ -6166,6 +6337,21 @@ pub fn teammates_too_old(err: &api::Error) -> bool {
 pub const TEAMMATES_TOO_OLD: &str =
     "this yard's yardr is older than the teammates view (it needs yardr from 28 Oct 2026 or later)";
 
+/// Whether the yard has no pairing calls: one from before the Pair a
+/// phone pane, which says it has no such method. That is no error: the
+/// pane says the yard is too old, in plain words, and no notice is
+/// raised. Its words are read here, as above, and when they change this
+/// is shown as any refusal.
+pub fn pairing_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
+/// What the Pair a phone pane says of a yard from before the pairing
+/// view, in place of the pairing it would show: plain words, never the
+/// wire's method name, and never in red.
+pub const PAIRING_TOO_OLD: &str =
+    "this yard's yardr is older than the pairing view (it needs yardr from 30 Oct 2026 or later)";
+
 /// Whether the yard refused a session's screen because the request came
 /// down the link from its edge: it reads none to a device that comes so,
 /// whoever holds it. That is no fault of the device's, whatever the rest of
@@ -6634,6 +6820,75 @@ pub fn not_filed(err: &api::Error) -> String {
         } => "the yard did not answer; read the queue again".to_string(),
         err if err.may_have_run() => "the yard did not answer; read the queue again".to_string(),
         _ => format!("not filed: {err}"),
+    }
+}
+
+/// What the Pair a phone pane says of an opening or an ending that
+/// ended without an answer after it may have run: the pairing is read
+/// again, and the pane says whether one is open.
+pub const NOT_ANSWERED_READ_PAIRING: &str = "the yard did not answer; read the pairing again";
+
+/// Whether a pairing's opening or ending ended without an answer after
+/// it may have run: the pairing is read again, and the pane says
+/// whether one is open. A call that sent nothing, and a refusal, read
+/// nothing again.
+pub fn pairing_unknown(err: &api::Error) -> bool {
+    matches!(
+        err,
+        api::Error::Down(_)
+            | api::Error::Protocol(_)
+            | api::Error::Slow {
+                idempotent: false,
+                sent: true
+            }
+    ) || err.may_have_run()
+}
+
+/// Why a pairing was not opened, as the pane's line says it. A call
+/// that sent nothing says so, and is opened again; one that ended
+/// without an answer after it may have run reads the pairing again,
+/// and is never said to be open or not. A refusal is the yard's
+/// words, whole.
+pub fn not_opened(err: &api::Error) -> String {
+    match err {
+        api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        } => "the yard did not answer; nothing was opened. Open it again.".to_string(),
+        unknown if pairing_unknown(unknown) => NOT_ANSWERED_READ_PAIRING.to_string(),
+        _ => format!("not opened: {err}"),
+    }
+}
+
+/// Why a pairing was not ended, as the pane's line says it. A call
+/// that sent nothing says so, and is ended again; one that ended
+/// without an answer after it may have run reads the pairing again,
+/// and is never said to be ended or not. A refusal is the yard's
+/// words, whole.
+pub fn not_ended(err: &api::Error) -> String {
+    match err {
+        api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        } => "the yard did not answer; nothing was ended. End it again.".to_string(),
+        unknown if pairing_unknown(unknown) => NOT_ANSWERED_READ_PAIRING.to_string(),
+        _ => format!("not ended: {err}"),
+    }
+}
+
+/// How long a pairing's code is good for, as the pane says it: the
+/// minutes between `now` and `expires`. Under a minute is less than a
+/// minute, and once the time ran out the code ran out. Empty for a
+/// time that cannot be read.
+pub fn pairing_left<Tz: TimeZone>(expires: &str, now: &DateTime<Tz>) -> String {
+    let Ok(ends) = expires.parse::<DateTime<Utc>>() else {
+        return String::new();
+    };
+    match ends.timestamp() - now.timestamp() {
+        left if left <= 0 => "the code ran out".to_string(),
+        left if left < 60 => "less than a minute left".to_string(),
+        left if left < 120 => "1 minute left".to_string(),
+        left => format!("{} minutes left", left / 60),
     }
 }
 
@@ -12195,6 +12450,295 @@ mod tests {
         };
         assert!(m.event(&changed).contains(&Effect::Teammates));
         assert!(m.is_operator());
+    }
+
+    /// The Pair a phone pane is the operator's on the yard's own machine
+    /// alone: its row stands last of decisions, after the teammates',
+    /// where the window runs as the yard's operator and the yard is near,
+    /// and nowhere else. Opening it reads the pairing again; a pairing
+    /// opened, used or refused elsewhere arrives as a user or device
+    /// event, which reads it again too.
+    #[test]
+    fn the_pairing_row_stands_for_the_operator_on_a_near_yard_and_reads_again() {
+        // Not the operator's: no row, no read, near or far.
+        for near in [false, true] {
+            let mut state = yard(&[]);
+            state.near = near;
+            let (mut m, _) = Model::new(state, Mode::Decisions, None);
+            assert!(!m.is_operator());
+            assert!(!m.pair_offered());
+            assert!(!m.order_in(Mode::Decisions).contains(&Selected::Pairing));
+            assert_eq!(m.select(Selected::Pairing), Vec::new());
+            assert_ne!(m.selected(), Some(&Selected::Pairing));
+        }
+
+        // The operator's, but the yard is at an address: no row, no read.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(m.is_operator());
+        assert!(!m.pair_offered());
+        assert!(!m.order_in(Mode::Decisions).contains(&Selected::Pairing));
+        assert_eq!(m.select(Selected::Pairing), Vec::new());
+        assert_ne!(m.selected(), Some(&Selected::Pairing));
+
+        // The operator's on the yard's own machine: the row stands last,
+        // after the teammates', and selecting it reads.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.near = true;
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(m.pair_offered());
+        let order = m.order_in(Mode::Decisions);
+        assert!(order.ends_with(&[Selected::Grants, Selected::Teammates, Selected::Pairing]));
+        assert_eq!(m.select(Selected::Pairing), vec![Effect::Pairing]);
+        assert_eq!(m.selected(), Some(&Selected::Pairing));
+
+        // A yard without the calls keeps the row, which says the yard is
+        // too old, and selecting it reads nothing.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.near = true;
+        state.pairing_too_old = true;
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(m.pair_offered());
+        assert!(
+            m.order_in(Mode::Decisions)
+                .ends_with(&[Selected::Teammates, Selected::Pairing])
+        );
+        assert_eq!(m.select(Selected::Pairing), Vec::new());
+        assert_eq!(m.selected(), Some(&Selected::Pairing));
+
+        // A pairing's event reads the pairing again beside the teammates,
+        // where the pane is offered, and nothing where it is not. A
+        // removal reads the linked yards too, as ever, and no pairing: no
+        // user removed ends one.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.near = true;
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        let event = |kind: &str| Event {
+            seq: 21,
+            kind: kind.into(),
+            ..Default::default()
+        };
+        for kind in [
+            "user_added",
+            "device_added",
+            "device_pair_opened",
+            "device_pair_refused",
+        ] {
+            assert_eq!(
+                m.event(&event(kind)),
+                vec![Effect::Teammates, Effect::Pairing],
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            m.event(&event("user_removed")),
+            vec![Effect::Peers, Effect::Teammates]
+        );
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        for kind in ["user_added", "device_added", "device_pair_opened"] {
+            assert_eq!(m.event(&event(kind)), vec![Effect::Teammates], "{kind}");
+        }
+
+        // Changing the operator clears the pairing at once. The old
+        // operator's selected pane closes, and a newly named operator
+        // reads the pairing for their own window where the yard is near.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.near = true;
+        state.pairing = Some(DevicePairing {
+            device: "iphone".into(),
+            code: "K7QM-2XPD".into(),
+            ..Default::default()
+        });
+        let (mut m, _) = Model::new(state, Mode::Decisions, Some(Selected::Pairing));
+        let changed = Event {
+            seq: 22,
+            kind: "setting_changed".into(),
+            data: serde_json::json!({"key": "operator", "value": "ada"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert!(!m.event(&changed).contains(&Effect::Pairing));
+        assert!(!m.is_operator());
+        assert!(m.pairing().is_none());
+        assert!(m.pairing_line().is_empty());
+        assert_ne!(m.selected(), Some(&Selected::Pairing));
+        assert!(!m.order_in(Mode::Decisions).contains(&Selected::Pairing));
+
+        let mut state = yard(&[]);
+        state.operator = "ada".into();
+        state.near = true;
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        let changed = Event {
+            seq: 23,
+            kind: "setting_changed".into(),
+            data: serde_json::json!({"key": "operator", "value": "jo"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert!(m.event(&changed).contains(&Effect::Pairing));
+        assert!(m.is_operator());
+
+        // Where the yard is at an address, a newly named operator reads
+        // no pairing either.
+        let mut state = yard(&[]);
+        state.operator = "ada".into();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(!m.event(&changed).contains(&Effect::Pairing));
+        assert!(m.is_operator());
+    }
+
+    /// An opening answers the pairing and reads the state for its QR
+    /// string; an ending clears it, and the pane offers Open again. A
+    /// refusal of either stands as the pane's line, in the yard's words;
+    /// a call that ended without an answer after it may have run reads
+    /// the pairing again, and is never said to be open or ended.
+    #[test]
+    fn an_opening_and_an_ending_say_the_yard_s_words_and_reread_what_may_have_run() {
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.near = true;
+        let (mut m, _) = Model::new(state, Mode::Decisions, Some(Selected::Pairing));
+        assert!(m.pairing().is_none());
+
+        // An opening answers the code with no QR string yet; the state is
+        // read for the string.
+        let opened = DevicePairing {
+            user: "jo".into(),
+            device: "iphone".into(),
+            code: "K7QM-2XPD".into(),
+            expires: "2026-10-30T12:30:00Z".into(),
+            qr: None,
+        };
+        assert_eq!(m.pairing_opened(opened.clone()), vec![Effect::Pairing]);
+        assert_eq!(m.pairing(), Some(&opened));
+        assert!(m.pairing_line().is_empty());
+
+        // The state read again carries the QR string, and clears the line.
+        let read = DevicePairing {
+            qr: Some("https://edge.example.com#K7QM-2XPD#jo/edgeyard".into()),
+            ..opened.clone()
+        };
+        m.pairing_read(Some(read.clone()));
+        assert_eq!(m.pairing(), Some(&read));
+        assert!(!m.pairing_too_old());
+
+        // An ending clears the pairing, and the pane offers Open again.
+        m.pairing_closed();
+        assert!(m.pairing().is_none());
+        assert!(m.pairing_line().is_empty());
+
+        // A refusal says why and opens nothing; a call that ended without
+        // an answer after it may have run reads the pairing again.
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        let why = "a pairing is open already, for the device tablet of jo until 12:30:00: a yard has one at a time";
+        assert_eq!(
+            m.pairing_open_failed(&refused(why)),
+            Vec::new(),
+            "a refused opening reads nothing"
+        );
+        assert_eq!(m.pairing_line(), format!("not opened: {why}"));
+        assert!(m.pairing().is_none());
+        assert!(!pairing_unknown(&refused(why)));
+        assert_eq!(not_opened(&refused(why)), format!("not opened: {why}"));
+        let why = "device \"!\": use letters, digits, '.', '_', '-' or '/' (starting with a letter or digit)";
+        assert_eq!(not_opened(&refused(why)), format!("not opened: {why}"));
+        // A read clears the line: the pane says what is.
+        m.pairing_read(None);
+        assert!(m.pairing_line().is_empty());
+
+        for err in [
+            api::Error::Down(std::io::Error::other("the yard went away")),
+            api::Error::Protocol("DevicePairOpen: status 200, and no JSON object".into()),
+            api::Error::Slow {
+                idempotent: false,
+                sent: true,
+            },
+        ] {
+            assert!(pairing_unknown(&err));
+            assert_eq!(not_opened(&err), NOT_ANSWERED_READ_PAIRING);
+            assert_eq!(not_ended(&err), NOT_ANSWERED_READ_PAIRING);
+        }
+        assert_eq!(
+            m.pairing_open_failed(&api::Error::Down(std::io::Error::other("gone"))),
+            vec![Effect::Pairing]
+        );
+        assert_eq!(m.pairing_line(), NOT_ANSWERED_READ_PAIRING);
+        // A call that sent nothing says it is safe to open again, and
+        // reads nothing.
+        let unsent = api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        };
+        assert!(!pairing_unknown(&unsent));
+        assert_eq!(
+            not_opened(&unsent),
+            "the yard did not answer; nothing was opened. Open it again."
+        );
+        assert_eq!(
+            not_ended(&unsent),
+            "the yard did not answer; nothing was ended. End it again."
+        );
+        assert_eq!(m.pairing_close_failed(&unsent), Vec::new());
+        assert_eq!(
+            m.pairing_line(),
+            "the yard did not answer; nothing was ended. End it again."
+        );
+
+        // A yard without the calls has none to show: the pane says it is
+        // too old, and no notice is raised. Anything else is said as a
+        // notice, as ever, and what the pane showed stands.
+        m.pairing_read(Some(read.clone()));
+        m.pairing_failed(&refused("no such method DevicePairState"));
+        assert!(m.pairing_too_old());
+        assert!(m.pairing().is_none());
+        assert!(m.notice.is_empty());
+        m.pairing_read(Some(read.clone()));
+        m.pairing_failed(&api::Error::Down(std::io::Error::other("gone")));
+        assert!(!m.pairing_too_old());
+        assert_eq!(m.pairing(), Some(&read));
+        assert!(!m.notice.is_empty());
+    }
+
+    /// The minutes a pairing's code is good for: what is left between
+    /// now and its expiry, or that they ran out. Empty for a time that
+    /// cannot be read.
+    #[test]
+    fn pairing_left_counts_the_minutes_until_the_code_runs_out() {
+        use chrono::{DateTime, Utc};
+        let now: DateTime<Utc> = "2026-10-30T12:20:00Z".parse().unwrap();
+        assert_eq!(
+            pairing_left("2026-10-30T12:30:00Z", &now),
+            "10 minutes left"
+        );
+        assert_eq!(pairing_left("2026-10-30T12:21:01Z", &now), "1 minute left");
+        assert_eq!(
+            pairing_left("2026-10-30T12:20:59Z", &now),
+            "less than a minute left"
+        );
+        assert_eq!(
+            pairing_left("2026-10-30T12:20:00Z", &now),
+            "the code ran out"
+        );
+        assert_eq!(
+            pairing_left("2026-10-30T12:19:59Z", &now),
+            "the code ran out"
+        );
+        assert!(pairing_left("not a time", &now).is_empty());
+        assert!(pairing_left("", &now).is_empty());
     }
 
     /// A session's screen opens for the operator alone: the session

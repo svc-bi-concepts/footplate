@@ -456,7 +456,8 @@ arrival's bead open from the panel), `flow` (yardr's line open on
 its flow), `old-lines` (the Lines pane against a yard too old to
 serve it, saying so in plain words), `grants` (the grants view open on
 its row, with a read, an update and an `--as` grant, and a source's named
-read call and update call), `secret` (an open card of a
+read call and update call), `pairing` (the Pair a phone pane open on
+its row, with a pairing's QR, code and minutes left), `secret` (an open card of a
 secret ask, posed with a value typed and hidden), `secret-shown`
 (that card where the yard marks the value no secret: typed and
 shown), `secret-refused` (that card with the yard's refusal of
@@ -552,6 +553,7 @@ press Send, and never otherwise.
 | `SessionScreen` | the Screen control, where the window runs as the yard's operator (a crew member's conversation, a bead a session works): what that session's pane shows, read when the screen opens and at its Refresh. Not made for a hosted yard, which reads a screen to no request that comes down the link from its edge, nor again once a yard has refused it so: the card says the screen is read on the yard's machine |
 | `TelemetryShow` | the settings' Telemetry section, where the window runs as the yard's operator: the switch, the install id and the next payload. Read with the state, and again when the switch is turned and on the event that says it changed. Not made for a hosted yard, which serves the preview to no request that comes down the link from its edge, nor again once a yard has refused it so or said it has no such call: the section is then not offered |
 | `Teammates` | the Teammates row's pane, where the window runs as the yard's operator: one row per teammate, with their yard name, email, role and paired-or-waiting state. Read with the state, when the row is opened, and on a `user_*` or `device_*` event or a change of operator |
+| `DevicePairState` | the Pair a phone pane, where the window runs as the yard's operator on its machine: the open pairing again — its device, code, expiry and QR string — with the state, when the pane opens, at its expiry and on a `user_*` or `device_*` event. Not made for a yard at an address, nor where the window is not the operator's: the pane is not offered |
 | `Conversation` | the mail both ways with the one whose row is open, and with each name trusted as them; on the `yard` row with the yard and with each sender who has no row |
 | `GET /blobs/<hash>` | an image a mail of the open conversation or of the open `yard` row carries, or a hook delivery of the open `yard` row, once for each hash |
 
@@ -571,6 +573,8 @@ press Send, and never otherwise.
 | `ApproveSetup` | the same key and button, on a setup ask's card: the preset pick with the account together — the typed values, or the candidate taken. A value is in the call's body and in nothing else of the window |
 | `TelemetrySet` | the Telemetry section's Turn on or Turn off button, and nothing else: the switch named, with the operator. Where the yard refuses the change the section says the switch is changed in the yard's web view, and the call is not made again by another path |
 | `UninviteTeammate` | a teammate row's Remove button, and nothing else: the teammate named, with the operator. Files the removal as a run ask on a new bead, and says the bead and the ask; the run-ask card in the queue is where approval happens |
+| `DevicePairOpen` | the Pair a phone pane's Open button, and nothing else: the device name typed, for the operator's user, with the operator. Where the call ends without a reply the pane says the yard did not answer and reads the pairing again |
+| `DevicePairClose` | the pane's End button, and nothing else, with the operator. Where the call ends without a reply the pane says the yard did not answer and reads the pairing again |
 | `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read; shift-`x` or the head's button: every notice read |
 
@@ -1377,7 +1381,14 @@ last use, or waiting where none is paired. Each row but your own has its
 Remove, which files the removal as a run ask on a new bead and says the
 bead and the ask; the card in the queue is where approval happens. It
 reads through `Teammates`, and a yard too old for the call says so in
-its pane; a hosted yard answers down the link, as for an approval. Then
+its pane; a hosted yard answers down the link, as for an approval. Last
+of them, where the window runs as the yard's operator on the yard's own
+machine, the Pair a phone row: the device's name with Open, and while a
+pairing lives its QR, its code as text, and the minutes the code is good
+for, with End. It is the terminal's `yardr user device pair` in the
+window, for the window's own user. On a yard at an address the row is
+absent, and no pairing call is made; a yard too old for the calls says so
+in its pane. Then
 the crew with what each one's session does (`working`,
 `idle`, `blocked`, `not logged in`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a

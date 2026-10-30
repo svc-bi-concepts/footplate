@@ -435,6 +435,24 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
             ),
         },
     };
+    // Who the Pair a phone pane is offered to: the yard's operator, on
+    // the yard's own machine. The yard serves the pairing calls on its
+    // socket alone, never to a device, so a yard at an address is not
+    // asked for its pairing: no pairing call is made for it. A yard from
+    // before the calls has no pairing to serve.
+    let near = !client.is_remote();
+    let (pairing, pairing_notice, pairing_too_old) = match is_operator && near {
+        false => (None, None, false),
+        true => match client.device_pair_state() {
+            Ok(pairing) => (pairing, None, false),
+            Err(err) if model::pairing_too_old(&err) => (None, None, true),
+            Err(err) => (
+                None,
+                Some(format!("the pairing could not be read: {err}")),
+                false,
+            ),
+        },
+    };
     Ok(State {
         me: user.name.clone(),
         head,
@@ -459,6 +477,10 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         teammates,
         teammates_notice,
         teammates_too_old,
+        near,
+        pairing,
+        pairing_notice,
+        pairing_too_old,
         grants_on_the_yard,
         // The yard reads a session's screen to no device that comes down
         // the link from its edge either. Nothing is asked for it here: the
@@ -710,6 +732,10 @@ mod tests {
         );
         yard.answer("SourceGrants", r#"{"result": []}"#);
         yard.answer("Teammates", r#"{"result": []}"#);
+        yard.answer(
+            "DevicePairState",
+            r#"{"error": {"code": "not-found", "message": "an open device pairing: not found"}}"#,
+        );
     }
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;

@@ -926,6 +926,7 @@ impl Footplate {
                 let flows_notice = state.flows_notice.take();
                 let grants_notice = state.grants_notice.take();
                 let teammates_notice = state.teammates_notice.take();
+                let pairing_notice = state.pairing_notice.take();
                 let (mut model, mut effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state, self.settings.mode_of(&yard)),
                     None => (Model::new_aside(state), Vec::new()),
@@ -935,6 +936,7 @@ impl Footplate {
                     flows_notice,
                     grants_notice,
                     teammates_notice,
+                    pairing_notice,
                 ]
                 .into_iter()
                 .flatten()
@@ -1010,6 +1012,7 @@ impl Footplate {
                 let flows_notice = state.flows_notice.take();
                 let grants_notice = state.grants_notice.take();
                 let teammates_notice = state.teammates_notice.take();
+                let pairing_notice = state.pairing_notice.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
                 // The yard was opened: in its remembered mode, on the row
@@ -1068,6 +1071,7 @@ impl Footplate {
                     flows_notice,
                     grants_notice,
                     teammates_notice,
+                    pairing_notice,
                 ]
                 .into_iter()
                 .flatten()
@@ -1386,6 +1390,7 @@ impl Footplate {
                 | Some(Selected::Decided(_, _))
                 | Some(Selected::Grants)
                 | Some(Selected::Teammates)
+                | Some(Selected::Pairing)
                 | Some(Selected::Arrivals)
                 | Some(Selected::Bead(_)) => {
                     self.decision.scroll_to_item(0);
@@ -1670,12 +1675,13 @@ impl Footplate {
             Selected::Conversation(_) | Selected::Yard => {
                 self.conversation.max_offset().height + self.conversation.offset().y
             }
-            // The board, the lines, No line, the grants, the teammates
-            // and the bead read from the top, as a card does.
+            // The board, the lines, No line, the grants, the teammates,
+            // the pairing and the bead read from the top, as a card does.
             Selected::Decision(_)
             | Selected::Decided(_, _)
             | Selected::Grants
             | Selected::Teammates
+            | Selected::Pairing
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -1713,14 +1719,15 @@ impl Footplate {
             Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead) => {
                 model.has_bead(bead)
             }
-            // The board's, a line's, No line's, the grants' and the
-            // teammates' rows came with the state: they are whole at
-            // once.
+            // The board's, a line's, No line's, the grants', the
+            // teammates' and the pairing's rows came with the state:
+            // they are whole at once.
             Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
             | Selected::Grants
-            | Selected::Teammates => true,
+            | Selected::Teammates
+            | Selected::Pairing => true,
         };
         // Under the settings nothing of the row is laid out.
         if !here || self.settings_open {
@@ -1758,6 +1765,7 @@ impl Footplate {
             | Selected::Decided(_, _)
             | Selected::Grants
             | Selected::Teammates
+            | Selected::Pairing
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -1842,6 +1850,7 @@ impl Footplate {
                 | Selected::Decided(_, _)
                 | Selected::Grants
                 | Selected::Teammates
+                | Selected::Pairing
                 | Selected::Arrivals
                 | Selected::Line(_)
                 | Selected::NoLine
@@ -2180,10 +2189,12 @@ impl Footplate {
                 self.ask_words.insert((bead.clone(), *ask), typed);
             }
             // Nothing is typed on the yard row, the grants, the
-            // teammates, the board, a line, No line or the bead.
+            // teammates, the pairing, the board, a line, No line or the
+            // bead.
             Selected::Yard
             | Selected::Grants
             | Selected::Teammates
+            | Selected::Pairing
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -2672,6 +2683,40 @@ impl Footplate {
                                 ) {
                                     this.change_in(session, cx, |m| {
                                         m.teammates_failed(&err);
+                                        Vec::new()
+                                    });
+                                }
+                            }
+                        },
+                    )
+                }
+                // A yard too old for the pairing calls has no call to
+                // make again.
+                Effect::Pairing => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.device_pair_state(),
+                        move |this, state, cx| match state {
+                            Ok(pairing) => {
+                                if this.fresh_in(session, Read::Pairing, stamp, cx, |m| {
+                                    m.pairing_read(pairing);
+                                    Vec::new()
+                                }) {
+                                    this.schedule_pairing_end_in(session, cx);
+                                }
+                            }
+                            Err(err) => {
+                                if this.read_failed_in(
+                                    session,
+                                    Read::Pairing,
+                                    stamp,
+                                    !model::pairing_too_old(&err),
+                                    cx,
+                                ) {
+                                    this.change_in(session, cx, |m| {
+                                        m.pairing_failed(&err);
                                         Vec::new()
                                     });
                                 }
@@ -3467,6 +3512,7 @@ impl Footplate {
             Some(Selected::Decision(_) | Selected::Decided(_, _)) => KeysView::Card,
             Some(Selected::Grants) => KeysView::Grants,
             Some(Selected::Teammates) => KeysView::Teammates,
+            Some(Selected::Pairing) => KeysView::Pairing,
             Some(Selected::Yard) => KeysView::Yard,
             Some(_) => KeysView::Timetable,
             None => match self.mode() {
@@ -5878,6 +5924,7 @@ impl Footplate {
                 .into_any_element(),
             Some(Selected::Grants) => self.talk_grants(model, palette, cx).into_any_element(),
             Some(Selected::Teammates) => self.talk_teammates(model, palette, cx).into_any_element(),
+            Some(Selected::Pairing) => self.talk_pairing(model, palette, cx).into_any_element(),
             // A mode with no row open: decisions with nothing to decide.
             // Chat always has the yard row, and timetable the arrivals.
             None => div()
@@ -6079,6 +6126,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("flow") => return Some(Selected::Line("yardr".into())),
         Ok("grants") => return Some(Selected::Grants),
         Ok("teammates-list") => return Some(Selected::Teammates),
+        Ok("pairing") => return Some(Selected::Pairing),
         Ok("delivery") => return Some(Selected::Yard),
         _ => {}
     }

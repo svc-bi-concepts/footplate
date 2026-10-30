@@ -5,8 +5,9 @@ pub(crate) const CONTEXT: &str = "Footplate";
 
 /// Where no line is typed in: the yard row, and a decision with the window
 /// focused, where a number key picks and `x` puts aside. With a
-/// conversation open, with the line focused to type words in, or with the
-/// history's filter focused, those keys are the line's text.
+/// conversation open, with the line focused to type words in, with the
+/// history's filter focused, or with the pairing pane's field focused,
+/// those keys are the line's text.
 pub(crate) const NO_LINE_CONTEXT: &str = "FootplateNoLine";
 
 /// Where the account of a setup ask is typed in, or the number of a
@@ -37,6 +38,7 @@ pub(crate) enum KeysView {
     Card,
     Grants,
     Teammates,
+    Pairing,
     Yard,
     Timetable,
     Away,
@@ -52,6 +54,7 @@ impl KeysView {
             KeysView::Card => "this card",
             KeysView::Grants => "Grants",
             KeysView::Teammates => "Teammates",
+            KeysView::Pairing => "Pair a phone",
             KeysView::Yard => "the yard row",
             KeysView::Timetable => "Lines",
             KeysView::Away => "this screen",
@@ -140,6 +143,15 @@ pub(crate) fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
             ("pageup · pagedown".into(), "scroll by a page".into()),
             ("?".into(), "this list".into()),
         ],
+        KeysView::Pairing => vec![
+            ("enter".into(), "in the name, opens the pairing".into()),
+            (
+                "tab · shift+tab".into(),
+                "the next, the previous row".into(),
+            ),
+            ("pageup · pagedown".into(), "scroll by a page".into()),
+            ("?".into(), "this list".into()),
+        ],
         KeysView::Yard => vec![
             ("x".into(), "marks one notice read".into()),
             ("shift+x".into(), "marks every notice read".into()),
@@ -180,6 +192,7 @@ pub(crate) fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
             KeysView::Conversation
             | KeysView::Grants
             | KeysView::Teammates
+            | KeysView::Pairing
             | KeysView::Yard
             | KeysView::Timetable => {
                 rows.insert(0, ("esc".into(), "shuts the bead drawer".into()));
