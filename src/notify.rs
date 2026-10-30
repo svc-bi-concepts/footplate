@@ -227,6 +227,7 @@ pub fn name(yard: &str, target: &Selected) -> String {
         Selected::Conversation(with) => format!("conversation:{with}"),
         Selected::Decision(bead) | Selected::Decided(bead, _) => format!("decision:{bead}"),
         Selected::Grants => "grants".to_string(),
+        Selected::Teammates => "teammates".to_string(),
         Selected::Yard => "yard".to_string(),
         Selected::Arrivals => "arrivals".to_string(),
         Selected::Line(line) => format!("line:{line}"),
@@ -254,6 +255,9 @@ fn row_in_yard(name: &str) -> Option<Selected> {
     }
     if name == "grants" {
         return Some(Selected::Grants);
+    }
+    if name == "teammates" {
+        return Some(Selected::Teammates);
     }
     if name == "arrivals" {
         return Some(Selected::Arrivals);
@@ -852,6 +856,7 @@ mod tests {
             Selected::Conversation("clerk:of@north".into()),
             Selected::Decision("yardr-n8ta".into()),
             Selected::Grants,
+            Selected::Teammates,
             Selected::Yard,
             Selected::Arrivals,
             Selected::Bead("yardr-n8ta".into()),

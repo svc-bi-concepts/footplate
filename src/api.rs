@@ -563,6 +563,54 @@ pub struct SourceGrant {
     pub kinds: HashMap<String, String>,
 }
 
+/// One device of a teammate's row: its name and when its token was
+/// last resolved. Where it was resolved from is no device's business,
+/// so it is not told.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TeammateDevice {
+    pub name: String,
+    /// When its token was last resolved, as an RFC 3339 time; absent
+    /// on a device never used.
+    #[serde(default)]
+    pub last_used: String,
+}
+
+/// One row of the yard's teammates: one address of the standing
+/// `web_jwt_users` mapping with its yard user and devices. A row with
+/// devices is paired; a row without is waiting. Whether anyone signed
+/// in over the edge's web door is not told: nothing at the yard
+/// records it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Teammate {
+    /// The teammate's yard user name.
+    pub name: String,
+    /// Their role: `operator` or `member`.
+    #[serde(default)]
+    pub role: String,
+    /// The mapped address they sign in with at the edge.
+    #[serde(default)]
+    pub email: String,
+    /// Who invited them.
+    #[serde(default)]
+    pub invited_by: String,
+    /// When they were invited, as an RFC 3339 time.
+    #[serde(default)]
+    pub invited_at: String,
+    /// Their devices, by name; empty while none is paired.
+    #[serde(default, deserialize_with = "or_default")]
+    pub devices: Vec<TeammateDevice>,
+}
+
+/// What `UninviteTeammate` filed: the run ask's new bead and the ask's
+/// seq on it. Approval, the edge-first removal and the retry are the
+/// card's built path.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Uninvited {
+    pub bead: String,
+    #[serde(default)]
+    pub ask: u64,
+}
+
 /// When one call of a grant was given and by whom, and the card it was
 /// approved on where it was: the bead, the ask and who asked it. Asker is
 /// empty where the ask's note is gone; it is never guessed.
@@ -3288,6 +3336,28 @@ impl Client {
         self.answer("TelemetrySet", json!({ "on": on, "actor": actor }))
     }
 
+    /// The yard's teammates: one row per address of the standing
+    /// `web_jwt_users` mapping, each with its yard user name, role,
+    /// email, who invited them and when, and their devices with last
+    /// use. A row with devices is paired; a row without is waiting.
+    /// The operator's to read: on the listener to a device of theirs
+    /// alone, down the link from the edge as an approval. No answer at
+    /// all reads as none.
+    pub fn teammates(&self) -> Result<Vec<Teammate>> {
+        self.list("Teammates", json!({}))
+    }
+
+    /// Files the removal of a teammate: the run ask `user uninvite
+    /// <user>` on a new bead, addressed to the yard's operator, and
+    /// answers the bead and the ask's seq on it. It files the ask and
+    /// no more: approval is the card's path. `actor` is the operator's
+    /// name on the socket; a device calls as its user. It refuses a
+    /// user the yard has not, one no mapping names, and the caller's
+    /// own user.
+    pub fn uninvite_teammate(&self, user: &str, actor: &str) -> Result<Uninvited> {
+        self.answer("UninviteTeammate", json!({ "user": user, "actor": actor }))
+    }
+
     /// One bead whole: body, stage, labels, notes, its asks with their
     /// options, recommendation and state, and the about-beads.
     pub fn bead(&self, bead: &str) -> Result<Bead> {
@@ -3888,6 +3958,7 @@ const READS: &[&str] = &[
     "SourceGrants",
     "SessionScreen",
     "TelemetryShow",
+    "Teammates",
     "Bead",
     "Conversation",
 ];
@@ -7105,6 +7176,62 @@ mod tests {
         // No answer at all is none.
         yard.answer("SourceGrants", r#"{"result": null}"#);
         assert!(yard.client().source_grants().unwrap().is_empty());
+    }
+
+    #[test]
+    fn teammates_come_with_each_row_s_user_and_devices() {
+        let yard = Yard::start();
+        yard.answer(
+            "Teammates",
+            r#"{"result": [
+                {"name": "hal", "role": "member", "email": "hal@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": []},
+                {"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [
+                    {"name": "tablet", "last_used": "2026-10-08T09:30:00Z"},
+                    {"name": "spare"}]}
+            ]}"#,
+        );
+        let teammates = yard.client().teammates().unwrap();
+        assert_eq!(yard.asked("Teammates"), vec![json!({})]);
+        assert_eq!(teammates.len(), 2);
+        assert_eq!(teammates[0].name.as_str(), "hal");
+        assert_eq!(teammates[0].role.as_str(), "member");
+        assert_eq!(teammates[0].email.as_str(), "hal@example.net");
+        assert_eq!(teammates[0].invited_by.as_str(), "jo");
+        assert_eq!(teammates[0].invited_at.as_str(), "2026-10-08T09:30:00Z");
+        assert!(teammates[0].devices.is_empty());
+        assert_eq!(teammates[1].name.as_str(), "sam");
+        assert_eq!(teammates[1].devices.len(), 2);
+        assert_eq!(teammates[1].devices[0].name.as_str(), "tablet");
+        assert_eq!(
+            teammates[1].devices[0].last_used.as_str(),
+            "2026-10-08T09:30:00Z"
+        );
+        // A device never used has no last use.
+        assert_eq!(teammates[1].devices[1].name.as_str(), "spare");
+        assert!(teammates[1].devices[1].last_used.is_empty());
+        // No answer at all is none.
+        yard.answer("Teammates", r#"{"result": null}"#);
+        assert!(yard.client().teammates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn uninvite_teammate_files_with_the_user_and_answers_the_bead_and_the_ask() {
+        let yard = Yard::start();
+        yard.answer(
+            "UninviteTeammate",
+            r#"{"result": {"bead": "yd-uninvite", "ask": 83}}"#,
+        );
+        let filed = yard.client().uninvite_teammate("sam", "jo").unwrap();
+        assert_eq!(
+            yard.asked("UninviteTeammate"),
+            vec![json!({"user": "sam", "actor": "jo"})]
+        );
+        assert_eq!(filed.bead.as_str(), "yd-uninvite");
+        assert_eq!(filed.ask, 83);
     }
 
     #[test]

@@ -29,8 +29,9 @@ use crate::yard::Env;
 /// Screen control in the header, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
-/// card of a run ask, an open card of a teammate invite, a weighty
-/// run ask's card beside a routine one's,
+/// card of a run ask, an open card of a teammate invite, the
+/// teammates view open on its row with a paired and a waiting
+/// teammate, a weighty run ask's card beside a routine one's,
 /// a weighty mapping ask's card beside a routine one's, a yard that is
 /// stopped, a yard at an
 /// address, the settings on each of their sections, the telemetry
@@ -126,6 +127,7 @@ pub const STATES: &[&str] = &[
     "lines",
     "run",
     "teammates",
+    "teammates-list",
     "weighty",
     "weighty-mapping",
     "stopped",
@@ -969,6 +971,12 @@ fn populate(yard: &Yard, state: &str) {
         if state != "grants" {
             yard.answer("SourceGrants", r#"{"result": []}"#);
         }
+        // The teammates every state loads: none, but for the
+        // teammates-list state, which holds a paired and a waiting
+        // teammate.
+        if state != "teammates-list" {
+            yard.answer("Teammates", r#"{"result": []}"#);
+        }
     }
     match state {
         // The yard at an address is opened from the settings, not from
@@ -1120,6 +1128,35 @@ fn populate(yard: &Yard, state: &str) {
                     r#"{"result": {"telemetry": "off", "sending_day": "2026-10-28", "hosted": false, "request": null, "no_batch": "off"}}"#,
                 );
             }
+        }
+        "teammates-list" => {
+            // The teammates view open on its row: jo's own operator row
+            // with a paired laptop, hal waiting, and sam paired with a
+            // tablet and a spare never used. No asks, so decisions opens
+            // on the teammates.
+            yard.answer(
+                "UserInbox",
+                r#"{"result": {"mail": [], "unread": 0, "last": 0, "from": []}}"#,
+            );
+            yard.answer("Conversation", r#"{"result": []}"#);
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+            yard.answer(
+                "Teammates",
+                &json!({"result": [
+                    {"name": "jo", "role": "operator", "email": "jo@example.net",
+                     "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                     "devices": [{"name": "laptop", "last_used": "2026-10-08T09:30:00Z"}]},
+                    {"name": "hal", "role": "member", "email": "hal@example.net",
+                     "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                     "devices": []},
+                    {"name": "sam", "role": "member", "email": "sam@example.net",
+                     "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                     "devices": [
+                        {"name": "tablet", "last_used": "2026-10-08T09:30:00Z"},
+                        {"name": "spare"}]},
+                ]})
+                .to_string(),
+            );
         }
         "grants" => {
             // The grants view open on its row: a read grant and an update
@@ -3020,6 +3057,28 @@ mod tests {
                     );
                     let image = yard.client().blob(&files[0].hash).unwrap().unwrap();
                     assert_eq!(image.len(), IMAGE.len(), "{state}");
+                }
+                "teammates-list" => {
+                    // The teammates the view opens on: jo's own operator
+                    // row with a paired laptop, hal waiting, and sam
+                    // paired with a tablet and a spare never used. No
+                    // asks, so decisions opens on the teammates.
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    assert_eq!(loaded.operator, "jo", "{state}");
+                    assert_eq!(loaded.teammates.len(), 3, "{state}");
+                    assert_eq!(loaded.teammates[0].name, "jo", "{state}");
+                    assert_eq!(loaded.teammates[0].role, "operator", "{state}");
+                    assert_eq!(loaded.teammates[1].name, "hal", "{state}");
+                    assert!(loaded.teammates[1].devices.is_empty(), "{state}");
+                    assert_eq!(loaded.teammates[2].name, "sam", "{state}");
+                    assert_eq!(loaded.teammates[2].devices.len(), 2, "{state}");
+                    assert_eq!(loaded.teammates[2].devices[0].name, "tablet", "{state}");
+                    assert!(
+                        loaded.teammates[2].devices[1].last_used.is_empty(),
+                        "{state}"
+                    );
+                    assert_eq!(loaded.teammates_notice, None, "{state}");
+                    assert!(!loaded.teammates_too_old, "{state}");
                 }
                 "grants" => {
                     // The grants the view opens on: a read, an update as a

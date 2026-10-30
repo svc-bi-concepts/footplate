@@ -925,14 +925,20 @@ impl Footplate {
                 let arrivals_notice = state.arrivals_notice.take();
                 let flows_notice = state.flows_notice.take();
                 let grants_notice = state.grants_notice.take();
+                let teammates_notice = state.teammates_notice.take();
                 let (mut model, mut effects) = match held.model.as_ref() {
                     Some(before) => before.resumed(state, self.settings.mode_of(&yard)),
                     None => (Model::new_aside(state), Vec::new()),
                 };
-                let notices: Vec<String> = [arrivals_notice, flows_notice, grants_notice]
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                let notices: Vec<String> = [
+                    arrivals_notice,
+                    flows_notice,
+                    grants_notice,
+                    teammates_notice,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
                 if !notices.is_empty() {
                     model.notice = notices.join("; ");
                 }
@@ -1003,6 +1009,7 @@ impl Footplate {
                 let arrivals_notice = state.arrivals_notice.take();
                 let flows_notice = state.flows_notice.take();
                 let grants_notice = state.grants_notice.take();
+                let teammates_notice = state.teammates_notice.take();
                 let open = self.model.as_ref().and_then(|m| m.selected().cloned());
                 let fresh = self.model.is_none();
                 // The yard was opened: in its remembered mode, on the row
@@ -1056,10 +1063,15 @@ impl Footplate {
                 if fresh && shot_departures() {
                     model.set_departures(true);
                 }
-                let notices: Vec<String> = [arrivals_notice, flows_notice, grants_notice]
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                let notices: Vec<String> = [
+                    arrivals_notice,
+                    flows_notice,
+                    grants_notice,
+                    teammates_notice,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
                 if !notices.is_empty() {
                     model.notice = notices.join("; ");
                 }
@@ -1373,6 +1385,7 @@ impl Footplate {
                 Some(Selected::Decision(_))
                 | Some(Selected::Decided(_, _))
                 | Some(Selected::Grants)
+                | Some(Selected::Teammates)
                 | Some(Selected::Arrivals)
                 | Some(Selected::Bead(_)) => {
                     self.decision.scroll_to_item(0);
@@ -1657,11 +1670,12 @@ impl Footplate {
             Selected::Conversation(_) | Selected::Yard => {
                 self.conversation.max_offset().height + self.conversation.offset().y
             }
-            // The board, the lines, No line, the grants and the bead
-            // read from the top, as a card does.
+            // The board, the lines, No line, the grants, the teammates
+            // and the bead read from the top, as a card does.
             Selected::Decision(_)
             | Selected::Decided(_, _)
             | Selected::Grants
+            | Selected::Teammates
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -1699,9 +1713,14 @@ impl Footplate {
             Selected::Decision(bead) | Selected::Decided(bead, _) | Selected::Bead(bead) => {
                 model.has_bead(bead)
             }
-            // The board's, a line's, No line's and the grants' rows came
-            // with the state: they are whole at once.
-            Selected::Arrivals | Selected::Line(_) | Selected::NoLine | Selected::Grants => true,
+            // The board's, a line's, No line's, the grants' and the
+            // teammates' rows came with the state: they are whole at
+            // once.
+            Selected::Arrivals
+            | Selected::Line(_)
+            | Selected::NoLine
+            | Selected::Grants
+            | Selected::Teammates => true,
         };
         // Under the settings nothing of the row is laid out.
         if !here || self.settings_open {
@@ -1738,6 +1757,7 @@ impl Footplate {
             Selected::Decision(_)
             | Selected::Decided(_, _)
             | Selected::Grants
+            | Selected::Teammates
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -1821,6 +1841,7 @@ impl Footplate {
                 Selected::Decision(_)
                 | Selected::Decided(_, _)
                 | Selected::Grants
+                | Selected::Teammates
                 | Selected::Arrivals
                 | Selected::Line(_)
                 | Selected::NoLine
@@ -2158,10 +2179,11 @@ impl Footplate {
             Selected::Decided(bead, ask) => {
                 self.ask_words.insert((bead.clone(), *ask), typed);
             }
-            // Nothing is typed on the yard row, the grants, the board,
-            // a line, No line or the bead.
+            // Nothing is typed on the yard row, the grants, the
+            // teammates, the board, a line, No line or the bead.
             Selected::Yard
             | Selected::Grants
+            | Selected::Teammates
             | Selected::Arrivals
             | Selected::Line(_)
             | Selected::NoLine
@@ -2618,6 +2640,38 @@ impl Footplate {
                                 ) {
                                     this.change_in(session, cx, |m| {
                                         m.grants_failed(&err);
+                                        Vec::new()
+                                    });
+                                }
+                            }
+                        },
+                    )
+                }
+                // A yard too old for the teammates view has no call to
+                // make again.
+                Effect::Teammates => {
+                    let stamp = self.stamp_in(session);
+                    self.ask_in(
+                        session,
+                        cx,
+                        |client, _| client.teammates(),
+                        move |this, teammates, cx| match teammates {
+                            Ok(teammates) => {
+                                this.fresh_in(session, Read::Teammates, stamp, cx, |m| {
+                                    m.teammates(teammates);
+                                    Vec::new()
+                                });
+                            }
+                            Err(err) => {
+                                if this.read_failed_in(
+                                    session,
+                                    Read::Teammates,
+                                    stamp,
+                                    !model::teammates_too_old(&err),
+                                    cx,
+                                ) {
+                                    this.change_in(session, cx, |m| {
+                                        m.teammates_failed(&err);
                                         Vec::new()
                                     });
                                 }
@@ -3412,6 +3466,7 @@ impl Footplate {
             Some(Selected::Conversation(_)) => KeysView::Conversation,
             Some(Selected::Decision(_) | Selected::Decided(_, _)) => KeysView::Card,
             Some(Selected::Grants) => KeysView::Grants,
+            Some(Selected::Teammates) => KeysView::Teammates,
             Some(Selected::Yard) => KeysView::Yard,
             Some(_) => KeysView::Timetable,
             None => match self.mode() {
@@ -5822,6 +5877,7 @@ impl Footplate {
                 .talk_decided(model, bead, *ask, palette, cx)
                 .into_any_element(),
             Some(Selected::Grants) => self.talk_grants(model, palette, cx).into_any_element(),
+            Some(Selected::Teammates) => self.talk_teammates(model, palette, cx).into_any_element(),
             // A mode with no row open: decisions with nothing to decide.
             // Chat always has the yard row, and timetable the arrivals.
             None => div()
@@ -6022,6 +6078,7 @@ fn shot_selected() -> Option<Selected> {
         Ok("arrival") => return Some(Selected::Bead("yd-zulu".into())),
         Ok("flow") => return Some(Selected::Line("yardr".into())),
         Ok("grants") => return Some(Selected::Grants),
+        Ok("teammates-list") => return Some(Selected::Teammates),
         Ok("delivery") => return Some(Selected::Yard),
         _ => {}
     }

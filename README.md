@@ -425,7 +425,8 @@ a page and an image), `image` (that mail's image open full size over
 the window), `run` (an
 open card of a run ask: the forged one of the run card's test, whose
 question forges the yard's lines), `teammates` (an open card of a
-teammate invite), `weighty` (a weighty run ask's
+teammate invite), `teammates-list` (the teammates view open on its row,
+with a paired and a waiting teammate), `weighty` (a weighty run ask's
 card beside a routine one's), `weighty-mapping` (a weighty mapping ask's
 card beside a routine one's), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
@@ -550,6 +551,7 @@ press Send, and never otherwise.
 | `Bead` | the open bead whole: each ask's options, recommendation and words, the body, notes and about-beads. Also once for each id the open mail names that looks like a bead's and that no list holds, to learn whether the yard has it: a bead that closed still chips |
 | `SessionScreen` | the Screen control, where the window runs as the yard's operator (a crew member's conversation, a bead a session works): what that session's pane shows, read when the screen opens and at its Refresh. Not made for a hosted yard, which reads a screen to no request that comes down the link from its edge, nor again once a yard has refused it so: the card says the screen is read on the yard's machine |
 | `TelemetryShow` | the settings' Telemetry section, where the window runs as the yard's operator: the switch, the install id and the next payload. Read with the state, and again when the switch is turned and on the event that says it changed. Not made for a hosted yard, which serves the preview to no request that comes down the link from its edge, nor again once a yard has refused it so or said it has no such call: the section is then not offered |
+| `Teammates` | the Teammates row's pane, where the window runs as the yard's operator: one row per teammate, with their yard name, email, role and paired-or-waiting state. Read with the state, when the row is opened, and on a `user_*` or `device_*` event or a change of operator |
 | `Conversation` | the mail both ways with the one whose row is open, and with each name trusted as them; on the `yard` row with the yard and with each sender who has no row |
 | `GET /blobs/<hash>` | an image a mail of the open conversation or of the open `yard` row carries, or a hook delivery of the open `yard` row, once for each hash |
 
@@ -568,6 +570,7 @@ press Send, and never otherwise.
 | `ApproveAsk` | `cmd+enter` (`ctrl+enter` on Linux) or the Approve button, on a run ask's card: the ask named, and nothing of the command |
 | `ApproveSetup` | the same key and button, on a setup ask's card: the preset pick with the account together — the typed values, or the candidate taken. A value is in the call's body and in nothing else of the window |
 | `TelemetrySet` | the Telemetry section's Turn on or Turn off button, and nothing else: the switch named, with the operator. Where the yard refuses the change the section says the switch is changed in the yard's web view, and the call is not made again by another path |
+| `UninviteTeammate` | a teammate row's Remove button, and nothing else: the teammate named, with the operator. Files the removal as a run ask on a new bead, and says the bead and the ask; the run-ask card in the queue is where approval happens |
 | `AckUserInbox` | a conversation or the `yard` row showed mail that was unread |
 | `AckUserNotifications` | `x`, on the open `yard` row: one notice read; shift-`x` or the head's button: every notice read |
 
@@ -1367,7 +1370,14 @@ from before it served kinds, counts as an update. It reads through
 says so in its pane. A hosted yard is not asked: it serves the list to
 no request that comes down the link from its edge, so the row and the
 pane say the grants are read on the yard's machine
-(`yardr source grants`), with no notice. Then
+(`yardr source grants`), with no notice. Beside it the Teammates row:
+every teammate of the yard's mapping, each with their yard name, email,
+role, who invited them and when, and paired with each device's name and
+last use, or waiting where none is paired. Each row but your own has its
+Remove, which files the removal as a run ask on a new bead and says the
+bead and the ask; the card in the queue is where approval happens. It
+reads through `Teammates`, and a yard too old for the call says so in
+its pane; a hosted yard answers down the link, as for an approval. Then
 the crew with what each one's session does (`working`,
 `idle`, `blocked`, `not logged in`, `running`, `not running`, `failed to start`), then those
 the linked yards expose, each with what they are there (a crew member or a

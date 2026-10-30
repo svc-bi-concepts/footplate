@@ -438,6 +438,10 @@ pub struct Footplate {
     /// The run ask whose approval is with the yard and not answered yet:
     /// no second one goes after it.
     approving: Option<(String, u64)>,
+    /// The teammates whose removals are with the yard and not answered
+    /// yet, by following session and user: no second filing goes after
+    /// one.
+    removing: HashSet<(u64, String)>,
     /// What the Mac's unlock says where a test fixed it instead of the
     /// system: whether the gate is offered, and what it answers. Tests
     /// start with no gate, so a weighty card never prompts the person
@@ -860,6 +864,7 @@ impl Footplate {
             typeback,
             typeback_for: None,
             approving: None,
+            removing: HashSet::new(),
             test_unlock: match cfg!(test) {
                 true => Some((false, false)),
                 false => None,
@@ -1643,6 +1648,7 @@ mod tests {
             r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
         );
         yard.answer("SourceGrants", r#"{"result": []}"#);
+        yard.answer("Teammates", r#"{"result": []}"#);
         yard.answer("Mail", "{}");
         yard.answer(
             "MailPeer",
@@ -11434,6 +11440,329 @@ yardr.dev
         assert_eq!(screen_of(&view, cx), model::SCREEN_ON_THE_YARD);
         assert_eq!(notice(&view, cx), "");
         assert!(far.asked("SessionScreen").is_empty());
+    }
+
+    /// The teammates view lists every teammate with their yard name,
+    /// email, role and paired-or-waiting state, for the operator's
+    /// window alone: a waiting row and a paired row with each device's
+    /// last use. Anywhere else the row stands nowhere, and the call is
+    /// never made. A teammate's event reads the list again, and an empty
+    /// yard says none is invited.
+    #[gpui::test]
+    fn the_teammates_view_lists_each_teammate_with_their_state_for_the_operator_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let teammates = || {
+            json!({"result": [
+                {"name": "hal", "role": "member", "email": "hal@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": []},
+                {"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [
+                    {"name": "tablet", "last_used": "2026-10-08T09:30:00Z"},
+                    {"name": "spare"}]},
+            ]})
+            .to_string()
+        };
+        let asks = || {
+            json!({"result": {"open": [
+                {"bead": "bead-a", "bead_title": "Move the links", "topic": "",
+                 "ask": 3, "question": "Move them now?", "asker": "yardmaster",
+                 "since": "2026-10-10T10:00:00Z"}
+            ], "decided": []}})
+            .to_string()
+        };
+        // The operator's: the row stands last of decisions, beside the
+        // grants', and opens the teammates.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("UserAsks", &asks());
+        yard.answer("Bead", &bead_three());
+        yard.answer("Teammates", &teammates());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "decision row bead-a"));
+        assert!(drawn(cx, "row grants"));
+        assert!(drawn(cx, "row teammates"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert_eq!(model.teammate_records().len(), 2);
+        });
+        click_on(cx, "row teammates");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Teammates));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.keys_view()),
+            KeysView::Teammates
+        );
+        assert!(drawn(cx, "teammates head"));
+        assert!(drawn(cx, "teammates summary"));
+        assert!(drawn(cx, "teammates row hal"));
+        assert!(drawn(cx, "teammates name hal"));
+        assert!(drawn(cx, "teammates email hal"));
+        assert!(drawn(cx, "teammates role hal"));
+        assert!(drawn(cx, "teammates invited hal"));
+        assert!(drawn(cx, "teammates state hal"));
+        assert!(drawn(cx, "teammates row sam"));
+        assert!(drawn(cx, "teammates state sam"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert_eq!(
+                crate::model::teammates_summary(model.teammate_records()),
+                "2 teammates: 1 paired, 1 waiting."
+            );
+            assert_eq!(
+                crate::model::teammate_state(&model.teammate_records()[0]),
+                "waiting"
+            );
+            assert!(
+                crate::model::teammate_state(&model.teammate_records()[1])
+                    .starts_with("paired: tablet, last used ")
+            );
+        });
+        // A device paired reads the teammates again: hal is paired now.
+        yard.answer(
+            "Teammates",
+            &json!({"result": [
+                {"name": "hal", "role": "member", "email": "hal@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [{"name": "phone"}]},
+                {"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [
+                    {"name": "tablet", "last_used": "2026-10-08T09:30:00Z"},
+                    {"name": "spare"}]},
+            ]})
+            .to_string(),
+        );
+        yard.emit(r#"{"seq": 21, "kind": "device_added", "actor": "jo", "data": {"user": "hal", "device": "phone"}}"#);
+        wait(cx, "the teammates read again, hal paired", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().is_some_and(|m| {
+                    m.teammate_records().len() == 2 && !m.teammate_records()[0].devices.is_empty()
+                })
+            })
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                crate::model::teammates_summary(v.model.as_ref().unwrap().teammate_records()),
+                "2 teammates: 2 paired, 0 waiting."
+            );
+        });
+        // A removal reads them again too: nobody is left, and the pane
+        // says none is invited.
+        yard.answer("Teammates", &json!({"result": []}).to_string());
+        yard.emit(r#"{"seq": 22, "kind": "user_removed", "actor": "jo", "data": {"user": "sam"}}"#);
+        wait(cx, "the teammates read again", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .is_some_and(|m| m.teammate_records().is_empty())
+            })
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "teammates empty"));
+        // Anywhere else: no row, and no call. The yard's operator is
+        // mckean, and the window runs as jo.
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Settings", r#"{"result": {"operator": "mckean"}}"#);
+        yard.answer("UserAsks", &asks());
+        yard.answer("Bead", &bead_three());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "decision row bead-a"));
+        assert!(!drawn(cx, "row teammates"));
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(!model.is_operator());
+            assert!(model.teammate_records().is_empty());
+        });
+        assert!(yard.asked("Teammates").is_empty());
+    }
+
+    /// The operator's window of a hosted yard reads the teammates down
+    /// the link from its edge, as an approval: the row stands, the call
+    /// is made, and the pane lists them.
+    #[gpui::test]
+    fn a_hosted_yard_is_asked_for_its_teammates_down_the_link(cx: &mut TestAppContext) {
+        use crate::fake::{Router, SESSION, TOKEN};
+
+        let far = Yard::start_tcp();
+        a_yard_of_jo(&far);
+        far.answer(
+            "Teammates",
+            r#"{"result": [{"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [{"name": "tablet"}]}]}"#,
+        );
+        let edge = Router::start(&far, SESSION);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = Footplate::new(edge.client_with(TOKEN, SESSION), "jo".into(), window, cx);
+            window.focus(&view.line.focus_handle(cx));
+            view
+        });
+        wait(cx, "the hosted yard's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        view.read_with(cx, |v, _| {
+            let model = v.model.as_ref().unwrap();
+            assert!(model.is_operator());
+            assert_eq!(model.teammate_records().len(), 1);
+        });
+        assert_eq!(far.asked("Teammates"), vec![json!({})]);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row teammates"));
+        click_on(cx, "row teammates");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Teammates));
+        assert!(drawn(cx, "teammates row sam"));
+        assert!(drawn(cx, "teammates state sam"));
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// A yard from before the teammates view has no Teammates call: no
+    /// notice is raised in any mode, and the teammates pane says the yard
+    /// is too old instead, and nowhere else.
+    #[gpui::test]
+    fn an_old_yard_says_so_in_the_teammates_pane_and_nowhere_else(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Teammates",
+            r#"{"error": {"code": "error", "message": "no such method Teammates"}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        view.read_with(cx, |v, _| {
+            assert!(v.model.as_ref().unwrap().teammates_too_old());
+        });
+        assert_eq!(notice(&view, cx), "");
+        assert!(!drawn(cx, "teammates too old"));
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        assert!(drawn(cx, "row teammates"));
+        click_on(cx, "row teammates");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Teammates));
+        assert!(drawn(cx, "teammates too old"));
+        assert_eq!(yard.asked("Teammates").len(), 1);
+        assert_eq!(notice(&view, cx), "");
+        // Back in chat: no notice, and the words stand in the teammates
+        // pane alone. (What was drawn stays drawn to the tests, so the
+        // words gone from the pane are not said here.)
+        to_chat(&view, cx);
+        cx.run_until_parked();
+        assert_eq!(notice(&view, cx), "");
+    }
+
+    /// Remove files the teammate's removal with that user, and the filed
+    /// bead and ask are said on the pane's line. The operator's own row
+    /// has no Remove. Nothing underway is filed twice. A refusal is shown
+    /// as the refusal line, filing nothing, and a call that ends without
+    /// an answer reads the queue again, never filed or not.
+    #[gpui::test]
+    fn remove_files_the_uninvite_and_says_the_filed_bead_and_ask(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Teammates",
+            &json!({"result": [
+                {"name": "jo", "role": "operator", "email": "jo@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [{"name": "laptop"}]},
+                {"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": []},
+                {"name": "hal", "role": "member", "email": "hal@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": []},
+            ]})
+            .to_string(),
+        );
+        yard.answer(
+            "UninviteTeammate",
+            r#"{"result": {"bead": "yd-uninvite", "ask": 83}}"#,
+        );
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_decisions(&view, cx);
+        cx.run_until_parked();
+        click_on(cx, "row teammates");
+        cx.run_until_parked();
+        assert_eq!(open_row(&view, cx), Some(Selected::Teammates));
+        // Sam's row has its Remove; jo's own row has none.
+        assert!(drawn(cx, "teammates row jo"));
+        assert!(!drawn(cx, "teammates remove jo"));
+        assert!(drawn(cx, "teammates remove sam"));
+        // A removal underway says so in the button's place.
+        view.update_in(cx, |v, _, cx| {
+            v.removing.insert((v.session, "sam".into()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(drawn(cx, "teammates removing sam"));
+        view.update_in(cx, |v, _, cx| {
+            v.removing.remove(&(v.session, "sam".into()));
+            cx.notify();
+        });
+        // The press files the removal with sam, and the filed bead and
+        // ask are said.
+        click_on(cx, "teammates remove sam");
+        wait(cx, "the removal filed", |cx| {
+            notice(&view, cx) == "removal of sam filed on yd-uninvite ask 83"
+        });
+        assert_eq!(
+            yard.asked("UninviteTeammate"),
+            [json!({"user": "sam", "actor": "jo"})]
+        );
+        assert!(view.read_with(cx, |v, _| v.removing.is_empty()));
+        // Two removals can be pending for different teammates. A second
+        // press for the same teammate is still ignored, and each row
+        // keeps its own busy marker while the yard answers them in turn.
+        yard.answer(
+            "UninviteTeammate",
+            r#"{"result": {"bead": "yd-uninvite-2", "ask": 84}}"#,
+        );
+        yard.hold_calls("UninviteTeammate");
+        view.update_in(cx, |v, _, cx| v.remove_teammate("sam".into(), cx));
+        assert_eq!(view.read_with(cx, |v, _| v.removing.len()), 1);
+        view.update_in(cx, |v, _, cx| v.remove_teammate("hal".into(), cx));
+        view.update_in(cx, |v, _, cx| v.remove_teammate("sam".into(), cx));
+        assert_eq!(view.read_with(cx, |v, _| v.removing.len()), 2);
+        yard.release_calls("UninviteTeammate");
+        wait(cx, "both removals answered", |cx| {
+            yard.calls_held("UninviteTeammate") == 0
+                && view.read_with(cx, |v, _| v.removing.is_empty())
+        });
+        assert_eq!(yard.asked("UninviteTeammate").len(), 3);
+        // A refusal is shown as the refusal line, filing nothing.
+        yard.answer(
+            "UninviteTeammate",
+            r#"{"error": {"code": "error", "message": "user hal: not found"}}"#,
+        );
+        click_on(cx, "teammates remove sam");
+        wait(cx, "the refusal", |cx| {
+            notice(&view, cx) == "not filed: user hal: not found"
+        });
+        assert_eq!(yard.asked("UninviteTeammate").len(), 4);
+        // A call that ends without an answer reads the queue again, and
+        // is never said to be filed or not.
+        yard.answer_nothing("UninviteTeammate");
+        let asks = yard.asked("UserAsks").len();
+        click_on(cx, "teammates remove sam");
+        wait(cx, "the queue read again", |cx| {
+            notice(&view, cx) == "the yard did not answer; read the queue again"
+                && yard.asked("UserAsks").len() == asks + 1
+        });
     }
 
     /// The settings offer Telemetry to the operator on a yard that serves

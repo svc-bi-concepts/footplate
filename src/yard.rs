@@ -809,6 +809,7 @@ mod tests {
         );
         yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
         yard.answer("SourceGrants", r#"{"result": []}"#);
+        yard.answer("Teammates", r#"{"result": []}"#);
     }
 
     #[test]

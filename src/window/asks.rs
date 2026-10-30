@@ -794,6 +794,44 @@ impl Footplate {
         );
     }
 
+    /// Files a teammate's removal: the run ask `user uninvite <user>` on
+    /// a new bead, addressed to the yard's operator. What the window says
+    /// afterwards is the yard's: the bead and the ask it filed on, or the
+    /// refusal whole, on the pane's line. A call that ended without an
+    /// answer is never said to be filed or not: the queue is read again,
+    /// and the card says which. Nothing underway is filed twice.
+    pub(crate) fn remove_teammate(&mut self, user: String, cx: &mut Context<Self>) {
+        let session = self.session;
+        if !self.removing.insert((session, user.clone())) {
+            return;
+        }
+        cx.notify();
+        // The filing is the yard's it was pressed in: what came of it is
+        // that yard's, and is said there, wherever the window is by then.
+        let call = user.clone();
+        self.ask_in(
+            session,
+            cx,
+            move |client, me| client.uninvite_teammate(&call, me),
+            move |this, filed, cx| {
+                this.removing.remove(&(session, user.clone()));
+                match filed {
+                    Ok(filed) => {
+                        let line = model::uninvited_line(&user, &filed);
+                        this.notice_in(session, line, cx);
+                    }
+                    Err(err) => {
+                        let reread = model::filing_unknown(&err);
+                        this.notice_in(session, model::not_filed(&err), cx);
+                        if reread {
+                            this.run_in(session, vec![Effect::Asks], cx);
+                        }
+                    }
+                }
+            },
+        );
+    }
+
     /// Approves the open card's setup ask: the preset pick, the option
     /// chosen or the recommended one, with the account together. A filled
     /// secret field types another; else the tap takes its file; else a
@@ -1958,6 +1996,7 @@ impl Footplate {
         }
         if model.is_operator() {
             body = body.child(self.grants_row(model, palette, cx));
+            body = body.child(self.teammates_row(model, palette, cx));
         }
         self.column(body, palette, top, cx)
     }
@@ -2180,6 +2219,62 @@ impl Footplate {
                     .text_color(palette.faint)
                     .truncate()
                     .debug_selector(|| "grants sub".to_string())
+                    .child(sub),
+            )
+    }
+
+    /// The teammates row, last of decisions where the window is the
+    /// operator's: what is invited, in so many teammates, or that none
+    /// is, or that the yard is too old to say.
+    pub(crate) fn teammates_row(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let selected = model.selected() == Some(&Selected::Teammates);
+        let sub = match model.teammates_too_old() {
+            true => "yard too old".to_string(),
+            false => match model.teammate_records().len() {
+                0 => "no teammates yet".to_string(),
+                1 => "1 teammate".to_string(),
+                n => format!("{n} teammates"),
+            },
+        };
+        div()
+            .id("row teammates")
+            .debug_selector(|| "row teammates".to_string())
+            .mx_1()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .flex()
+            .flex_col()
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgba(0x00000000))
+            .when(selected, |el| el.bg(palette.open))
+            .when(!selected, |el| {
+                el.hover(|style| style.border_color(palette.line))
+            })
+            .on_click(
+                cx.listener(|this, _, window, cx| this.select(Selected::Teammates, window, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .debug_selector(|| "teammates head".to_string())
+                    .child(div().flex_1().truncate().child("Teammates")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.faint)
+                    .truncate()
+                    .debug_selector(|| "teammates sub".to_string())
                     .child(sub),
             )
     }
@@ -4119,6 +4214,217 @@ impl Footplate {
             fenced(&revoke),
             &self.selection,
         ))
+    }
+
+    /// The teammates pane: every teammate of the yard's mapping, with
+    /// their yard name, email, role, who invited them and when, and
+    /// their paired-or-waiting state, and each row's Remove, which files
+    /// the uninvite run ask. The operator's own row has none: the yard
+    /// refuses self-removal. A yard too old for the call says so, in
+    /// plain words.
+    pub(crate) fn talk_teammates(
+        &self,
+        model: &Model,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+        if model.teammates_too_old() {
+            return pane
+                .children(self.reconnect_strip(palette))
+                .child(
+                    div()
+                        .p_3()
+                        .border_b_1()
+                        .border_color(palette.line)
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Teammates")),
+                )
+                .child(
+                    div().flex_1().min_h_0().p_4().child(
+                        div()
+                            .debug_selector(|| "teammates too old".to_string())
+                            .text_color(palette.faint)
+                            .child(model::TEAMMATES_TOO_OLD),
+                    ),
+                );
+        }
+        let teammates = model.teammate_records();
+        if teammates.is_empty() {
+            return pane
+                .children(self.reconnect_strip(palette))
+                .child(
+                    div()
+                        .p_3()
+                        .border_b_1()
+                        .border_color(palette.line)
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Teammates")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(palette.faint)
+                        .debug_selector(|| "teammates empty".to_string())
+                        .child("no teammate is invited yet"),
+                );
+        }
+        let head = div()
+            .p_3()
+            .border_b_1()
+            .border_color(palette.line)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .debug_selector(|| "teammates head".to_string())
+                    .child("Teammates"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(|| "teammates summary".to_string())
+                    .child(model::teammates_summary(teammates)),
+            );
+        let mut body = div()
+            .id("teammates")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.decision)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_4();
+        for teammate in teammates {
+            body = body.child(
+                self.teammate_row(
+                    teammate,
+                    teammate.name == model.me(),
+                    self.removing
+                        .contains(&(self.session, teammate.name.clone())),
+                    palette,
+                    cx,
+                ),
+            );
+        }
+        pane.children(self.reconnect_strip(palette))
+            .child(head)
+            .child(body)
+            .when(!model.notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(palette.warn)
+                        .child(format!("! {}", model.notice)),
+                )
+            })
+    }
+
+    /// One teammate's row: their yard name with Remove beside it, their
+    /// email, their role, who invited them and when, and whether a
+    /// device is paired. The operator's own row has no Remove, and a
+    /// removal underway says so in its place.
+    fn teammate_row(
+        &self,
+        teammate: &api::Teammate,
+        own: bool,
+        removing: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let name = teammate.name.clone();
+        let mut head = div().flex().items_center().justify_between().gap_2().child(
+            div()
+                .flex_1()
+                .truncate()
+                .debug_selector({
+                    let name = name.clone();
+                    move || format!("teammates name {name}")
+                })
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(model::plain(&teammate.name)),
+        );
+        if !own {
+            if removing {
+                head = head.child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.faint)
+                        .debug_selector({
+                            let name = name.clone();
+                            move || format!("teammates removing {name}")
+                        })
+                        .child("Removing…"),
+                );
+            } else {
+                head = head.child(
+                    small_button("Remove".to_string(), palette)
+                        .id(SharedString::from(format!("teammates remove {name}")))
+                        .debug_selector({
+                            let name = name.clone();
+                            move || format!("teammates remove {name}")
+                        })
+                        .on_click({
+                            let name = name.clone();
+                            cx.listener(move |this, _, _, cx| {
+                                this.remove_teammate(name.clone(), cx)
+                            })
+                        }),
+                );
+            }
+        }
+        div()
+            .debug_selector({
+                let name = name.clone();
+                move || format!("teammates row {name}")
+            })
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(head)
+            .child(
+                div()
+                    .text_sm()
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("teammates email {name}")
+                    })
+                    .child(model::plain(&teammate.email)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("teammates role {name}")
+                    })
+                    .child(teammate_role(&teammate.role)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector({
+                        let name = name.clone();
+                        move || format!("teammates invited {name}")
+                    })
+                    .child(model::teammate_invited(teammate)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .debug_selector(move || format!("teammates state {name}"))
+                    .child(model::teammate_state(teammate)),
+            )
     }
 }
 

@@ -418,6 +418,23 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
             ),
         },
     };
+    // Who the teammates view is offered to: the yard's operator, and no
+    // one else. Unlike the grant list, the teammates come down the link
+    // from the edge to a paired device of the operator's, as an approval
+    // does, so a hosted yard is asked for them. A yard from before the
+    // call has no teammates to serve.
+    let (teammates, teammates_notice, teammates_too_old) = match is_operator {
+        false => (Vec::new(), None, false),
+        true => match client.teammates() {
+            Ok(teammates) => (teammates, None, false),
+            Err(err) if model::teammates_too_old(&err) => (Vec::new(), None, true),
+            Err(err) => (
+                Vec::new(),
+                Some(format!("the teammates could not be read: {err}")),
+                false,
+            ),
+        },
+    };
     Ok(State {
         me: user.name.clone(),
         head,
@@ -439,6 +456,9 @@ pub fn load(client: &Client, name: &str) -> Result<State, Trouble> {
         grants,
         grants_notice,
         grants_too_old,
+        teammates,
+        teammates_notice,
+        teammates_too_old,
         grants_on_the_yard,
         // The yard reads a session's screen to no device that comes down
         // the link from its edge either. Nothing is asked for it here: the
@@ -689,6 +709,7 @@ mod tests {
             r#"{"result": {"travelling": 0, "depots": [], "unassigned": []}}"#,
         );
         yard.answer("SourceGrants", r#"{"result": []}"#);
+        yard.answer("Teammates", r#"{"result": []}"#);
     }
 
     const NOT_FOUND: &str = r#"{"error": {"code": "not-found", "message": "user: not found"}}"#;
@@ -955,6 +976,125 @@ mod tests {
         );
         assert!(!state.grants_too_old);
         assert!(!state.grants_on_the_yard);
+    }
+
+    /// The operator's window reads the teammates: each row's user and
+    /// devices. A yard from before the call reads as empty with no
+    /// notice, and too old instead, and an unreadable one with why.
+    /// Anywhere else no teammates call is made.
+    #[test]
+    fn load_reads_the_teammates_for_the_operator_alone() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // The operator's: the teammates are read.
+        yard.answer(
+            "Teammates",
+            r#"{"result": [
+                {"name": "hal", "role": "member", "email": "hal@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": []},
+                {"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [{"name": "tablet", "last_used": "2026-10-08T09:30:00Z"}]}
+            ]}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert_eq!(state.me, "jo");
+        assert_eq!(state.operator, "jo");
+        assert_eq!(state.teammates.len(), 2);
+        assert_eq!(state.teammates[0].name, "hal");
+        assert!(state.teammates[0].devices.is_empty());
+        assert_eq!(state.teammates[1].name, "sam");
+        assert_eq!(state.teammates[1].devices[0].name, "tablet");
+        assert_eq!(state.teammates_notice, None);
+        assert!(!state.teammates_too_old);
+        assert_eq!(yard.asked("Teammates"), vec![json!({})]);
+
+        // A yard from before the call: empty, with no notice, and too old.
+        yard.answer(
+            "Teammates",
+            r#"{"error": {"code": "error", "message": "no such method Teammates"}}"#,
+        );
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.teammates.is_empty());
+        assert_eq!(state.teammates_notice, None);
+        assert!(state.teammates_too_old);
+
+        // An unreadable one: empty, with why, and not too old.
+        yard.answer_nothing("Teammates");
+        let state = load(&yard.client(), "jo").unwrap();
+        assert!(state.teammates.is_empty());
+        assert!(
+            state
+                .teammates_notice
+                .as_deref()
+                .unwrap()
+                .starts_with("the teammates could not be read: ")
+        );
+        assert!(!state.teammates_too_old);
+    }
+
+    /// Anywhere but the operator's, the window reads no teammates: not
+    /// for another user, not where the yard names no operator, and not
+    /// where its settings could not be read. But the operator's window
+    /// of a hosted yard is asked: the teammates come down the link from
+    /// its edge, as an approval does. The window still opens.
+    #[test]
+    fn load_reads_no_teammates_where_the_window_is_not_the_operator_s() {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // Another user: the operator's call is never made.
+        yard.answer(
+            "GetUser",
+            r#"{"result": {"name": "ada", "cursor": 9, "notification_cursor": 4}}"#,
+        );
+        yard.answer(
+            "Users",
+            r#"{"result": [{"name": "jo", "cursor": 5, "notification_cursor": 0},
+                           {"name": "ada", "cursor": 9, "notification_cursor": 4}]}"#,
+        );
+        let state = load(&yard.client(), "ada").unwrap();
+        assert_eq!(state.me, "ada");
+        assert_eq!(state.operator, "jo");
+        assert!(state.teammates.is_empty());
+        assert_eq!(state.teammates_notice, None);
+        assert!(!state.teammates_too_old);
+        assert!(yard.asked("Teammates").is_empty());
+
+        // No operator: nobody's window is the operator's.
+        yard.answer("Settings", r#"{"result": {}}"#);
+        let state = load(&yard.client(), "ada").unwrap();
+        assert_eq!(state.me, "ada");
+        assert!(state.operator.is_empty());
+        assert!(state.teammates.is_empty());
+        assert!(yard.asked("Teammates").is_empty());
+
+        // Unreadable settings: the window still opens, with no teammates.
+        yard.answer_nothing("Settings");
+        let state = load(&yard.client(), "ada").unwrap();
+        assert!(state.operator.is_empty());
+        assert!(state.teammates.is_empty());
+
+        // The operator's window of a hosted yard: asked down the link,
+        // and answered, where the grant list is not.
+        use crate::fake::{Router, SESSION, TOKEN};
+        let yard = Yard::start_tcp();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "Teammates",
+            r#"{"result": [{"name": "sam", "role": "member", "email": "sam@example.net",
+                 "invited_by": "jo", "invited_at": "2026-10-08T09:30:00Z",
+                 "devices": [{"name": "tablet"}]}]}"#,
+        );
+        let edge = Router::start(&yard, SESSION);
+        let hosted = load(&edge.client_with(TOKEN, SESSION), "jo").unwrap();
+        assert_eq!(hosted.me, "jo");
+        assert_eq!(hosted.operator, "jo");
+        assert_eq!(hosted.teammates.len(), 1);
+        assert_eq!(hosted.teammates[0].name, "sam");
+        assert_eq!(hosted.teammates_notice, None);
+        assert!(!hosted.teammates_too_old);
+        assert_eq!(yard.asked("Teammates"), vec![json!({})]);
     }
 
     /// The preview is read where the window is the operator's: a yard

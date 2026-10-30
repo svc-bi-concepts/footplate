@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     self, AboutBead, Arrival, Arrivals, AskWeight, Asks, Bead, BeadAsk, BeadNote, BlobRef,
     CrewMember, DecidedAsk, Event, Flow, FlowBead, FlowDepot, Flows, GrantGiven, Identity, Letter,
-    Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant,
-    TelemetryPreview, User,
+    Me, Notification, OpenAsk, Peer, Ran, Reaction, Run, Secret, Setup, SourceGrant, Teammate,
+    TelemetryPreview, Uninvited, User,
 };
 use crate::markdown;
 use crate::select;
@@ -94,6 +94,15 @@ pub struct State {
     /// The yard has no SourceGrants call: one from before the grants
     /// view. The grants pane says so, and no notice is raised.
     pub grants_too_old: bool,
+    /// Every teammate of the yard, as read: empty where the window is
+    /// not the operator's, which reads none.
+    pub teammates: Vec<Teammate>,
+    /// Why the teammates are empty, in the window's words; `None` where
+    /// they were read.
+    pub teammates_notice: Option<String>,
+    /// The yard has no Teammates call: one from before the teammates
+    /// view. The teammates pane says so, and no notice is raised.
+    pub teammates_too_old: bool,
     /// The yard serves the grant list to no device that comes down the
     /// link from its edge: it is read on the yard's machine. The grants
     /// pane says so, and the call is not made, nor a notice raised.
@@ -387,9 +396,9 @@ pub enum Target {
 }
 
 /// What the left list has open: a bead with open asks, one dealt with,
-/// the grants, a conversation, what the yard reports, the arrivals
-/// board, a line's flows, the beads with no line, or one travelling bead
-/// whole.
+/// the grants, the teammates, a conversation, what the yard reports, the
+/// arrivals board, a line's flows, the beads with no line, or one
+/// travelling bead whole.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selected {
     /// A bead with open asks, by its id. A bead with several is one row.
@@ -399,6 +408,10 @@ pub enum Selected {
     /// The grants: every source × holder × call, for the operator's
     /// window alone. It has a row where the window is the operator's.
     Grants,
+    /// The teammates: every user of the yard's mapping, for the
+    /// operator's window alone. It has a row where the window is the
+    /// operator's, beside the grants'.
+    Teammates,
     /// A conversation, by crew name, user name or `<name>@<peer>`.
     Conversation(String),
     Yard,
@@ -418,13 +431,16 @@ pub enum Selected {
 
 impl Selected {
     /// The mode whose list holds the row: the conversations and the yard
-    /// row are chat's, the beads with open asks, the dealt with and the
-    /// grants are decisions', the timetable's rows and a travelling bead
-    /// timetable's.
+    /// row are chat's, the beads with open asks, the dealt with, the
+    /// grants and the teammates are decisions', the timetable's rows and
+    /// a travelling bead timetable's.
     pub fn mode(&self) -> Mode {
         match self {
             Selected::Conversation(_) | Selected::Yard => Mode::Chat,
-            Selected::Decision(_) | Selected::Decided(_, _) | Selected::Grants => Mode::Decisions,
+            Selected::Decision(_)
+            | Selected::Decided(_, _)
+            | Selected::Grants
+            | Selected::Teammates => Mode::Decisions,
             Selected::Arrivals | Selected::Line(_) | Selected::NoLine | Selected::Bead(_) => {
                 Mode::Timetable
             }
@@ -882,6 +898,8 @@ pub enum Effect {
     Flows,
     /// `SourceGrants`; answered to [`Model::grants`].
     Grants,
+    /// `Teammates`; answered to [`Model::teammates`].
+    Teammates,
     /// `TelemetryShow`; answered to [`Model::telemetry`].
     Telemetry,
     /// Which of the person's beads were added or closed after `from`
@@ -913,6 +931,7 @@ pub enum Read {
     Arrivals,
     Flows,
     Grants,
+    Teammates,
     Telemetry,
 }
 
@@ -928,6 +947,7 @@ impl Read {
             Read::Arrivals => Effect::Arrivals,
             Read::Flows => Effect::Flows,
             Read::Grants => Effect::Grants,
+            Read::Teammates => Effect::Teammates,
             Read::Telemetry => Effect::Telemetry,
         }
     }
@@ -1101,6 +1121,14 @@ pub struct Model {
     /// view. The grants pane says so, and no notice is raised. Grants
     /// read again clear it, as ones read at the start never set it.
     grants_too_old: bool,
+    /// Every teammate of the yard, as read: empty where the window is
+    /// not the operator's, which reads none.
+    teammates: Vec<Teammate>,
+    /// The yard has no Teammates call: one from before the teammates
+    /// view. The teammates pane says so, and no notice is raised.
+    /// Teammates read again clear it, as ones read at the start never
+    /// set it.
+    teammates_too_old: bool,
     /// The grants are read on the yard's machine, since the yard serves
     /// them down no link: the pane says so, and no call is made for them.
     /// A window reached by the edge starts so; a refusal that says the
@@ -1315,6 +1343,8 @@ impl Model {
             operator: state.operator,
             grants: state.grants,
             grants_too_old: state.grants_too_old,
+            teammates: state.teammates,
+            teammates_too_old: state.teammates_too_old,
             grants_on_the_yard: state.grants_on_the_yard,
             screen_on_the_yard: state.screen_on_the_yard,
             telemetry: state.telemetry,
@@ -1551,8 +1581,9 @@ impl Model {
     }
 
     /// Whether the window is the operator's: it runs as the yard's
-    /// operator, who alone is offered the grants view and the Telemetry
-    /// section. A yard that names no operator offers them to no one.
+    /// operator, who alone is offered the grants view, the teammates
+    /// view and the Telemetry section. A yard that names no operator
+    /// offers them to no one.
     pub fn is_operator(&self) -> bool {
         !self.operator.is_empty() && self.me == self.operator
     }
@@ -1721,11 +1752,11 @@ impl Model {
 
     /// Every row of one mode's list from the top: the conversations and
     /// the yard row in chat, the beads with open asks with the dealt with
-    /// when "Decided" stands open and the grants last where the window is
-    /// the operator's in decisions, the arrivals row, the lines in the
-    /// served order and No line last in timetable, while unassigned beads
-    /// travel. A travelling bead is open from the board, a flow,
-    /// Elsewhere or No line, and has no row here.
+    /// when "Decided" stands open and the grants with the teammates last
+    /// where the window is the operator's in decisions, the arrivals row,
+    /// the lines in the served order and No line last in timetable, while
+    /// unassigned beads travel. A travelling bead is open from the board,
+    /// a flow, Elsewhere or No line, and has no row here.
     fn order_in(&self, mode: Mode) -> Vec<Selected> {
         let mut out: Vec<Selected> = Vec::new();
         match mode {
@@ -1748,6 +1779,7 @@ impl Model {
                 }
                 if self.is_operator() {
                     out.push(Selected::Grants);
+                    out.push(Selected::Teammates);
                 }
             }
             Mode::Timetable => {
@@ -2287,6 +2319,39 @@ impl Model {
             }
             false => {
                 self.notice = format!("the grants could not be read: {err}");
+            }
+        }
+    }
+
+    /// Every teammate of the yard, as read.
+    pub fn teammate_records(&self) -> &[Teammate] {
+        &self.teammates
+    }
+
+    /// The teammates as read again. The yard has the call, so it is not
+    /// too old for it.
+    pub fn teammates(&mut self, teammates: Vec<Teammate>) {
+        self.teammates = teammates;
+        self.teammates_too_old = false;
+    }
+
+    /// Whether the yard has no Teammates call: one from before the
+    /// teammates view, which the teammates pane says.
+    pub fn teammates_too_old(&self) -> bool {
+        self.teammates_too_old
+    }
+
+    /// The teammates could not be read again. A yard without the call
+    /// has none to show: the teammates pane says it is too old, and no
+    /// notice is raised. Anything else is said as a notice, as ever.
+    pub fn teammates_failed(&mut self, err: &api::Error) {
+        match teammates_too_old(err) {
+            true => {
+                self.teammates.clear();
+                self.teammates_too_old = true;
+            }
+            false => {
+                self.notice = format!("the teammates could not be read: {err}");
             }
         }
     }
@@ -4473,9 +4538,9 @@ impl Model {
     /// notices need no call. A bead, one dealt with and one travelling
     /// bead read the bead whole when it was not read before. The grants
     /// are read again whenever their row opens, so a revoke, which the
-    /// yard tells no event of, is seen. The board, a line and No line
-    /// need no call: their rows came with the state, and events re-read
-    /// them.
+    /// yard tells no event of, is seen, and the teammates whenever
+    /// theirs opens. The board, a line and No line need no call: their
+    /// rows came with the state, and events re-read them.
     fn open(&mut self) -> Vec<Effect> {
         match self.selected.clone() {
             Some(sel @ Selected::Conversation(_)) => {
@@ -4515,6 +4580,11 @@ impl Model {
             }
             Some(Selected::Grants) => match self.is_operator() {
                 true if !self.grants_too_old => self.read_grants(),
+                false => Vec::new(),
+                true => Vec::new(),
+            },
+            Some(Selected::Teammates) => match self.is_operator() {
+                true if !self.teammates_too_old => vec![Effect::Teammates],
                 false => Vec::new(),
                 true => Vec::new(),
             },
@@ -4903,18 +4973,37 @@ impl Model {
             }
             // Removing a user also removes any link trust that named them;
             // unlike a direct grant change, this is not a `peer_` event.
-            "user_removed" => vec![Effect::Peers],
+            // It also removes a teammate's row, where the window is the
+            // operator's.
+            "user_removed" => {
+                let mut effects = vec![Effect::Peers];
+                if self.is_operator() {
+                    effects.push(Effect::Teammates);
+                }
+                effects
+            }
+            // A teammate added, changed or paired: the event carries less
+            // than what changed, so the teammates are read again, where
+            // the window is the operator's.
+            kind if kind.starts_with("user_") || kind.starts_with("device_") => {
+                match self.is_operator() {
+                    true => vec![Effect::Teammates],
+                    false => Vec::new(),
+                }
+            }
             kind if kind.starts_with("peer_") => self.link(e),
             // The operator is the only person whose device may read the
-            // grant graph. Drop the cached rows as soon as that setting
-            // changes, then read them again only if this window is still
-            // the operator's. A remote listener enforces the same rule on
-            // the call itself; this also clears what a former operator's
-            // window already had on screen.
+            // grant graph and the teammates. Drop the cached rows as soon
+            // as that setting changes, then read them again only if this
+            // window is still the operator's. A remote listener enforces
+            // the same rule on the call itself; this also clears what a
+            // former operator's window already had on screen.
             "setting_changed" if e.text("key") == "operator" => {
                 self.operator = e.text("value").to_string();
                 self.grants.clear();
                 self.grants_too_old = false;
+                self.teammates.clear();
+                self.teammates_too_old = false;
                 // A former operator's window keeps none of the preview.
                 // Unserved stays as it was: a yard that serves the calls
                 // to no such window is not asked for them on a change of
@@ -4924,9 +5013,12 @@ impl Model {
                 self.telemetry_read_only = false;
                 if self.is_operator() {
                     let mut effects = self.read_grants();
+                    effects.push(Effect::Teammates);
                     effects.extend(self.read_telemetry());
                     effects
-                } else if self.selected == Some(Selected::Grants) {
+                } else if self.selected == Some(Selected::Grants)
+                    || self.selected == Some(Selected::Teammates)
+                {
                     self.selected = self.row_in(Mode::Decisions, None);
                     self.opened();
                     self.open()
@@ -6059,6 +6151,21 @@ pub fn grants_over_the_link(err: &api::Error) -> bool {
 pub const GRANTS_ON_THE_YARD: &str =
     "the grants are read on the yard's machine: yardr source grants";
 
+/// Whether the yard has no Teammates call: one from before the teammates
+/// view, which says it has no such method. That is no error: the
+/// teammates pane says the yard is too old, in plain words, and no notice
+/// is raised. Its words are read here, as above, and when they change this
+/// is shown as any refusal.
+pub fn teammates_too_old(err: &api::Error) -> bool {
+    matches!(err, api::Error::Refused { message, .. } if message.starts_with("no such method"))
+}
+
+/// What the teammates pane says of a yard from before the teammates view,
+/// in place of the teammates it would list: plain words, never the wire's
+/// method name, and never in red.
+pub const TEAMMATES_TOO_OLD: &str =
+    "this yard's yardr is older than the teammates view (it needs yardr from 28 Oct 2026 or later)";
+
 /// Whether the yard refused a session's screen because the request came
 /// down the link from its edge: it reads none to a device that comes so,
 /// whoever holds it. That is no fault of the device's, whatever the rest of
@@ -6428,6 +6535,106 @@ pub fn ordered_grants(grants: &[SourceGrant]) -> Vec<&SourceGrant> {
             ))
     });
     ordered
+}
+
+/// How the teammates view says a time: `17 Oct 19:02`, in the zone of
+/// the person reading, as the grants view says one. Empty for a time
+/// that cannot be read.
+pub fn teammate_time(at: &str) -> String {
+    grant_time(at)
+}
+
+/// A teammate's state, as their row says it: `paired` with each
+/// device's name and last use, or `waiting` while none is paired. A
+/// device never used says no last use. Nothing of any web sign-in is
+/// said: nothing at the yard records it.
+pub fn teammate_state(teammate: &Teammate) -> String {
+    if teammate.devices.is_empty() {
+        return "waiting".to_string();
+    }
+    let devices: Vec<String> = teammate
+        .devices
+        .iter()
+        .map(|device| match teammate_time(&device.last_used) {
+            used if used.is_empty() => plain(&device.name),
+            used => format!("{}, last used {used}", plain(&device.name)),
+        })
+        .collect();
+    format!("paired: {}", devices.join(", "))
+}
+
+/// Who invited a teammate and when, as their row says it. A user with
+/// no invite on record says it was not kept, never a guess.
+pub fn teammate_invited(teammate: &Teammate) -> String {
+    match (
+        plain(&teammate.invited_by),
+        teammate_time(&teammate.invited_at),
+    ) {
+        (by, at) if !by.is_empty() && !at.is_empty() => format!("invited by {by}, {at}"),
+        (by, _) if !by.is_empty() => format!("invited by {by}"),
+        (_, at) if !at.is_empty() => format!("invited {at}"),
+        _ => "invite not kept".to_string(),
+    }
+}
+
+/// What the teammates view says is invited: how many teammates, with
+/// how many paired and how many waiting.
+pub fn teammates_summary(teammates: &[Teammate]) -> String {
+    let paired = teammates
+        .iter()
+        .filter(|teammate| !teammate.devices.is_empty())
+        .count();
+    let waiting = teammates.len() - paired;
+    format!(
+        "{}: {paired} paired, {waiting} waiting.",
+        count_phrase(teammates.len(), "teammate", "teammates"),
+    )
+}
+
+/// What the window says of a removal filed: the teammate, the bead the
+/// ask stands on and the ask's seq. Approval is the card's path.
+pub fn uninvited_line(user: &str, filed: &Uninvited) -> String {
+    format!(
+        "removal of {} filed on {} ask {}",
+        plain(user),
+        plain(&filed.bead),
+        filed.ask
+    )
+}
+
+/// Whether a removal's filing ended without an answer after it may
+/// have run: the queue is read again, and the card says whether the ask
+/// stands. A call that sent nothing, and a refusal, read nothing again.
+pub fn filing_unknown(err: &api::Error) -> bool {
+    matches!(
+        err,
+        api::Error::Down(_)
+            | api::Error::Protocol(_)
+            | api::Error::Slow {
+                idempotent: false,
+                sent: true
+            }
+    ) || err.may_have_run()
+}
+
+/// Why a teammate's removal was not filed, as the pane's refusal line
+/// says it. A call that ended without an answer is never said to be
+/// filed or not: the queue is read again, and the card says which.
+pub fn not_filed(err: &api::Error) -> String {
+    match err {
+        api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        } => "the yard did not answer; nothing was filed. File it again.".to_string(),
+        api::Error::Down(_)
+        | api::Error::Protocol(_)
+        | api::Error::Slow {
+            idempotent: false,
+            sent: true,
+        } => "the yard did not answer; read the queue again".to_string(),
+        err if err.may_have_run() => "the yard did not answer; read the queue again".to_string(),
+        _ => format!("not filed: {err}"),
+    }
 }
 
 /// What the yard answered to a setup approval, in one line: the pack with
@@ -11440,6 +11647,56 @@ mod tests {
         }
     }
 
+    /// A yard from before the teammates view has no Teammates call: its
+    /// answer is no error, so no notice is raised, and the teammates pane
+    /// says the yard is too old instead. Anything else the call fails
+    /// with is said as a notice, as ever. Teammates read again clear the
+    /// pane's saying.
+    #[test]
+    fn a_yard_that_gives_no_teammates_says_so_in_the_teammates_pane_not_as_a_notice() {
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        assert!(teammates_too_old(&refused("no such method Teammates")));
+        assert!(!teammates_too_old(&refused("the teammates are closed")));
+        assert!(!teammates_too_old(&api::Error::Protocol(
+            "Teammates: status 200, and no JSON object".into()
+        )));
+        // Plain words, and never the wire's method name.
+        assert!(TEAMMATES_TOO_OLD.contains("older than the teammates view"));
+        assert!(!TEAMMATES_TOO_OLD.contains("no such method"));
+        assert!(!TEAMMATES_TOO_OLD.contains("Teammates"));
+
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        m.teammates(vec![Teammate {
+            name: "sam".into(),
+            ..Default::default()
+        }]);
+        assert!(!m.teammates_too_old());
+        assert_eq!(m.teammate_records().len(), 1);
+        m.teammates_failed(&refused("no such method Teammates"));
+        assert!(m.teammates_too_old());
+        assert!(m.teammate_records().is_empty());
+        assert!(m.notice.is_empty(), "{}", m.notice);
+
+        // Teammates read again clear it.
+        m.teammates(Vec::new());
+        assert!(!m.teammates_too_old());
+
+        // Any other failure is a notice, as ever, and not the pane's.
+        for err in [
+            refused("the teammates are closed"),
+            api::Error::Protocol("Teammates: status 200, and no JSON object".into()),
+            api::Error::Down(std::io::Error::other("the yard went away")),
+        ] {
+            m.teammates_failed(&err);
+            assert!(!m.teammates_too_old());
+            assert_eq!(m.notice, format!("the teammates could not be read: {err}"));
+            m.notice.clear();
+        }
+    }
+
     /// The Telemetry section is the operator's alone, on a yard that serves
     /// the calls: a preview read, a refusal that says the yard has no such
     /// calls or serves them down no link, and anything else the read fails
@@ -11750,7 +12007,7 @@ mod tests {
         let (mut m, _) = Model::new(state, Mode::Decisions, None);
         assert!(m.is_operator());
         let order = m.order_in(Mode::Decisions);
-        assert_eq!(order.last(), Some(&Selected::Grants));
+        assert!(order.ends_with(&[Selected::Grants, Selected::Teammates]));
         assert_eq!(m.select(Selected::Grants), vec![Effect::Grants]);
 
         // With nothing asking, decisions opens on none, with the
@@ -11790,7 +12047,10 @@ mod tests {
         state.grants_on_the_yard = true;
         let (mut m, _) = Model::new(state, Mode::Decisions, None);
         assert!(m.is_operator());
-        assert_eq!(m.order_in(Mode::Decisions).last(), Some(&Selected::Grants));
+        assert!(
+            m.order_in(Mode::Decisions)
+                .ends_with(&[Selected::Grants, Selected::Teammates])
+        );
         assert_eq!(m.select(Selected::Grants), Vec::new());
         assert_eq!(m.selected(), Some(&Selected::Grants));
         assert!(m.event(&event("source_granted")).is_empty());
@@ -11844,6 +12104,97 @@ mod tests {
         assert!(!m.event(&changed).contains(&Effect::Grants));
         assert!(m.is_operator());
         assert!(m.grants_on_the_yard());
+    }
+
+    /// The teammates view is the operator's alone: its row stands last
+    /// of decisions where the window runs as the yard's operator, and
+    /// nowhere else. Opening it reads the teammates again; a teammate
+    /// added, removed, changed or paired reads them again through its
+    /// event. A removal that is only approved reads nothing until then.
+    #[test]
+    fn the_teammates_row_stands_for_the_operator_alone_and_reads_again() {
+        // Not the operator's: no row, no read.
+        let (mut m, _) = Model::new(yard(&[]), Mode::Decisions, None);
+        assert!(!m.is_operator());
+        assert!(!m.order_in(Mode::Decisions).contains(&Selected::Teammates));
+        assert_eq!(m.select(Selected::Teammates), Vec::new());
+        assert_ne!(m.selected(), Some(&Selected::Teammates));
+
+        // The operator's: the row stands last, beside the grants', and
+        // selecting it reads.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        assert!(m.is_operator());
+        let order = m.order_in(Mode::Decisions);
+        assert!(order.ends_with(&[Selected::Grants, Selected::Teammates]));
+        assert_eq!(m.select(Selected::Teammates), vec![Effect::Teammates]);
+
+        // A teammate's event reads the teammates again for the
+        // operator, and nothing for anyone else. A removal reads the
+        // linked yards too, as ever.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        let (mut m, _) = Model::new(state, Mode::Chat, None);
+        let event = |kind: &str| Event {
+            seq: 21,
+            kind: kind.into(),
+            ..Default::default()
+        };
+        for kind in ["user_added", "user_set", "device_added", "device_removed"] {
+            assert_eq!(m.event(&event(kind)), vec![Effect::Teammates], "{kind}");
+        }
+        assert_eq!(
+            m.event(&event("user_removed")),
+            vec![Effect::Peers, Effect::Teammates]
+        );
+        let (mut m, _) = Model::new(yard(&[]), Mode::Chat, None);
+        for kind in ["user_added", "user_set", "device_added", "device_removed"] {
+            assert!(m.event(&event(kind)).is_empty(), "{kind}");
+        }
+        // A removal still reads the linked yards, as ever, and nothing
+        // of the teammates.
+        assert_eq!(m.event(&event("user_removed")), vec![Effect::Peers]);
+
+        // Changing the operator clears the teammates at once. The old
+        // operator's selected pane closes, and a newly named operator
+        // reads teammates only for their own window.
+        let mut state = yard(&[]);
+        state.operator = "jo".into();
+        state.teammates.push(Teammate {
+            name: "sam".into(),
+            ..Default::default()
+        });
+        let (mut m, _) = Model::new(state, Mode::Decisions, Some(Selected::Teammates));
+        let changed = Event {
+            seq: 22,
+            kind: "setting_changed".into(),
+            data: serde_json::json!({"key": "operator", "value": "ada"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert!(!m.event(&changed).contains(&Effect::Teammates));
+        assert!(!m.is_operator());
+        assert!(m.teammate_records().is_empty());
+        assert_ne!(m.selected(), Some(&Selected::Teammates));
+        assert!(!m.order_in(Mode::Decisions).contains(&Selected::Teammates));
+
+        let mut state = yard(&[]);
+        state.operator = "ada".into();
+        let (mut m, _) = Model::new(state, Mode::Decisions, None);
+        let changed = Event {
+            seq: 23,
+            kind: "setting_changed".into(),
+            data: serde_json::json!({"key": "operator", "value": "jo"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        assert!(m.event(&changed).contains(&Effect::Teammates));
+        assert!(m.is_operator());
     }
 
     /// A session's screen opens for the operator alone: the session
@@ -12196,6 +12547,119 @@ mod tests {
                 ("google-mail", "ada"),
                 ("telegram", "")
             ]
+        );
+    }
+
+    /// A teammate's row says who invited them and when, and whether a
+    /// device is paired: each device's name with its last use, or
+    /// waiting while none is. A removal filed says the bead and the ask
+    /// it stands on; one refused says why, and one that ended without an
+    /// answer says the queue is read again, never filed or not.
+    #[test]
+    fn a_teammate_s_row_says_the_invite_and_the_pairing_and_a_filing_says_where_it_stands() {
+        use crate::api::TeammateDevice;
+        let waiting = Teammate {
+            name: "hal".into(),
+            role: "member".into(),
+            email: "hal@example.net".into(),
+            invited_by: "jo".into(),
+            invited_at: "2026-10-08T09:30:00Z".into(),
+            devices: Vec::new(),
+        };
+        let paired = Teammate {
+            name: "sam".into(),
+            role: "member".into(),
+            email: "sam@example.net".into(),
+            invited_by: "jo".into(),
+            invited_at: "2026-10-08T09:30:00Z".into(),
+            devices: vec![
+                TeammateDevice {
+                    name: "tablet".into(),
+                    last_used: "2026-10-08T09:30:00Z".into(),
+                },
+                TeammateDevice {
+                    name: "spare".into(),
+                    last_used: String::new(),
+                },
+            ],
+        };
+        // Who invited them and when, in the reader's zone; a user with
+        // no invite on record says it was not kept.
+        let invited = teammate_invited(&waiting);
+        assert!(invited.starts_with("invited by jo, "), "{invited}");
+        assert!(teammate_time("not a time").is_empty());
+        assert_eq!(
+            teammate_invited(&Teammate {
+                name: "root".into(),
+                ..Default::default()
+            }),
+            "invite not kept"
+        );
+        assert_eq!(
+            teammate_invited(&Teammate {
+                invited_by: "jo".into(),
+                ..Default::default()
+            }),
+            "invited by jo"
+        );
+        // Paired names each device with its last use; waiting names no
+        // web sign-in, which nothing at the yard records.
+        assert_eq!(teammate_state(&waiting), "waiting");
+        let state = teammate_state(&paired);
+        assert!(state.starts_with("paired: tablet, last used "), "{state}");
+        assert!(state.ends_with(", spare"), "{state}");
+        assert!(!state.contains("sign"));
+        // The summary counts teammates, paired and waiting.
+        assert_eq!(
+            teammates_summary(&[waiting, paired]),
+            "2 teammates: 1 paired, 1 waiting."
+        );
+        assert_eq!(teammates_summary(&[]), "0 teammates: 0 paired, 0 waiting.");
+
+        // A removal filed names the bead and the ask.
+        assert_eq!(
+            uninvited_line(
+                "sam",
+                &Uninvited {
+                    bead: "yd-uninvite".into(),
+                    ask: 83
+                }
+            ),
+            "removal of sam filed on yd-uninvite ask 83"
+        );
+        // A refusal says why and files nothing; a call that ended
+        // without an answer after it may have run reads the queue again.
+        let refused = |message: &str| api::Error::Refused {
+            code: "error".into(),
+            message: message.into(),
+        };
+        let why = "user sam is the caller: file the removal of another teammate, not of the user filing it";
+        assert_eq!(not_filed(&refused(why)), format!("not filed: {why}"));
+        assert!(!filing_unknown(&refused(why)));
+        for err in [
+            api::Error::Down(std::io::Error::other("the yard went away")),
+            api::Error::Protocol("UninviteTeammate: status 200, and no JSON object".into()),
+            api::Error::Slow {
+                idempotent: false,
+                sent: true,
+            },
+        ] {
+            assert!(filing_unknown(&err));
+            assert_eq!(
+                not_filed(&err),
+                "the yard did not answer; read the queue again"
+            );
+        }
+        // A call that sent nothing says it is safe to file again, and
+        // reads nothing.
+        let unsent = api::Error::Slow {
+            idempotent: false,
+            sent: false,
+        };
+        assert!(!filing_unknown(&unsent));
+        assert_eq!(
+            not_filed(&unsent),
+            "the yard did not answer; nothing was filed. File it again."
         );
     }
 
