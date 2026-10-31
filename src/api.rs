@@ -1694,6 +1694,14 @@ impl AddressOf {
     }
 }
 
+/// Whether the host is this machine: `localhost` in any letters, or a
+/// loopback address. Anything else is reached over the network, as an
+/// edge's address is.
+fn here(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 impl Address {
     /// Reads an address as `yardr user device pair` prints it. Plain HTTP
     /// is refused off this machine: the yard does no TLS and cannot tell
@@ -1771,8 +1779,7 @@ impl Address {
             None if tls => 443,
             None => 80,
         };
-        let here = host.eq_ignore_ascii_case("localhost")
-            || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        let here = here(host);
         if !tls && !here {
             return Err(format!(
                 "{text} is refused: plain http is for {noun} on this machine alone (127.0.0.1, ::1, localhost).{} Give the https:// address of what stands in front of {}.",
@@ -3532,7 +3539,11 @@ impl Client {
     /// client's word that its person saw the card's weight and passed its
     /// gate: every setup ask is weighty, and the yard refuses one without
     /// it. It goes only where it is said: a yard from before the argument
-    /// takes the call as it always did.
+    /// takes the call as it always did. Typed values are withheld from a
+    /// yard reached down its edge link that is not hosted: a value-free
+    /// read first meets the edge's session refusal, the call sends
+    /// nothing, and the card answers it at the yard instead, in the
+    /// yard's words.
     #[allow(clippy::too_many_arguments)]
     pub fn approve_setup(
         &self,
@@ -3544,6 +3555,27 @@ impl Client {
         actor: &str,
         weighed: bool,
     ) -> Result<SetupApproved> {
+        // A typed account is a secret: before any is sent at an address
+        // where no session rides beside the token, a value-free read
+        // looks at what answers. The edge answers a call with no
+        // session it knows with its session refusal, which a yard's
+        // listener never sends: meeting it, the approval is withheld,
+        // and the card answers it at the yard instead, in the yard's
+        // words. Any other outcome sends as ever, since the yard the
+        // call reaches takes the values or answers why it does not; a
+        // read that fails never withholds what the call itself would
+        // say. Decided before anything of the values is written
+        // anywhere, and never from the yard's refusal to the call,
+        // which arrives after they crossed. A yard of this machine and
+        // a hosted yard take typed values as ever, and a candidate
+        // taken or an account kept types nothing.
+        if values.is_some_and(|values| !values.is_empty())
+            && self.is_remote()
+            && !self.hosted()
+            && matches!(self.head(), Err(Error::NotSignedIn))
+        {
+            return Err(refused("error", "answer it at the yard"));
+        }
         let mut args = json!({ "bead": bead, "ask": ask, "option": option, "actor": actor });
         if weighed {
             args["weighed"] = json!(true);
@@ -5087,7 +5119,82 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, Error::Down(_)), "{way}: {err:?}");
             without(&err);
+            // Typed values at a listener look first: one value-free read
+            // goes before each of the four approvals above. None goes on
+            // the socket, which is no edge.
+            let probed = if yard.at_listener() { 4 } else { 0 };
+            assert_eq!(yard.asked("Head").len(), probed, "{way}");
         }
+        // A typed account is withheld from a yard reached down its edge
+        // link that is not hosted: the value-free read first meets the
+        // edge's session refusal, nothing of the approval is sent, and
+        // the card answers it at the yard instead, in the yard's words.
+        // The edge is the local stand-in, so the refusal proves nothing
+        // was sent: the yard behind it answers the call, and hears none.
+        let yard = Yard::start_tcp();
+        yard.answer(
+            "ApproveSetup",
+            r#"{"result": {"bead": "yd-crm", "ask": 41, "asker": "yardmaster",
+                "pack": "courier", "preset": "read", "given": ["COURIER_ACCOUNT"],
+                "result": "approved, to be carried out"}}"#,
+        );
+        let edge = Router::start(&yard, SESSION);
+        let linked = Client::remote(Address::parse(edge.address()).unwrap(), TOKEN);
+        let values = [("COURIER_ACCOUNT".to_string(), VALUE.to_string())];
+        let err = linked
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "answer it at the yard");
+        assert!(!err.to_string().contains(VALUE));
+        assert!(!format!("{err:?}").contains(VALUE));
+        assert!(yard.asked("ApproveSetup").is_empty());
+        assert!(edge.seen("POST /user/call/ApproveSetup ").is_empty());
+        assert_eq!(edge.seen("POST /user/call/Head ").len(), 1);
+        assert_eq!(edge.proxied(), 0);
+        assert!(!edge.last_request().contains(VALUE));
+        // A hosted yard takes the typed account at its edge: the
+        // service runs the yard's machine too, which has no shell to
+        // answer at instead. No read goes first: the session beside
+        // the token is the edge's to check, and the yard takes the
+        // whole call.
+        let client = edge.client_with(TOKEN, SESSION);
+        let approved = client
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap();
+        assert_eq!(approved.given, ["COURIER_ACCOUNT"]);
+        assert_eq!(
+            yard.asked("ApproveSetup").last(),
+            Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
+                         "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"}))
+        );
+        // No values is no secret: an empty map crosses as a bare
+        // pick does.
+        let empty: [(String, String); 0] = [];
+        client
+            .approve_setup("yd-crm", 41, 1, Some(&empty), None, "jo", false)
+            .unwrap();
+        assert_eq!(
+            yard.asked("ApproveSetup").last(),
+            Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
+                         "values": {}, "actor": "jo"}))
+        );
+        assert!(yard.asked("Head").is_empty());
+        // A far address is no verdict on its own: the read first cannot
+        // reach it, and the call is tried as ever, failing to connect
+        // rather than refused as at an edge. Plain http off this machine
+        // is filtered before any packet moves, so this leg attempts
+        // nothing anywhere.
+        let far = Address {
+            tls: false,
+            host: "192.0.2.1".to_string(),
+            authority: "192.0.2.1:80".to_string(),
+            port: 80,
+            path: String::new(),
+        };
+        let err = Client::remote(far, TOKEN)
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap_err();
+        assert!(matches!(err, Error::Down(_)), "{err:?}");
     }
 
     #[test]
