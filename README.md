@@ -1146,9 +1146,10 @@ an older release, whose signature is as good as it ever was, cannot be
 handed over as a newer one; and a version below the lowest one built into
 footplate (`LOWEST`, there too) is refused whatever is signed.
 
-The archive holds `yardr`, and may hold `README.md`, `LICENSE` and `NOTICE`
-beside it. The binary alone is unpacked, to a `bin` beside the
-[settings](#settings), mode 0755:
+The archive holds `yardr`, and may hold `server-yard` (yardr's script for
+setting a yard up on a server, in every release from v0.15.0), `README.md`,
+`LICENSE` and `NOTICE` beside it. The binary alone is unpacked, to a `bin`
+beside the [settings](#settings), mode 0755:
 `$XDG_CONFIG_HOME/footplate/bin/yardr` when `XDG_CONFIG_HOME` is set,
 `~/Library/Application Support/footplate/bin/yardr` on macOS otherwise,
 and `~/.config/footplate/bin/yardr` on Linux otherwise. It is written

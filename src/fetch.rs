@@ -69,9 +69,10 @@ const RELEASES: &str = "/releases/";
 /// The binary, as the archive and footplate's directory name it.
 const PROGRAM: &str = "yardr";
 
-/// What a release's archive holds beside the binary. Anything else in it
-/// is refused.
-const BESIDE: [&str; 3] = ["README.md", "LICENSE", "NOTICE"];
+/// What a release's archive holds beside the binary: the README and the
+/// licence, and from v0.15.0 `server-yard`, the script that sets a yard up
+/// on a server. None of it is kept. Anything else in the archive is refused.
+const BESIDE: [&str; 4] = ["server-yard", "README.md", "LICENSE", "NOTICE"];
 
 /// The most bytes that are read of `latest.json` and of the checksums, of
 /// the signature, of an archive, and of what an archive unpacks to. An
@@ -1323,14 +1324,26 @@ mod tests {
         gz.finish().unwrap()
     }
 
-    /// An archive as a release has it.
-    fn release_archive() -> Vec<u8> {
-        archive_of(&[
+    /// What a release's archive holds, in the order yardr packs it (`files`
+    /// in contrib/release/build of its repository): from v0.15.0 the script
+    /// that sets a yard up on a server is beside the binary.
+    fn release_members() -> Vec<(&'static str, u8, &'static [u8])> {
+        vec![
             ("yardr", b'0', BINARY),
+            (
+                "server-yard",
+                b'0',
+                b"#!/bin/sh\n# sets a yard up on a server\n",
+            ),
             ("README.md", b'0', b"# yardr\n"),
             ("LICENSE", b'0', b"Functional Source License\n"),
             ("NOTICE", b'0', b"yardr\n"),
-        ])
+        ]
+    }
+
+    /// An archive as a release has it.
+    fn release_archive() -> Vec<u8> {
+        archive_of(&release_members())
     }
 
     fn sign(keys: &KeyPair, text: &[u8]) -> String {
@@ -1450,8 +1463,8 @@ mod tests {
         assert_eq!(fs::read(&stored.path).unwrap(), BINARY);
         let mode = fs::metadata(&stored.path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
-        // The binary and its version: nothing else of the archive, no
-        // part.
+        // The binary and its version: nothing else of the archive (not the
+        // server-yard beside it), no part.
         let mut kept: Vec<_> = fs::read_dir(fixture.dir())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -2244,11 +2257,20 @@ mod tests {
     #[test]
     fn a_member_is_taken_from_an_archive_that_holds_what_is_expected() {
         let most = 1024 * 1024;
+        // The five members of a release from v0.15.0: the binary is taken,
+        // and not the script beside it.
         assert_eq!(
             member(&release_archive(), "yardr", &BESIDE, most).unwrap(),
             BINARY
         );
-        // What may be beside it need not be.
+        // What may be beside it need not be: the releases before v0.15.0
+        // hold no server-yard.
+        let mut older = release_members();
+        older.retain(|(name, ..)| *name != "server-yard");
+        assert_eq!(
+            member(&archive_of(&older), "yardr", &BESIDE, most).unwrap(),
+            BINARY
+        );
         let alone = archive_of(&[("yardr", b'0', BINARY)]);
         assert_eq!(member(&alone, "yardr", &BESIDE, most).unwrap(), BINARY);
         // A file longer than a block, and one that fills its blocks.
@@ -2267,6 +2289,11 @@ mod tests {
             ("extra", b'0', b"x"),
         ]));
         assert!(why.contains("\"extra\""), "{why}");
+        // The five members of a v0.15.0 release make no room for a sixth.
+        let mut more = release_members();
+        more.push(("install.sh", b'0', b"#!/bin/sh\n"));
+        let why = refused(&archive_of(&more));
+        assert!(why.contains("\"install.sh\""), "{why}");
         // A name that leaves the directory, or stands in one.
         for name in ["../yardr", "/usr/bin/yardr", "./yardr", "bin/yardr"] {
             let why = refused(&archive_of(&[(name, b'0', BINARY)]));
