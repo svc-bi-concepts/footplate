@@ -302,6 +302,35 @@ impl Yardr {
             .map(|_| ())
     }
 
+    /// Installs the web view's login service, or writes it anew: its file
+    /// names the yardr that runs this. The address is the yard's own:
+    /// its setting's, where it names one.
+    pub fn web_install(&self) -> Result<(), String> {
+        self.run(&["web", "install"], &[])?
+            .done("web install")
+            .map(|_| ())
+    }
+
+    /// Installs the BDP server's login service, or writes it anew: its
+    /// file names the yardr that runs this. The address is the yard's
+    /// own: its setting's, where it names one.
+    pub fn bdp_install(&self) -> Result<(), String> {
+        self.run(&["bdp", "install"], &[])?
+            .done("bdp install")
+            .map(|_| ())
+    }
+
+    /// What of the BDP server runs, and what of it starts at login.
+    /// `status` carries no BDP service, so its server is asked itself.
+    pub fn bdp_status(&self) -> Result<BdpStatus, String> {
+        let ran = self.run(&["bdp", "status"], &[])?;
+        if let Some(error) = ran.error() {
+            return Err(error);
+        }
+        serde_json::from_value(ran.json)
+            .map_err(|err| format!("yardr bdp status answered what footplate cannot read ({err})."))
+    }
+
     /// Makes `dir` a depot called `name` and sets it up from the yard's
     /// pack. What the import still asks for is answered as the first run
     /// does: a group of agents works on `harness`, and a group of people
@@ -705,6 +734,8 @@ pub struct Status {
     /// yard on the machine.
     #[serde(default, rename = "herdr_login_service")]
     herdr_login: Service,
+    #[serde(default)]
+    web: WebRuns,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -721,8 +752,14 @@ struct DaemonRuns {
     service: Service,
 }
 
-/// A login service as `status` reports it: the daemon's, or herdr's
-/// server's.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct WebRuns {
+    #[serde(default)]
+    service: Service,
+}
+
+/// A login service as yardr reports one: the daemon's, the web view's,
+/// the BDP server's, or herdr's server's.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Service {
     /// The system has a service manager yardr writes to.
@@ -755,6 +792,11 @@ impl Status {
         &self.daemon.service
     }
 
+    /// The web view's login service.
+    pub fn web_service(&self) -> &Service {
+        &self.web.service
+    }
+
     /// The login service for herdr's server.
     pub fn herdr_service(&self) -> &Service {
         &self.herdr_login
@@ -768,6 +810,16 @@ impl Status {
         self.daemon_service().installed
             && (self.herdr_service().installed || !self.herdr_service().foreign.is_empty())
     }
+}
+
+/// `yardr bdp status --json`: whether the BDP server runs, and its login
+/// service.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct BdpStatus {
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub service: Service,
 }
 
 /// What `status` came to instead of the yard: the home holds no yard, or
@@ -1197,7 +1249,16 @@ pub mod standin {
 D=$(dirname "$0")
 key=$1
 case "$2" in ''|-*) ;; *) key="$1-$2" ;; esac
-{ printf 'PATH=%s\n' "$PATH"; printf 'ARGS'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$D/calls"
+{
+    printf 'PATH=%s\n' "$PATH"
+    printf 'ARGS'
+    for a in "$@"; do printf ' [%s]' "$a"; done
+    if [ -e "$D/old-binary" ]; then
+        old=$(cat "$D/old-binary")
+        if [ -e "$old" ]; then printf ' [old-present]'; else printf ' [old-gone]'; fi
+    fi
+    printf '\n'
+} >> "$D/calls"
 if [ "$key" = harness-login ]; then
     echo '{"need":"choose","text":"How do you log in to Claude Code?","options":["Claude subscription","Anthropic Console (API usage billing)"]}'
     IFS= read -r line || { echo '{"error":"stdin closed before a method was chosen"}'; exit 1; }

@@ -300,10 +300,11 @@ impl Machine {
         Ok(place)
     }
 
-    /// Runs `daemon install` from `program` on each yard with a login
-    /// service, whose unit names the yardr that installed it. Doctor widens
-    /// the PATH first: the unit keeps the PATH it was installed with. Where
-    /// one fails, how many were done before it, and why.
+    /// Runs each login service's install from `program` on each yard
+    /// with one: the daemon's, the web view's, and the BDP server's,
+    /// whose units name the yardr that installed them. Doctor widens the
+    /// PATH first: a unit keeps the PATH it was installed with. Where one
+    /// fails, how many were done before it, and why.
     fn reinstalled(&self, program: &Path) -> Result<usize, (usize, String)> {
         let mut done = 0;
         for home in &self.yards {
@@ -315,11 +316,24 @@ impl Machine {
             };
             let _ = yardr.needs();
             match yardr.status() {
-                Ok(status) if status.daemon_service().installed => {
-                    yardr.daemon_install().map_err(|why| (done, why))?;
-                    done += 1;
+                Ok(status) => {
+                    if status.daemon_service().installed {
+                        yardr.daemon_install().map_err(|why| (done, why))?;
+                        done += 1;
+                    }
+                    if status.web_service().installed {
+                        yardr.web_install().map_err(|why| (done, why))?;
+                        done += 1;
+                    }
+                    // `status` says nothing of the BDP server's service,
+                    // so it is asked itself.
+                    let bdp = yardr.bdp_status().map_err(|why| (done, why))?;
+                    if bdp.service.installed {
+                        yardr.bdp_install().map_err(|why| (done, why))?;
+                        done += 1;
+                    }
                 }
-                Ok(_) | Err(StatusError::NoYard) => {}
+                Err(StatusError::NoYard) => {}
                 Err(StatusError::Failed(why)) => return Err((done, why)),
             }
         }
@@ -1433,8 +1447,22 @@ mod tests {
         }
     }
 
-    fn with_service(installed: bool) -> serde_json::Value {
-        serde_json::json!({"daemon": {"service": {"supported": true, "installed": installed}}})
+    fn with_services(daemon: bool, web: bool) -> serde_json::Value {
+        let service =
+            |installed: bool| serde_json::json!({"supported": true, "installed": installed});
+        serde_json::json!({
+            "daemon": {"service": service(daemon)},
+            "web": {"views": [], "service": service(web)},
+        })
+    }
+
+    /// What `bdp status` answers: whether the BDP server's login service
+    /// is installed.
+    fn bdp_answer(installed: bool) -> serde_json::Value {
+        serde_json::json!({
+            "running": false,
+            "service": {"supported": true, "installed": installed},
+        })
     }
 
     /// The whole order: each step is found while the ones before it are
@@ -1647,46 +1675,79 @@ mod tests {
         assert_eq!(site.asked().len(), asked);
     }
 
-    /// A kept yardr, with a login service: its copy runs `daemon install`
-    /// with the PATH doctor leads to, and only then the old one goes.
+    /// A kept yardr, with login services: its copy runs every installed
+    /// service's install with the PATH doctor leads to, and only then the
+    /// old one goes.
     #[test]
     fn the_kept_yardr_moves_with_its_login_service() {
-        let stage = Stage::new();
-        let kept = stage.kept(0, &with_service(true));
-        standin::answers(&stage.local(), "daemon-install", 0, &serde_json::json!({}));
-        // A yard records the yardr that started it: the kept one is not
-        // "found" for that.
-        fs::write(stage.at("yard/binary"), format!("{}\n", kept.display())).unwrap();
-        let machine = stage.machine();
+        for (daemon, web, bdp) in [(true, true, true), (false, false, true)] {
+            let stage = Stage::new();
+            let kept = stage.kept(0, &with_services(daemon, web));
+            fs::write(
+                stage.local().parent().unwrap().join("old-binary"),
+                kept.display().to_string(),
+            )
+            .unwrap();
+            standin::answers(&stage.local(), "bdp-status", 0, &bdp_answer(bdp));
+            for part in ["daemon", "web", "bdp"] {
+                standin::answers(
+                    &stage.local(),
+                    &format!("{part}-install"),
+                    0,
+                    &serde_json::json!({}),
+                );
+            }
+            // A yard records the yardr that started it: the kept one is not
+            // "found" for that.
+            fs::write(stage.at("yard/binary"), format!("{}\n", kept.display())).unwrap();
+            let machine = stage.machine();
 
-        assert_eq!(machine.yardr(), Ok((stage.local(), None)));
+            assert_eq!(machine.yardr(), Ok((stage.local(), None)));
 
-        assert_eq!(fs::read(stage.local()).unwrap(), standin_script());
-        assert!(!kept.exists() && !stage.at("own").join(VERSION_FILE).exists());
-        let calls = fs::read_to_string(stage.at("home/.local/bin/calls")).unwrap();
-        let install = calls
-            .lines()
-            .position(|line| line.starts_with("ARGS [daemon] [install]"))
-            .unwrap_or_else(|| panic!("no daemon install in {calls}"));
-        let line = calls.lines().nth(install).unwrap();
-        assert!(line.contains(&format!("[--home] [{}]", stage.at("yard").display())));
-        assert_eq!(
-            calls.lines().nth(install - 1).unwrap(),
-            "PATH=/usr/bin:/bin:/opt/herdr/bin"
-        );
-        // The record now leads nowhere, which falls through to the copy.
-        assert_eq!(machine.found(), Some(stage.local()));
+            assert_eq!(fs::read(stage.local()).unwrap(), standin_script());
+            assert!(!kept.exists() && !stage.at("own").join(VERSION_FILE).exists());
+            let calls = fs::read_to_string(stage.at("home/.local/bin/calls")).unwrap();
+            let mut installs = Vec::new();
+            for (part, installed) in [("daemon", daemon), ("web", web), ("bdp", bdp)] {
+                let at = calls
+                    .lines()
+                    .position(|line| line.starts_with(&format!("ARGS [{part}] [install]")));
+                match (at, installed) {
+                    (Some(at), true) => {
+                        let line = calls.lines().nth(at).unwrap();
+                        assert!(
+                            line.contains(&format!("[--home] [{}]", stage.at("yard").display())),
+                            "{line}"
+                        );
+                        assert!(line.ends_with("[old-present]"), "{line}");
+                        installs.push(at);
+                    }
+                    (None, false) => {}
+                    (at, installed) => {
+                        panic!("{part} install ran: {at:?}, installed: {installed} in {calls}")
+                    }
+                }
+            }
+            assert!(installs.windows(2).all(|pair| pair[0] < pair[1]), "{calls}");
+            assert_eq!(
+                calls.lines().nth(installs[0] - 1).unwrap(),
+                "PATH=/usr/bin:/bin:/opt/herdr/bin"
+            );
+            // The record now leads nowhere, which falls through to the copy.
+            assert_eq!(machine.found(), Some(stage.local()));
+        }
     }
 
     #[test]
     fn the_kept_yardr_moves_without_a_login_service() {
         for (status, answer) in [
-            (0, with_service(false)),
+            (0, with_services(false, false)),
             // No yard in that home at all.
             (2, serde_json::json!({})),
         ] {
             let stage = Stage::new();
             let kept = stage.kept(status, &answer);
+            standin::answers(&stage.local(), "bdp-status", 0, &bdp_answer(false));
             assert_eq!(stage.machine().yardr(), Ok((stage.local(), None)));
             assert!(!kept.exists() && !stage.at("own").join(VERSION_FILE).exists());
             let calls = fs::read_to_string(stage.at("home/.local/bin/calls")).unwrap();
@@ -1724,10 +1785,27 @@ mod tests {
         // The service could not be installed: the copy goes too, or it
         // would be found next time and the service left naming the old one.
         let stage = Stage::new();
-        let kept = stage.kept(0, &with_service(true));
+        let kept = stage.kept(0, &with_services(true, false));
         standin::answers(
             &stage.local(),
             "daemon-install",
+            1,
+            &serde_json::json!({"error": "launchctl refused"}),
+        );
+        let (used, note) = stage.machine().yardr().unwrap();
+        assert_eq!(used, kept);
+        still_there(&stage, &kept, note, "launchctl refused");
+        assert!(!stage.local().exists());
+
+        // The web view's service could not be installed either, with no
+        // daemon service before it: the old yardr stays where its
+        // services start it, and the copy goes, so the move is tried
+        // again.
+        let stage = Stage::new();
+        let kept = stage.kept(0, &with_services(false, true));
+        standin::answers(
+            &stage.local(),
+            "web-install",
             1,
             &serde_json::json!({"error": "launchctl refused"}),
         );
@@ -1747,7 +1825,8 @@ mod tests {
         // One of two services was moved: it names the copy, the other the
         // old one, so both stay.
         let stage = Stage::new();
-        let kept = stage.kept(0, &with_service(true));
+        let kept = stage.kept(0, &with_services(true, false));
+        standin::answers(&stage.local(), "bdp-status", 0, &bdp_answer(false));
         standin::answers(
             &stage.local(),
             "daemon-install.1",
@@ -1770,7 +1849,8 @@ mod tests {
         // A failure to clean up the migration's marker keeps the old
         // executable in place and reaches the person in the same note.
         let stage = Stage::new();
-        let kept = stage.kept(0, &with_service(false));
+        let kept = stage.kept(0, &with_services(false, false));
+        standin::answers(&stage.local(), "bdp-status", 0, &bdp_answer(false));
         let marker = kept.with_file_name(VERSION_FILE);
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
