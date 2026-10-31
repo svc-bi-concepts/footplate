@@ -1,0 +1,31 @@
+[package]
+name = "voice-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Throwaway harness for bead footplate-4hd3: a GPT-Live voice session over a hand-written WebSocket, to be run by a person. Not part of footplate."
+
+# Its own workspace root: footplate's gate, its Windows job and its release
+# scripts never see this package, and cargo never looks for a workspace above.
+[workspace]
+
+[features]
+default = ["device"]
+# The microphone and the speaker, through cpal. Without it only the fake
+# devices exist (the tests' and the rehearsal's), which is how the harness
+# builds where the system's audio library is not installed.
+device = ["dep:cpal"]
+
+[dependencies]
+# What footplate's own tree has, at the versions its Cargo.lock names (this
+# package's lock was seeded from it), so that what the socket reuses is the
+# very TLS api.rs speaks.
+serde_json = "1"
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+# The one signal handler (Ctrl-C closes the session before it exits).
+libc = "0.2"
+# The audio crate under test (decision 2 of the design): Apache-2.0, pinned
+# exactly since it changes its API between releases.
+cpal = { version = "=0.18.2", optional = true }
