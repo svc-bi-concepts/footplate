@@ -227,7 +227,8 @@ fn concealed() -> bool {
 }
 
 /// The yard's settings, of which a client reads the operator, the cap on
-/// a file, and how many of them a mail or a note carries.
+/// a file, how many of them a mail or a note carries, and whether the
+/// yard is a hosted one.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -238,6 +239,11 @@ pub struct Settings {
     /// A whole number in a string; absent when the yard answers none.
     #[serde(default)]
     pub files_max: String,
+    /// `true` where the yard is a hosted one, `false` where its operator
+    /// runs it. Absent to a device of no operator, whatever the yard is,
+    /// and on a yard from before the key. Only `true` says hosted.
+    #[serde(default)]
+    pub hosted: String,
 }
 
 impl Settings {
@@ -3541,9 +3547,9 @@ impl Client {
     /// it. It goes only where it is said: a yard from before the argument
     /// takes the call as it always did. Typed values are withheld from a
     /// yard reached down its edge link that is not hosted: a value-free
-    /// read first meets the edge's session refusal, the call sends
-    /// nothing, and the card answers it at the yard instead, in the
-    /// yard's words.
+    /// read first meets the edge's session refusal, or the yard says it
+    /// is no hosted one, the call sends nothing, and the card answers it
+    /// at the yard instead, in the yard's words.
     #[allow(clippy::too_many_arguments)]
     pub fn approve_setup(
         &self,
@@ -3555,26 +3561,35 @@ impl Client {
         actor: &str,
         weighed: bool,
     ) -> Result<SetupApproved> {
-        // A typed account is a secret: before any is sent at an address
-        // where no session rides beside the token, a value-free read
-        // looks at what answers. The edge answers a call with no
-        // session it knows with its session refusal, which a yard's
-        // listener never sends: meeting it, the approval is withheld,
-        // and the card answers it at the yard instead, in the yard's
-        // words. Any other outcome sends as ever, since the yard the
-        // call reaches takes the values or answers why it does not; a
-        // read that fails never withholds what the call itself would
-        // say. Decided before anything of the values is written
-        // anywhere, and never from the yard's refusal to the call,
-        // which arrives after they crossed. A yard of this machine and
-        // a hosted yard take typed values as ever, and a candidate
-        // taken or an account kept types nothing.
-        if values.is_some_and(|values| !values.is_empty())
-            && self.is_remote()
-            && !self.hosted()
-            && matches!(self.head(), Err(Error::NotSignedIn))
-        {
-            return Err(refused("error", "answer it at the yard"));
+        // A typed account is a secret: before any is sent at an address,
+        // a value-free read looks at what answers. With no session
+        // beside the token, the edge answers a call with no session it
+        // knows with its session refusal, which a yard's listener never
+        // sends: meeting it, the approval is withheld, and the card
+        // answers it at the yard instead, in the yard's words. With a
+        // session the edge lets the read through, and the yard is asked
+        // whether it is hosted: a connected yard refuses typed values
+        // down the link only after they crossed, so where Settings says
+        // not hosted the approval is withheld the same way. Only `true`
+        // says hosted; no key (a yard from before it, or no operator's
+        // device) sends as ever, as does any other outcome of either
+        // read, since the yard the call reaches takes the values or
+        // answers why it does not, and a read that fails never withholds
+        // what the call itself would say. Decided before anything of the
+        // values is written anywhere, and never from the yard's refusal
+        // to the call, which arrives after they crossed. A yard of this
+        // machine takes typed values as ever, and a candidate taken or
+        // an account kept types nothing.
+        if values.is_some_and(|values| !values.is_empty()) && self.is_remote() {
+            let linked = match self.hosted() {
+                false => matches!(self.head(), Err(Error::NotSignedIn)),
+                true => self
+                    .settings()
+                    .is_ok_and(|s| !s.hosted.is_empty() && s.hosted != "true"),
+            };
+            if linked {
+                return Err(refused("error", "answer it at the yard"));
+            }
         }
         let mut args = json!({ "bead": bead, "ask": ask, "option": option, "actor": actor });
         if weighed {
@@ -5195,6 +5210,49 @@ mod tests {
             .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
             .unwrap_err();
         assert!(matches!(err, Error::Down(_)), "{err:?}");
+        // A yard reached with a session is asked through Settings whether
+        // it is hosted: a connected one refuses typed values down the
+        // link only after they crossed, so where Settings says not hosted
+        // nothing of the approval is sent, and the card answers it at the
+        // yard instead. The yard behind the edge answers the call, and
+        // hears none.
+        yard.answer("Settings", r#"{"result": {"hosted": "false"}}"#);
+        let approvals = yard.asked("ApproveSetup").len();
+        let sent = edge.seen("POST /user/call/ApproveSetup ").len();
+        let reads = edge.seen("POST /user/call/Settings ").len();
+        let err = client
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "answer it at the yard");
+        assert!(!err.to_string().contains(VALUE));
+        assert!(!format!("{err:?}").contains(VALUE));
+        assert_eq!(yard.asked("ApproveSetup").len(), approvals);
+        assert_eq!(edge.seen("POST /user/call/ApproveSetup ").len(), sent);
+        assert_eq!(edge.seen("POST /user/call/Settings ").len(), reads + 1);
+        assert!(!edge.last_request().contains(VALUE));
+        // Where Settings says hosted the typed account goes as ever.
+        yard.answer("Settings", r#"{"result": {"hosted": "true"}}"#);
+        let approved = client
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap();
+        assert_eq!(approved.given, ["COURIER_ACCOUNT"]);
+        assert_eq!(
+            yard.asked("ApproveSetup").last(),
+            Some(&json!({"bead": "yd-crm", "ask": 41, "option": 1,
+                         "values": {"COURIER_ACCOUNT": VALUE}, "actor": "jo"}))
+        );
+        // No hosted key (a yard from before it, or no operator's device)
+        // sends as ever, as does a read that fails: neither withholds
+        // what the call itself would say.
+        yard.answer("Settings", r#"{"result": {"operator": "jo"}}"#);
+        client
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap();
+        yard.answer_nothing("Settings");
+        client
+            .approve_setup("yd-crm", 41, 1, Some(&values), None, "jo", false)
+            .unwrap();
+        assert_eq!(yard.asked("ApproveSetup").len(), approvals + 3);
     }
 
     #[test]
