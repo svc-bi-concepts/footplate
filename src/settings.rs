@@ -259,13 +259,14 @@ pub fn host_of(address: &str) -> String {
     host.split('.').next().unwrap_or_default().to_string()
 }
 
-/// One of the settings' seven sections, as the sheet's side list shows
+/// One of the settings' eight sections, as the sheet's side list shows
 /// them: this window, how it looks, what the system tells of, the yards
 /// it shows, how this yard's agents work with the operator, the
-/// addresses a note's pages go through, and the yard's telemetry switch.
-/// Kept as the open one, this window where none was chosen. A file
-/// naming one that is gone (the crew's, from before it went) opens the
-/// first: the rest of the file is still read.
+/// addresses a note's pages go through, talking with the yard by voice,
+/// and the yard's telemetry switch. Kept as the open one, this window
+/// where none was chosen. A file naming one that is gone (the crew's,
+/// from before it went) opens the first: the rest of the file is still
+/// read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String")]
 pub enum Section {
@@ -282,6 +283,8 @@ pub enum Section {
     Agents,
     #[serde(rename = "connection")]
     Connection,
+    #[serde(rename = "voice")]
+    Voice,
     #[serde(rename = "telemetry")]
     Telemetry,
 }
@@ -297,6 +300,7 @@ impl From<String> for Section {
             "yards" => Section::Yards,
             "agents" => Section::Agents,
             "connection" => Section::Connection,
+            "voice" => Section::Voice,
             "telemetry" => Section::Telemetry,
             _ => Section::default(),
         }
@@ -304,16 +308,17 @@ impl From<String> for Section {
 }
 
 impl Section {
-    /// The seven, as the side list shows them: telemetry only where
+    /// The eight, as the side list shows them: telemetry only where
     /// the window runs as the yard's operator and the yard serves the
     /// calls to such a window.
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::ThisWindow,
         Section::Appearance,
         Section::Notifications,
         Section::Yards,
         Section::Agents,
         Section::Connection,
+        Section::Voice,
         Section::Telemetry,
     ];
 
@@ -326,6 +331,7 @@ impl Section {
             Section::Yards => "yards",
             Section::Agents => "agents",
             Section::Connection => "connection",
+            Section::Voice => "voice",
             Section::Telemetry => "telemetry",
         }
     }
@@ -339,6 +345,7 @@ impl Section {
             Section::Yards => "Yards",
             Section::Agents => "Agents & you",
             Section::Connection => "Connection",
+            Section::Voice => "Voice",
             Section::Telemetry => "Telemetry",
         }
     }
@@ -395,6 +402,13 @@ pub struct Settings {
     /// file while it is auto, as the look is.
     #[serde(skip_serializing_if = "Look::is_auto")]
     pub tray: Look,
+    /// Whether talking with the yard by voice is on: off until a person
+    /// switches it on in the settings, which is the opt-in, since what a
+    /// voice session sends goes to OpenAI. Left out of the file while it
+    /// is off, as the menu bar's is left out while it is on. The key
+    /// itself is never here: it stands in `voice.key` beside the file.
+    #[serde(skip_serializing_if = "is_off")]
+    pub voice: bool,
     /// The settings' open section: the one the side list shows. Left out
     /// of the file while it is the first, as the modes are.
     #[serde(skip_serializing_if = "Section::is_first")]
@@ -403,6 +417,10 @@ pub struct Settings {
 
 fn is_on(on: &bool) -> bool {
     *on
+}
+
+fn is_off(on: &bool) -> bool {
+    !*on
 }
 
 fn nobody_chose(yards: &[Yard]) -> bool {
@@ -427,6 +445,7 @@ struct Kept {
     notifications: Notify,
     menu_bar: bool,
     tray: Look,
+    voice: bool,
     section: Section,
     web_view: String,
     run_base: String,
@@ -446,6 +465,7 @@ impl Default for Kept {
             notifications: Notify::default(),
             menu_bar: true,
             tray: Look::Auto,
+            voice: false,
             section: Section::default(),
             web_view: String::new(),
             run_base: String::new(),
@@ -521,6 +541,7 @@ impl From<Kept> for Settings {
             notifications: kept.notifications,
             menu_bar: kept.menu_bar,
             tray: kept.tray,
+            voice: kept.voice,
             section: kept.section,
         }
     }
@@ -624,6 +645,7 @@ impl Default for Settings {
             notifications: Notify::default(),
             menu_bar: true,
             tray: Look::Auto,
+            voice: false,
             section: Section::default(),
         }
     }
@@ -1191,6 +1213,53 @@ mod tests {
             fs::read_to_string(&file).unwrap(),
             "{\n  \"text\": 17,\n  \"look\": \"dark\"\n}\n"
         );
+    }
+
+    #[test]
+    fn voice_is_off_until_chosen_and_the_file_holds_no_key() {
+        // The section stands after Connection, and telemetry keeps its
+        // place at the end.
+        assert_eq!(Section::Voice.name(), "voice");
+        assert_eq!(Section::Voice.title(), "Voice");
+        assert_eq!(
+            Section::ALL,
+            [
+                Section::ThisWindow,
+                Section::Appearance,
+                Section::Notifications,
+                Section::Yards,
+                Section::Agents,
+                Section::Connection,
+                Section::Voice,
+                Section::Telemetry,
+            ]
+        );
+        assert_eq!(Section::from("voice".to_string()), Section::Voice);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        // Off until chosen: a file that says nothing of it reads off,
+        // and writing it off keeps nothing of it, as the menu bar's is
+        // left out while it is on.
+        assert!(!Settings::default().voice);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "{\"look\": \"light\"}").unwrap();
+        assert!(!Settings::read(&file).voice);
+        Settings::default().write(&file).unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("voice"));
+        // On, the file says so; the key kept beside it is never in it.
+        let key = dir.path().join("footplate").join(yard::VOICE_KEY_FILE);
+        yard::keep_voice_key(&key, "sk-voice-test-key").unwrap();
+        let set = Settings {
+            voice: true,
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"voice\": true\n}\n"
+        );
+        assert_eq!(Settings::read(&file), set);
     }
 
     #[test]

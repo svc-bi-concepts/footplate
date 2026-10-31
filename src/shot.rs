@@ -140,6 +140,7 @@ pub const STATES: &[&str] = &[
     "settings-agents",
     "settings-notifications",
     "settings-connection",
+    "settings-voice",
     "settings-telemetry",
     "settings-telemetry-off",
     "reconnecting",
@@ -1015,6 +1016,7 @@ fn populate(yard: &Yard, state: &str) {
         | "settings-agents"
         | "settings-notifications"
         | "settings-connection"
+        | "settings-voice"
         | "settings-telemetry"
         | "settings-telemetry-off"
         | "reconnecting"
@@ -2500,6 +2502,7 @@ mod tests {
                 | "settings-agents"
                 | "settings-notifications"
                 | "settings-connection"
+                | "settings-voice"
                 | "settings-telemetry"
                 | "settings-telemetry-off"
                 | "reconnecting"

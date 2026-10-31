@@ -1646,6 +1646,13 @@ folder. A change is drawn at once and kept for the next start:
   open in the browser, and the run base, through which they run. Each
   names the address in effect, the default where nothing is set, with a
   reset once it is overridden.
+- Voice: talking with the yard by voice, off until it is switched on,
+  which is the opt-in. The key is your own OpenAI project's, typed
+  into its masked field and kept in `voice.key` beside the settings,
+  for you alone, never in the settings file; where
+  `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
+  read. Under the field, one plain line says what a voice session
+  sends to OpenAI and what is kept of it.
 - Telemetry: the yard's opt-in telemetry switch, for the operator's
   window alone on a yard that serves the calls. Off, the consent words
   and Turn on; on, the install id with a copy of it, the next payload

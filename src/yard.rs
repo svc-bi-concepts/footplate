@@ -20,6 +20,11 @@ use crate::settings::{self, Settings};
 /// before there were several.
 pub const TOKEN_FILE: &str = "yard.token";
 
+/// The file beside the settings that holds the voice key: the person's
+/// own OpenAI key, typed in the settings' Voice section. Never in the
+/// settings file, as a device's token never is.
+pub const VOICE_KEY_FILE: &str = "voice.key";
+
 /// What is said where a token's file would be beside the settings and
 /// there are none.
 const NO_HOME: &str = "There is no home directory to keep this device's token in. Name a file for it: FOOTPLATE_TOKEN_FILE";
@@ -36,6 +41,12 @@ const FOOTPLATE_TOKEN: &str = "!footplate-token-v1";
 /// Marks a session file that footplate wrote after signing in: a token
 /// file's marker never stands in one, and this one never in a token's.
 const FOOTPLATE_SESSION: &str = "!footplate-session-v1";
+
+/// Marks a voice key file that footplate wrote from the settings: a
+/// token or session file's marker never stands in one, and this one
+/// never in a token's or a session's, so neither is ever taken for the
+/// voice key.
+const FOOTPLATE_VOICE: &str = "!footplate-voice-v1";
 
 /// What the environment says of the yard, read once when footplate starts.
 #[derive(Debug, Clone, Default)]
@@ -344,25 +355,34 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-/// A credential kept in a file of its own: a device's token or a hosted
-/// yard's session token. Both are read the same way; only the marker and
-/// the words differ.
+/// A credential kept in a file of its own: a device's token, a hosted
+/// yard's session token, or the voice key. All are read the same way;
+/// only the marker and the words differ.
 #[derive(Clone, Copy)]
 pub(crate) struct KeptKind {
     /// The marker footplate writes under a token it kept.
     marker: &'static str,
-    /// `token` or `session`, as a refusal names the file and what it holds.
+    /// Whether a marker must be present. Older yard credentials can be
+    /// read without one; a voice key has no such legacy form.
+    marker_required: bool,
+    /// Whether the file may name the yard or edge the credential is for.
+    /// A voice key is for OpenAI and has no address.
+    has_address: bool,
+    /// `token`, `session` or `voice key`, as a refusal names the file and
+    /// what it holds.
     noun: &'static str,
     /// Why the file may not be read by others, past the mode. Said where a
     /// mode is read, which Windows has none to.
     #[cfg_attr(not(unix), allow(dead_code))]
     open: &'static str,
-    /// What gave the token: `the yard` or `signing in`.
+    /// What gave the token: `the yard`, `signing in` or `OpenAI`.
     giver: &'static str,
 }
 
 pub(crate) const TOKEN_KIND: KeptKind = KeptKind {
     marker: FOOTPLATE_TOKEN,
+    marker_required: false,
+    has_address: true,
     noun: "token",
     open: "whoever reads it calls the yard as you",
     giver: "the yard",
@@ -370,9 +390,20 @@ pub(crate) const TOKEN_KIND: KeptKind = KeptKind {
 
 pub(crate) const SESSION_KIND: KeptKind = KeptKind {
     marker: FOOTPLATE_SESSION,
+    marker_required: false,
+    has_address: true,
     noun: "session",
     open: "whoever reads it is signed in as this yard's user",
     giver: "signing in",
+};
+
+pub(crate) const VOICE_KIND: KeptKind = KeptKind {
+    marker: FOOTPLATE_VOICE,
+    marker_required: true,
+    has_address: false,
+    noun: "voice key",
+    open: "whoever reads it calls OpenAI as you",
+    giver: "OpenAI",
 };
 
 impl KeptKind {
@@ -383,12 +414,15 @@ impl KeptKind {
     }
 
     /// Why there is no token where the file is not there: pairing for a
-    /// device, signing in for a session.
+    /// device, signing in for a session, the settings for the voice key.
     fn missing(&self, at: &std::path::Display<'_>) -> String {
         match self.noun {
             "session" => {
                 format!("Not signed in: {at} is not there. Sign in to this hosted yard again.")
             }
+            "voice key" => format!(
+                "There is no voice key: {at} is not there. Type your OpenAI key in the settings' Voice section, or set FOOTPLATE_OPENAI_KEY."
+            ),
             _ => format!(
                 "This device has no token: {at} is not there. Pair it in the settings, with a code the yard's operator opens: yardr user device pair <user> <device>"
             ),
@@ -446,15 +480,20 @@ fn kept_as(file: &Path, kind: KeptKind) -> Result<KeptToken, String> {
     let text = fs::read_to_string(file)
         .map_err(|err| format!("The {noun} file {at} cannot be read: {err}"))?;
     let ends_newline = text.ends_with('\n');
-    let none = || {
-        format!(
+    // A voice key stands with the marker under it and no address: it is
+    // for OpenAI, not for one yard.
+    let none = || match noun {
+        "voice key" => format!(
+            "The voice key file {at} holds no voice key: one is a line, as OpenAI gave it, with footplate's marker under it."
+        ),
+        _ => format!(
             "The {noun} file {at} holds no {noun}: one is a line, as {} gave it, with footplate's marker and the address of its {} where it wrote them.",
             kind.giver,
             match noun {
                 "session" => "edge",
                 _ => "yard",
             }
-        )
+        ),
     };
     let lines: Vec<&str> = text.trim().lines().collect();
     let token = lines.first().copied().unwrap_or_default().trim();
@@ -463,6 +502,9 @@ fn kept_as(file: &Path, kind: KeptKind) -> Result<KeptToken, String> {
         Some(line) => (false, Some(*line)),
         None => (false, None),
     };
+    if (kind.marker_required && !managed) || (!kind.has_address && address_line.is_some()) {
+        return Err(none());
+    }
     let line_count = match managed {
         true if address_line.is_some() => 3,
         true => 2,
@@ -556,6 +598,45 @@ pub fn session_for(file: &Path, address: &Address) -> Result<String, String> {
             "The session in {at} is this yard's sign-in at {given}, and is not sent to {address}: whoever answers there could sign in as you. Sign in to the yard at {address}."
         )
     })
+}
+
+/// The voice key: `FOOTPLATE_OPENAI_KEY` where set, else the key kept in
+/// `voice.key` beside the settings. The environment's is read first and
+/// the file is not read then, as `FOOTPLATE_TOKEN_FILE` wins over the
+/// file beside the settings. The secret is read here, at its use, and
+/// held nowhere: neither the settings nor the environment's struct keeps
+/// it. Why there is none is said in words.
+// Read by the voice session, which this bead's keeper blocks
+// (footplate-2550): until it lands the window only keeps the key.
+#[allow(dead_code)]
+pub fn voice_key(settings: Option<&Path>) -> Result<String, String> {
+    voice_key_as(std::env::var("FOOTPLATE_OPENAI_KEY").ok(), settings)
+}
+
+/// The voice key the environment's value `env` holds, else the file's:
+/// what a test holds the environment to without setting it.
+pub(crate) fn voice_key_as(env: Option<String>, settings: Option<&Path>) -> Result<String, String> {
+    if let Some(key) = env
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+    {
+        if !api::is_token(&key) {
+            return Err(
+                "FOOTPLATE_OPENAI_KEY is no voice key: one is a line, as OpenAI gave it."
+                    .to_string(),
+            );
+        }
+        return Ok(key);
+    }
+    let Some(settings) = settings else {
+        return Err(
+            "There is no home directory to keep the voice key in. Set FOOTPLATE_OPENAI_KEY."
+                .to_string(),
+        );
+    };
+    VOICE_KIND
+        .read(&settings.with_file_name(VOICE_KEY_FILE))
+        .map(|kept| kept.token)
 }
 
 /// The token `file` holds for the yard at `address`: refused and sent
@@ -734,6 +815,26 @@ impl Drop for TokenPlace {
 /// beside itself and renamed.
 pub fn keep_session(file: &Path, token: &str, address: &Address) -> io::Result<()> {
     token_place(file)?.keep_as(token, Some(address), SESSION_KIND)
+}
+
+/// Keeps the voice key typed in the settings in `file`, for its user
+/// alone, with footplate's marker under it and no address: a key is for
+/// OpenAI, not for one yard. The file is whole or not there: it is
+/// written beside itself and renamed. What is no key is refused with
+/// why, and nothing written.
+pub fn keep_voice_key(file: &Path, key: &str) -> Result<(), String> {
+    let key = key.trim();
+    if !api::is_token(key) {
+        return Err("That is no voice key: one is a line, as OpenAI gave it.".to_string());
+    }
+    token_place(file)
+        .and_then(|place| place.keep_as(key, None, VOICE_KIND))
+        .map_err(|err| {
+            format!(
+                "The voice key file {} cannot be written: {err}",
+                file.display()
+            )
+        })
 }
 
 /// A legacy token alone in `file`, for tests that need a file before its
@@ -1899,5 +2000,164 @@ mod tests {
             both("https://mac.example.net", "abcd efgh")
         );
         assert_eq!(typed("", ""), both("", ""));
+    }
+
+    #[test]
+    fn the_voice_key_is_kept_for_its_user_alone_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("footplate/settings.json");
+        // The directory is not there before the first keep.
+        let file = dir.path().join("footplate").join(VOICE_KEY_FILE);
+        keep_voice_key(&file, "sk-voice-test-key").unwrap();
+        assert_eq!(
+            voice_key_as(None, Some(&settings)).unwrap(),
+            "sk-voice-test-key"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // The marker under it, and no address: the key is for OpenAI,
+        // not for one yard.
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "sk-voice-test-key\n!footplate-voice-v1\n"
+        );
+        // Kept again it replaces the last, also where the last was left
+        // open, and the ends are trimmed.
+        #[cfg(unix)]
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        keep_voice_key(&file, "  sk-voice-second-key\n").unwrap();
+        assert_eq!(
+            voice_key_as(None, Some(&settings)).unwrap(),
+            "sk-voice-second-key"
+        );
+        // What is no key is refused, the key never named, and nothing
+        // written.
+        for none in ["", "two words", "a\nb"] {
+            let why = keep_voice_key(&file, none).unwrap_err();
+            assert!(why.contains("is no voice key"), "{none:?}: {why}");
+            assert!(!why.contains("sk-voice"), "{why}");
+        }
+        assert_eq!(
+            voice_key_as(None, Some(&settings)).unwrap(),
+            "sk-voice-second-key"
+        );
+    }
+
+    #[test]
+    fn the_environment_s_voice_key_wins_over_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        keep_voice_key(&dir.path().join(VOICE_KEY_FILE), "sk-voice-filed-key").unwrap();
+        // Set, the environment's is read and the file is not: not even
+        // a file that would be refused.
+        for env in ["sk-voice-env-key", "  sk-voice-env-key\n"] {
+            assert_eq!(
+                voice_key_as(Some(env.to_string()), Some(&settings)).unwrap(),
+                "sk-voice-env-key"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let file = dir.path().join(VOICE_KEY_FILE);
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                voice_key_as(Some("sk-voice-env-key".to_string()), Some(&settings)).unwrap(),
+                "sk-voice-env-key"
+            );
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        // An environment's key that is none is said, the key never
+        // named, while an empty one is unset: the file is read.
+        let why = voice_key_as(Some("two words".to_string()), Some(&settings)).unwrap_err();
+        assert!(
+            why.contains("FOOTPLATE_OPENAI_KEY is no voice key"),
+            "{why}"
+        );
+        assert!(!why.contains("two words"), "{why}");
+        for empty in ["", "  \n "] {
+            assert_eq!(
+                voice_key_as(Some(empty.to_string()), Some(&settings)).unwrap(),
+                "sk-voice-filed-key"
+            );
+        }
+        // With neither, why there is none: no home, or no key kept.
+        assert_eq!(
+            voice_key_as(None, None).unwrap_err(),
+            "There is no home directory to keep the voice key in. Set FOOTPLATE_OPENAI_KEY."
+        );
+        fs::remove_file(dir.path().join(VOICE_KEY_FILE)).unwrap();
+        let why = voice_key_as(None, Some(&settings)).unwrap_err();
+        assert!(why.starts_with("There is no voice key: "), "{why}");
+        assert!(
+            why.contains("Voice section") && why.contains("FOOTPLATE_OPENAI_KEY"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_voice_key_file_open_to_others_or_holding_none_is_refused() {
+        // No file mode holds root: what is refused below for another
+        // user is let through here. Nor is there a mode on Windows, where
+        // a file holding no key is the case left.
+        #[cfg(unix)]
+        if running_as_root() {
+            eprintln!("skipped: root (euid 0) is not held by a file's mode");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let read = || voice_key_as(None, Some(&settings));
+        #[cfg(unix)]
+        for mode in [0o644, 0o640, 0o604, 0o660] {
+            file_of_mode(dir.path(), VOICE_KEY_FILE, mode, "sk-voice-test-key\n");
+            let why = read().unwrap_err();
+            assert!(
+                why.contains(&format!("is open to others (mode {mode:04o})")),
+                "{why}"
+            );
+            assert!(why.contains("calls OpenAI as you"), "{why}");
+            assert!(!why.contains("sk-voice"), "{why}");
+        }
+        // One that holds no key: empty, two words, two lines, or a third
+        // line that is no address where footplate kept none.
+        for none in [
+            "",
+            "\n",
+            "two words",
+            "a\nb",
+            // A voice key has no markerless legacy format, and yard or
+            // hosted credentials carry their address instead of the
+            // voice-key marker.
+            "sk-voice-test-key",
+            "yardr-dev-kept\nhttps://mac.example.net\n",
+            "sk-voice-test-key\nhttps://mac.example.net\n",
+            "sk-voice-test-key\n!footplate-voice-v1\nextra\n",
+            "sk-voice-test-key\n!footplate-voice-v1\nhttps://mac.example.net\n",
+        ] {
+            file_of_mode(dir.path(), VOICE_KEY_FILE, 0o600, none);
+            let why = read().unwrap_err();
+            assert!(why.contains("holds no voice key"), "{none:?}: {why}");
+        }
+        // A yard's token or session file is never taken for the voice
+        // key, and the voice key never for a token.
+        let token = dir.path().join("yard.token");
+        keep_token(&token, TOKEN).unwrap();
+        let session = dir.path().join("yard.session");
+        keep_session_token(&session, "kratos-dev-south").unwrap();
+        let key = dir.path().join(VOICE_KEY_FILE);
+        keep_voice_key(&key, "sk-voice-test-key").unwrap();
+        for foreign in [
+            fs::read_to_string(&token).unwrap(),
+            fs::read_to_string(&session).unwrap(),
+        ] {
+            fs::write(&key, &foreign).unwrap();
+            let why = read().unwrap_err();
+            assert!(why.contains("holds no voice key"), "{foreign:?}: {why}");
+        }
+        fs::write(&token, fs::read_to_string(&key).unwrap()).unwrap();
+        assert!(read_token(&token).is_err());
     }
 }

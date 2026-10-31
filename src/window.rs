@@ -511,6 +511,12 @@ pub struct Footplate {
     view_said: Option<String>,
     run: Entity<Line>,
     run_said: Option<String>,
+    /// The voice key as it is typed: what talking with the yard by voice
+    /// is spoken to OpenAI with, and what a typed one that is none says.
+    /// A masked line, as a secret ask's field is: what is typed is in no
+    /// draft, and Enter keeps it beside the settings and clears the field.
+    voice_key: Entity<Line>,
+    voice_said: Option<String>,
     /// "Set up a yard here", while it is underway: it stands where the
     /// yard that is not there would, and where its conversation will.
     first_run: Option<Entity<FirstRun>>,
@@ -724,6 +730,14 @@ impl Footplate {
         });
         cx.subscribe(&run, |this, _, _: &Submitted, cx| this.submit_run(cx))
             .detach();
+        // Enter in the voice key keeps it beside the settings and clears
+        // the field. The key shows marks, as the Kratos password does:
+        // what is typed is in no draft.
+        let voice_key = cx.new(Line::masked);
+        cx.subscribe(&voice_key, |this, _, _: &Submitted, cx| {
+            this.submit_voice_key(cx)
+        })
+        .detach();
         // Enter in the line about the operator saves it with the chosen
         // style: the next session picks both up.
         let agents_about = cx.new(|cx| {
@@ -924,6 +938,8 @@ impl Footplate {
             view_said: None,
             run,
             run_said: None,
+            voice_key,
+            voice_said: None,
             first_run: None,
             means: Means::real(),
             title_press: titlebar::Press::default(),
@@ -10834,6 +10850,7 @@ yardr.dev
         assert!(!drawn(cx, "agents save"));
         assert!(!drawn(cx, "notify on"));
         assert!(!drawn(cx, "view address"));
+        assert!(!drawn(cx, "voice on"));
         // The sheet starts where the rail ends: no rows stand beside it.
         assert_eq!(bounds_of(cx, "settings sheet").origin.x, px(RAIL));
         // With no title bar of its own to stand in it starts at the top.
@@ -10908,6 +10925,22 @@ yardr.dev
         assert!(drawn(cx, "view address") && drawn(cx, "run address"));
         assert!(drawn(cx, "view effect") && drawn(cx, "run effect"));
         assert!(!drawn(cx, "view reset") && !drawn(cx, "run reset"));
+        // Voice: the switch, the masked key field with its save, and the
+        // plain line of what a session sends. Off, the section says no
+        // state; on, it says `voice is on`, and the file has it.
+        click_on(cx, "settings section voice");
+        assert!(drawn(cx, "voice off") && drawn(cx, "voice on"));
+        assert!(drawn(cx, "voice key") && drawn(cx, "voice save"));
+        assert!(drawn(cx, "voice plain"));
+        assert!(!drawn(cx, "voice state"));
+        assert!(!drawn(cx, "voice said"));
+        click_on(cx, "voice on");
+        assert!(drawn(cx, "voice state"));
+        assert!(settings_of(&view, cx).voice);
+        assert!(Settings::read(&file).voice);
+        click_on(cx, "voice off");
+        assert!(!settings_of(&view, cx).voice);
+        assert!(!Settings::read(&file).voice);
         // The footer names where they are kept, with what opens it.
         assert!(drawn(cx, "settings saved") && drawn(cx, "settings reveal"));
 
@@ -10930,6 +10963,149 @@ yardr.dev
         click_on(cx, "settings section this window");
         assert!(drawn(cx, "text size"));
         assert!(!std::fs::read_to_string(&file).unwrap().contains("section"));
+    }
+
+    /// Voice is off until it is switched on in the settings, and the key
+    /// typed in its masked field is kept beside the settings: a settings
+    /// file with voice on and a key beside it opens with the section on,
+    /// and the settings file itself holds no key.
+    #[gpui::test]
+    fn voice_is_off_until_switched_on_and_its_key_is_kept_beside_the_settings(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        // Off until switched on: the section says no state, and the file
+        // nothing of voice.
+        assert!(!settings_of(&view, cx).voice);
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        click_on(cx, "settings section voice");
+        assert!(drawn(cx, "voice off") && drawn(cx, "voice on"));
+        assert!(drawn(cx, "voice key") && drawn(cx, "voice save"));
+        assert!(drawn(cx, "voice plain"));
+        assert!(!drawn(cx, "voice state"));
+        assert!(!drawn(cx, "voice said"));
+        // The file names the open section, but the switch is off in it.
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"voice\": true")
+        );
+        // On: the section says so, and the file has it.
+        click_on(cx, "voice on");
+        assert!(settings_of(&view, cx).voice);
+        assert!(drawn(cx, "voice state"));
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"voice\": true")
+        );
+        // With no key typed, saving asks for one, and nothing is kept.
+        click_on(cx, "voice save");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.voice_said.clone()),
+            Some("A key is wanted: your OpenAI project's.".to_string())
+        );
+        assert!(drawn(cx, "voice said"));
+        assert!(!file.with_file_name(yard::VOICE_KEY_FILE).exists());
+        // Enter in the masked field keeps the key beside the settings
+        // and clears the field; the settings file holds no key.
+        click_on(cx, "voice key");
+        cx.simulate_input("sk-voice-test-key");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            yard::voice_key_as(None, Some(&file)).unwrap(),
+            "sk-voice-test-key"
+        );
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.voice_key.read(cx).text(), "");
+        });
+        // Said no longer: the test frame's bounds only ever grow, so
+        // what is gone is read, not drawn.
+        assert_eq!(view.read_with(cx, |v, _| v.voice_said.clone()), None);
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("sk-voice-test-key")
+        );
+        // A restart opens with the section on and the key still kept.
+        let (again, cx) = opened_kept(&yard, &file, cx);
+        assert!(settings_of(&again, cx).voice);
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section voice");
+        assert!(drawn(cx, "voice state"));
+        assert_eq!(
+            yard::voice_key_as(None, Some(&file)).unwrap(),
+            "sk-voice-test-key"
+        );
+    }
+
+    /// With voice off, nothing but the Voice settings section offers
+    /// voice: no control outside the settings, and in the settings only
+    /// the side list's row — until the section itself is open.
+    #[gpui::test]
+    fn with_voice_off_nothing_but_the_voice_section_offers_voice(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        assert!(!settings_of(&view, cx).voice);
+        // No voice control stands: the switch, the state, the field, its
+        // save, what it said, and the plain line are all gone.
+        let voice_gone = |cx: &mut VisualTestContext| {
+            for gone in [
+                "voice off",
+                "voice on",
+                "voice state",
+                "voice key",
+                "voice save",
+                "voice said",
+                "voice plain",
+            ] {
+                assert!(!drawn(cx, gone), "{gone}");
+            }
+        };
+        // Shut, not even the section's row stands.
+        voice_gone(cx);
+        assert!(!drawn(cx, "settings section voice"));
+        // Open on every other section, only the side list's row stands.
+        // Telemetry is not offered on this yard, and Agents reads yardr,
+        // which these means do not stand in for.
+        cx.simulate_keystrokes("secondary-,");
+        assert!(settings_open(&view, cx));
+        for section in [
+            Section::ThisWindow,
+            Section::Appearance,
+            Section::Notifications,
+            Section::Yards,
+            Section::Connection,
+        ] {
+            click_on(cx, &format!("settings section {}", section.name()));
+            assert!(drawn(cx, "settings section voice"));
+            voice_gone(cx);
+        }
+        // On the Voice section itself the controls stand, which is what
+        // proves the pin above live. Shutting is read, not drawn: the
+        // test frame's bounds only ever grow, so nothing drawn can be
+        // undrawn here.
+        click_on(cx, "settings section voice");
+        assert!(drawn(cx, "voice on") && drawn(cx, "voice key"));
+        assert!(drawn(cx, "voice plain"));
+        cx.simulate_keystrokes("escape");
+        assert!(!settings_open(&view, cx));
     }
 
     /// The layout at the smallest and the largest text: the rows of the

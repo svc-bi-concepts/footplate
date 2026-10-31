@@ -33,7 +33,7 @@ use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
 use crate::theme::{Look, Palette, crew_dot, yard_color, yard_ink};
 use crate::titlebar::Gesture;
-use crate::yard::Env;
+use crate::yard::{self, Env};
 
 use super::Footplate;
 use super::ask::group_head;
@@ -51,6 +51,14 @@ use super::ui::{
 };
 use super::words::{footplate_words, unread_words, yardr_place, yardr_words};
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
+
+/// What the Voice section says under its key field: all of what a voice
+/// session sends, and what is kept of it, in the Feedback form's manner.
+/// Held to every one of those by a test, as `PLAIN` is held in
+/// `feedback.rs`: microphone audio going to OpenAI, what the person
+/// says, the yard's and the counterpart's names, their answers, and the
+/// up-to-30-day abuse-monitoring retention with `store` off.
+pub const VOICE_PLAIN: &str = "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands.";
 
 impl Footplate {
     /// As [`Footplate::opened`], with each yard's stream watched as
@@ -3349,6 +3357,18 @@ impl Footplate {
         );
     }
 
+    /// Talking with the yard by voice is on, or no longer. The switch
+    /// alone sends nothing: only a voice session the person starts does.
+    pub(crate) fn voice_on(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                voice: on,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
     /// The text a step larger or smaller.
     pub(crate) fn resize(&mut self, by: i8, cx: &mut Context<Self>) {
         self.set(self.settings.clone().sized(by), cx);
@@ -3425,6 +3445,31 @@ impl Footplate {
                 self.set(settings, cx);
             }
             Err(why) => self.run_said = Some(why),
+        }
+    }
+
+    /// Keeps the voice key that is typed, in `voice.key` beside the
+    /// settings: talking with the yard by voice is spoken to OpenAI
+    /// with it. Enter keeps it and clears the field. What is no key is
+    /// said, and nothing changed; the key itself is never in the
+    /// settings file.
+    pub(crate) fn submit_voice_key(&mut self, cx: &mut Context<Self>) {
+        let key = self.voice_key.update(cx, |line, cx| line.take_text(cx));
+        cx.notify();
+        if key.trim().is_empty() {
+            self.voice_said = Some("A key is wanted: your OpenAI project's.".to_string());
+            return;
+        }
+        let Some(file) = self.kept.as_ref() else {
+            self.voice_said = Some(
+                "There is no home directory to keep the voice key in. Set FOOTPLATE_OPENAI_KEY."
+                    .to_string(),
+            );
+            return;
+        };
+        match yard::keep_voice_key(&file.with_file_name(yard::VOICE_KEY_FILE), key.trim()) {
+            Ok(()) => self.voice_said = None,
+            Err(why) => self.voice_said = Some(why),
         }
     }
 
@@ -4161,6 +4206,7 @@ impl Footplate {
         let yard = self.talk_yards(setting, palette, cx);
         let view = self.view_setting(setting, palette, cx);
         let run = self.run_setting(setting, palette, cx);
+        let voice = self.voice_setting(setting, palette, cx);
         let agents = self.agents_setting(setting, palette, cx);
         let telemetry = self.telemetry_setting(setting, palette, cx);
         // What the system tells of: nothing, or the kinds that are chosen,
@@ -4431,6 +4477,7 @@ impl Footplate {
                                     Section::Yards => vec![yard],
                                     Section::Agents => vec![agents],
                                     Section::Connection => vec![view, run],
+                                    Section::Voice => vec![voice],
                                     Section::Telemetry => vec![telemetry],
                                 }),
                         ),
@@ -4704,6 +4751,95 @@ impl Footplate {
             );
         }
         section
+    }
+
+    /// Talking with the yard by voice in the settings: the switch,
+    /// which is the opt-in, the masked field the OpenAI key is typed
+    /// in, and the plain line of what a voice session sends. The
+    /// section says `voice is on` while it is on; the switch alone
+    /// sends nothing, opens no connection and reads no key.
+    pub(crate) fn voice_setting(
+        &self,
+        setting: impl Fn(String, String) -> Div,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let on = self.settings.voice;
+        let focus = self.voice_key.focus_handle(cx);
+        let mut section = setting(
+            "voice".to_string(),
+            "Talk with the yard by voice, in the open conversation".to_string(),
+        )
+        .child(
+            div().flex().child(segmented(
+                [("off", false), ("on", true)]
+                    .map(|(name, voiced)| {
+                        segment(name.to_string(), voiced == on, palette)
+                            .id(SharedString::from(format!("voice {name}")))
+                            .debug_selector(move || format!("voice {name}"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.voice_on(voiced, cx)))
+                    })
+                    .into_iter()
+                    .collect(),
+                palette,
+            )),
+        );
+        if on {
+            section = section.child(
+                div()
+                    .debug_selector(|| "voice state".to_string())
+                    .child("voice is on"),
+            );
+        }
+        section = section
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(rems(4.)).flex_none().child("key"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .max_w(rems(28.))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(palette.line)
+                            .bg(palette.side)
+                            .debug_selector(|| "voice key".to_string())
+                            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                window.focus(&focus);
+                                window.prevent_default();
+                            })
+                            .child(self.voice_key.clone()),
+                    ),
+            )
+            .child(
+                div().flex().flex_wrap().items_center().gap_2().child(
+                    small_button("save (enter)".to_string(), palette)
+                        .id("voice save")
+                        .debug_selector(|| "voice save".to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_voice_key(cx))),
+                ),
+            );
+        if let Some(said) = &self.voice_said {
+            section = section.child(
+                div()
+                    .debug_selector(|| "voice said".to_string())
+                    .child(said.clone()),
+            );
+        }
+        section.child(
+            div()
+                .debug_selector(|| "voice plain".to_string())
+                .pr_4()
+                .text_sm()
+                .text_color(palette.faint)
+                .child(VOICE_PLAIN),
+        )
     }
 
     /// Whether the settings offer the Telemetry section: the window runs
@@ -6088,6 +6224,7 @@ fn shot_section() -> Option<Section> {
         Ok("settings-agents") => Some(Section::Agents),
         Ok("settings-notifications") => Some(Section::Notifications),
         Ok("settings-connection") => Some(Section::Connection),
+        Ok("settings-voice") => Some(Section::Voice),
         Ok("settings-telemetry") | Ok("settings-telemetry-off") => Some(Section::Telemetry),
         _ => None,
     }
@@ -6168,4 +6305,42 @@ fn pose_shot_selection(
     selection.update(cx, |selection, cx| {
         selection.pose(key, line.clone().into(), start..line.len(), cx)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line the Voice section says is held to everything a voice
+    /// session sends and keeps: microphone audio going to OpenAI, what
+    /// the person says, the yard's and the counterpart's names, their
+    /// answers, and the up-to-30-day abuse-monitoring retention with
+    /// `store` off. Every one of those is named in it.
+    #[test]
+    fn the_plain_line_names_all_a_voice_session_sends_and_keeps() {
+        assert_eq!(
+            VOICE_PLAIN,
+            "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands."
+        );
+        for named in [
+            "Microphone audio",
+            "streams to OpenAI",
+            "during a voice session you start",
+            "what you say",
+            "the yard's name",
+            "the name of who you are talking with",
+            "what they answer",
+            "in its own words",
+            "the written mail in the conversation is the record",
+            "No saved session is kept with store off",
+            "abuse-monitoring logs",
+            "up to 30 days",
+            "Your key stays on this machine",
+            "in a file beside the settings",
+            "Nothing is sent while voice is off",
+            "while no session stands",
+        ] {
+            assert!(VOICE_PLAIN.contains(named), "{named}");
+        }
+    }
 }
