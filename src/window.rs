@@ -23687,6 +23687,56 @@ yardr.dev
         assert!(drawn(cx, "reconnecting"));
     }
 
+    /// Where a newer yardr could not be fetched and status then fails,
+    /// the switch keeps both: the stale fetch's words and status's
+    /// failure, in the note the settings show. An older kept yardr that
+    /// cannot open a newer store takes exactly this path.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_switch_keeps_a_stale_fetch_beside_a_failed_status(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        let (mut means, program, _) = stand_in_means(dir.path(), true);
+        let fetched = program.clone();
+        means.yardr = Arc::new(move || {
+            Ok((
+                fetched.clone(),
+                Some(
+                    "yardr v9.1.0 is used: a newer one could not be had. yardr.dev does not answer."
+                        .to_string(),
+                ),
+            ))
+        });
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(
+            &program,
+            "status",
+            1,
+            &json!({"error": "the store cannot be read"}),
+        );
+        view.update(cx, |v, _| v.means = means);
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the stale fetch and the failed status read", |cx| {
+            settled(&view, cx)
+                && view.read_with(cx, |v, _| {
+                    v.switch_note
+                        .as_ref()
+                        .is_some_and(|note| note.contains("a newer one could not be had"))
+                })
+        });
+        let note = view.read_with(cx, |v, _| v.switch_note.clone().unwrap());
+        assert!(note.contains("a newer one could not be had"), "{note}");
+        assert!(note.contains("the store cannot be read"), "{note}");
+        // And shown: the open yard's card in the settings carries it.
+        click_on(cx, "settings");
+        click_on(cx, "settings section yards");
+        assert!(drawn(cx, "switch note"));
+    }
+
     /// A yard at an address has no switch, in the head or the settings:
     /// its processes are elsewhere, and nothing of yardr's runs for it.
     #[cfg(unix)]

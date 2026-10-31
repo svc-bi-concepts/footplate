@@ -305,7 +305,14 @@ impl Footplate {
                     Err(setup::StatusError::Failed(why)) => {
                         self.switch_status = None;
                         self.switch_noyard = false;
-                        self.switch_note = Some(why);
+                        // Both stand: the fetch's words first, then
+                        // status's failure. An older kept yardr that cannot
+                        // open a newer store fails status after a stale
+                        // fetch, and either alone would hide why.
+                        self.switch_note = Some(match self.switch_note.take() {
+                            Some(stale) => format!("{stale} {why}"),
+                            None => why,
+                        });
                     }
                 }
             }

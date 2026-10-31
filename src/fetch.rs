@@ -42,6 +42,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::api::{self, Address};
+use crate::log;
 
 /// The site yardr's releases are on: the one host yardr is ever fetched
 /// from.
@@ -452,6 +453,12 @@ impl Source<'_> {
                 false => self.release(dir, version, &latest).map(Some),
             }
         });
+        // Said where it happens, and kept in the log: the window may show
+        // the kept yardr's words instead, and status may fail after, so
+        // this refusal would otherwise leave no trace.
+        if let Err(refusal) = &newer {
+            say(&format!("fetch failed: {refusal}"));
+        }
         match (newer, kept) {
             (Ok(Some(new)), _) => Ok((new, None)),
             (Ok(None), Some(kept)) => Ok((kept, None)),
@@ -554,6 +561,33 @@ impl Source<'_> {
             version: version.to_string(),
         })
     }
+}
+
+/// Says `line` on stderr, led by the program's name as its other lines are,
+/// and keeps it in the log with the time ([`log`]): an app started by the
+/// Finder or by launchd has its stderr on /dev/null, and would lose it. A
+/// test keeps in the file its thread was given, where it was given one, and
+/// never in the person's own log.
+fn say(line: &str) {
+    #[cfg(test)]
+    let file = test_log_file();
+    #[cfg(not(test))]
+    let file = log::file();
+    log::say(|text| eprintln!("{text}"), file.as_deref(), line);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The file this test keeps its lines in, where it set one.
+    static LOG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The file [`say`] keeps its line in during a test: the one this test
+/// set for its thread, else none, so that no test writes the person's
+/// own log.
+#[cfg(test)]
+fn test_log_file() -> Option<PathBuf> {
+    LOG.with(|file| file.borrow().clone())
 }
 
 fn unreadable(what: &str, why: impl ToString) -> Refusal {
@@ -1139,6 +1173,15 @@ mod tests {
 
     use super::*;
 
+    /// Has this test keep its lines in a log under `dir`, which is not
+    /// there yet, and gives its file: a fetch is made on the thread that
+    /// asks it.
+    fn keep_in(dir: &std::path::Path) -> PathBuf {
+        let file = dir.join("footplate/footplate.log");
+        super::LOG.with(|kept| *kept.borrow_mut() = Some(file.clone()));
+        file
+    }
+
     #[test]
     fn yardr_is_kept_beside_settings_under_an_isolated_config_home() {
         let settings = crate::settings::file_under(
@@ -1523,11 +1566,22 @@ mod tests {
 
     /// A newer release that fails its proof is not kept, and the yardr
     /// that was proved before is still the one to run, with why beside it.
-    /// With none kept there is none to run.
+    /// With none kept there is none to run. Every refusal reaches the log,
+    /// where the window's note may not carry it.
     #[test]
     fn a_newer_release_that_fails_leaves_the_kept_one_to_run() {
         let fixture = Fixture::new("v9.1.0");
+        let log = keep_in(fixture.home.path());
+        let logged = || {
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(|line| line.split_once(' ').unwrap().1.to_string())
+                .collect::<Vec<_>>()
+        };
         fixture.current().unwrap();
+        // A fetch that goes through says nothing.
+        assert!(!log.exists());
         fixture.release("v9.2.0", &archive_of(&[("yardr", b'0', b"a newer yardr")]));
         fixture.site.put(
             &Fixture::archive_path("v9.2.0"),
@@ -1537,20 +1591,30 @@ mod tests {
         assert_eq!(kept.version, "v9.1.0");
         assert_eq!(fs::read(&kept.path).unwrap(), BINARY);
         assert!(matches!(why, Some(Refusal::Differs { .. })), "{why:?}");
+        let lines = logged();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("fetch failed: "), "{}", lines[0]);
+        assert!(lines[0].contains("its checksum differs"), "{}", lines[0]);
         // So is it with the site away.
         fixture.site.status(LATEST, 503);
         let (kept, why) = fixture.current().unwrap();
         assert_eq!(kept.version, "v9.1.0");
         assert!(matches!(why, Some(Refusal::Answered { status: 503, .. })));
+        let lines = logged();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("status 503"), "{}", lines[1]);
 
         // A binary whose version's file is gone is no kept yardr: with the
-        // site away there is nothing to run.
+        // site away there is nothing to run, and the refusal is logged too.
         fs::remove_file(fixture.dir().join(VERSION_FILE)).unwrap();
         assert_eq!(stored(&fixture.dir()), None);
         assert!(matches!(
             fixture.current(),
             Err(Refusal::Answered { status: 503, .. })
         ));
+        let lines = logged();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[2].contains("status 503"), "{}", lines[2]);
     }
 
     /// A version marker does not make a symlink or a non-runnable file a
