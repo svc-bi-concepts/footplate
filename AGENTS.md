@@ -77,10 +77,11 @@ Setup, release and tests:
   that send; the key and the survey's id are two plain constants, and with
   either empty there is no project, so no button. It sends by
   `api::post_json`, the post to a site that is no yard.
-- `src/fetch.rs`: fetches yardr's release from yardr.dev (minisign over
-  checksums against the built-in key, archive against checksums), plus
-  `yardr doctor`-named programs by checksum alone; and asks the kept yardr
-  its version, for the About card.
+- `src/fetch.rs`: finds the yardr on this machine (`Machine`: the yard's
+  `<home>/binary`, `~/.local/bin`, the PATH, the login shell), moves the copy
+  an older footplate kept, and runs yardr's installer from yardr.dev; fetches
+  `yardr doctor`-named programs by checksum; and asks the yardr its version,
+  for the About card.
 - `src/setup.rs`: the first run as yardr's commands, with no window (args in,
   JSON out, PATH from doctor's data, never through a shell).
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for
@@ -88,8 +89,7 @@ Setup, release and tests:
 - `src/fake.rs`: a yard for tests (socket or TCP, scripted JSON, tokens and
   pairing; no TLS), and a stand-in for PostHog's capture (`Posthog`).
   `Yard::start()` is the socket's on unix and the TCP one's on Windows.
-- `src/fixtures/`: `shot-page.png`, and the published yardr v0.10.0 checksums
-  plus signature the built-in key is held to.
+- `src/fixtures/`: `shot-page.png` and the terminal screens.
 
 ## Where to start
 
@@ -181,8 +181,6 @@ Setup, release and tests:
 
 - Build output ignored by `.gitignore`: generated files, not source to edit.
 - `Cargo.lock`: committed; cargo owns it, never hand-edit.
-- `src/fixtures/yardr-v0.10.0/`: published checksums the built-in key
-  must keep verifying; do not regenerate.
 - `assets/*.png`: rendered masters (see `README.md` "The icon",
   `scripts/bundle-mac.sh`); new marks come from yardr-design.
 - The `eyes` rule in `.yardr/depot.md` still applies: a change that

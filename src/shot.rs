@@ -173,7 +173,7 @@ pub const STATES: &[&str] = &[
     "decisions-filtered",
     "keys",
     "about",
-    "about-unfetched",
+    "about-missing",
     "feedback",
     "reactions",
     "reactions-hover",
@@ -1032,7 +1032,7 @@ fn populate(yard: &Yard, state: &str) {
         | "member-pair"
         | "member-paired"
         | "about"
-        | "about-unfetched"
+        | "about-missing"
         | "feedback"
         | "notice"
         | "screen"
@@ -2512,7 +2512,7 @@ mod tests {
                 | "member-pair"
                 | "member-paired"
                 | "about"
-                | "about-unfetched"
+                | "about-missing"
                 | "feedback" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");
                     let letters = yard.client().conversation("jo", "yardmaster", 0).unwrap();

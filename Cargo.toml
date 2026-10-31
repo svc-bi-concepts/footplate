@@ -30,13 +30,9 @@ unicode-segmentation = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 socket2 = "0.6"
-# yardr's release is fetched and proved here (fetch.rs). The signature over
-# its checksums is minisign's, verified in this process by the crate
-# minisign's author keeps for exactly that: MIT, with no dependency of its
-# own, so it is the one crate this adds to the tree. sha2 and flate2 are in
-# gpui's tree already: the archive's checksum, and its gzip. The tar inside
-# is read by fetch.rs itself, which takes four names and nothing else.
-minisign-verify = "0.3"
+# What yardr's doctor names is fetched and checked here (fetch.rs). sha2 and
+# flate2 are in gpui's tree already: the file's checksum, and its gzip. The
+# tar inside is read by fetch.rs itself, which takes one name and nothing else.
 sha2 = "0.10"
 flate2 = "1"
 # A session's screen arrives with the terminal's ANSI styling, which is
@@ -115,6 +111,10 @@ async-io = "2"
 # shutting the socket down does not wake that read on Windows. The one call,
 # CancelIoEx, of the crate that is in gpui's tree already, with the two
 # features it needs: no crate more.
+# A login shell that hangs is stopped with its process group (fetch.rs).
+[target.'cfg(unix)'.dependencies]
+libc = ">=0.2.170, <0.2.190"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_System_IO"] }
 
@@ -122,11 +122,6 @@ windows-sys = { version = "0.61", default-features = false, features = ["Win32_F
 # The window's own test opens it on gpui's test platform, without a screen.
 gpui = { version = "=0.2.2", features = ["test-support"] }
 tempfile = "3"
-# The tests of fetch.rs sign a release of their own with a key they make,
-# which minisign-verify cannot: it only verifies. By the same author, MIT;
-# with it come scrypt and rpassword, for the passwords of keys, which the
-# tests do not use. Nothing of it is in the built footplate.
-minisign = "0.10"
 # The keepalive the client sets is read back from its socket, which only
 # socket2's "all" calls do. Nothing of it is in the built footplate.
 socket2 = { version = "0.6", features = ["all"] }

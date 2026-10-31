@@ -9,7 +9,7 @@ use gpui::{Pixels, Task};
 
 use super::count_words;
 use crate::api::{self, Client};
-use crate::fetch::Kept;
+use crate::fetch::Seen;
 use crate::model::{Mode, Model, Outcome, Selected};
 use crate::session;
 use crate::settings;
@@ -230,6 +230,7 @@ pub(crate) enum SwitchBusy {
     Stopping,
     Asking,
     Login,
+    Installing,
 }
 
 /// What "Agents and you" is doing: nothing else of it starts meanwhile.
@@ -239,12 +240,12 @@ pub(crate) enum AgentsBusy {
     Saving,
 }
 
-/// The About card, while it stands over the window: what it says of the
-/// yardr footplate keeps. None until that yardr has been asked its version,
-/// which is done when the card opens.
+/// The About card, while it stands over the window: what the yardr on this
+/// machine says of itself, and where it is. None until the yardr has been
+/// asked its version, which is done when the card opens.
 #[derive(Debug)]
 pub(crate) struct About {
-    pub(crate) kept: Option<Kept>,
+    pub(crate) seen: Option<Seen>,
 }
 
 /// What the status row at the list's head is for the open yard.
@@ -277,10 +278,10 @@ pub(crate) enum SwitchRead {
         program: PathBuf,
         path: std::ffi::OsString,
         status: Result<setup::Status, setup::StatusError>,
-        stale: Option<String>,
+        note: Option<String>,
     },
-    /// yardr could not be had, in the fetch's words: nothing of the
-    /// switch runs.
+    /// There is no yardr, in the lookup's words: nothing of the switch
+    /// runs.
     NoYardr(String),
 }
 

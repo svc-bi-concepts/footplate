@@ -4,7 +4,7 @@
 use gpui::{Div, Rgba, div, prelude::*, rems};
 
 use crate::api::{FlowBead, FlowStage};
-use crate::fetch::Kept;
+use crate::fetch::Seen;
 use crate::model::{
     self, ArrivalDetail, Route, Selected, WorkingGroup, held_by_you, is_held, waits_on_you,
 };
@@ -311,15 +311,23 @@ pub(crate) fn footplate_words() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
-/// What the About card says of the yardr footplate keeps: its own answer
-/// to `--version`, that none is fetched yet, or why it would not say.
-/// None is what it says until the program has been asked.
-pub(crate) fn yardr_words(kept: Option<&Kept>) -> String {
-    match kept {
+/// What the About card says of the yardr on this machine: its own answer
+/// to `--version`, that there is none, or why it would not say. None is
+/// what it says until the program has been asked.
+pub(crate) fn yardr_words(seen: Option<&Seen>) -> String {
+    match seen {
         None => "reading…".to_string(),
-        Some(Kept::Nothing) => "not fetched yet".to_string(),
-        Some(Kept::Says(line)) => line.clone(),
-        Some(Kept::Silent(why)) => format!("could not say its version ({why})"),
+        Some(Seen::Nothing) => "not installed".to_string(),
+        Some(Seen::Says { line, .. }) => line.clone(),
+        Some(Seen::Silent { why, .. }) => format!("could not say its version ({why})"),
+    }
+}
+
+/// Where the About card's yardr is, where there is one.
+pub(crate) fn yardr_place(seen: Option<&Seen>) -> Option<String> {
+    match seen? {
+        Seen::Nothing => None,
+        Seen::Says { path, .. } | Seen::Silent { path, .. } => Some(path.display().to_string()),
     }
 }
 

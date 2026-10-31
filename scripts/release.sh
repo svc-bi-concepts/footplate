@@ -7,9 +7,10 @@
 # footplate.png), README.md, LICENSE and NOTICE, and the Windows zip, holding
 # footplate.exe, README.md, LICENSE and NOTICE, with one checksums.txt
 # (sha256) over the seven.
-# No archive holds yardr, which footplate fetches itself at its first run:
-# each is listed as it is made, the disk image mounted read-only for it, and
-# a member whose path names yardr fails the release.
+# No archive holds yardr: footplate uses the one on the machine, or offers
+# yardr's installer where there is none. Each archive is listed as it is
+# made, the disk image mounted read-only, and a member whose path names yardr
+# fails the release.
 #
 # The Windows zip is not built here. gpui compiles its shaders for Windows
 # with fxc.exe of the Windows SDK, which a Mac does not have, so the release
@@ -221,9 +222,9 @@ list_archive() {
 }
 
 # Fails the release when the archive $1, called $2 in the messages, holds a
-# member whose path names yardr, in any case: footplate fetches yardr at its
-# first run (README.md, "Installing") and carries none, and the listing is how
-# that is known. A listing that is empty proves nothing, and fails too.
+# member whose path names yardr, in any case: footplate uses the yardr on the
+# machine (README.md, "yardr, a dependency") and carries none, and the listing
+# is how that is known. A listing that is empty proves nothing, and fails too.
 assert_no_yardr() {
     listing=$work/listing
     list_archive "$1" >"$listing" || {

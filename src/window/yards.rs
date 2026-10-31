@@ -21,6 +21,7 @@ use super::state::{
 };
 use super::ui::{keys_hint, quiet_button, segment, segmented, small_button};
 use crate::api::{self, Address, Client};
+use crate::fetch;
 use crate::model::{self, Entry, Model};
 use crate::session;
 use crate::settings::{self, Section};
@@ -187,7 +188,7 @@ impl Footplate {
             None => SwitchFor::NoHome,
         }
     }
-    /// The yardr the switch runs for the open yard: the fetched one, by
+    /// The yardr the switch runs for the open yard: the machine's, by
     /// its whole path, on the yard's home. None where there is no switch,
     /// or yardr is not there yet.
     pub(crate) fn switch_yardr(&self) -> Option<setup::Yardr> {
@@ -202,14 +203,14 @@ impl Footplate {
             path: self
                 .switch_path
                 .clone()
-                .unwrap_or_else(|| self.means.path.clone()),
+                .unwrap_or_else(|| self.means.machine.path.clone()),
             actor: None,
         })
     }
     /// Reads the switch anew: the yardr to run, and what `status` says of
     /// the open yard. Off the window's thread, as the first run's work is;
     /// an answer that comes when another yard was opened since is dropped.
-    /// Nothing is read while the first run is open: it owns fetching
+    /// Nothing is read while the first run is open: it owns finding yardr
     /// then, and the yard it makes is read once it ends.
     pub(crate) fn refresh_switch(&mut self, cx: &mut Context<Self>) {
         if self.first_run.is_some() || self.switch_busy.is_some() || self.switch_reading {
@@ -221,20 +222,20 @@ impl Footplate {
         };
         let opening = self.opening;
         self.switch_reading = true;
-        let (fetch, path, program) = (
+        let (find, path, program) = (
             self.means.yardr.clone(),
             self.switch_path.clone(),
             self.switch_program.clone(),
         );
-        let inherited = self.means.path.clone();
+        let inherited = self.means.machine.path.clone();
         cx.spawn(async move |this, cx| {
             let read = cx
                 .background_executor()
                 .spawn(async move {
-                    let (program, stale) = match program {
+                    let (program, note) = match program {
                         Some(program) => (program, None),
-                        None => match fetch() {
-                            Ok((program, stale)) => (program, stale),
+                        None => match find() {
+                            Ok((program, note)) => (program, note),
                             Err(why) => return SwitchRead::NoYardr(why),
                         },
                     };
@@ -254,7 +255,7 @@ impl Footplate {
                         program,
                         path: yardr.path.clone(),
                         status,
-                        stale,
+                        note,
                     }
                 })
                 .await;
@@ -271,6 +272,62 @@ impl Footplate {
         })
         .detach();
     }
+    /// What the switch's button says where there is no yardr: the offer,
+    /// and once an install failed, that it can be tried again.
+    fn switch_install_word(&self) -> &'static str {
+        match self.switch_note.as_deref() {
+            Some(fetch::NOT_THERE) => "install yardr",
+            _ => "try again",
+        }
+    }
+    /// Runs yardr's installer for the switch, on the person's word, showing
+    /// what it prints, and reads the switch with the yardr it left. A
+    /// failure stands in the switch's note, in the installer's words.
+    pub(crate) fn install_yardr(&mut self, cx: &mut Context<Self>) {
+        if self.switch_busy.is_some() {
+            return;
+        }
+        self.switch_busy = Some(SwitchBusy::Installing);
+        self.switch_note = None;
+        cx.notify();
+        let install = self.means.install.clone();
+        let (send, progress) = async_channel::bounded(1);
+        cx.spawn(async move |this, cx| {
+            while let Ok(line) = progress.recv().await {
+                // A line that comes late is no match for how it ended.
+                let shown = this.update(cx, |this, cx| {
+                    if this.switch_busy == Some(SwitchBusy::Installing) {
+                        this.switch_note = Some(line);
+                        cx.notify();
+                    }
+                });
+                if shown.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let installed = cx
+                .background_executor()
+                .spawn(async move { install(Some(send)) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.switch_busy = None;
+                match installed {
+                    Ok(program) => {
+                        this.switch_program = Some(program);
+                        this.switch_note = None;
+                        this.refresh_switch(cx);
+                    }
+                    Err(why) => this.switch_note = Some(why),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
     /// What a reading of the switch came to is the status row's from
     /// here on.
     pub(crate) fn read_switch(&mut self, read: SwitchRead, cx: &mut Context<Self>) {
@@ -279,20 +336,22 @@ impl Footplate {
                 self.switch_program = None;
                 self.switch_status = None;
                 self.switch_noyard = false;
-                self.switch_note = Some(why);
+                // An installer's words stand: the switch is read again by
+                // itself, and that lookup only says less.
+                self.switch_note.get_or_insert(why);
             }
             SwitchRead::Ready {
                 program,
                 path,
                 status,
-                stale,
+                note,
             } => {
                 self.switch_program = Some(program);
                 self.switch_path = Some(path);
                 // A reading that went through clears what an earlier one
                 // could not read; what there is to know of the yardr
                 // stands instead.
-                self.switch_note = stale;
+                self.switch_note = note;
                 match status {
                     Ok(status) => {
                         self.switch_status = Some(status);
@@ -305,12 +364,11 @@ impl Footplate {
                     Err(setup::StatusError::Failed(why)) => {
                         self.switch_status = None;
                         self.switch_noyard = false;
-                        // Both stand: the fetch's words first, then
-                        // status's failure. An older kept yardr that cannot
-                        // open a newer store fails status after a stale
-                        // fetch, and either alone would hide why.
+                        // Both stand: what there is to say of the yardr
+                        // first, then status's failure, and either alone
+                        // would hide why.
                         self.switch_note = Some(match self.switch_note.take() {
-                            Some(stale) => format!("{stale} {why}"),
+                            Some(note) => format!("{note} {why}"),
                             None => why,
                         });
                     }
@@ -384,7 +442,7 @@ impl Footplate {
                 .child("Reconnecting…")
         })
     }
-    /// Tries the switch's yardr again, after it could not be had.
+    /// Looks for the switch's yardr again, after there was none.
     pub(crate) fn switch_retry(&mut self, cx: &mut Context<Self>) {
         self.switch_note = None;
         self.refresh_switch(cx);
@@ -1801,6 +1859,7 @@ impl Footplate {
         let (state, dot, button): (String, Rgba, Option<(&str, &str)>) = match self.switch_busy {
             Some(SwitchBusy::Starting) => ("Starting…".to_string(), palette.accent, None),
             Some(SwitchBusy::Stopping) => ("Stopping…".to_string(), palette.accent, None),
+            Some(SwitchBusy::Installing) => ("Installing yardr…".to_string(), palette.accent, None),
             _ if self.stopped_while_reconnecting() => (
                 "Stopped".to_string(),
                 palette.faint,
@@ -1811,20 +1870,20 @@ impl Footplate {
                 palette.faint,
                 match (self.switch_yardr().is_some(), self.switch_note.is_some()) {
                     (true, _) => Some(("switch start", "Start")),
-                    (false, true) => Some(("switch try again", "try again")),
+                    (false, true) => Some(("switch try again", self.switch_install_word())),
                     (false, false) => None,
                 },
             ),
             _ if self.switch_program.is_none() && self.switch_note.is_some() => match running {
                 true => (
-                    "Running · yardr is not fetched".to_string(),
+                    "Running · yardr is not installed".to_string(),
                     palette.warn,
-                    Some(("switch try again", "try again")),
+                    Some(("switch try again", self.switch_install_word())),
                 ),
                 false => (
-                    "yardr is not fetched".to_string(),
+                    "yardr is not installed".to_string(),
                     palette.warn,
-                    Some(("switch try again", "try again")),
+                    Some(("switch try again", self.switch_install_word())),
                 ),
             },
             _ if running => (
@@ -1889,7 +1948,7 @@ impl Footplate {
                     button.on_click(cx.listener(|this, _, _, cx| this.start_yard(cx)))
                 }
                 "switch stop" => button.on_click(cx.listener(|this, _, _, cx| this.stop_yard(cx))),
-                _ => button.on_click(cx.listener(|this, _, _, cx| this.switch_retry(cx))),
+                _ => button.on_click(cx.listener(|this, _, _, cx| this.install_yardr(cx))),
             });
         }
         row.into_any_element()

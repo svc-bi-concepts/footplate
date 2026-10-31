@@ -36,11 +36,11 @@ it needs a terminal. The files are on yardr.dev.
 and each of its files, and a file is at
 `https://yardr.dev/releases/footplate/v<version>/<file>`.
 
-No download holds yardr. On macOS and Linux footplate fetches it the first
-time it opens, when it sets a yard up
-([Setting up a yard here](#setting-up-a-yard-here)). Windows sets none up and
-fetches nothing. The release script checks this for every archive it makes,
-and stops if a member's name has yardr in it ([Building](#building)).
+No footplate release holds yardr. On macOS and Linux footplate uses the yardr
+on the machine, and offers yardr's installer when none is found
+([yardr, a dependency](#yardr-a-dependency)). Windows sets no yard up and
+installs no yardr. The release script checks every archive it makes and stops
+if a member's name has yardr in it ([Building](#building)).
 
 ### macOS
 
@@ -205,8 +205,8 @@ loaders, so they run on distributions as new as that.
 Each archive is listed as it will ship, the zips and the tarballs with
 `tar -tf` and the disk image mounted read-only with `hdiutil attach`. The
 release stops if a member's path has yardr in it, in any case, since
-footplate fetches yardr the first time it opens
-([yardr, fetched](#yardr-fetched)) and carries none. An image that will not
+footplate uses the yardr on the machine
+([yardr, a dependency](#yardr-a-dependency)) and carries none. An image that will not
 mount cannot be listed, and stops the release too. Nothing reaches out-dir
 until all seven pass (six with the switch off). yardr.dev's `scripts/sync-release` checks the members of
 a Linux archive and of the Windows zip against lists of its own, so a member
@@ -476,8 +476,8 @@ open ask and the 156-item history open: day groups and a folded
 look-alike row), `decisions-filtered` (that history with `docs`
 in its filter), `keys` (the cheatsheet open over an open card),
 `about` (the About card open over the yardmaster's conversation,
-naming footplate's version and the kept yardr's), `about-unfetched`
-(that card with no yardr kept), `feedback` (the Feedback form open over
+naming footplate's version and the yardr's, with its path), `about-missing`
+(that card with no yardr on the machine), `feedback` (the Feedback form open over
 the yardmaster's conversation, with a message typed, against a capture of
 this machine's that stands in for PostHog), `reactions` (the conversation with
 the parties' reactions under three mails), `reactions-hover` (that
@@ -532,7 +532,7 @@ Or a yard that is not on this machine, at the address of its listener: see
 [A yard at an address](#a-yard-at-an-address). The calls are the same ones.
 
 Beside the yard it speaks to two sites that are no yard's: yardr.dev, for
-yardr's release ([yardr, fetched](#yardr-fetched)), and PostHog's EU
+yardr's installer when you ask for it ([yardr, a dependency](#yardr-a-dependency)), and PostHog's EU
 capture, to which [the Feedback form](#feedback) sends a message when you
 press Send, and never otherwise.
 
@@ -1110,80 +1110,63 @@ for later. The release's zip is not signed, and [Installing](#windows-pc) says
 what Windows shows for that. A release build is a console-less
 `footplate.exe`.
 
-## yardr, fetched
+## yardr, a dependency
 
-footplate fetches yardr itself, for a person who has none and no terminal
-to install it with: it is the first thing "set up a yard here" does, and
-the yardr it keeps is the one every step after runs, by its whole path.
-[The switch in the head](#starting-and-stopping-the-yard) runs the same
-yardr, so the window also fetches it, with no click, when it opens a yard
-of this machine: `latest.json` is read, until the switch has its yardr
-for this run of footplate, and a yardr is downloaded where none is kept or
-a newer one is out. A yardr you
-installed yourself is not used by the window, and is not touched.
+yardr is the core and footplate a client of it, so footplate treats it as it
+treats herdr or any other program it needs: it uses the yardr on this
+machine, and where there is none it offers to run yardr's own installer. It
+keeps no copy, and neither downloads nor checks yardr itself.
 `src/fetch.rs` is the mechanism.
 
-yardr comes from one host, `https://yardr.dev`, and from no other. An
-answer that sends footplate elsewhere is refused and not followed. Four
-files are read there, in this order, and where the yardr that is kept is
-the latest already, the first of them alone:
+It looks in this order, by whole path, and takes the first that runs:
 
-| File | For |
-|---|---|
-| `/releases/latest.json` | which version is the latest, and where its archive for this system and its checksums are. Nothing is trusted because this file says so: its own `sha256` and `size` are not read |
-| the release's `checksums.txt` | the SHA-256 of each archive |
-| `checksums.txt.minisig` | yardr's makers' [minisign](https://jedisct1.github.io/minisign/) signature over the checksums |
-| `yardr_<version>_<os>_<arch>.tar.gz` | the archive for this system: macOS or Linux, arm64 or amd64 |
+1. `<home>/binary` of the local yard (the directory of its socket), which the
+   yard writes for the yardr that runs it. A file that is missing, or holds
+   anything but one whole path to a program, is no answer.
+2. `~/.local/bin/yardr`, where yardr's installer puts it.
+3. `yardr` on the PATH footplate was started with.
+4. Your login shell (`$SHELL -l -c 'command -v yardr'`), asked once and given
+   five seconds: an app opened from the Dock has none of your shell's PATH. A
+   shell that fails, hangs or answers with anything but a whole path has not
+   found it, and a shell that hangs is stopped with what it started.
 
-The public half of the key releases are signed with is built into footplate
-(`KEY` in `src/fetch.rs`), and the signature is verified in footplate's own
-process, with the `minisign-verify` crate: no program is started for it.
-That key is yardr's makers', id `0ECCFE6E81F150B3`, and the one key
-footplate trusts: a new key means a new footplate.
-The archive is taken for yardr's because its SHA-256 is in the checksums
-that key signed. Its name is made from the version `latest.json` names, so
-an older release, whose signature is as good as it ever was, cannot be
-handed over as a newer one; and a version below the lowest one built into
-footplate (`LOWEST`, there too) is refused whatever is signed.
+These four read and nothing else: they fetch nothing and write nothing. A
+yardr that is found is used as it is. Nothing checks it, compares versions or
+asks what the latest is. The first run looks when it starts, and [the switch
+in the head](#starting-and-stopping-the-yard) when the window opens a yard of
+this machine, until it has its yardr for this run of footplate.
 
-The archive holds `yardr`, and may hold `server-yard` (yardr's script for
-setting a yard up on a server, in every release from v0.15.0), `README.md`,
-`LICENSE` and `NOTICE` beside it. The binary alone is unpacked, to a `bin`
-beside the [settings](#settings), mode 0755:
-`$XDG_CONFIG_HOME/footplate/bin/yardr` when `XDG_CONFIG_HOME` is set,
-`~/Library/Application Support/footplate/bin/yardr` on macOS otherwise,
-and `~/.config/footplate/bin/yardr` on Linux otherwise. It is written
-whole beside that place and then moved there, so what is at the path is
-the yardr that was there or the new one, never half of one. Its version
-stands beside it, in `yardr.version`. A yardr of your own, on your PATH,
-is not touched or looked at.
+**None found.** The first run and the switch say so and offer "install yardr".
+On your word alone, footplate reads `https://yardr.dev/install.sh`, from that
+one host and over TLS, not following it anywhere else, and runs it as a maker's
+installer: from a directory of footplate's own that nobody else can write to,
+with no shell around it and nothing to read, showing what it prints, and gone
+afterwards. The script checks what it installs (`install.sh` in the yardr
+repository); footplate has no checksum for the script itself, so that host is
+what is trusted, as it is by anyone who pipes it to a shell. Then step 2 is
+looked at again. A failure shows what the installer said and offers to try
+again.
 
-A kept yardr is replaced by a newer one alone: when the site names an older
-release as the latest, the kept one stays. When a newer one cannot be had,
-because the site is away or what it gave was refused, the kept one is still
-the one that is run, and the window says why there is no newer: it was
-proved when it was fetched, and a yard has to start without the network.
-With none kept, nothing is run.
+**The yardr an older footplate kept** stood in a `bin` beside the
+[settings](#settings), with a `yardr.version`. Where it is there and the four
+steps find nothing else (a `<home>/binary` that names it counts as nothing
+else), it is moved, once, with no click: copied to `~/.local/bin`, `daemon
+install` run again from there on each yard of this machine with a login
+service, since its unit names the old path, and only then the old `yardr` and
+`yardr.version` removed. A failure leaves the old one running and says so,
+beside the switch and in the first run. If no service was moved, the copy is
+removed and the move is tried again at the next start. If some services were
+moved before a failure, the copy and the old one both stay, as each is what a
+service starts.
 
-It refuses, each in a sentence for a person, and keeps nothing of what it
-refused:
-
-- a release with no signature, with one that is not the built-in key's, or
-  with checksums changed after they were signed;
-- an archive whose checksum is not the signed one, or that the signed
-  checksums do not name;
-- an archive that holds anything else: another name, a directory, a link,
-  a name twice, something after its end;
-- a version below the lowest, or one that is not three numbers (`v0.10.0`);
-- a `latest.json` that names a file outside `/releases/`;
-- a system yardr has no release for;
-- a footplate built without the key, which then asks the site nothing.
+Updating yardr is not here: that is yardr's own. Windows has no yard of its
+own, so it finds and installs none.
 
 ## Setting up a yard here
 
 "Set up a yard here" on the [first screen](#what-it-talks-to) takes a person
 from no yard to talking with the yardmaster, and asks them to type no
-command. Each step runs the yardr that was fetched, with `--json`, and shows
+command. Each step runs the yardr on this machine, with `--json`, and shows
 what it answers; where yardr refuses, its own words are shown. The list of
 commands is yardr's: `docs/setup.md` of its repository, "For a program that
 drives the first run". The yard is this run's own: the home its socket is
@@ -1191,7 +1174,7 @@ in, which every command is told (`--home`).
 
 | Step | What is shown | What is run |
 |---|---|---|
-| yardr itself | that it is fetched, or why not, with "try again" | the fetch [above](#yardr-fetched); nothing of yardr |
+| yardr itself | that it is found; where it is not, "install yardr", what the installer prints, and "try again" where it failed | the lookup and the installer [above](#yardr-a-dependency) |
 | What this needs | a row for git, herdr and each harness: installed or not, what it is for, and how it comes. "check again" asks once more. A herdr whose server is down is said to wait, and keeps nothing back. "go on" needs git, herdr and one harness | `yardr doctor --json` |
 | Your yard | your name (the login name to begin with), the harness (the installed ones; one yardr cannot log in for you is marked "needs a terminal once to log in"), the yardmaster's name, a model, how agents work with you (the four styles, "Guide me" to begin with), a line about you | `yardr init --harness … --operator … --yardmaster … --style … [--model …] [--about …]`: it creates the yard and starts nothing |
 | Logging in | "log in", or "it is logged in already". Then what yardr asks for: the ways to log in as buttons, the page as a button, the code in a field, and the question before the one call that proves the login, which costs a model call | `yardr harness login <kind> --json`, answered on its input |
@@ -1250,9 +1233,10 @@ login names.
 footplate was started with, and after it the directory of each place doctor
 names, where your login shell finds a program that the PATH lacks
 (`login_shell_path`) and where a program is fetched to. Doctor is asked
-again with it, and then finds them. footplate runs no shell and writes no
-profile; the one login shell in all of this is doctor's own, which it runs
-once for a program missing from the PATH. A terminal opened later finds a
+again with it, and then finds them. footplate writes no profile; the login
+shells in all of this are doctor's own, which it runs once for a program
+missing from the PATH, and the one question that
+[looks for yardr itself](#yardr-a-dependency). A terminal opened later finds a
 fetched program only once its own PATH has `~/.local/bin`.
 
 **What footplate starts**, all of it, each with its arguments and never
@@ -1260,9 +1244,11 @@ through a shell:
 
 | It starts | For |
 |---|---|
-| the fetched `yardr`, by its whole path: `doctor`, `init`, `harness login`, `up`, `depot add`, `depot init --yes`, `bead create`, `bead advance`, `subscribe`, each with `--json` | the steps above |
-| the fetched `yardr`, by its whole path: `doctor` (once per run of footplate, for the PATH above; its one login shell with it) and `status` when a yard of this machine is opened, with no click; `up`, `down`, `up --login`, `daemon uninstall` on a click; each with `--json` | [the switch in the head](#starting-and-stopping-the-yard) |
+| the `yardr` on this machine, by its whole path: `doctor`, `init`, `harness login`, `up`, `depot add`, `depot init --yes`, `bead create`, `bead advance`, `subscribe`, each with `--json` | the steps above |
+| the `yardr` on this machine, by its whole path: `doctor` (once per run of footplate, for the PATH above; its one login shell with it) and `status` when a yard of this machine is opened, with no click; `up`, `down`, `up --login`, `daemon uninstall` on a click; each with `--json` | [the switch in the head](#starting-and-stopping-the-yard) |
 | a maker's installer that yardr names, on a Mac (Claude Code's `install <version>`) | "install" on a harness's row |
+| yardr's installer, `https://yardr.dev/install.sh` | "install yardr" where there is none |
+| your login shell, `$SHELL -l -c 'command -v yardr'`, under a timeout | [looking for yardr](#yardr-a-dependency), where the first three steps found none |
 | `/usr/bin/xcode-select --install`, on a Mac | "install" on git's row |
 | `git`, to read: `rev-parse --is-inside-work-tree`, `branch --show-current` | the branch offered for a folder |
 | `notify-send`, on Linux | a [notification](#notifications) |
@@ -1279,8 +1265,8 @@ in [A hosted yard](#a-hosted-yard); it starts no process.
 ### Trying the setup without touching your yard
 
 Set `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `YARDR_HOME` to a
-temporary directory before opening Footplate. This keeps its settings and
-fetched yardr, the new yard, the desktop entry and any fetched prerequisites
+temporary directory before opening Footplate. This keeps its settings, the
+installed yardr, the new yard, the desktop entry and any fetched prerequisites
 under that directory. The restricted PATH also keeps the test from using
 programs already installed in your usual home:
 
@@ -1685,14 +1671,14 @@ the "about footplate" row under "This window" in the
 [settings](#settings), which is the door on Linux and on Windows, where
 footplate has no application menu.
 
-- footplate: the release this is, as its build names it (`v0.6.0`).
-- yardr: what the yardr footplate fetched says to `yardr --version`, asked
+- footplate: the release this is, as its build names it (`v0.8.0`).
+- yardr: what the yardr on this machine says to `yardr --version`, asked
   when the card opens (`v0.14.0 (cbceebd22919)`: the release, and the
-  commit it was built from). Where footplate has fetched none, the card says
-  "not fetched yet" ([yardr, fetched](#yardr-fetched) has when it does); a
-  yardr that is kept and will not say gives the reason. A yardr you
-  installed yourself is not asked: footplate does not use it. On Windows
-  footplate fetches none, and the card names footplate alone.
+  commit it was built from), and under it its path, found as
+  [yardr, a dependency](#yardr-a-dependency) has it. With none, the card says
+  "not installed"; a yardr that will not say gives the reason. The card moves
+  and installs nothing. On Windows there is none, and the card names footplate
+  alone.
 
 The card looks for nothing newer, of either, and offers no update.
 
@@ -1924,7 +1910,7 @@ options have no icon, so the program sees to it when it starts
 |---|---|
 | `src/api.rs` | the client: the calls, the stream, their JSON, by the socket or at an address over TCP and TLS; a pairing code redeemed, a member's pairing opened at a hosted edge, a Kratos account signed in at a hosted edge; a file read from a site, and a JSON post to one, that is no yard |
 | `src/feedback.rs` | what the Feedback form sends, and where: one survey answer to yardr's PostHog (EU), made as plain functions (the payload, a fresh id for each send, the words of a refusal) and sent by `api::post_json`; the write key and the survey's id are two constants, and with either empty there is no project to offer |
-| `src/fetch.rs` | yardr's release, fetched from yardr.dev: the signature over its checksums verified against the built-in key, the archive against the checksums, its one binary kept in footplate's directory with its version, and fetched again only for a newer one; the kept one asked its version for the About card. A program doctor names for a Mac, fetched from its maker and held to yardr's checksum. As plain functions: a file read, a checksum, a member of a gzipped tar, a program kept |
+| `src/fetch.rs` | the yardr on this machine, as plain functions over a `Machine`: found in order by whole path, the one an older footplate kept moved, the installer fetched from yardr.dev and run; what `yardr doctor` names for a Mac, fetched and checked by checksum; and the yardr asked its version for the About card |
 | `src/setup.rs` | the first run as yardr's commands, with no window: each run with its arguments and its JSON read, the PATH made from doctor's data, the import's questions answered, a login led by what yardr prints |
 | `src/yard.rs` | which yard is opened, as plain functions: the environment's one yard or the open one of the settings, each yard's token file and its mode, a hosted yard's session file beside it |
 | `src/session.rs` | following a yard on a thread, one for each yard of the settings: who the window is for, the state it starts from, trying again, or not when the device is not let in |
@@ -1964,16 +1950,16 @@ at an address the tests run over plain HTTP on this machine, and one test
 that is not run by the gate (`cargo test tls -- --ignored`) makes the
 handshake with a site of the internet.
 
-The fetch of yardr is tested against a stand-in for the site, a port of this
-machine, with a release the tests make and sign with a key of their own:
-the good path and each refusal. One signature in them was made by the
-`minisign` program itself, since that is what signs a release. The built-in
-key is held to the checksums and signature v0.10.0 published, kept in
-`src/fixtures/yardr-v0.10.0`. They ask yardr.dev nothing. A program doctor
-names is fetched from the same stand-in: sent on from one address to
-another, checked, kept or run, and refused for each reason. The kept
-yardr's version is asked of a script that stands in for it, which says
-what each test writes it to say, or ends badly, or does not end.
+The lookup of yardr is tested on a machine under a temporary directory, with
+stand-ins for yardr and the login shell: each step in order with the ones
+before it taken away, no network and no write up to the installer, a broken
+`<home>/binary`, a shell that fails or hangs. The installer and what doctor
+names are fetched from a stand-in for the site, a port of this machine, and
+yardr.dev is asked nothing: sent on from one address to another, checked, kept
+or run, and refused for each reason. The move of a kept yardr is tested with
+and without a login service, and failing at each step. The yardr's version is
+asked of a script that stands in for it, which says what each test writes it
+to say, or ends badly, or does not end.
 
 The Feedback form is tested against a stand-in for PostHog's capture, a
 port of this machine that keeps each request whole and answers with the

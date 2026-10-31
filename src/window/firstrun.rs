@@ -1,17 +1,16 @@
 //! "Set up a yard here": the first run of a yard on this machine, from no
 //! yard to talking with the yardmaster, with no terminal. It stands where
 //! the window says there is no yard, as the third way to one, and each of
-//! its steps is a command of the yardr that footplate fetched (setup.rs):
+//! its steps is a command of the yardr on this machine (setup.rs):
 //! what yardr answers is what is shown, in yardr's words where it refuses.
 //!
-//! The steps, in order: yardr itself is fetched and proved (fetch.rs); what
+//! The steps, in order: yardr itself is found or installed (fetch.rs); what
 //! the machine lacks is listed from `yardr doctor --json`, and installed
 //! where yardr names a way; the yard is created (`yardr init`); the harness
 //! is logged in, led by `yardr harness login --json`; the yard is started
 //! (`yardr up`); a folder becomes its first depot, with a first bead. Then
 //! the window opens the yardmaster's conversation.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,15 +22,21 @@ use gpui::{
 
 use super::small_button;
 use crate::feedback::Project;
-use crate::fetch;
+use crate::fetch::{self, Machine};
 use crate::input::{Line, Submitted};
 use crate::setup::{self, Doctor, Form, Item, Login, Need, Offer, Yardr};
 use crate::theme::Palette;
 use crate::titlebar::{self, Gesture};
 
-/// Gives the yardr to run: where it is kept, and what there is to say of
-/// it where a newer one could not be had. In a sentence, why there is none.
-pub type Fetches = Arc<dyn Fn() -> Result<(PathBuf, Option<String>), String> + Send + Sync>;
+/// Gives the yardr to run: where it is, and what there is to say of it
+/// where the one an older footplate kept could not be moved. In a sentence,
+/// why there is none.
+pub type Finds = Arc<dyn Fn() -> Result<(PathBuf, Option<String>), String> + Send + Sync>;
+
+/// Runs yardr's installer, sending what it prints as it goes, and gives the
+/// yardr it left. In a sentence, why there is none.
+pub type Installs =
+    Arc<dyn Fn(Option<async_channel::Sender<String>>) -> Result<PathBuf, String> + Send + Sync>;
 
 /// Opens a page on the web in the person's browser.
 pub type Opens = Rc<dyn Fn(&str, &mut App)>;
@@ -43,13 +48,11 @@ pub type Strip = Rc<dyn Fn(Gesture, &mut Window, &mut App)>;
 /// outside the window with. A test has a stand-in for each.
 #[derive(Clone)]
 pub struct Means {
-    pub yardr: Fetches,
-    /// The PATH footplate was started with.
-    pub path: OsString,
-    /// The person's home, which a program that is fetched goes under, and
-    /// footplate's own directory for programs.
-    pub home: Option<PathBuf>,
-    pub own: Option<PathBuf>,
+    pub yardr: Finds,
+    pub install: Installs,
+    /// What yardr is looked for by, and where a program that is fetched
+    /// goes: the person's home, and footplate's own directory for programs.
+    pub machine: Machine,
     pub open: Opens,
     /// This is a Mac: git comes with Apple's own installer.
     pub apple: bool,
@@ -66,27 +69,22 @@ pub struct Means {
 impl Means {
     /// This machine's.
     pub fn real() -> Means {
+        // Tests look at no machine, and fetch nothing: a test that reaches
+        // out for yardr stands in for it.
+        #[cfg(not(test))]
+        let machine = Machine::here();
+        #[cfg(test)]
+        let machine = Machine::default();
         Means {
-            #[cfg(not(test))]
-            yardr: Arc::new(|| match fetch::current() {
-                Ok((stored, stale)) => Ok((
-                    stored.path,
-                    stale.map(|why| {
-                        format!(
-                            "yardr {} is used: a newer one could not be had. {why}",
-                            stored.version
-                        )
-                    }),
-                )),
-                Err(refusal) => Err(refusal.to_string()),
-            }),
-            // Tests fetch nothing: a test that reaches out for yardr
-            // stands in for it.
-            #[cfg(test)]
-            yardr: Arc::new(|| Err("yardr is not fetched in tests".to_string())),
-            path: std::env::var_os("PATH").unwrap_or_default(),
-            home: std::env::home_dir(),
-            own: fetch::dir(),
+            yardr: {
+                let machine = machine.clone();
+                Arc::new(move || machine.yardr())
+            },
+            install: {
+                let machine = machine.clone();
+                Arc::new(move |progress| machine.install(progress))
+            },
+            machine,
             open: Rc::new(|url, cx| cx.open_url(url)),
             apple: cfg!(target_os = "macos"),
             titlebar: (cfg!(target_os = "macos") && !cfg!(test))
@@ -101,7 +99,7 @@ impl Means {
 /// Where the first run stands.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Step {
-    /// yardr itself is fetched.
+    /// yardr itself is looked for, and installed where it is missing.
     Yardr,
     /// What the machine has of what a yard needs.
     Needs,
@@ -212,7 +210,7 @@ impl Focusable for FirstRun {
 
 impl FirstRun {
     /// The first run of the yard at `socket`, for the person whose login
-    /// is `name`. It starts by fetching yardr.
+    /// is `name`. It starts by looking for yardr.
     pub fn new(
         means: Means,
         socket: &Path,
@@ -221,7 +219,7 @@ impl FirstRun {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::build(means, socket, name, handle, cx);
-        this.fetch(cx);
+        this.find(cx);
         this
     }
 
@@ -341,35 +339,52 @@ impl FirstRun {
         .detach();
     }
 
-    /// Step 0: the yardr to run, fetched where none is kept or a newer one
-    /// is out. One that failed its proof is not kept, and so never run.
-    fn fetch(&mut self, cx: &mut Context<Self>) {
+    /// Step 0: the yardr on this machine.
+    fn find(&mut self, cx: &mut Context<Self>) {
         self.step = Step::Yardr;
-        let (fetch, home, path) = (
-            self.means.yardr.clone(),
-            self.home.clone(),
-            self.means.path.clone(),
-        );
+        let find = self.means.yardr.clone();
         self.work(
-            "fetching yardr from yardr.dev…",
-            move || fetch(),
-            |this, fetched, cx| match fetched {
-                Ok((program, stale)) => {
-                    this.yardr = Some(Yardr {
-                        program,
-                        home: Some(home),
-                        path,
-                        actor: None,
-                    });
-                    this.check(cx);
+            "looking for yardr…",
+            move || find(),
+            |this, found, cx| match found {
+                Ok((program, note)) => {
+                    this.use_yardr(program, cx);
                     // After the check began: it is what there is to know
                     // while the rows are read.
-                    this.said = stale;
+                    this.said = note;
                 }
                 Err(why) => this.said = Some(why),
             },
             cx,
         );
+    }
+
+    /// Step 0 where there is none: yardr's own installer, on the person's
+    /// word, showing what it prints.
+    fn install_yardr(&mut self, cx: &mut Context<Self>) {
+        let install = self.means.install.clone();
+        let installing = "installing yardr…".to_string();
+        let (send, progress) = async_channel::bounded(1);
+        self.work(
+            &installing,
+            move || install(Some(send)),
+            |this, installed, cx| match installed {
+                Ok(program) => this.use_yardr(program, cx),
+                Err(why) => this.said = Some(why),
+            },
+            cx,
+        );
+        self.follow(progress, installing, cx);
+    }
+
+    fn use_yardr(&mut self, program: PathBuf, cx: &mut Context<Self>) {
+        self.yardr = Some(Yardr {
+            program,
+            home: Some(self.home.clone()),
+            path: self.means.machine.path.clone(),
+            actor: None,
+        });
+        self.check(cx);
     }
 
     /// Step 1: what the machine has, as doctor says it.
@@ -421,9 +436,11 @@ impl FirstRun {
             .into_iter()
             .find(|item| item.program == program)
             .and_then(|item| item.fetch.clone());
-        let (Some(wanted), Some(home), Some(own)) =
-            (wanted, self.means.home.clone(), self.means.own.clone())
-        else {
+        let (Some(wanted), Some(home), Some(own)) = (
+            wanted,
+            self.means.machine.home.clone(),
+            self.means.machine.own.clone(),
+        ) else {
             return;
         };
         let host = wanted.url.split('/').nth(2).unwrap_or_default().to_string();
@@ -439,6 +456,16 @@ impl FirstRun {
             },
             cx,
         );
+        self.follow(progress, installing, cx);
+    }
+
+    /// Shows what an installer prints as it runs, behind `installing`.
+    fn follow(
+        &self,
+        progress: async_channel::Receiver<String>,
+        installing: String,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             while let Ok(line) = progress.recv().await {
                 if this
@@ -897,8 +924,8 @@ impl FirstRun {
         let program = item.program.clone();
         let can_fetch = self.means.apple
             && item.fetch.is_some()
-            && self.means.home.is_some()
-            && self.means.own.is_some();
+            && self.means.machine.home.is_some()
+            && self.means.machine.own.is_some();
         let installs = !item.found && (can_fetch || (program == "git" && self.means.apple));
         let state = match (item.found, item.harness.is_some()) {
             (true, _) => "installed",
@@ -1018,12 +1045,16 @@ impl FirstRun {
         match self.step {
             Step::Yardr => {
                 body.push(faint(
-                    "footplate fetches yardr, the program that runs a yard, from yardr.dev, and checks its makers' signature before it keeps it. This needs the network once.",
+                    "footplate uses the yardr on this machine, the program that runs a yard. Where there is none, it can run yardr's own installer from yardr.dev, which puts it in ~/.local/bin. This needs the network once.",
                 ));
                 if self.busy.is_none() {
+                    let label = match self.said.as_deref() {
+                        Some(fetch::NOT_THERE) => "install yardr",
+                        _ => "try again",
+                    };
                     body.push(
-                        self.button("setup again".to_string(), "try again", palette)
-                            .on_click(cx.listener(|this, _, _, cx| this.fetch(cx)))
+                        self.button("setup again".to_string(), label, palette)
+                            .on_click(cx.listener(|this, _, _, cx| this.install_yardr(cx)))
                             .into_any_element(),
                     );
                 }
@@ -1623,7 +1654,7 @@ impl FirstRun {
     }
 
     /// The PATH of what is started.
-    pub fn path(&self) -> Option<OsString> {
+    pub fn path(&self) -> Option<std::ffi::OsString> {
         self.yardr.as_ref().map(|yardr| yardr.path.clone())
     }
 }

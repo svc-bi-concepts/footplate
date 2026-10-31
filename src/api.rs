@@ -2715,7 +2715,7 @@ fn kratos_errors(bytes: &[u8]) -> Vec<String> {
 }
 
 /// Reads the file a site has at `path`, which is no yard: one `GET` with
-/// no token, as yardr's release is fetched (fetch.rs). A status that is not
+/// no token, as yardr's installer is fetched (fetch.rs). A status that is not
 /// 200 is given with no bytes, and the site is not followed anywhere else:
 /// a redirect is such a status. A file longer than `most` bytes is not
 /// read to its end.

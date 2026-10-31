@@ -1,35 +1,33 @@
-//! yardr itself, fetched: its latest release is read from yardr.dev, proved
-//! to be its makers', and its one binary kept in footplate's own directory,
-//! to be run from there by the first run (setup.rs). A yardr that is not
-//! proved is not kept, so none is ever run.
+//! yardr is a dependency: footplate uses the one on this machine, found by
+//! whole path ([`Machine::found`]), and where there is none it offers to run
+//! yardr's own installer ([`Machine::install`]). It keeps no copy, and
+//! neither downloads nor checks yardr itself: a yardr that is found is used
+//! as it is. An older footplate did keep one, and that one is moved out of
+//! footplate's directory the first time nothing else is found
+//! ([`Machine::yardr`]).
 //!
-//! What is trusted is one thing, the public key built into footplate. The
-//! release signs its `checksums.txt` with minisign, and the archive is
-//! taken for yardr's because its SHA-256 is in the checksums that key
-//! signed. `latest.json` only says which version there is and where:
-//! nothing is trusted because it says so, and its own `sha256` and `size`
-//! are not read. The version it names is in the archive's name, and that
-//! name is looked up in the signed checksums, so an older release cannot
-//! be handed over as a newer one.
-//!
-//! The site is the one host yardr is fetched from. It is not followed
-//! elsewhere: an answer that is no 200, a redirect among them, is a
-//! refusal.
+//! The installer comes from one host, [`SITE`], over TLS, and is not
+//! followed elsewhere: an answer that is no 200, a redirect among them, is a
+//! refusal. It carries no checksum, so that host is what is trusted, as it
+//! is by anyone who pipes the same script to a shell. What it installs it
+//! checks itself.
 //!
 //! What `yardr doctor --json` names for a program fetched on a Mac
-//! (docs/doctor.md of the yardr repository) goes the same way, by the same
-//! plain functions ([`program`]): its [`sha256`] is compared, the one
-//! [`member`] of a gzipped tar taken, and the program [`keep`]-ed. It comes
-//! from its maker's address, which may send on to another, and is trusted
-//! for its checksum alone, which the proved yardr carries. Only yardr's
-//! own fetch has the signature on top.
+//! (docs/doctor.md of the yardr repository) goes another way, by
+//! [`program`]: its [`sha256`] is compared, the one [`member`] of a gzipped
+//! tar taken, and the program [`keep`]-ed. It comes from its maker's address,
+//! which may send on to another, and is trusted for its checksum alone,
+//! which yardr carries.
 
-use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,67 +35,54 @@ use std::time::{Duration, Instant};
 use std::{env, fmt, thread};
 
 use flate2::bufread::GzDecoder;
-use minisign_verify::{PublicKey, Signature};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::api::{self, Address};
 use crate::log;
+use crate::setup::{StatusError, Yardr};
 
-/// The site yardr's releases are on: the one host yardr is ever fetched
-/// from.
+/// The site yardr's installer is on: the one host it is ever fetched from.
 pub const SITE: &str = "https://yardr.dev";
 
-/// The public half of the minisign key yardr's releases are signed with,
-/// as the second line of its `.pub` file has it: the key of yardr's
-/// makers, id 0ECCFE6E81F150B3, made on 13 Oct 2026, and v0.10.0 is the
-/// first release it signed. Nothing can replace it in a footplate that is
-/// built: a new key means a new footplate.
-const KEY: &str = "RWSzUPGBbv7MDqH+nnbNmYdOm20UTkuk7eC5e6XuVtYRwZtaEZRlV/WB";
+/// Where the site has the installer.
+const INSTALLER_AT: &str = "/install.sh";
 
-/// The oldest yardr this footplate takes. A release below it is refused
-/// though its signature is good: every release ever signed stays signed,
-/// and an old one with a known fault must not be what the site hands out.
-const LOWEST: Version = Version(0, 11, 0);
+/// The most bytes that are read of the installer, a script of some 10 kB.
+const INSTALLER_MOST: u64 = 1024 * 1024;
 
-/// What says which release is the latest, the one address that does not
-/// change with the version.
-const LATEST: &str = "/releases/latest.json";
-
-/// Everything that is fetched is under this.
-const RELEASES: &str = "/releases/";
-
-/// The binary, as the archive and footplate's directory name it.
+/// The program, as the machine names it, and the file an older footplate
+/// kept beside its copy of it.
 const PROGRAM: &str = "yardr";
+const VERSION_FILE: &str = "yardr.version";
 
-/// What a release's archive holds beside the binary: the README and the
-/// licence, and from v0.15.0 `server-yard`, the script that sets a yard up
-/// on a server. None of it is kept. Anything else in the archive is refused.
-const BESIDE: [&str; 4] = ["server-yard", "README.md", "LICENSE", "NOTICE"];
-
-/// The most bytes that are read of `latest.json` and of the checksums, of
-/// the signature, of an archive, and of what an archive unpacks to. An
-/// archive of yardr 0.10 is 9 MB and unpacks to 21.
-const SMALL_MOST: u64 = 64 * 1024;
-const SIGNATURE_MOST: u64 = 4 * 1024;
-const ARCHIVE_MOST: u64 = 64 * 1024 * 1024;
+/// The most a program's archive unpacks to.
 const UNPACKED_MOST: u64 = 256 * 1024 * 1024;
+
+/// How long the login shell has to say where yardr is. A profile that takes
+/// longer has not found it, and the person is offered the installer instead
+/// of waiting.
+#[cfg_attr(test, allow(dead_code))]
+const SHELL_WITHIN: Duration = Duration::from_secs(5);
+
+/// The one question the login shell is asked, as yardr's doctor asks it.
+const SHELL_ASKS: &str = "command -v yardr";
+
+/// What is said where no yardr is found. The window offers the installer
+/// under exactly these words, and "try again" under any others.
+pub const NOT_THERE: &str = "There is no yardr on this machine.";
 
 /// Each writer gets its own temporary file before atomically replacing the
 /// stored program. The pid also keeps names distinct across footplate runs.
 static NEXT_PART: AtomicU64 = AtomicU64::new(0);
 
-/// Why nothing was fetched, or why what was fetched is not kept. Each is
-/// said in words for a person (`Display`), and nothing that is refused is
-/// in footplate's directory afterwards.
+/// Why the installer was not fetched. Each is said in words for a person
+/// (`Display`).
 #[derive(Debug)]
 pub enum Refusal {
-    /// footplate has no directory of its own: the person has no home.
+    /// The person has no home for yardr to go under.
     NoHome,
-    /// This footplate was built without the key releases are signed with.
-    NoKey,
-    /// There is no yardr for this system, named as the releases name it
-    /// where they could.
+    /// yardr has no installer for this system.
     NoSystem { system: String },
     /// The site did not answer.
     Down { site: String, err: io::Error },
@@ -109,126 +94,39 @@ pub enum Refusal {
     },
     /// What the site answered cannot be read as what it should be.
     Unreadable { what: String, why: String },
-    /// The latest release is older than the oldest this footplate takes.
-    TooOld { version: String, lowest: String },
-    /// The release has no signature.
-    NoSignature { site: String },
-    /// The signature is not the built-in key's over these checksums.
-    BadSignature,
-    /// The signed checksums do not name the archive.
-    NotListed { name: String },
-    /// The archive is not the one the signed checksums name.
-    Differs { name: String },
-    /// The archive holds what a release does not, or not the binary.
-    Archive { name: String, why: String },
-    /// The binary could not be written to footplate's directory.
-    NotKept { path: PathBuf, err: io::Error },
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Refusal::NoHome => f.write_str(
-                "There is no home directory to keep yardr in, so it was not fetched.",
-            ),
-            Refusal::NoKey => f.write_str(
-                "This footplate was built without the key yardr's releases are signed with, so it cannot tell whether a yardr is the real one, and fetches none.",
-            ),
+            Refusal::NoHome => f.write_str("There is no home directory to install yardr under."),
             Refusal::NoSystem { system } => write!(
                 f,
-                "There is no yardr for this system ({system}): its releases are for macOS and Linux, on arm64 and amd64."
+                "There is no yardr to install on this system ({system}): it runs on macOS and Linux."
             ),
             Refusal::Down { site, err } => write!(
                 f,
-                "{site} does not answer, so yardr was not fetched ({err}). This needs the network once."
+                "{site} does not answer, so yardr's installer was not fetched ({err}). This needs the network once."
             ),
             Refusal::Answered { site, path, status } => write!(
                 f,
-                "{site} did not serve {path} directly (status {status}), so yardr was not fetched."
+                "{site} did not serve {path} directly (status {status}), so yardr was not installed."
             ),
             Refusal::Unreadable { what, why } => {
-                write!(f, "footplate cannot read {what}: {why}. yardr was not fetched.")
+                write!(
+                    f,
+                    "footplate cannot read {what}: {why}. yardr was not installed."
+                )
             }
-            Refusal::TooOld { version, lowest } => write!(
-                f,
-                "The yardr that is offered is {version}, older than {lowest}, the oldest this footplate takes. It was not fetched."
-            ),
-            Refusal::NoSignature { site } => write!(
-                f,
-                "The release of yardr at {site} is not signed, so nothing shows who made it. It was not fetched."
-            ),
-            Refusal::BadSignature => f.write_str(
-                "The signature of yardr's release is not that of yardr's makers. What was fetched is not kept.",
-            ),
-            Refusal::NotListed { name } => write!(
-                f,
-                "The checksums yardr's makers signed do not name {name}. It was not fetched."
-            ),
-            Refusal::Differs { name } => write!(
-                f,
-                "{name} is not the file yardr's makers signed: its checksum differs. It is not kept."
-            ),
-            Refusal::Archive { name, why } => write!(
-                f,
-                "{name} is not what a release holds: {why}. Nothing of it is kept."
-            ),
-            Refusal::NotKept { path, err } => write!(
-                f,
-                "yardr was fetched and is its makers', but could not be written to {} ({err}).",
-                path.display()
-            ),
         }
     }
 }
 
 impl std::error::Error for Refusal {}
 
-/// A release's version: `v0.10.0`, three numbers and nothing after them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Version(u64, u64, u64);
-
-impl Version {
-    /// Reads a release's tag. One that says more than three numbers (a
-    /// pre-release) is none: where it would stand against the lowest
-    /// version is not for footplate to guess.
-    pub fn parse(text: &str) -> Option<Version> {
-        let mut parts = text.strip_prefix('v')?.split('.');
-        let mut number = || {
-            let part = parts.next()?;
-            // `parse` alone would take a sign.
-            if part.is_empty() || part.len() > 9 || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            part.parse::<u64>().ok()
-        };
-        let version = Version(number()?, number()?, number()?);
-        parts.next().is_none().then_some(version)
-    }
-
-    /// The archive of this version for `target`, as a release names it.
-    fn archive(&self, target: &str) -> String {
-        let Version(major, minor, patch) = self;
-        format!("{PROGRAM}_{major}.{minor}.{patch}_{target}.tar.gz")
-    }
-}
-
-impl fmt::Display for Version {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Version(major, minor, patch) = self;
-        write!(f, "v{major}.{minor}.{patch}")
-    }
-}
-
-/// The yardr that is kept: where, to be run from there by its whole path,
-/// and of which version.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Stored {
-    pub path: PathBuf,
-    pub version: String,
-}
-
 /// Where footplate keeps the programs it fetched: a `bin` beside its
 /// settings. Nowhere for a person without a home.
+#[cfg_attr(test, allow(dead_code))]
 pub fn dir() -> Option<PathBuf> {
     directory_for(&crate::settings::file()?)
 }
@@ -237,81 +135,371 @@ fn directory_for(settings: &Path) -> Option<PathBuf> {
     Some(settings.parent()?.join("bin"))
 }
 
-/// A system as yardr's releases name it, Go's GOOS and GOARCH: `os` and
-/// `arch` are Rust's names (`std::env::consts`).
-pub fn target_of(os: &str, arch: &str) -> Option<String> {
-    let os = match os {
-        "macos" => "darwin",
-        "linux" => "linux",
-        _ => return None,
-    };
-    let arch = match arch {
-        "aarch64" => "arm64",
-        "x86_64" => "amd64",
-        _ => return None,
-    };
-    Some(format!("{os}_{arch}"))
+/// Whether yardr runs on the system Rust names `os`. Windows has no yard of
+/// its own, so an old or misplaced file under its data directory must not be
+/// started.
+fn runs_on(os: &str) -> bool {
+    matches!(os, "macos" | "linux")
 }
 
-/// The file beside the kept yardr that says which version it is: the
-/// release's tag, on one line.
-const VERSION_FILE: &str = "yardr.version";
+/// What yardr is looked for by, on this machine or in a test's directory.
+/// Nothing here is read before it is asked for. The default finds nothing.
+#[derive(Debug, Clone, Default)]
+pub struct Machine {
+    /// `<home>/binary` of the local yard: the file the yard records the
+    /// yardr it runs in (docs/configuration.md of the yardr repository,
+    /// "Which yardr a yard runs").
+    pub binary: Option<PathBuf>,
+    /// The person's home, which `.local/bin` is under.
+    pub home: Option<PathBuf>,
+    /// The PATH footplate was started with.
+    pub path: OsString,
+    /// The person's login shell, and how long it has to answer.
+    pub shell: Option<PathBuf>,
+    pub within: Duration,
+    /// footplate's own directory for programs ([`dir`]).
+    pub own: Option<PathBuf>,
+    /// The yards of this machine, by their homes: each may have a login
+    /// service that names the yardr an older footplate kept.
+    pub yards: Vec<PathBuf>,
+}
 
-/// The yardr to run: the one that is kept, where it is the latest the
-/// site has, and else the latest, fetched from [`SITE`], proved and kept in
-/// [`dir`] in the other's place. Nothing but `latest.json` is read where
-/// the kept one is the latest. A yardr that is kept is never replaced by an
-/// older one, whatever the site says is the latest.
-///
-/// Where a newer one could not be had, for whatever reason, the kept one
-/// is still the answer, with why beside it: it was proved when it was
-/// fetched, and a yard must start without the network. With none kept, the
-/// reason is a refusal.
-#[cfg_attr(test, allow(dead_code))]
-pub fn current() -> Result<(Stored, Option<Refusal>), Refusal> {
-    let dir = dir().ok_or(Refusal::NoHome)?;
-    let site = Address::parse(SITE).map_err(|why| Refusal::Unreadable {
-        what: SITE.to_string(),
-        why,
-    })?;
-    let target = target_of(env::consts::OS, env::consts::ARCH).ok_or(Refusal::NoSystem {
-        system: format!("{} {}", env::consts::OS, env::consts::ARCH),
-    })?;
-    Source {
-        site: &site,
-        key: KEY,
-        lowest: LOWEST,
-        target: &target,
+impl Machine {
+    /// This machine: the local yard's by its socket, the rest from the
+    /// environment and the settings.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn here() -> Machine {
+        let socket = api::socket_path();
+        let local = socket.parent().map(Path::to_path_buf);
+        let listed = crate::settings::file()
+            .map(|file| crate::settings::Settings::read(&file).yards)
+            .unwrap_or_default();
+        let mut yards: Vec<PathBuf> = local.iter().cloned().collect();
+        for yard in listed {
+            let home = Path::new(&yard.socket).parent().map(Path::to_path_buf);
+            if let Some(home) = home.filter(|home| home.is_absolute() && !yards.contains(home)) {
+                yards.push(home);
+            }
+        }
+        Machine {
+            binary: local.map(|home| home.join("binary")),
+            home: env::home_dir(),
+            path: env::var_os("PATH").unwrap_or_default(),
+            shell: env::var_os("SHELL").map(PathBuf::from),
+            within: SHELL_WITHIN,
+            own: dir(),
+            yards,
+        }
     }
-    .current(&dir)
+
+    /// The yardr of `~/.local/bin`, where the installer puts it.
+    fn local(&self) -> Option<PathBuf> {
+        Some(self.home.as_ref()?.join(".local/bin").join(PROGRAM))
+    }
+
+    /// The yardr an older footplate kept in its own directory, a regular
+    /// file its user can run.
+    fn kept(&self) -> Option<PathBuf> {
+        let path = self.own.as_ref()?.join(PROGRAM);
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        (metadata.file_type().is_file() && runnable(&metadata)).then_some(path)
+    }
+
+    /// The yardr on this machine, in this order: the one the local yard
+    /// records, `~/.local/bin`'s, the PATH's, and the login shell's. It
+    /// reads, and writes and fetches nothing.
+    ///
+    /// The kept yardr is none of them, wherever it is named: a yard it
+    /// started records it in `<home>/binary`, and taking it for found would
+    /// leave it where it is for good ([`Machine::yardr`] moves it).
+    pub fn found(&self) -> Option<PathBuf> {
+        let kept = self.kept();
+        let usable = |path: &PathBuf| {
+            runs(path)
+                && !kept
+                    .as_ref()
+                    .is_some_and(|kept| crate::yard::same_file(path, kept))
+        };
+        recorded(self.binary.as_deref())
+            .filter(usable)
+            .or_else(|| self.local().filter(usable))
+            .or_else(|| {
+                env::split_paths(&self.path)
+                    .map(|dir| dir.join(PROGRAM))
+                    .find(usable)
+            })
+            .or_else(|| {
+                let shell = self.shell.as_deref()?;
+                login_shell(shell, self.within).filter(usable)
+            })
+    }
+
+    /// The yardr to run. Where nothing but the kept one is there, the kept
+    /// one is moved first, and if that fails it is still the one to run,
+    /// with why beside it. With none at all, [`NOT_THERE`]; the installer is
+    /// the person's to ask for.
+    pub fn yardr(&self) -> Result<(PathBuf, Option<String>), String> {
+        if let Some(found) = self.found() {
+            return Ok((found, None));
+        }
+        let Some(kept) = self.kept() else {
+            return Err(NOT_THERE.to_string());
+        };
+        match self.moved(&kept) {
+            Ok(place) => Ok((place, None)),
+            Err(why) => {
+                let note = format!(
+                    "The yardr footplate kept is still used, from {}: {why}",
+                    kept.display()
+                );
+                say(&note);
+                Ok((kept, Some(note)))
+            }
+        }
+    }
+
+    /// Moves the kept yardr to `~/.local/bin`, for the machine to have it
+    /// where the installer would have put it. The old one goes last: until
+    /// the login services name the new place, the old one is what they
+    /// start.
+    fn moved(&self, kept: &Path) -> Result<PathBuf, String> {
+        let place = self.local().ok_or(Refusal::NoHome.to_string())?;
+        let dir = place.parent().ok_or(Refusal::NoHome.to_string())?;
+        let cannot =
+            |err: io::Error| format!("it could not be copied to {} ({err}).", dir.display());
+        let bytes = fs::read(kept).map_err(cannot)?;
+        keep(dir, PROGRAM, &bytes).map_err(cannot)?;
+        let reinstalled = match self.reinstalled(&place) {
+            Ok(reinstalled) => reinstalled,
+            // No service names the copy yet, so it can go, and the move is
+            // tried again. Left, it would be found, and the service would go
+            // on naming the old one with nothing left to move it.
+            Err((0, why)) => {
+                let _ = fs::remove_file(&place);
+                return Err(why);
+            }
+            // A service names the copy, so it stays, and so does the old
+            // one, which the next is still started from.
+            Err((_, why)) => return Err(why),
+        };
+        for file in [kept.with_file_name(VERSION_FILE), kept.to_path_buf()] {
+            match fs::remove_file(&file) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                    // With no service switched, the old copy still serves
+                    // every start. Remove the new one too so the move can
+                    // be tried again; after any service switched, both are
+                    // needed until that service can be changed.
+                    if reinstalled == 0 {
+                        let _ = fs::remove_file(&place);
+                    }
+                    return Err(format!("{} could not be removed ({err}).", file.display()));
+                }
+                _ => {}
+            }
+        }
+        Ok(place)
+    }
+
+    /// Runs `daemon install` from `program` on each yard with a login
+    /// service, whose unit names the yardr that installed it. Doctor widens
+    /// the PATH first: the unit keeps the PATH it was installed with. Where
+    /// one fails, how many were done before it, and why.
+    fn reinstalled(&self, program: &Path) -> Result<usize, (usize, String)> {
+        let mut done = 0;
+        for home in &self.yards {
+            let mut yardr = Yardr {
+                program: program.to_path_buf(),
+                home: Some(home.clone()),
+                path: self.path.clone(),
+                actor: None,
+            };
+            let _ = yardr.needs();
+            match yardr.status() {
+                Ok(status) if status.daemon_service().installed => {
+                    yardr.daemon_install().map_err(|why| (done, why))?;
+                    done += 1;
+                }
+                Ok(_) | Err(StatusError::NoYard) => {}
+                Err(StatusError::Failed(why)) => return Err((done, why)),
+            }
+        }
+        Ok(done)
+    }
+
+    /// Fetches yardr's installer from [`SITE`], runs it, and gives the
+    /// yardr it left. A failure says what the installer said.
+    pub fn install(
+        &self,
+        progress: Option<async_channel::Sender<String>>,
+    ) -> Result<PathBuf, String> {
+        let site = Address::parse(SITE).map_err(|why| unreadable(SITE, why).to_string())?;
+        self.install_from(&site, env::consts::OS, progress)
+    }
+
+    fn install_from(
+        &self,
+        site: &Address,
+        os: &str,
+        progress: Option<async_channel::Sender<String>>,
+    ) -> Result<PathBuf, String> {
+        if !runs_on(os) {
+            let system = os.to_string();
+            return Err(Refusal::NoSystem { system }.to_string());
+        }
+        let (Some(place), Some(own)) = (self.local(), self.own.as_ref()) else {
+            return Err(Refusal::NoHome.to_string());
+        };
+        let script = get(site, INSTALLER_AT, INSTALLER_MOST).map_err(|why| why.to_string())?;
+        // A site may answer 200 with a page for an address it does not have.
+        if !script.starts_with(b"#!") {
+            return Err(unreadable(INSTALLER_AT, "it is no script").to_string());
+        }
+        let said = run_aside(own, PROGRAM, &script, &[], &self.path, progress)?;
+        match runs(&place) {
+            true => Ok(place),
+            false => Err(format!(
+                "The installer of yardr ended, and {} is not there. It said: {said}",
+                place.display()
+            )),
+        }
+    }
+
+    /// What the yardr that is used says of itself, for the About card. The
+    /// kept one counts, as it is what runs until it is moved. Nothing is
+    /// moved or fetched for a card.
+    pub fn seen(&self) -> Seen {
+        seen_on(env::consts::OS, self)
+    }
 }
 
-/// The yardr that is kept in `dir`, with the version its file says: none
-/// where either is not there, or the version is not one.
-pub fn stored(dir: &Path) -> Option<Stored> {
-    let path = dir.join(PROGRAM);
-    let version = fs::read_to_string(dir.join(VERSION_FILE)).ok()?;
-    let version = Version::parse(version.trim())?;
-    let metadata = fs::symlink_metadata(&path).ok()?;
-    (metadata.file_type().is_file() && runnable(&metadata)).then(|| Stored {
-        path,
-        version: version.to_string(),
-    })
+/// What the yardr of `<home>/binary` is: its one line where that is a whole
+/// path, and none for anything else, a missing file among them.
+fn recorded(file: Option<&Path>) -> Option<PathBuf> {
+    let text = fs::read_to_string(file?).ok()?;
+    let line = text.strip_suffix('\n').unwrap_or(&text);
+    let path = PathBuf::from(line);
+    (!line.is_empty() && !line.contains('\n') && path.is_absolute()).then_some(path)
 }
 
-/// What the yardr that is kept says of itself, for the About card.
+/// Whether `path` is a whole path to a program its user can run. A link
+/// counts by what it leads to: Homebrew's is one.
+fn runs(path: &Path) -> bool {
+    path.is_absolute()
+        && fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
+}
+
+/// Where the login shell finds yardr, asked once. The shell has its own
+/// process group, so that a profile that hangs is stopped with what it
+/// started. Its output is read without waiting for the pipe to close: a
+/// profile may leave something running after the shell has ended. Anything
+/// but a whole path on the last line is no answer: a shell that fails or
+/// takes too long, or an alias.
+#[cfg(unix)]
+fn login_shell(shell: &Path, within: Duration) -> Option<PathBuf> {
+    let mut child = Command::new(shell)
+        .args(["-l", "-c", SHELL_ASKS])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let Some(mut out) = child.stdout.take() else {
+        stop_group(&mut child);
+        return None;
+    };
+    // SAFETY: out owns a live descriptor until this function returns.
+    let flags = unsafe { libc::fcntl(out.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1 {
+        stop_group(&mut child);
+        return None;
+    }
+    // SAFETY: the same owned descriptor remains open while its flags change.
+    if unsafe { libc::fcntl(out.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        stop_group(&mut child);
+        return None;
+    }
+    let asked = Instant::now();
+    let mut said = Vec::new();
+    let status = loop {
+        let mut chunk = [0; 1024];
+        match out.read(&mut chunk) {
+            Ok(n) => {
+                let keep = (VERSION_MOST as usize).saturating_sub(said.len()).min(n);
+                said.extend_from_slice(&chunk[..keep]);
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => {
+                stop_group(&mut child);
+                return None;
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if asked.elapsed() > within => {
+                stop_group(&mut child);
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                stop_group(&mut child);
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    // Get bytes written just before the shell ended. A background process
+    // may still hold the pipe, so a non-blocking read must stop at WouldBlock.
+    loop {
+        let mut chunk = [0; 1024];
+        match out.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let keep = (VERSION_MOST as usize).saturating_sub(said.len()).min(n);
+                said.extend_from_slice(&chunk[..keep]);
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let said = String::from_utf8_lossy(&said);
+    let line = said.lines().rev().find(|line| !line.trim().is_empty())?;
+    Some(PathBuf::from(line.trim())).filter(|path| path.is_absolute())
+}
+
+/// Stops the shell and the processes it started in its own group.
+#[cfg(unix)]
+fn stop_group(child: &mut Child) {
+    // SAFETY: the negative pid addresses only the process group made for this child.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn login_shell(_: &Path, _: Duration) -> Option<PathBuf> {
+    None
+}
+
+/// What the yardr that is used says of itself, for the About card.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Kept {
-    /// None is kept: footplate has not fetched one.
+pub enum Seen {
+    /// There is none on this machine.
     Nothing,
     /// Its own answer to `--version`, the first line of it: the release and
     /// the commit it was built from, as yardr words them.
-    Says(String),
-    /// One is kept and would not say which it is: why, in a few words.
-    Silent(String),
+    Says { line: String, path: PathBuf },
+    /// One is there and would not say which it is: why, in a few words.
+    Silent { why: String, path: PathBuf },
 }
 
-/// How long a kept yardr has to answer `--version`, which takes it a few
+/// How long a yardr has to answer `--version`, which takes it a few
 /// milliseconds: one that has not by then is stopped.
 const VERSION_WITHIN: Duration = Duration::from_secs(5);
 
@@ -320,27 +508,17 @@ const VERSION_WITHIN: Duration = Duration::from_secs(5);
 const VERSION_MOST: u64 = 4 * 1024;
 const VERSION_LINE: usize = 80;
 
-/// The yardr kept in `dir`, found as [`stored`] finds it, and asked its
-/// version by its whole path. Its own answer is what the card shows, and
-/// not the tag in `yardr.version`: the file says what was fetched, this says
-/// what runs. None where `dir` is none, for a person without a home.
-pub fn kept(dir: Option<&Path>) -> Kept {
-    kept_for(env::consts::OS, env::consts::ARCH, dir)
-}
-
-/// The kept yardr, only where releases name a target. In particular,
-/// Windows does not fetch yardr, so an old or misplaced file under the
-/// app's data directory must not be started by the About card.
-fn kept_for(os: &str, arch: &str, dir: Option<&Path>) -> Kept {
-    if target_of(os, arch).is_none() {
-        return Kept::Nothing;
+/// [`Machine::seen`], on the system Rust names `os`.
+fn seen_on(os: &str, machine: &Machine) -> Seen {
+    if !runs_on(os) {
+        return Seen::Nothing;
     }
-    let Some(stored) = dir.and_then(stored) else {
-        return Kept::Nothing;
+    let Some(path) = machine.found().or_else(|| machine.kept()) else {
+        return Seen::Nothing;
     };
-    match version_of(&stored.path, VERSION_WITHIN) {
-        Ok(line) => Kept::Says(line),
-        Err(why) => Kept::Silent(why),
+    match version_of(&path, VERSION_WITHIN) {
+        Ok(line) => Seen::Says { line, path },
+        Err(why) => Seen::Silent { why, path },
     }
 }
 
@@ -409,160 +587,6 @@ fn runnable(_: &fs::Metadata) -> bool {
     true
 }
 
-/// Where a release comes from and what it is held to. [`yardr`] has the
-/// built-in ones; a test has a stand-in for the site and a key of its own.
-struct Source<'a> {
-    site: &'a Address,
-    key: &'a str,
-    lowest: Version,
-    target: &'a str,
-}
-
-/// `latest.json`, as the README of the yardr.dev repository has it ("A
-/// yardr release"), of which only what leads to the files is read.
-#[derive(Deserialize)]
-struct Latest {
-    version: String,
-    checksums: String,
-    targets: HashMap<String, Target>,
-}
-
-#[derive(Deserialize)]
-struct Target {
-    path: String,
-}
-
-impl Source<'_> {
-    /// Fetches the latest release whatever is kept.
-    #[cfg(test)]
-    fn yardr(&self, dir: &Path) -> Result<Stored, Refusal> {
-        let (version, latest) = self.latest()?;
-        self.release(dir, version, &latest)
-    }
-
-    /// [`current`], from this source and in `dir`.
-    fn current(&self, dir: &Path) -> Result<(Stored, Option<Refusal>), Refusal> {
-        let kept = stored(dir);
-        let newer = self.latest().and_then(|(version, latest)| {
-            let has = kept
-                .as_ref()
-                .and_then(|kept| Version::parse(&kept.version))
-                .is_some_and(|kept| version <= kept);
-            match has {
-                true => Ok(None),
-                false => self.release(dir, version, &latest).map(Some),
-            }
-        });
-        // Said where it happens, and kept in the log: the window may show
-        // the kept yardr's words instead, and status may fail after, so
-        // this refusal would otherwise leave no trace.
-        if let Err(refusal) = &newer {
-            say(&format!("fetch failed: {refusal}"));
-        }
-        match (newer, kept) {
-            (Ok(Some(new)), _) => Ok((new, None)),
-            (Ok(None), Some(kept)) => Ok((kept, None)),
-            (Err(refusal), Some(kept)) => Ok((kept, Some(refusal))),
-            (Err(refusal), None) => Err(refusal),
-            // `has` is true of a kept one alone.
-            (Ok(None), None) => Err(Refusal::NoHome),
-        }
-    }
-
-    /// Which release the site says is the latest: its version, held to the
-    /// lowest one, and where its files are.
-    fn latest(&self) -> Result<(Version, Latest), Refusal> {
-        // Before anything is asked of the site: without the key nothing it
-        // answers could be kept.
-        PublicKey::from_base64(self.key).map_err(|_| Refusal::NoKey)?;
-
-        let latest = get(self.site, LATEST, SMALL_MOST)?;
-        let latest: Latest =
-            serde_json::from_slice(&latest).map_err(|err| unreadable(LATEST, err))?;
-        let version = Version::parse(&latest.version).ok_or_else(|| {
-            unreadable(
-                LATEST,
-                format!("{:?} is no version of a release", latest.version),
-            )
-        })?;
-        if version < self.lowest {
-            return Err(Refusal::TooOld {
-                version: version.to_string(),
-                lowest: self.lowest.to_string(),
-            });
-        }
-        Ok((version, latest))
-    }
-
-    /// Fetches the release of `version` that `latest` leads to, proves it
-    /// and keeps its binary in `dir`, with its version beside it.
-    fn release(&self, dir: &Path, version: Version, latest: &Latest) -> Result<Stored, Refusal> {
-        let key = PublicKey::from_base64(self.key).map_err(|_| Refusal::NoKey)?;
-        let target = latest.targets.get(self.target).ok_or(Refusal::NoSystem {
-            system: self.target.to_string(),
-        })?;
-        // The name is made here from the version, and not taken from the
-        // path: it is what the signed checksums are asked for, so that the
-        // version latest.json claims is the version that was signed.
-        let name = version.archive(self.target);
-        if file_under_releases(&target.path) != Some(name.as_str()) {
-            return Err(unreadable(
-                LATEST,
-                format!(
-                    "it names {:?} for {}, and the archive of {version} is {name} under {RELEASES}",
-                    target.path, self.target
-                ),
-            ));
-        }
-        if file_under_releases(&latest.checksums).is_none() {
-            return Err(unreadable(
-                LATEST,
-                format!(
-                    "it names {:?} for the checksums, which is no file under {RELEASES}",
-                    latest.checksums
-                ),
-            ));
-        }
-
-        // The signature before the archive: a release that is not signed
-        // costs no download.
-        let checksums = get(self.site, &latest.checksums, SMALL_MOST)?;
-        let signature = format!("{}.minisig", latest.checksums);
-        let signature = match get(self.site, &signature, SIGNATURE_MOST) {
-            Err(Refusal::Answered {
-                site, status: 404, ..
-            }) => return Err(Refusal::NoSignature { site }),
-            other => other?,
-        };
-        signed(&key, &checksums, &signature)?;
-        let sum = listed(&checksums, &name)?;
-
-        let archive = get(self.site, &target.path, ARCHIVE_MOST)?;
-        if sha256(&archive) != sum {
-            return Err(Refusal::Differs { name });
-        }
-        let program = member(&archive, PROGRAM, &BESIDE, UNPACKED_MOST)
-            .map_err(|why| Refusal::Archive { name, why })?;
-        let not_kept = |err| Refusal::NotKept {
-            path: dir.join(PROGRAM),
-            err,
-        };
-        // The version's file goes first, away: between the two writes the
-        // binary has no version, and is fetched again, never taken for
-        // another version than it is.
-        match fs::remove_file(dir.join(VERSION_FILE)) {
-            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(not_kept(err)),
-            _ => {}
-        }
-        let path = keep(dir, PROGRAM, &program).map_err(not_kept)?;
-        keep_as(dir, VERSION_FILE, format!("{version}\n").as_bytes(), 0o644).map_err(not_kept)?;
-        Ok(Stored {
-            path,
-            version: version.to_string(),
-        })
-    }
-}
-
 /// Says `line` on stderr, led by the program's name as its other lines are,
 /// and keeps it in the log with the time ([`log`]): an app started by the
 /// Finder or by launchd has its stderr on /dev/null, and would lose it. A
@@ -597,24 +621,6 @@ fn unreadable(what: &str, why: impl ToString) -> Refusal {
     }
 }
 
-/// The file's name, when `path` is a file under `/releases/` written in
-/// letters, digits, `.`, `_`, `-` and `/` alone. The path is the site's
-/// word and goes into the first line of a request as it is.
-fn file_under_releases(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix(RELEASES)?;
-    let plain = rest
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'));
-    if !plain
-        || rest
-            .split('/')
-            .any(|part| part.is_empty() || part.starts_with('.'))
-    {
-        return None;
-    }
-    rest.rsplit('/').next()
-}
-
 /// Reads the file the site has at `path`, of `most` bytes at the most.
 pub fn get(site: &Address, path: &str, most: u64) -> Result<Vec<u8>, Refusal> {
     match api::read(site, path, most) {
@@ -633,44 +639,6 @@ pub fn get(site: &Address, path: &str, most: u64) -> Result<Vec<u8>, Refusal> {
     }
 }
 
-/// Whether `signature`, a `.minisig` file, is `key`'s over `text`. A
-/// signature that cannot be read is a bad one, and so is one of the kind
-/// minisign made before it hashed what it signs: no release has such a one.
-fn signed(key: &PublicKey, text: &[u8], signature: &[u8]) -> Result<(), Refusal> {
-    let signature = std::str::from_utf8(signature)
-        .ok()
-        .and_then(|lines| Signature::decode(lines).ok())
-        .ok_or(Refusal::BadSignature)?;
-    key.verify(text, &signature, false)
-        .map_err(|_| Refusal::BadSignature)
-}
-
-/// The SHA-256 the checksums have for the file `name`, in small hex. The
-/// checksums are lines of `sha256sum`: the sum, then the name.
-fn listed(checksums: &[u8], name: &str) -> Result<String, Refusal> {
-    const WHAT: &str = "the release's checksums";
-    let checksums =
-        std::str::from_utf8(checksums).map_err(|_| unreadable(WHAT, "they are no text"))?;
-    let mut sums = checksums.lines().filter_map(|line| {
-        let mut words = line.split_whitespace();
-        let (Some(sum), Some(file), None) = (words.next(), words.next(), words.next()) else {
-            return None;
-        };
-        // sha256sum marks a file it read as binary with a star.
-        (file.strip_prefix('*').unwrap_or(file) == name).then_some(sum)
-    });
-    let sum = sums.next().ok_or_else(|| Refusal::NotListed {
-        name: name.to_string(),
-    })?;
-    if sums.next().is_some() {
-        return Err(unreadable(WHAT, format!("they name {name} twice")));
-    }
-    if sum.len() != 64 || !sum.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(unreadable(WHAT, format!("{name} has no SHA-256 in them")));
-    }
-    Ok(sum.to_ascii_lowercase())
-}
-
 /// The SHA-256 of `bytes`, in small hex.
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -679,13 +647,13 @@ pub fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Takes the member `name` out of a gzipped tar. The archive may hold the
-/// regular files `beside` too, and nothing else: no other name, no
-/// directory, no link, no name twice, nothing after its end. It is read in
+/// Takes the member `name` out of a gzipped tar. The archive may hold
+/// nothing else: no other name, no directory, no link, no name twice,
+/// nothing after its end. It is read in
 /// memory and nothing of it is written anywhere; what it unpacks to is
 /// read to `most` bytes. A refusal says why, to follow the archive's name
 /// in a sentence.
-pub fn member(archive: &[u8], name: &str, beside: &[&str], most: u64) -> Result<Vec<u8>, String> {
+pub fn member(archive: &[u8], name: &str, most: u64) -> Result<Vec<u8>, String> {
     const BLOCK: usize = 512;
     const CUT: &str = "it ends in the middle of a file";
     let mut tar = Vec::new();
@@ -757,7 +725,7 @@ pub fn member(archive: &[u8], name: &str, beside: &[&str], most: u64) -> Result<
         } else {
             format!("{prefix}/{file}")
         };
-        if file != name && !beside.contains(&file.as_str()) {
+        if file != name {
             return Err(format!("it holds {file:?}, which is not expected in it"));
         }
         // '0', or a NUL in an old tar, is a regular file. Everything else
@@ -877,7 +845,7 @@ const INSTALLER: Duration = Duration::from_secs(15 * 60);
 /// documentation gives a program that fetches, and says in a sentence why
 /// where it could not. Nothing is kept or run that is not the file yardr
 /// named: the address is the maker's, but what is trusted is the size and
-/// the checksum, which came with the yardr that was proved. `home` is
+/// the checksum, which came with yardr. `home` is
 /// whose programs these are: the place must be under it. An installer is
 /// kept for its run in `own`, a directory of footplate's ([`dir`]), and
 /// run with `path` for its PATH, with no shell and nothing to read.
@@ -987,7 +955,7 @@ pub fn program_with_progress(
         ));
     }
     let program = match &wanted.member {
-        Some(member_name) => member(&bytes, member_name, &[], UNPACKED_MOST).map_err(|why| {
+        Some(member_name) => member(&bytes, member_name, UNPACKED_MOST).map_err(|why| {
             format!("The archive of {name} is not as expected: {why}. Nothing of it is kept.")
         })?,
         None => bytes,
@@ -997,9 +965,29 @@ pub fn program_with_progress(
         return Ok(());
     }
 
-    // The maker's installer: kept in a directory of footplate's own that
-    // nobody else can write to, so that the file that was checked is the
-    // file that is run, and gone afterwards.
+    let said = run_aside(own, name, &program, &wanted.run, path, progress)?;
+    match fs::symlink_metadata(place).is_ok() {
+        true => Ok(()),
+        false => Err(format!(
+            "The installer of {name} ended, and {} is not there. It said: {said}",
+            place.display()
+        )),
+    }
+}
+
+/// Runs a maker's installer, kept for its run in `own`, a directory of
+/// footplate's that nobody else can write to, so that the file that was
+/// checked is the file that is run, and gone afterwards.
+fn run_aside(
+    own: &Path,
+    name: &str,
+    installer: &[u8],
+    args: &[String],
+    path: &OsStr,
+    progress: Option<async_channel::Sender<String>>,
+) -> Result<String, String> {
+    let cannot =
+        |what: &Path, err: io::Error| format!("{} cannot be written ({err}).", what.display());
     let serial = NEXT_PART.fetch_add(1, Ordering::Relaxed);
     let aside = own.join(format!(".install.{}.{serial}", std::process::id()));
     fs::create_dir_all(own).map_err(|err| cannot(own, err))?;
@@ -1008,18 +996,11 @@ pub fn program_with_progress(
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(&aside).map_err(|err| cannot(&aside, err))?;
-    let ran = keep(&aside, name, &program)
+    let ran = keep(&aside, name, installer)
         .map_err(|err| cannot(&aside, err))
-        .and_then(|installer| run_installer(&installer, &wanted.run, path, progress));
+        .and_then(|installer| run_installer(&installer, args, path, progress));
     let _ = fs::remove_dir_all(&aside);
-    let said = ran?;
-    match fs::symlink_metadata(place).is_ok() {
-        true => Ok(()),
-        false => Err(format!(
-            "The installer of {name} ended, and {} is not there. It said: {said}",
-            place.display()
-        )),
-    }
+    ran
 }
 
 /// The host of an address, to name in a sentence.
@@ -1157,11 +1138,11 @@ fn send_progress(progress: &async_channel::Sender<String>, line: &[u8]) {
     }
 }
 
-// The fetch is a unix one (`target_of` names no yardr for Windows), and so are
-// its tests: they read file modes and make symlinks.
+// The lookup and the fetch are unix ones (Windows finds and installs no yardr),
+// and so are their tests: they read file modes and make symlinks.
 #[cfg(all(test, unix))]
 mod tests {
-    use std::io::Cursor;
+    use std::collections::HashMap;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
@@ -1169,9 +1150,9 @@ mod tests {
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use minisign::KeyPair;
 
     use super::*;
+    use crate::setup::standin;
 
     /// Has this test keep its lines in a log under `dir`, which is not
     /// there yet, and gives its file: a fetch is made on the thread that
@@ -1183,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn yardr_is_kept_beside_settings_under_an_isolated_config_home() {
+    fn programs_are_kept_beside_settings_under_an_isolated_config_home() {
         let settings = crate::settings::file_under(
             true,
             Some("/tmp/footplate-test/config".into()),
@@ -1255,7 +1236,7 @@ mod tests {
                 head.push(byte[0]);
             }
             let head = String::from_utf8_lossy(&head).into_owned();
-            // "GET /releases/latest.json HTTP/1.1"
+            // "GET /install.sh HTTP/1.1"
             let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
             asked.lock().unwrap().push(path.clone());
             let file = files.lock().unwrap().get(&path).cloned();
@@ -1300,10 +1281,6 @@ mod tests {
                 .insert(path.to_string(), bytes.as_ref().to_vec());
         }
 
-        fn remove(&self, path: &str) {
-            self.files.lock().unwrap().remove(path);
-        }
-
         fn status(&self, path: &str, status: u16) {
             self.statuses
                 .lock()
@@ -1325,10 +1302,7 @@ mod tests {
         }
     }
 
-    /// The system the tests' releases are for, whatever system runs them.
-    const TARGET: &str = "linux_amd64";
-
-    const BINARY: &[u8] = b"#!/bin/sh\necho this is no yardr, and nothing runs it\n";
+    const BINARY: &[u8] = b"#!/bin/sh\necho this is no program, and nothing runs it\n";
 
     /// One member of a tar: its header, its bytes, and the block filled.
     fn tar_member(name: &str, kind: u8, bytes: &[u8]) -> Vec<u8> {
@@ -1367,318 +1341,480 @@ mod tests {
         gz.finish().unwrap()
     }
 
-    /// What a release's archive holds, in the order yardr packs it (`files`
-    /// in contrib/release/build of its repository): from v0.15.0 the script
-    /// that sets a yard up on a server is beside the binary.
-    fn release_members() -> Vec<(&'static str, u8, &'static [u8])> {
-        vec![
-            ("yardr", b'0', BINARY),
-            (
-                "server-yard",
-                b'0',
-                b"#!/bin/sh\n# sets a yard up on a server\n",
-            ),
-            ("README.md", b'0', b"# yardr\n"),
-            ("LICENSE", b'0', b"Functional Source License\n"),
-            ("NOTICE", b'0', b"yardr\n"),
-        ]
+    /// A home, a yard and footplate's own directory under one temporary
+    /// directory, none of them holding anything yet, and a PATH with no
+    /// yardr on it.
+    struct Stage {
+        root: tempfile::TempDir,
     }
 
-    /// An archive as a release has it.
-    fn release_archive() -> Vec<u8> {
-        archive_of(&release_members())
-    }
-
-    fn sign(keys: &KeyPair, text: &[u8]) -> String {
-        minisign::sign(None, &keys.sk, Cursor::new(text), None, None)
-            .unwrap()
-            .into_string()
-    }
-
-    /// A release of the tests on a site of the tests, signed with a key
-    /// made for it, and a directory to keep it in.
-    struct Fixture {
-        site: Site,
-        keys: KeyPair,
-        key: String,
-        home: tempfile::TempDir,
-    }
-
-    impl Fixture {
-        /// The site with the release `version`, whole and signed.
-        fn new(version: &str) -> Fixture {
-            let keys = KeyPair::generate_unencrypted_keypair().unwrap();
-            let fixture = Fixture {
-                site: Site::start(),
-                key: keys.pk.to_base64(),
-                keys,
-                home: tempfile::tempdir().unwrap(),
+    impl Stage {
+        fn new() -> Stage {
+            let stage = Stage {
+                root: tempfile::tempdir().unwrap(),
             };
-            fixture.release(version, &release_archive());
-            fixture
-        }
-
-        fn archive_path(version: &str) -> String {
-            let name = Version::parse(version).unwrap().archive(TARGET);
-            format!("/releases/{version}/{name}")
-        }
-
-        fn checksums_path(version: &str) -> String {
-            format!("/releases/{version}/checksums.txt")
-        }
-
-        /// Puts the release `version` on the site with `archive` as its
-        /// archive: signed checksums that name it, and latest.json.
-        fn release(&self, version: &str, archive: &[u8]) {
-            let name = Version::parse(version).unwrap().archive(TARGET);
-            let checksums = format!(
-                "{}  yardr_other_system.tar.gz\n{}  {name}\n",
-                sha256(b"another system's"),
-                sha256(archive)
-            );
-            let path = Fixture::checksums_path(version);
-            self.site.put(&Fixture::archive_path(version), archive);
-            self.site.put(
-                &format!("{path}.minisig"),
-                sign(&self.keys, checksums.as_bytes()),
-            );
-            self.site.put(&path, checksums);
-            self.latest(version, &Fixture::archive_path(version));
-        }
-
-        /// latest.json alone: it says `version`, with its archive at `path`.
-        fn latest(&self, version: &str, path: &str) {
-            self.site.put(
-                LATEST,
-                serde_json::json!({
-                    "version": version,
-                    "date": "2026-10-13",
-                    "checksums": Fixture::checksums_path(version),
-                    "targets": { TARGET: { "path": path, "size": 1, "sha256": "not read" } },
-                })
-                .to_string(),
-            );
-        }
-
-        fn dir(&self) -> PathBuf {
-            self.home.path().join("footplate").join("bin")
-        }
-
-        fn fetch(&self) -> Result<Stored, Refusal> {
-            self.fetch_with(&self.key)
-        }
-
-        /// The yardr to run, as the first run asks for it.
-        fn current(&self) -> Result<(Stored, Option<Refusal>), Refusal> {
-            Source {
-                site: &self.site.address,
-                key: &self.key,
-                lowest: Version(9, 0, 0),
-                target: TARGET,
+            for dir in ["home", "yard", "own"] {
+                fs::create_dir_all(stage.at(dir)).unwrap();
             }
-            .current(&self.dir())
+            stage
         }
 
-        fn fetch_with(&self, key: &str) -> Result<Stored, Refusal> {
-            Source {
-                site: &self.site.address,
-                key,
-                lowest: Version(9, 0, 0),
-                target: TARGET,
+        fn at(&self, path: &str) -> PathBuf {
+            self.root.path().join(path)
+        }
+
+        fn machine(&self) -> Machine {
+            Machine {
+                binary: Some(self.at("yard/binary")),
+                home: Some(self.at("home")),
+                path: "/usr/bin:/bin".into(),
+                shell: None,
+                within: Duration::from_secs(60),
+                own: Some(self.at("own")),
+                yards: vec![self.at("yard")],
             }
-            .yardr(&self.dir())
         }
 
-        /// Whether footplate's directory holds nothing: no yardr and no
-        /// part of one.
-        fn kept_nothing(&self) -> bool {
-            fs::read_dir(self.dir()).map_or(true, |mut dir| dir.next().is_none())
+        fn local(&self) -> PathBuf {
+            self.at("home/.local/bin/yardr")
+        }
+
+        /// A program at `path` under the stage.
+        fn program(&self, path: &str) -> PathBuf {
+            let path = self.at(path);
+            let (dir, name) = (path.parent().unwrap(), path.file_name().unwrap());
+            keep(dir, name.to_str().unwrap(), b"#!/bin/sh\necho v0.1.0\n").unwrap()
+        }
+
+        /// A login shell that prints `line`, whatever it is asked, and
+        /// keeps what it was asked beside it.
+        fn shell(&self, line: &str) -> PathBuf {
+            let script = format!("#!/bin/sh\nprintf '%s|' \"$@\" >> \"$0.asked\"\n{line}\n");
+            keep(&self.at("shell"), "zsh", script.as_bytes()).unwrap()
+        }
+
+        /// The yardr an older footplate kept: a stand-in for it, with what
+        /// a copy of it at `~/.local/bin` will answer, there being its own
+        /// answers beside each program.
+        fn kept(&self, status: i32, answer: &serde_json::Value) -> PathBuf {
+            let kept = standin::make(&self.at("own"));
+            fs::write(self.at("own").join(VERSION_FILE), "v0.14.0\n").unwrap();
+            fs::create_dir_all(self.at("home/.local/bin/answers")).unwrap();
+            standin::answers(&self.local(), "status", status, answer);
+            standin::answers(
+                &self.local(),
+                "doctor",
+                0,
+                &serde_json::json!({"machine": [
+                    {"program": "herdr", "login_shell_path": "/opt/herdr/bin/herdr"}
+                ]}),
+            );
+            kept
+        }
+
+        /// Every file under the stage's three directories: what it is
+        /// called, how long it is and when it was written.
+        fn tree(&self) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+            let mut files = Vec::new();
+            let mut dirs = vec![self.at("home"), self.at("yard"), self.at("own")];
+            while let Some(dir) = dirs.pop() {
+                for entry in fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    let metadata = fs::symlink_metadata(&path).unwrap();
+                    if metadata.is_dir() {
+                        dirs.push(path);
+                    } else {
+                        files.push((path, metadata.len(), metadata.modified().unwrap()));
+                    }
+                }
+            }
+            files.sort();
+            files
         }
     }
 
-    #[test]
-    fn a_signed_release_is_kept_in_footplates_directory() {
-        let fixture = Fixture::new("v9.1.0");
-        let stored = fixture.fetch().unwrap();
+    fn with_service(installed: bool) -> serde_json::Value {
+        serde_json::json!({"daemon": {"service": {"supported": true, "installed": installed}}})
+    }
 
-        assert_eq!(stored.path, fixture.dir().join("yardr"));
-        assert_eq!(stored.version, "v9.1.0");
-        assert_eq!(fs::read(&stored.path).unwrap(), BINARY);
-        let mode = fs::metadata(&stored.path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755);
-        // The binary and its version: nothing else of the archive (not the
-        // server-yard beside it), no part.
-        let mut kept: Vec<_> = fs::read_dir(fixture.dir())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
+    /// The whole order: each step is found while the ones before it are
+    /// there no longer, the last of them is the installer, and nothing up
+    /// to it fetches or writes anything.
+    #[test]
+    fn yardr_is_looked_for_in_order_and_only_the_last_step_reaches_out() {
+        let stage = Stage::new();
+        let site = Site::start();
+        let installer = format!(
+            "#!/bin/sh\nmkdir -p {dir}\nprintf '#!/bin/sh\\n' > {place}\nchmod +x {place}\n",
+            dir = stage.local().parent().unwrap().display(),
+            place = stage.local().display(),
+        );
+        site.put(INSTALLER_AT, &installer);
+
+        let recorded = stage.program("recorded/yardr");
+        let local = stage.program("home/.local/bin/yardr");
+        let on_path = stage.program("path/yardr");
+        let from_shell = stage.program("profile/yardr");
+        fs::write(stage.at("yard/binary"), format!("{}\n", recorded.display())).unwrap();
+        let mut machine = stage.machine();
+        machine.path = env::join_paths([stage.at("empty"), stage.at("path")]).unwrap();
+        let shell = stage.shell(&format!("echo {}", from_shell.display()));
+        machine.shell = Some(shell);
+        let before = stage.tree();
+
+        assert_eq!(machine.yardr(), Ok((recorded.clone(), None)));
+        fs::remove_file(&recorded).unwrap();
+        assert_eq!(machine.yardr(), Ok((local.clone(), None)));
+        fs::remove_file(&local).unwrap();
+        assert_eq!(machine.yardr(), Ok((on_path.clone(), None)));
+        fs::remove_file(&on_path).unwrap();
+        // The shell is asked only now, once, and the one thing.
+        assert!(!stage.at("shell/zsh.asked").exists());
+        assert_eq!(machine.yardr(), Ok((from_shell.clone(), None)));
+        assert_eq!(
+            fs::read_to_string(stage.at("shell/zsh.asked")).unwrap(),
+            "-l|-c|command -v yardr|"
+        );
+        fs::remove_file(&from_shell).unwrap();
+        assert_eq!(machine.yardr(), Err(NOT_THERE.to_string()));
+
+        // Four steps and the end of them asked no one and wrote nothing
+        // but what the test took away.
+        assert_eq!(site.asked(), Vec::<String>::new());
+        let left: Vec<_> = before
+            .into_iter()
+            .filter(|(path, ..)| *path != local)
             .collect();
-        kept.sort();
-        assert_eq!(kept, ["yardr", "yardr.version"]);
-        assert_eq!(
-            fs::read_to_string(fixture.dir().join("yardr.version")).unwrap(),
-            "v9.1.0\n"
-        );
-        assert_eq!(
-            fixture.site.asked(),
-            [
-                "/releases/latest.json",
-                "/releases/v9.1.0/checksums.txt",
-                "/releases/v9.1.0/checksums.txt.minisig",
-                "/releases/v9.1.0/yardr_9.1.0_linux_amd64.tar.gz",
-            ]
-        );
+        assert_eq!(stage.tree(), left);
+
+        // The fifth is the person's to ask for, and step 2 finds what it left.
+        machine.path = "/usr/bin:/bin".into();
+        let installed = machine.install_from(&site.address, "macos", None).unwrap();
+        assert_eq!(installed, stage.local());
+        assert_eq!(site.asked(), [INSTALLER_AT]);
+        assert_eq!(machine.yardr(), Ok((stage.local(), None)));
+        // Its file is gone from footplate's directory.
+        assert!(fs::read_dir(stage.at("own")).unwrap().next().is_none());
     }
 
-    /// The first run's step 0: the release is fetched where no yardr is
-    /// kept or the kept one's version is not the latest, and else the kept
-    /// one is the answer, with `latest.json` alone read.
+    /// `<home>/binary` is a contract with a stranger's file: anything but
+    /// one whole path to a program is no answer, and the next step's.
     #[test]
-    fn the_kept_yardr_is_the_one_to_run_while_it_is_the_latest() {
-        let fixture = Fixture::new("v9.1.0");
-        assert_eq!(stored(&fixture.dir()), None);
-        let (first, stale) = fixture.current().unwrap();
-        assert!(stale.is_none());
-        assert_eq!(first.version, "v9.1.0");
-        assert_eq!(fixture.site.asked().len(), 4);
-        assert_eq!(stored(&fixture.dir()), Some(first.clone()));
+    fn a_broken_record_of_the_yards_yardr_falls_through() {
+        let stage = Stage::new();
+        let local = stage.program("home/.local/bin/yardr");
+        let good = stage.program("elsewhere/yardr");
+        let plain = stage.at("elsewhere/plain");
+        fs::write(&plain, b"not to be run").unwrap();
+        fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).unwrap();
+        let machine = stage.machine();
 
-        // Kept and the latest: nothing but latest.json is asked for.
-        let (again, stale) = fixture.current().unwrap();
-        assert_eq!((again, stale.is_none()), (first.clone(), true));
-        assert_eq!(fixture.site.asked()[4..], ["/releases/latest.json"]);
-
-        // A newer one is out: it is fetched, proved and kept in its place.
-        let newer = archive_of(&[("yardr", b'0', b"a newer yardr")]);
-        fixture.release("v9.2.0", &newer);
-        let (second, _) = fixture.current().unwrap();
-        assert_eq!(second.version, "v9.2.0");
-        assert_eq!(fs::read(&second.path).unwrap(), b"a newer yardr");
-        assert_eq!(fixture.site.asked().len(), 9);
-
-        // The site says an older one is the latest: the kept one is never
-        // replaced by it, and nothing of it is fetched.
-        fixture.latest("v9.1.0", &Fixture::archive_path("v9.1.0"));
-        let (kept, stale) = fixture.current().unwrap();
-        assert_eq!((kept.version.as_str(), stale.is_none()), ("v9.2.0", true));
-        assert_eq!(fs::read(&kept.path).unwrap(), b"a newer yardr");
-        assert_eq!(fixture.site.asked().len(), 10);
-    }
-
-    /// A newer release that fails its proof is not kept, and the yardr
-    /// that was proved before is still the one to run, with why beside it.
-    /// With none kept there is none to run. Every refusal reaches the log,
-    /// where the window's note may not carry it.
-    #[test]
-    fn a_newer_release_that_fails_leaves_the_kept_one_to_run() {
-        let fixture = Fixture::new("v9.1.0");
-        let log = keep_in(fixture.home.path());
-        let logged = || {
-            fs::read_to_string(&log)
-                .unwrap()
-                .lines()
-                .map(|line| line.split_once(' ').unwrap().1.to_string())
-                .collect::<Vec<_>>()
-        };
-        fixture.current().unwrap();
-        // A fetch that goes through says nothing.
-        assert!(!log.exists());
-        fixture.release("v9.2.0", &archive_of(&[("yardr", b'0', b"a newer yardr")]));
-        fixture.site.put(
-            &Fixture::archive_path("v9.2.0"),
-            archive_of(&[("yardr", b'0', b"another's yardr")]),
-        );
-        let (kept, why) = fixture.current().unwrap();
-        assert_eq!(kept.version, "v9.1.0");
-        assert_eq!(fs::read(&kept.path).unwrap(), BINARY);
-        assert!(matches!(why, Some(Refusal::Differs { .. })), "{why:?}");
-        let lines = logged();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].starts_with("fetch failed: "), "{}", lines[0]);
-        assert!(lines[0].contains("its checksum differs"), "{}", lines[0]);
-        // So is it with the site away.
-        fixture.site.status(LATEST, 503);
-        let (kept, why) = fixture.current().unwrap();
-        assert_eq!(kept.version, "v9.1.0");
-        assert!(matches!(why, Some(Refusal::Answered { status: 503, .. })));
-        let lines = logged();
-        assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(lines[1].contains("status 503"), "{}", lines[1]);
-
-        // A binary whose version's file is gone is no kept yardr: with the
-        // site away there is nothing to run, and the refusal is logged too.
-        fs::remove_file(fixture.dir().join(VERSION_FILE)).unwrap();
-        assert_eq!(stored(&fixture.dir()), None);
-        assert!(matches!(
-            fixture.current(),
-            Err(Refusal::Answered { status: 503, .. })
-        ));
-        let lines = logged();
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines[2].contains("status 503"), "{}", lines[2]);
-    }
-
-    /// A version marker does not make a symlink or a non-runnable file a
-    /// fetched yardr. The next check fetches the verified binary back into
-    /// footplate's directory before anything can run it.
-    #[test]
-    fn a_kept_yardr_must_be_a_regular_executable() {
-        let fixture = Fixture::new("v9.1.0");
-        let (first, _) = fixture.current().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let target = keep(other.path(), "yardr", b"not yardr").unwrap();
-
-        fs::remove_file(&first.path).unwrap();
-        std::os::unix::fs::symlink(&target, &first.path).unwrap();
-        assert_eq!(stored(&fixture.dir()), None);
-        let (replaced, _) = fixture.current().unwrap();
-        assert_eq!(fs::read(&replaced.path).unwrap(), BINARY);
-        assert_eq!(fs::read(&target).unwrap(), b"not yardr");
-
-        fs::set_permissions(&replaced.path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(stored(&fixture.dir()), None);
-        let (executable, _) = fixture.current().unwrap();
-        assert_eq!(fs::read(&executable.path).unwrap(), BINARY);
-        assert_eq!(
-            fs::metadata(&executable.path).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-    }
-
-    /// What the About card says of the kept yardr is its own answer to
-    /// `--version`: the first line it prints, as text, and not the tag in
-    /// `yardr.version`. With none kept there is nothing to ask; one that
-    /// is kept and cannot say says why, and one that ends badly says
-    /// nothing of its words.
-    #[test]
-    fn the_kept_yardr_is_asked_its_version_and_says_why_when_it_cannot() {
-        let home = tempfile::tempdir().unwrap();
-        let dir = home.path().join("bin");
-
-        // Nothing is kept: no home, no directory, an empty one, or a
-        // version file with no program beside it.
-        assert_eq!(kept(None), Kept::Nothing);
-        assert_eq!(kept(Some(&dir)), Kept::Nothing);
-
-        // A file with yardr's marker is not enough on a target with no
-        // release: the About card must not try to start it.
-        let misplaced = home.path().join("misplaced-bin");
-        fs::create_dir(&misplaced).unwrap();
-        let old = misplaced.join(PROGRAM);
-        fs::write(&old, b"not a program").unwrap();
-        fs::write(misplaced.join(VERSION_FILE), "0.14.0\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&old, fs::Permissions::from_mode(0o700)).unwrap();
+        // No file at all.
+        assert_eq!(machine.found(), Some(local.clone()));
+        let good_text = good.display().to_string();
+        for text in [
+            String::new(),
+            "\n".to_string(),
+            "yardr\n".to_string(),
+            format!("{good_text}\n{good_text}\n"),
+            format!("{}\n", stage.at("gone/yardr").display()),
+            format!("{}\n", plain.display()),
+            format!("{}\n", stage.at("elsewhere").display()),
+        ] {
+            fs::write(stage.at("yard/binary"), &text).unwrap();
+            assert_eq!(machine.found(), Some(local.clone()), "{text:?}");
         }
+        // No newline is still the one line; a link counts by what it
+        // leads to, and is named as it is written.
+        fs::write(stage.at("yard/binary"), &good_text).unwrap();
+        assert_eq!(machine.found(), Some(good.clone()));
+        let link = stage.at("elsewhere/link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        fs::write(stage.at("yard/binary"), link.display().to_string()).unwrap();
+        assert_eq!(machine.found(), Some(link));
+    }
+
+    /// A shell that fails, says what is no path, or has no such program is
+    /// "not found"; a profile that talks first is still heard, and one
+    /// that leaves something running on the pipe does not hold the answer.
+    #[test]
+    fn the_login_shell_is_heard_only_for_a_whole_path() {
+        let stage = Stage::new();
+        let there = stage.program("profile/yardr");
+        let at = there.display();
+        let ask = |line: &str| login_shell(&stage.shell(line), Duration::from_secs(60));
+
+        assert_eq!(ask(&format!("echo {at}")), Some(there.clone()));
         assert_eq!(
-            kept_for("windows", "x86_64", Some(&misplaced)),
-            Kept::Nothing
+            ask(&format!("echo Welcome back; echo {at}; echo")),
+            Some(there.clone())
+        );
+        let pid_file = stage.at("profile/sleep.pid");
+        let background = stage.shell(&format!(
+            "sleep 30 & echo $! > {}; echo {at}; exit 0",
+            pid_file.display()
+        ));
+        let found = login_shell(&background, Duration::from_millis(500));
+        let pid: i32 = fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // The background process owns the pipe after the shell ends. Stop
+        // this test's child by pid so it does not outlive the test.
+        // SAFETY: the pid came from this test's shell's `$!` output.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(found, Some(there.clone()));
+        assert_eq!(ask("exit 1"), None);
+        assert_eq!(ask(&format!("echo {at}; exit 1")), None);
+        assert_eq!(ask("echo 'alias yardr=/x/yardr'"), None);
+        assert_eq!(ask("echo yardr"), None);
+        assert_eq!(
+            login_shell(&stage.at("no/shell"), Duration::from_secs(1)),
+            None
+        );
+    }
+
+    /// A shell that hangs is stopped at the timeout with what it started,
+    /// and the lookup goes on to say there is none.
+    #[test]
+    fn a_login_shell_that_hangs_falls_through_within_the_timeout() {
+        let stage = Stage::new();
+        let pid = stage.at("pid");
+        let shell = stage.shell(&format!("sleep 30 &\necho $! > {}\nwait", pid.display()));
+        // The system assesses a program the first time it starts, a matter
+        // of seconds on a busy Mac: once, before anything is measured. It
+        // is a stand-in that hangs, so it is asked to stop at once.
+        login_shell(&shell, Duration::from_millis(1));
+        let _ = fs::remove_file(&pid);
+
+        let mut machine = stage.machine();
+        machine.shell = Some(shell);
+        machine.within = Duration::from_millis(300);
+        let asked = Instant::now();
+        assert_eq!(machine.yardr(), Err(NOT_THERE.to_string()));
+        assert!(asked.elapsed() < Duration::from_secs(10));
+
+        // What it started went with it.
+        let sleep: i32 = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = || unsafe { libc::kill(sleep, 0) } == 0;
+        let stopped = Instant::now();
+        while alive() && stopped.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!alive());
+    }
+
+    /// The installer's failures are its own words, or why it was not run,
+    /// and no failure leaves anything behind.
+    #[test]
+    fn a_failing_installer_says_what_it_said() {
+        let stage = Stage::new();
+        let site = Site::start();
+        let machine = stage.machine();
+        let install = |os: &str| machine.install_from(&site.address, os, None);
+
+        // Not on the site yet.
+        let why = install("macos").unwrap_err();
+        assert!(why.contains("status 404"), "{why}");
+        // A page that is no script is not run.
+        site.put(INSTALLER_AT, "<html>yardr</html>");
+        let why = install("linux").unwrap_err();
+        assert!(why.contains("it is no script"), "{why}");
+        site.put(
+            INSTALLER_AT,
+            "#!/bin/sh\necho curl is not on PATH >&2\nexit 3\n",
+        );
+        let why = install("macos").unwrap_err();
+        assert!(why.starts_with("The installer of yardr failed"), "{why}");
+        assert!(why.ends_with("It said: curl is not on PATH"), "{why}");
+        site.put(INSTALLER_AT, "#!/bin/sh\necho all done\n");
+        let why = install("macos").unwrap_err();
+        assert!(why.ends_with("is not there. It said: all done"), "{why}");
+        assert!(fs::read_dir(stage.at("own")).unwrap().next().is_none());
+
+        // Redirected elsewhere is not followed.
+        site.put(INSTALLER_AT, "https://elsewhere.example/install.sh");
+        site.status(INSTALLER_AT, 302);
+        let why = install("linux").unwrap_err();
+        assert!(why.contains("status 302"), "{why}");
+
+        // Windows installs none and asks nothing.
+        let asked = site.asked().len();
+        let why = install("windows").unwrap_err();
+        assert!(why.contains("no yardr to install"), "{why}");
+        assert_eq!(site.asked().len(), asked);
+    }
+
+    /// A kept yardr, with a login service: its copy runs `daemon install`
+    /// with the PATH doctor leads to, and only then the old one goes.
+    #[test]
+    fn the_kept_yardr_moves_with_its_login_service() {
+        let stage = Stage::new();
+        let kept = stage.kept(0, &with_service(true));
+        standin::answers(&stage.local(), "daemon-install", 0, &serde_json::json!({}));
+        // A yard records the yardr that started it: the kept one is not
+        // "found" for that.
+        fs::write(stage.at("yard/binary"), format!("{}\n", kept.display())).unwrap();
+        let machine = stage.machine();
+
+        assert_eq!(machine.yardr(), Ok((stage.local(), None)));
+
+        assert_eq!(fs::read(stage.local()).unwrap(), standin_script());
+        assert!(!kept.exists() && !stage.at("own").join(VERSION_FILE).exists());
+        let calls = fs::read_to_string(stage.at("home/.local/bin/calls")).unwrap();
+        let install = calls
+            .lines()
+            .position(|line| line.starts_with("ARGS [daemon] [install]"))
+            .unwrap_or_else(|| panic!("no daemon install in {calls}"));
+        let line = calls.lines().nth(install).unwrap();
+        assert!(line.contains(&format!("[--home] [{}]", stage.at("yard").display())));
+        assert_eq!(
+            calls.lines().nth(install - 1).unwrap(),
+            "PATH=/usr/bin:/bin:/opt/herdr/bin"
+        );
+        // The record now leads nowhere, which falls through to the copy.
+        assert_eq!(machine.found(), Some(stage.local()));
+    }
+
+    #[test]
+    fn the_kept_yardr_moves_without_a_login_service() {
+        for (status, answer) in [
+            (0, with_service(false)),
+            // No yard in that home at all.
+            (2, serde_json::json!({})),
+        ] {
+            let stage = Stage::new();
+            let kept = stage.kept(status, &answer);
+            assert_eq!(stage.machine().yardr(), Ok((stage.local(), None)));
+            assert!(!kept.exists() && !stage.at("own").join(VERSION_FILE).exists());
+            let calls = fs::read_to_string(stage.at("home/.local/bin/calls")).unwrap();
+            assert!(!calls.contains("[install]"), "{calls}");
+        }
+    }
+
+    /// A move that fails leaves the old yardr where its service starts it,
+    /// says so, and leaves nothing that would keep the next try from
+    /// happening.
+    #[test]
+    fn a_move_that_fails_leaves_the_kept_yardr_running() {
+        let still_there = |stage: &Stage, kept: &Path, note: Option<String>, words: &str| {
+            let note = note.unwrap();
+            assert!(note.contains(words), "{note}");
+            assert!(note.contains(&kept.display().to_string()), "{note}");
+            assert!(kept.exists() && stage.at("own").join(VERSION_FILE).exists());
+        };
+
+        // No copy: `.local` is a file.
+        let stage = Stage::new();
+        let log = keep_in(&stage.at("log"));
+        let kept = standin::make(&stage.at("own"));
+        fs::write(stage.at("own").join(VERSION_FILE), "v0.14.0\n").unwrap();
+        fs::write(stage.at("home/.local"), b"in the way").unwrap();
+        let (used, note) = stage.machine().yardr().unwrap();
+        assert_eq!(used, kept);
+        still_there(&stage, &kept, note, "could not be copied");
+        assert!(
+            fs::read_to_string(log)
+                .unwrap()
+                .contains("could not be copied")
         );
 
-        fs::create_dir_all(&dir).unwrap();
-        assert_eq!(kept(Some(&dir)), Kept::Nothing);
-        fs::write(dir.join(VERSION_FILE), "v0.14.0\n").unwrap();
-        assert_eq!(kept(Some(&dir)), Kept::Nothing);
+        // The service could not be installed: the copy goes too, or it
+        // would be found next time and the service left naming the old one.
+        let stage = Stage::new();
+        let kept = stage.kept(0, &with_service(true));
+        standin::answers(
+            &stage.local(),
+            "daemon-install",
+            1,
+            &serde_json::json!({"error": "launchctl refused"}),
+        );
+        let (used, note) = stage.machine().yardr().unwrap();
+        assert_eq!(used, kept);
+        still_there(&stage, &kept, note, "launchctl refused");
+        assert!(!stage.local().exists());
+
+        // Nothing could tell whether there is a service.
+        let stage = Stage::new();
+        let kept = stage.kept(1, &serde_json::json!({"error": "the store cannot be read"}));
+        let (used, note) = stage.machine().yardr().unwrap();
+        assert_eq!(used, kept);
+        still_there(&stage, &kept, note, "the store cannot be read");
+        assert!(!stage.local().exists());
+
+        // One of two services was moved: it names the copy, the other the
+        // old one, so both stay.
+        let stage = Stage::new();
+        let kept = stage.kept(0, &with_service(true));
+        standin::answers(
+            &stage.local(),
+            "daemon-install.1",
+            0,
+            &serde_json::json!({}),
+        );
+        standin::answers(
+            &stage.local(),
+            "daemon-install",
+            1,
+            &serde_json::json!({"error": "launchctl refused"}),
+        );
+        let mut machine = stage.machine();
+        machine.yards.push(stage.at("second"));
+        let (used, note) = machine.yardr().unwrap();
+        assert_eq!(used, kept);
+        still_there(&stage, &kept, note, "launchctl refused");
+        assert!(stage.local().exists());
+
+        // A failure to clean up the migration's marker keeps the old
+        // executable in place and reaches the person in the same note.
+        let stage = Stage::new();
+        let kept = stage.kept(0, &with_service(false));
+        let marker = kept.with_file_name(VERSION_FILE);
+        fs::remove_file(&marker).unwrap();
+        fs::create_dir(&marker).unwrap();
+        let (used, note) = stage.machine().yardr().unwrap();
+        assert_eq!(used, kept);
+        still_there(&stage, &kept, note, "could not be removed");
+        assert!(!stage.local().exists());
+    }
+
+    /// The stand-in's own bytes, to hold a copy to.
+    fn standin_script() -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        fs::read(standin::make(dir.path())).unwrap()
+    }
+
+    /// What the About card says is the yardr's own answer to `--version`:
+    /// the first line it prints, as text, with where it is. With none there
+    /// is nothing to ask; one that cannot say says why, and one that ends
+    /// badly says nothing of its words.
+    #[test]
+    fn the_yardr_in_use_is_asked_its_version_and_says_why_when_it_cannot() {
+        let stage = Stage::new();
+        let machine = stage.machine();
+        assert_eq!(machine.seen(), Seen::Nothing);
+        assert_eq!(Machine::default().seen(), Seen::Nothing);
+
+        // A file that would be found is left alone on a system with no yard:
+        // the About card must not try to start it.
+        let dir = stage.at("home/.local/bin");
+        keep(&dir, PROGRAM, b"not a program").unwrap();
+        assert_eq!(seen_on("windows", &machine), Seen::Nothing);
+
+        // The yardr an older footplate kept is the one in use until it moves.
+        fs::remove_file(stage.local()).unwrap();
+        let kept = keep(&stage.at("own"), PROGRAM, b"#!/bin/sh\necho v0.14.0\n").unwrap();
+        let _ = version_of(&kept, Duration::from_secs(60));
+        assert_eq!(
+            machine.seen(),
+            Seen::Says {
+                line: "v0.14.0".to_string(),
+                path: kept.clone()
+            }
+        );
+        fs::remove_file(&kept).unwrap();
 
         // The program is asked, whatever the file beside it says. One
         // stand-in answers every row with the shell the row writes to
@@ -1689,17 +1825,23 @@ mod tests {
         // is assessed again.
         let program = keep(&dir, PROGRAM, b"#!/bin/sh\n. \"$(dirname \"$0\")/how\"\n").unwrap();
         // Start it once, and wait for it to end (a minute at the most),
-        // before a row measures anything. Not through `ask`: `kept` stops
+        // before a row measures anything. Not through `ask`: `seen` stops
         // a start at VERSION_WITHIN, the assessment goes on after the
         // stop, and the first row would pay what is left of it.
         fs::write(dir.join("how"), "exit 0").unwrap();
         let _ = version_of(&program, Duration::from_secs(60));
         let ask = |how: &str| {
             fs::write(dir.join("how"), how).unwrap();
-            kept(Some(&dir))
+            machine.seen()
         };
-        let says = |line: &str| Kept::Says(line.to_string());
-        let silent = |why: &str| Kept::Silent(why.to_string());
+        let says = |line: &str| Seen::Says {
+            line: line.to_string(),
+            path: program.clone(),
+        };
+        let silent = |why: &str| Seen::Silent {
+            why: why.to_string(),
+            path: program.clone(),
+        };
         assert_eq!(
             ask("echo 'v0.15.1 (cbceebd22919)'"),
             says("v0.15.1 (cbceebd22919)")
@@ -1741,11 +1883,10 @@ mod tests {
         // One that cannot be started gives the system's reason.
         keep(&dir, PROGRAM, b"#!/no/such/interpreter\n").unwrap();
         assert!(matches!(
-            kept(Some(&dir)),
-            Kept::Silent(why) if why.contains("No such file")
+            machine.seen(),
+            Seen::Silent { why, .. } if why.contains("No such file")
         ));
     }
-
     /// A program that is still open for writing somewhere when it is
     /// started, as one is on Linux while another process is on its way to
     /// being its own program, is started once that has passed.
@@ -1974,417 +2115,63 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_release_replaces_the_kept_one_and_a_refused_one_leaves_it() {
-        let fixture = Fixture::new("v9.1.0");
-        fixture.fetch().unwrap();
-
-        let newer = archive_of(&[("yardr", b'0', b"a newer yardr")]);
-        fixture.release("v9.2.0", &newer);
-        let stored = fixture.fetch().unwrap();
-        assert_eq!(stored.version, "v9.2.0");
-        assert_eq!(fs::read(&stored.path).unwrap(), b"a newer yardr");
-
-        fixture
-            .site
-            .put(&Fixture::archive_path("v9.2.0"), release_archive());
-        assert!(matches!(fixture.fetch(), Err(Refusal::Differs { .. })));
-        assert_eq!(fs::read(&stored.path).unwrap(), b"a newer yardr");
-    }
-
-    #[test]
-    fn a_version_below_the_lowest_is_refused_before_anything_is_fetched() {
-        let fixture = Fixture::new("v8.9.9");
-        let refusal = fixture.fetch().unwrap_err();
-
-        assert!(
-            matches!(&refusal, Refusal::TooOld { version, lowest } if version == "v8.9.9" && lowest == "v9.0.0"),
-            "{refusal:?}"
-        );
-        assert_eq!(fixture.site.asked(), [LATEST]);
-        assert!(fixture.kept_nothing());
-    }
-
-    /// The rollback: the site hands out an old release, signed as it was,
-    /// and says it is a new one.
-    #[test]
-    fn an_older_release_under_a_newer_version_is_refused() {
-        let fixture = Fixture::new("v8.0.0");
-
-        // latest.json says v9.5.0 and points at the old archive.
-        fixture.latest("v9.5.0", &Fixture::archive_path("v8.0.0"));
-        let refusal = fixture.fetch().unwrap_err();
-        assert!(matches!(refusal, Refusal::Unreadable { .. }), "{refusal:?}");
-
-        // The old files, checksums and signature under the new version's
-        // names: the signed checksums name the old archive alone.
-        for (new, old) in [
-            (
-                Fixture::archive_path("v9.5.0"),
-                Fixture::archive_path("v8.0.0"),
-            ),
-            (
-                Fixture::checksums_path("v9.5.0"),
-                Fixture::checksums_path("v8.0.0"),
-            ),
-            (
-                format!("{}.minisig", Fixture::checksums_path("v9.5.0")),
-                format!("{}.minisig", Fixture::checksums_path("v8.0.0")),
-            ),
-        ] {
-            let bytes = fixture.site.files.lock().unwrap()[&old].clone();
-            fixture.site.put(&new, bytes);
-        }
-        fixture.latest("v9.5.0", &Fixture::archive_path("v9.5.0"));
-        let refusal = fixture.fetch().unwrap_err();
-        assert!(
-            matches!(&refusal, Refusal::NotListed { name } if name == "yardr_9.5.0_linux_amd64.tar.gz"),
-            "{refusal:?}"
-        );
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_release_with_no_signature_is_refused_and_its_archive_not_fetched() {
-        let fixture = Fixture::new("v9.1.0");
-        fixture
-            .site
-            .remove("/releases/v9.1.0/checksums.txt.minisig");
-        let refusal = fixture.fetch().unwrap_err();
-
-        assert!(
-            matches!(refusal, Refusal::NoSignature { .. }),
-            "{refusal:?}"
-        );
-        assert!(
-            !fixture
-                .site
-                .asked()
-                .contains(&Fixture::archive_path("v9.1.0"))
-        );
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_signature_redirect_is_not_reported_as_a_missing_signature() {
-        let fixture = Fixture::new("v9.1.0");
-        let signature = "/releases/v9.1.0/checksums.txt.minisig";
-        fixture.site.status(signature, 302);
-
-        let refusal = fixture.fetch().unwrap_err();
-        assert!(
-            matches!(&refusal, Refusal::Answered { path, status: 302, .. } if path == signature),
-            "{refusal:?}"
-        );
-        assert!(
-            !fixture
-                .site
-                .asked()
-                .contains(&Fixture::archive_path("v9.1.0"))
-        );
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_signature_of_another_key_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        let other = KeyPair::generate_unencrypted_keypair().unwrap();
-
-        // The site's release is signed with its own key, and footplate was
-        // built with another.
-        let refusal = fixture.fetch_with(&other.pk.to_base64()).unwrap_err();
-        assert!(matches!(refusal, Refusal::BadSignature), "{refusal:?}");
-        assert!(
-            !fixture
-                .site
-                .asked()
-                .contains(&Fixture::archive_path("v9.1.0"))
-        );
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn checksums_changed_after_they_were_signed_are_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        // Whoever holds the site swaps the archive and writes its checksum
-        // into the checksums: the signature is of the old ones.
-        let swapped = archive_of(&[("yardr", b'0', b"not yardr's makers'")]);
-        let name = Version(9, 1, 0).archive(TARGET);
-        fixture.site.put(&Fixture::archive_path("v9.1.0"), &swapped);
-        fixture.site.put(
-            &Fixture::checksums_path("v9.1.0"),
-            format!("{}  {name}\n", sha256(&swapped)),
-        );
-        let refusal = fixture.fetch().unwrap_err();
-
-        assert!(matches!(refusal, Refusal::BadSignature), "{refusal:?}");
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_signature_that_is_none_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        let path = "/releases/v9.1.0/checksums.txt.minisig";
-        for signature in [&b""[..], b"untrusted comment: none\nAAAA\n", b"\xff\xfe"] {
-            fixture.site.put(path, signature);
-            let refusal = fixture.fetch().unwrap_err();
-            assert!(matches!(refusal, Refusal::BadSignature), "{refusal:?}");
-        }
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn an_archive_whose_checksum_differs_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        let mut archive = release_archive();
-        let last = archive.len() - 1;
-        archive[last] ^= 1;
-        fixture.site.put(&Fixture::archive_path("v9.1.0"), archive);
-        let refusal = fixture.fetch().unwrap_err();
-
-        assert!(
-            matches!(&refusal, Refusal::Differs { name } if name == "yardr_9.1.0_linux_amd64.tar.gz"),
-            "{refusal:?}"
-        );
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_signed_archive_that_holds_more_than_a_release_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        let archive = archive_of(&[
-            ("yardr", b'0', BINARY),
-            ("install.sh", b'0', b"#!/bin/sh\n"),
-        ]);
-        fixture.release("v9.1.0", &archive);
-        let refusal = fixture.fetch().unwrap_err();
-
-        assert!(
-            matches!(&refusal, Refusal::Archive { why, .. } if why.contains("install.sh")),
-            "{refusal:?}"
-        );
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn checksums_that_do_not_name_the_archive_or_name_it_twice_are_refused() {
-        let name = Version(9, 1, 0).archive(TARGET);
-        let sum = sha256(b"an archive");
-
-        let none = format!("{sum}  yardr_9.1.0_linux_arm64.tar.gz\n");
-        assert!(matches!(
-            listed(none.as_bytes(), &name),
-            Err(Refusal::NotListed { .. })
-        ));
-        let twice = format!("{sum}  {name}\n{}  {name}\n", sha256(b"another"));
-        assert!(matches!(
-            listed(twice.as_bytes(), &name),
-            Err(Refusal::Unreadable { .. })
-        ));
-        let short = format!("abc123  {name}\n");
-        assert!(matches!(
-            listed(short.as_bytes(), &name),
-            Err(Refusal::Unreadable { .. })
-        ));
-        // As sha256sum writes it, with a star for a binary and in capitals.
-        let starred = format!("{}  *{name}\n", sum.to_ascii_uppercase());
-        assert_eq!(listed(starred.as_bytes(), &name).unwrap(), sum);
-    }
-
-    #[test]
-    fn a_site_with_no_release_for_this_system_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        let refusal = Source {
-            site: &fixture.site.address,
-            key: &fixture.key,
-            lowest: Version(9, 0, 0),
-            target: "darwin_arm64",
-        }
-        .yardr(&fixture.dir())
-        .unwrap_err();
-
-        assert!(
-            matches!(&refusal, Refusal::NoSystem { system } if system == "darwin_arm64"),
-            "{refusal:?}"
-        );
-        assert_eq!(fixture.site.asked(), [LATEST]);
-    }
-
-    #[test]
-    fn a_footplate_without_the_key_asks_the_site_nothing() {
-        let fixture = Fixture::new("v9.1.0");
-        for key in ["", "not a key"] {
-            let refusal = fixture.fetch_with(key).unwrap_err();
-            assert!(matches!(refusal, Refusal::NoKey), "{refusal:?}");
-        }
-        assert!(fixture.site.asked().is_empty());
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_latest_json_that_cannot_be_read_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        let archive = Fixture::archive_path("v9.1.0");
-        let checksums = Fixture::checksums_path("v9.1.0");
-        let with = |version: &str, checksums: &str, path: &str| {
-            serde_json::json!({
-                "version": version,
-                "checksums": checksums,
-                "targets": { TARGET: { "path": path } },
-            })
-            .to_string()
-        };
-        for latest in [
-            "<html>a page of a hotel's network</html>".to_string(),
-            "{}".to_string(),
-            // No version of a release.
-            with("9.1.0", &checksums, &archive),
-            with("v9.1.0-rc1", &checksums, &archive),
-            with("v9.1", &checksums, &archive),
-            // Files that are not under /releases/, or not plainly named.
-            with("v9.1.0", &checksums, "/yardr_9.1.0_linux_amd64.tar.gz"),
-            with(
-                "v9.1.0",
-                &checksums,
-                "/releases/../yardr_9.1.0_linux_amd64.tar.gz",
-            ),
-            with(
-                "v9.1.0",
-                &checksums,
-                "/releases/v9.1.0/yardr_9.1.0_linux_amd64.tar.gz HTTP/1.1\r\nX: y",
-            ),
-            with(
-                "v9.1.0",
-                &checksums,
-                "https://elsewhere.example/releases/v9.1.0/yardr_9.1.0_linux_amd64.tar.gz",
-            ),
-            with("v9.1.0", "/elsewhere/checksums.txt", &archive),
-            with("v9.1.0", "/releases/v9.1.0/checksums.txt?x=1", &archive),
-        ] {
-            fixture.site.put(LATEST, &latest);
-            let refusal = fixture.fetch().unwrap_err();
-            assert!(
-                matches!(refusal, Refusal::Unreadable { .. }),
-                "{latest}: {refusal:?}"
-            );
-        }
-        // Nothing but latest.json was asked for, each time.
-        assert!(fixture.site.asked().iter().all(|path| path == LATEST));
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
-    fn a_site_that_has_no_latest_json_or_does_not_answer_is_refused() {
-        let fixture = Fixture::new("v9.1.0");
-        fixture.site.remove(LATEST);
-        let refusal = fixture.fetch().unwrap_err();
-        assert!(
-            matches!(&refusal, Refusal::Answered { path, status: 404, .. } if path == LATEST),
-            "{refusal:?}"
-        );
-
-        // A port nothing listens on: one that was bound, and is not now.
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let nowhere = Address::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        let refusal = Source {
-            site: &nowhere,
-            key: &fixture.key,
-            lowest: Version(9, 0, 0),
-            target: TARGET,
-        }
-        .yardr(&fixture.dir())
-        .unwrap_err();
-        assert!(matches!(refusal, Refusal::Down { .. }), "{refusal:?}");
-        assert!(fixture.kept_nothing());
-    }
-
-    #[test]
     fn a_file_longer_than_it_may_be_is_not_read_to_its_end() {
-        let fixture = Fixture::new("v9.1.0");
-        fixture
-            .site
-            .put(LATEST, vec![b' '; SMALL_MOST as usize + 1]);
-        let refusal = fixture.fetch().unwrap_err();
+        let site = Site::start();
+        site.put("/file", vec![b' '; 65]);
+        let refusal = get(&site.address, "/file", 64).unwrap_err();
         assert!(matches!(refusal, Refusal::Unreadable { .. }), "{refusal:?}");
-
-        assert_eq!(
-            get(&fixture.site.address, LATEST, SMALL_MOST + 1)
-                .unwrap()
-                .len(),
-            SMALL_MOST as usize + 1
-        );
+        assert_eq!(get(&site.address, "/file", 65).unwrap().len(), 65);
     }
 
     #[test]
     fn a_member_is_taken_from_an_archive_that_holds_what_is_expected() {
         let most = 1024 * 1024;
-        // The five members of a release from v0.15.0: the binary is taken,
-        // and not the script beside it.
-        assert_eq!(
-            member(&release_archive(), "yardr", &BESIDE, most).unwrap(),
-            BINARY
-        );
-        // What may be beside it need not be: the releases before v0.15.0
-        // hold no server-yard.
-        let mut older = release_members();
-        older.retain(|(name, ..)| *name != "server-yard");
-        assert_eq!(
-            member(&archive_of(&older), "yardr", &BESIDE, most).unwrap(),
-            BINARY
-        );
-        let alone = archive_of(&[("yardr", b'0', BINARY)]);
-        assert_eq!(member(&alone, "yardr", &BESIDE, most).unwrap(), BINARY);
+        let alone = archive_of(&[("herdr", b'0', BINARY)]);
+        assert_eq!(member(&alone, "herdr", most).unwrap(), BINARY);
         // A file longer than a block, and one that fills its blocks.
-        let long = vec![7u8; 1024];
-        let archive = archive_of(&[("README.md", b'0', &[1u8; 700]), ("yardr", b'0', &long)]);
-        assert_eq!(member(&archive, "yardr", &BESIDE, most).unwrap(), long);
+        for long in [vec![7u8; 700], vec![7u8; 1024]] {
+            let archive = archive_of(&[("herdr", b'0', &long)]);
+            assert_eq!(member(&archive, "herdr", most).unwrap(), long);
+        }
     }
 
     #[test]
     fn an_archive_that_holds_anything_else_is_refused() {
         let most = 1024 * 1024;
-        let refused = |archive: &[u8]| member(archive, "yardr", &BESIDE, most).unwrap_err();
+        let refused = |archive: &[u8]| member(archive, "herdr", most).unwrap_err();
 
         let why = refused(&archive_of(&[
-            ("yardr", b'0', BINARY),
+            ("herdr", b'0', BINARY),
             ("extra", b'0', b"x"),
         ]));
         assert!(why.contains("\"extra\""), "{why}");
-        // The five members of a v0.15.0 release make no room for a sixth.
-        let mut more = release_members();
-        more.push(("install.sh", b'0', b"#!/bin/sh\n"));
-        let why = refused(&archive_of(&more));
-        assert!(why.contains("\"install.sh\""), "{why}");
         // A name that leaves the directory, or stands in one.
-        for name in ["../yardr", "/usr/bin/yardr", "./yardr", "bin/yardr"] {
+        for name in ["../herdr", "/usr/bin/herdr", "./herdr", "bin/herdr"] {
             let why = refused(&archive_of(&[(name, b'0', BINARY)]));
             assert!(why.contains("not expected"), "{name}: {why}");
         }
         // A link, a hard link and a directory under an expected name, and
         // the header of an extension, which could rename what follows.
         for kind in *b"215xgL" {
-            let why = refused(&archive_of(&[("yardr", kind, b"")]));
+            let why = refused(&archive_of(&[("herdr", kind, b"")]));
             assert!(why.contains("no regular file"), "{}: {why}", kind as char);
         }
         let why = refused(&archive_of(&[
-            ("yardr", b'0', BINARY),
-            ("yardr", b'0', b"x"),
+            ("herdr", b'0', BINARY),
+            ("herdr", b'0', b"x"),
         ]));
         assert!(why.contains("twice"), "{why}");
-        let why = refused(&archive_of(&[("README.md", b'0', b"# yardr\n")]));
-        assert!(why.contains("holds no yardr"), "{why}");
-        let why = refused(&archive_of(&[("yardr", b'0', b"")]));
+        let why = refused(&archive_of(&[]));
+        assert!(why.contains("holds no herdr"), "{why}");
+        let why = refused(&archive_of(&[("herdr", b'0', b"")]));
         assert!(why.contains("empty"), "{why}");
     }
 
     #[test]
     fn an_archive_that_is_no_whole_gzipped_tar_is_refused() {
         let most = 1024 * 1024;
-        let refused = |archive: &[u8]| member(archive, "yardr", &BESIDE, most).unwrap_err();
-        let whole = tar_member("yardr", b'0', BINARY);
+        let refused = |archive: &[u8]| member(archive, "herdr", most).unwrap_err();
+        let whole = tar_member("herdr", b'0', BINARY);
 
         assert!(refused(b"no gzip at all").contains("no gzipped archive"));
         // No end, and cut in the middle of the file.
@@ -2396,7 +2183,7 @@ mod tests {
         trailed.extend(tar_member("extra", b'0', b"x"));
         assert!(refused(&gzip(&trailed)).contains("follows its end"));
         // The compressed stream itself must also end with the archive; a
-        // valid tar followed by unrelated bytes is not a whole release.
+        // valid tar followed by unrelated bytes is not a whole archive.
         let mut compressed_trailing = gzip(&whole);
         compressed_trailing.extend_from_slice(b"extra");
         assert!(refused(&compressed_trailing).contains("follows its gzipped archive"));
@@ -2406,8 +2193,8 @@ mod tests {
         wrong.extend([0u8; 1024]);
         assert!(refused(&gzip(&wrong)).contains("no tar archive"));
         // More than it may unpack to.
-        let big = archive_of(&[("yardr", b'0', &vec![0u8; 4096])]);
-        let why = member(&big, "yardr", &BESIDE, 2048).unwrap_err();
+        let big = archive_of(&[("herdr", b'0', &vec![0u8; 4096])]);
+        let why = member(&big, "herdr", 2048).unwrap_err();
         assert!(why.contains("unpacks to more than"), "{why}");
     }
 
@@ -2475,161 +2262,31 @@ mod tests {
         assert!(!dir.exists());
     }
 
+    /// What is built in: the one host, over TLS.
     #[test]
-    fn a_version_is_three_numbers_after_a_v() {
-        assert_eq!(Version::parse("v0.10.0"), Some(Version(0, 10, 0)));
-        assert_eq!(Version::parse("v0.10.0").unwrap().to_string(), "v0.10.0");
-        for none in [
-            "",
-            "v",
-            "0.10.0",
-            "v0.10",
-            "v0.10.0.1",
-            "v0.10.0-rc1",
-            "v0.+1.0",
-            "v0..0",
-            "v0.10.x",
-            "v1.2.9999999999",
-        ] {
-            assert_eq!(Version::parse(none), None, "{none}");
-        }
-        // By its numbers, not by its letters.
-        assert!(Version::parse("v0.9.9").unwrap() < Version::parse("v0.10.0").unwrap());
-        assert!(Version::parse("v1.0.0").unwrap() > Version::parse("v0.99.99").unwrap());
-        assert_eq!(
-            Version(0, 10, 0).archive("darwin_arm64"),
-            "yardr_0.10.0_darwin_arm64.tar.gz"
-        );
-    }
-
-    #[test]
-    fn a_system_is_named_as_the_releases_name_it() {
-        assert_eq!(target_of("macos", "aarch64").unwrap(), "darwin_arm64");
-        assert_eq!(target_of("macos", "x86_64").unwrap(), "darwin_amd64");
-        assert_eq!(target_of("linux", "aarch64").unwrap(), "linux_arm64");
-        assert_eq!(target_of("linux", "x86_64").unwrap(), "linux_amd64");
-        assert_eq!(target_of("windows", "x86_64"), None);
-        assert_eq!(target_of("linux", "riscv64"), None);
-        // The system the tests run on is one of them.
-        assert!(target_of(env::consts::OS, env::consts::ARCH).is_some());
-    }
-
-    /// What is built in: the one host, over TLS, and a key that is a key.
-    #[test]
-    fn the_site_is_yardr_dev_over_tls_and_a_built_in_key_is_a_key() {
+    fn the_site_is_yardr_dev_over_tls() {
         let site = Address::parse(SITE).unwrap();
         assert_eq!(site.to_string(), "https://yardr.dev");
-        assert!(PublicKey::from_base64(KEY).is_ok());
-        assert!(LOWEST >= Version(0, 11, 0));
-    }
-
-    /// The built-in key is the one releases are signed with, and no typo
-    /// of it: v0.10.0's checksums and their signature, as that release
-    /// published them (src/fixtures/yardr-v0.10.0), are that key's by the
-    /// function the fetch asks. The files are read into the test when it
-    /// is built, so it asks yardr.dev nothing.
-    #[test]
-    fn the_built_in_key_signed_the_checksums_of_v0_10_0() {
-        let checksums: &[u8] = include_bytes!("fixtures/yardr-v0.10.0/checksums.txt");
-        let signature: &[u8] = include_bytes!("fixtures/yardr-v0.10.0/checksums.txt.minisig");
-        let key = PublicKey::from_base64(KEY).unwrap();
-
-        signed(&key, checksums, signature).unwrap();
-        // The archive for a system is found in them as the fetch finds it.
-        let name = Version(0, 10, 0).archive("darwin_arm64");
-        assert_eq!(
-            listed(checksums, &name).unwrap(),
-            "531771e558a7cab5986adc53da6bcc3b9fe48c6e519425d1f595c65b1e05698c"
-        );
-
-        // One byte of the checksums changed, their first and then the last
-        // of their last name; and one byte of what the signature says of
-        // them.
-        for at in [0, checksums.len() - 2] {
-            let mut changed = checksums.to_vec();
-            changed[at] ^= 1;
-            assert!(matches!(
-                signed(&key, &changed, signature),
-                Err(Refusal::BadSignature)
-            ));
-        }
-        let at = signature
-            .windows(5)
-            .position(|bytes| bytes == b"file:")
-            .unwrap();
-        let mut changed = signature.to_vec();
-        changed[at] ^= 1;
-        assert!(matches!(
-            signed(&key, checksums, &changed),
-            Err(Refusal::BadSignature)
-        ));
-    }
-
-    /// A signature the minisign program itself made (0.12, `minisign -S`),
-    /// with a key that was made for this test and thrown away: releases
-    /// are signed by that program, and the tests' own signer is a library.
-    #[test]
-    fn a_signature_of_the_minisign_program_is_read() {
-        let key =
-            PublicKey::from_base64("RWQNyPIoV7GL/P97bZk/pPzJ48AcgOPmTiPFicdxIN/gbfZu0x3AEthl")
-                .unwrap();
-        let checksums = b"aa11  yardr_9.1.0_linux_amd64.tar.gz\n";
-        let signature = "untrusted comment: signature from minisign secret key\n\
-            RUQNyPIoV7GL/OdyVoirSuSHlzkwfAsVRnn5iQ/ixIjmfqhoj80qVkwZ7Eaeri2KOjawvl1Qomx5HN4be4DkHE7d0Hxx79JmZQk=\n\
-            trusted comment: a release of the tests\n\
-            +SYLGnW63pmV5VPdwHRfDhiw74wwmz7U46Ali1hS/9BYzsPNYh+vlDRi8mKfxa9OoDxdr+Rx6D3n3F2PxTNXBw==\n";
-
-        signed(&key, checksums, signature.as_bytes()).unwrap();
-        // A letter of the checksums changed, and a changed trusted comment.
-        let changed = b"aa12  yardr_9.1.0_linux_amd64.tar.gz\n";
-        assert!(matches!(
-            signed(&key, changed, signature.as_bytes()),
-            Err(Refusal::BadSignature)
-        ));
-        let commented = signature.replace("a release of the tests", "a release of another's");
-        assert!(matches!(
-            signed(&key, checksums, commented.as_bytes()),
-            Err(Refusal::BadSignature)
-        ));
     }
 
     #[test]
     fn every_refusal_is_said_in_words_for_a_person() {
-        let io = || io::Error::from(io::ErrorKind::ConnectionRefused);
-        let name = || "yardr_0.10.0_darwin_arm64.tar.gz".to_string();
         let site = || SITE.to_string();
         let refusals = [
             Refusal::NoHome,
-            Refusal::NoKey,
             Refusal::NoSystem {
-                system: "freebsd x86_64".into(),
+                system: "freebsd".into(),
             },
             Refusal::Down {
                 site: site(),
-                err: io(),
+                err: io::Error::from(io::ErrorKind::ConnectionRefused),
             },
             Refusal::Answered {
                 site: site(),
-                path: LATEST.into(),
+                path: INSTALLER_AT.into(),
                 status: 404,
             },
-            unreadable(LATEST, "\"x\" is no version of a release"),
-            Refusal::TooOld {
-                version: "v0.9.0".into(),
-                lowest: LOWEST.to_string(),
-            },
-            Refusal::NoSignature { site: site() },
-            Refusal::BadSignature,
-            Refusal::NotListed { name: name() },
-            Refusal::Differs { name: name() },
-            Refusal::Archive {
-                name: name(),
-                why: "it holds \"install.sh\", which is not expected in it".into(),
-            },
-            Refusal::NotKept {
-                path: "/home/jo/.config/footplate/bin/yardr".into(),
-                err: io(),
-            },
+            unreadable(INSTALLER_AT, "it is no script"),
         ];
         for refusal in refusals {
             let words = refusal.to_string();
@@ -2640,13 +2297,5 @@ mod tests {
                 "{words}"
             );
         }
-        assert_eq!(
-            Refusal::TooOld {
-                version: "v0.9.0".into(),
-                lowest: "v0.10.0".into(),
-            }
-            .to_string(),
-            "The yardr that is offered is v0.9.0, older than v0.10.0, the oldest this footplate takes. It was not fetched."
-        );
     }
 }

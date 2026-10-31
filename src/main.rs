@@ -1,7 +1,7 @@
 //! footplate: a native chat window onto a yardr yard. It is an interface over
 //! yardr's socket API, or over the same calls at a yard's address. Where
-//! this machine has no yard it sets one up, with the yardr it fetches
-//! (fetch.rs, setup.rs), and its head starts and stops the open yard with
+//! this machine has no yard it sets one up, using the yardr it finds or
+//! installs (`fetch.rs`, `setup.rs`), and its head starts and stops the open yard with
 //! the same yardr; beside those two it starts nothing of yardr's. On Windows
 //! there is no yard of this machine to set up or reach, and the window is of
 //! a yard at an address alone. The first slice is the

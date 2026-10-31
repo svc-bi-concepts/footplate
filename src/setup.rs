@@ -1,6 +1,6 @@
 //! The first run of a yard on this machine, as the commands of yardr that
 //! make it: what the window's screens (window/firstrun.rs) ask is put to
-//! the yardr that was fetched (fetch.rs), and what yardr answers is read as
+//! the yardr on this machine (fetch.rs), and what yardr answers is read as
 //! JSON. docs/setup.md of the yardr repository, "For a program that drives
 //! the first run", is the list this follows.
 //!
@@ -10,7 +10,8 @@
 //! the PATH footplate was started with, and after it the directories
 //! `yardr doctor --json` names, where the person's login shell finds a
 //! program (`login_shell_path`) and where one is fetched to (`fetch`). The
-//! one login shell in all of it is doctor's own.
+//! login shells in all of it are doctor's own, and the one question
+//! `fetch::Machine` asks to find yardr itself.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -31,7 +32,7 @@ const LONGEST: Duration = Duration::from_secs(5 * 60);
 /// The most that is read of what a command prints.
 const MOST: u64 = 4 * 1024 * 1024;
 
-/// The yardr that is run: the fetched one, by its whole path, on the yard
+/// The yardr that is run: the machine's, by its whole path, on the yard
 /// whose home this is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Yardr {
@@ -291,6 +292,14 @@ impl Yardr {
         serde_json::from_value(ran.json).map_err(|err| {
             format!("yardr daemon uninstall answered what footplate cannot read ({err}).")
         })
+    }
+
+    /// Installs the daemon's login service, or writes it anew: its file
+    /// names the yardr that runs this.
+    pub fn daemon_install(&self) -> Result<(), String> {
+        self.run(&["daemon", "install"], &[])?
+            .done("daemon install")
+            .map(|_| ())
     }
 
     /// Makes `dir` a depot called `name` and sets it up from the yard's

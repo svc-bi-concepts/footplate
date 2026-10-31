@@ -1,4 +1,0 @@
-531771e558a7cab5986adc53da6bcc3b9fe48c6e519425d1f595c65b1e05698c  yardr_0.10.0_darwin_arm64.tar.gz
-f31d57627ae4f6861ac266a1b571e6de727a521c2b159c146fa95481c6d0376d  yardr_0.10.0_darwin_amd64.tar.gz
-cbebf9bf225aee4b042337705d2f154f475eb6ca4e65d9aecac8b36a9c00054c  yardr_0.10.0_linux_amd64.tar.gz
-72f355eb3c85755f82bad453adfdb281a6ee62337eebbcae4decc1fb63a7c4bf  yardr_0.10.0_linux_arm64.tar.gz

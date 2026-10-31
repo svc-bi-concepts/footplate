@@ -36,7 +36,7 @@ caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is. The same
 # list as scripts/shot-linux.sh keeps.
-states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-telemetry settings-telemetry-off reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-unfetched feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-telemetry settings-telemetry-off reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;
@@ -93,7 +93,7 @@ caffeinate -d -u -w $$ &
 awake=$!
 
 mkdir -p "$T/home/.local/bin" "$T/config/footplate/bin" "$T/data" "$T/tmp" "$T/yard"
-bin_dir="$T/config/footplate/bin"
+bin_dir="$T/home/.local/bin"
 cat > "$bin_dir/yardr" <<'EOF'
 #!/bin/sh
 # yardr for a shot alone: doctor, status and settings answer canned JSON,
@@ -110,7 +110,6 @@ settings) case "$2" in get) cat "$D/settings-get.json" ;; set) echo {} ;; *) ech
 esac
 EOF
 chmod +x "$bin_dir/yardr"
-printf '%s\n' "v99.0.0" > "$bin_dir/yardr.version"
 printf '%s\n' '{"yard": false, "machine": []}' > "$bin_dir/doctor.json"
 printf '%s\n' '[{"key": "operator_style", "value": "show", "from": "set"}, {"key": "operator_note", "value": "I review every merge myself", "from": "set"}]' > "$bin_dir/settings-get.json"
 printf '%s\n' '{"home": "/tmp/shot-yard", "name": "shot", "operator": "Jo", "server": {"running": true, "cli_build": "shot"}, "daemon": {"running": true, "pid": 0, "service": {"supported": true, "manager": "launchd", "name": "dev.yardr.shot", "file": "/tmp/shot.plist", "installed": false, "loaded": false}}, "herdr_login_service": {"supported": true, "manager": "launchd", "name": "dev.herdr.shot", "file": "/tmp/shot-herdr.plist", "installed": false, "loaded": false}, "web": {"views": [], "service": {"supported": true, "manager": "launchd", "name": "dev.yardr.shot-web", "file": "/tmp/shot-web.plist", "installed": false, "loaded": false}}}' > "$bin_dir/status.json"

@@ -393,8 +393,8 @@ pub struct Footplate {
     switching: Option<usize>,
     /// The cheatsheet of the open view's keys stands over the window.
     show_keys: bool,
-    /// The About card stands over the window, with what it says of the
-    /// yardr footplate keeps.
+    /// The About card stands over the window, with what the yardr on this
+    /// machine says of itself.
     about: Option<About>,
     /// The Feedback form stands over the window, with what is typed in it.
     feedback: Option<Feedback>,
@@ -1277,12 +1277,12 @@ mod tests {
         ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words,
         footplate_words, headcode_color, remark_color, stage_group_words, stage_lamp, unread_words,
         waiting_words, waits_for_seat, worker_words, working_group_words, working_tip,
-        working_words, yardr_words,
+        working_words, yardr_place, yardr_words,
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
     use crate::fake::{Posthog, Yard};
-    use crate::fetch::{self, Kept};
+    use crate::fetch::{self, Machine, Seen};
     use crate::input;
     use crate::model::{
         ArrivalDetail, DecidedDetail, DecidedEntry, DecidedRow, DecisionAsk, Outcome, Route,
@@ -13525,7 +13525,7 @@ yardr.dev
         assert_eq!(switching(&view, cx), None);
     }
 
-    /// The About card names this footplate and the yardr it keeps, which
+    /// The About card names this footplate and the yardr on this machine, which
     /// is asked its version each time the card opens, and two doors open
     /// it: the application menu's action, and the row of the settings'
     /// first section. Esc and its button shut it, a click outside shuts it
@@ -13535,34 +13535,44 @@ yardr.dev
     #[gpui::test]
     fn the_about_card_names_both_versions_and_two_doors_open_it(cx: &mut TestAppContext) {
         let home = tempfile::tempdir().unwrap();
-        let bin = home.path().join("bin");
+        let bin = home.path().join(".local/bin");
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // What the card holds of the yardr: none while it stands shut,
         // and nothing yet while the program is being asked.
         let kept_of = |view: &Entity<Footplate>, cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, _| v.about.as_ref().map(|about| about.kept.clone()))
+            view.read_with(cx, |v, _| v.about.as_ref().map(|about| about.seen.clone()))
         };
         // The card asks this test's home, not the person's.
-        view.update(cx, |v, _| v.means.own = Some(bin.clone()));
+        let says = |line: &str| Seen::Says {
+            line: line.to_string(),
+            path: bin.join("yardr"),
+        };
+        view.update(cx, |v, _| {
+            v.means.machine = Machine {
+                home: Some(home.path().to_path_buf()),
+                ..Machine::default()
+            }
+        });
         assert!(!drawn(cx, "about"));
 
-        // The application menu's door, with no yardr kept. A second use
+        // The application menu's door, with no yardr there. A second use
         // of it leaves the card as it is.
         cx.dispatch_action(OpenAbout);
-        wait(cx, "the card, told that none is kept", |cx| {
-            kept_of(&view, cx) == Some(Some(Kept::Nothing))
+        wait(cx, "the card, told that there is none", |cx| {
+            kept_of(&view, cx) == Some(Some(Seen::Nothing))
         });
         assert!(drawn(cx, "about card"));
         assert!(drawn(cx, "about footplate"));
         assert!(drawn(cx, "about yardr"));
         cx.dispatch_action(OpenAbout);
-        assert_eq!(kept_of(&view, cx), Some(Some(Kept::Nothing)));
+        assert!(!drawn(cx, "about yardr path"));
+        assert_eq!(kept_of(&view, cx), Some(Some(Seen::Nothing)));
         cx.simulate_keystrokes("escape");
         assert_eq!(kept_of(&view, cx), None);
 
-        // A yardr is kept now, and says which it is, each time: it is
+        // A yardr is there now, and says which it is, each time: it is
         // asked again as the card opens, not once.
         fetch::keep(
             &bin,
@@ -13570,13 +13580,12 @@ yardr.dev
             b"#!/bin/sh\ncat \"$(dirname \"$0\")/says\"\n",
         )
         .unwrap();
-        std::fs::write(bin.join("yardr.version"), "v0.14.0\n").unwrap();
         std::fs::write(bin.join("says"), "v0.14.0 (cbceebd22919)\n").unwrap();
         // Start it once and let it end before the card asks it. The system
         // assesses a program the first time it starts: a second or two on
         // a busy Mac, 5 s and more while other programs are being started
         // for the first time too, and the card stops a start at 5 s
-        // (`fetch::kept`). Not through `kept` here either: the assessment
+        // (`Machine::seen`). Not through `seen` here either: the assessment
         // goes on after a stop, and the first ask would pay what is left
         // of it. The program is not rewritten below, only `says`: a
         // rewritten program is assessed again, a rewritten data file is not.
@@ -13587,14 +13596,15 @@ yardr.dev
             .stdout(std::process::Stdio::null())
             .status();
         cx.dispatch_action(OpenAbout);
-        wait(cx, "the card, told which yardr is kept", |cx| {
-            kept_of(&view, cx) == Some(Some(Kept::Says("v0.14.0 (cbceebd22919)".into())))
+        wait(cx, "the card, told which yardr is there", |cx| {
+            kept_of(&view, cx) == Some(Some(says("v0.14.0 (cbceebd22919)")))
         });
+        assert!(drawn(cx, "about yardr path"));
         cx.simulate_keystrokes("escape");
         std::fs::write(bin.join("says"), "v0.15.0 (0123456789ab)\n").unwrap();
         cx.dispatch_action(OpenAbout);
-        wait(cx, "the card, told which yardr is kept now", |cx| {
-            kept_of(&view, cx) == Some(Some(Kept::Says("v0.15.0 (0123456789ab)".into())))
+        wait(cx, "the card, told which yardr is there now", |cx| {
+            kept_of(&view, cx) == Some(Some(says("v0.15.0 (0123456789ab)")))
         });
 
         // A click inside leaves the card. A click outside shuts it, and
@@ -14021,21 +14031,34 @@ yardr.dev
 
     /// The About card's words: this footplate as a release's tag, which a
     /// tag parses as, and the yardr's line as it says itself, or that it is
-    /// being asked, not fetched, or silent.
+    /// being asked, not installed, or silent, with where it is.
     #[test]
     fn the_about_card_says_what_it_knows_of_each_version() {
         let tag = footplate_words();
         assert!(tag.starts_with('v'), "{tag}");
-        assert!(fetch::Version::parse(&tag).is_some(), "{tag} is no tag");
+        assert_eq!(tag, format!("v{}", env!("CARGO_PKG_VERSION")));
         assert_eq!(yardr_words(None), "reading…");
-        assert_eq!(yardr_words(Some(&Kept::Nothing)), "not fetched yet");
-        let says = Kept::Says("v0.14.0 (cbceebd22919)".into());
+        assert_eq!(yardr_words(Some(&Seen::Nothing)), "not installed");
+        assert_eq!(yardr_place(Some(&Seen::Nothing)), None);
+        let path = PathBuf::from("/home/jo/.local/bin/yardr");
+        let says = Seen::Says {
+            line: "v0.14.0 (cbceebd22919)".into(),
+            path: path.clone(),
+        };
         assert_eq!(yardr_words(Some(&says)), "v0.14.0 (cbceebd22919)");
-        let silent = Kept::Silent("ended with status 3".into());
+        assert_eq!(
+            yardr_place(Some(&says)).as_deref(),
+            Some("/home/jo/.local/bin/yardr")
+        );
+        let silent = Seen::Silent {
+            why: "ended with status 3".into(),
+            path,
+        };
         assert_eq!(
             yardr_words(Some(&silent)),
             "could not say its version (ended with status 3)"
         );
+        assert!(yardr_place(Some(&silent)).is_some());
     }
 
     /// A late overrun stands as words in the remark column: `late by
@@ -22171,7 +22194,7 @@ yardr.dev
             view.read_with(cx, |v, _| (v.switch_program.clone(), v.switch_note.clone()));
         view.update(cx, |v, cx| {
             v.switch_program = None;
-            v.switch_note = Some("yardr could not be fetched".to_string());
+            v.switch_note = Some(fetch::NOT_THERE.to_string());
             cx.notify();
         });
         assert!(drawn(cx, "reconnecting"));
@@ -22515,19 +22538,18 @@ yardr.dev
         assert!(!drawn(cx, "menu bar on") && !drawn(cx, "tray auto"));
 
         // The About card is opened from the same section, there being no
-        // application menu, and names footplate alone: Windows fetches no
+        // application menu, and names footplate alone: Windows runs no
         // yardr, even if an old file with its names is in this test's folder.
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("yardr"), b"not a program").unwrap();
-        std::fs::write(bin.join("yardr.version"), "0.14.0\n").unwrap();
-        view.update(cx, |v, _| v.means.own = Some(bin));
+        view.update(cx, |v, _| v.means.machine.own = Some(bin));
         click_on(cx, "about show");
-        wait(cx, "the card, told that none is kept", |cx| {
+        wait(cx, "the card, told that there is none", |cx| {
             view.read_with(cx, |v, _| {
                 v.about
                     .as_ref()
-                    .is_some_and(|about| about.kept == Some(Kept::Nothing))
+                    .is_some_and(|about| about.seen == Some(Seen::Nothing))
             })
         });
         assert!(drawn(cx, "about card") && drawn(cx, "about footplate"));
@@ -22628,7 +22650,7 @@ yardr.dev
     }
 
     /// What the first run of a test reaches out with: a stand-in for
-    /// yardr in `dir`, which is not fetched from anywhere, a home under
+    /// yardr in `dir`, which is found and not installed, a home under
     /// `dir`, and a list in place of the browser. The stand-in's path, and
     /// the pages that were opened.
     #[cfg(unix)]
@@ -22643,9 +22665,13 @@ yardr.dev
         let (fetched, pages) = (program.clone(), opened.clone());
         let means = Means {
             yardr: Arc::new(move || Ok((fetched.clone(), None))),
-            path: "/usr/bin:/bin".into(),
-            home: Some(home),
-            own: Some(dir.join("own")),
+            install: Arc::new(|_| Err("nothing is installed in this test".to_string())),
+            machine: Machine {
+                path: "/usr/bin:/bin".into(),
+                home: Some(home),
+                own: Some(dir.join("own")),
+                ..Machine::default()
+            },
             open: Rc::new(move |url, _| pages.borrow_mut().push(url.to_string())),
             apple,
             titlebar: None,
@@ -23451,7 +23477,7 @@ yardr.dev
             Mode::Timetable => to_timetable(&view, cx),
         }
         cx.run_until_parked();
-        // Tests fetch no yardr: say it is there, so the row is Running
+        // Tests look for no yardr: say it is there, so the row is Running
         // with Stop, as on a machine with one.
         view.update(cx, |v, _| {
             v.switch_program = Some(dir.path().join("yardr"));
@@ -23687,13 +23713,12 @@ yardr.dev
         assert!(drawn(cx, "reconnecting"));
     }
 
-    /// Where a newer yardr could not be fetched and status then fails,
-    /// the switch keeps both: the stale fetch's words and status's
-    /// failure, in the note the settings show. An older kept yardr that
-    /// cannot open a newer store takes exactly this path.
+    /// Where the yardr an older footplate kept could not be moved and
+    /// status then fails, the switch keeps both: why it is still used and
+    /// status's failure, in the note the settings show.
     #[cfg(unix)]
     #[gpui::test]
-    fn the_switch_keeps_a_stale_fetch_beside_a_failed_status(cx: &mut TestAppContext) {
+    fn the_switch_keeps_a_failed_move_beside_a_failed_status(cx: &mut TestAppContext) {
         use crate::setup::standin;
 
         let dir = tempfile::tempdir().unwrap();
@@ -23705,10 +23730,7 @@ yardr.dev
         means.yardr = Arc::new(move || {
             Ok((
                 fetched.clone(),
-                Some(
-                    "yardr v9.1.0 is used: a newer one could not be had. yardr.dev does not answer."
-                        .to_string(),
-                ),
+                Some("The yardr footplate kept is still used.".to_string()),
             ))
         });
         standin::answers(&program, "doctor", 0, &standin::doctor_ready());
@@ -23720,21 +23742,88 @@ yardr.dev
         );
         view.update(cx, |v, _| v.means = means);
         view.update(cx, |v, cx| v.refresh_switch(cx));
-        wait(cx, "the stale fetch and the failed status read", |cx| {
+        wait(cx, "the failed move and the failed status read", |cx| {
             settled(&view, cx)
                 && view.read_with(cx, |v, _| {
                     v.switch_note
                         .as_ref()
-                        .is_some_and(|note| note.contains("a newer one could not be had"))
+                        .is_some_and(|note| note.contains("is still used"))
                 })
         });
         let note = view.read_with(cx, |v, _| v.switch_note.clone().unwrap());
-        assert!(note.contains("a newer one could not be had"), "{note}");
+        assert!(note.contains("is still used"), "{note}");
         assert!(note.contains("the store cannot be read"), "{note}");
         // And shown: the open yard's card in the settings carries it.
         click_on(cx, "settings");
         click_on(cx, "settings section yards");
         assert!(drawn(cx, "switch note"));
+    }
+
+    /// A yard of this machine with no yardr: the switch says so and offers
+    /// the installer, and with the yardr it left it reads the yard.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_switch_offers_the_installer_where_there_is_no_yardr(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        let (mut means, program, _) = stand_in_means(dir.path(), true);
+        means.yardr = Arc::new(|| Err(fetch::NOT_THERE.to_string()));
+        let tries = Arc::new(AtomicUsize::new(0));
+        let (installed, tried) = (program.clone(), tries.clone());
+        means.install = Arc::new(move |progress| {
+            if let Some(progress) = progress {
+                let _ = progress.send_blocking("installing yardr v9".to_string());
+            }
+            match tried.fetch_add(1, Ordering::SeqCst) {
+                0 => Err("The installer of yardr failed. It said: no curl".to_string()),
+                _ => Ok(installed.clone()),
+            }
+        });
+        standin::answers(&program, "doctor", 0, &standin::doctor_ready());
+        standin::answers(&program, "status", 0, &standin::status(true, false));
+        view.update(cx, |v, _| {
+            v.means = means;
+            v.switch_program = None;
+        });
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "that there is no yardr", |cx| {
+            settled(&view, cx)
+                && view.read_with(cx, |v, _| {
+                    v.switch_note.as_deref() == Some(fetch::NOT_THERE)
+                })
+        });
+        assert_eq!(tries.load(Ordering::SeqCst), 0);
+        assert!(drawn(cx, "switch try again"));
+
+        click_on(cx, "switch try again");
+        wait(cx, "the installer's words", |cx| {
+            settled(&view, cx)
+                && view.read_with(cx, |v, _| {
+                    v.switch_note
+                        .as_ref()
+                        .is_some_and(|note| note.ends_with("It said: no curl"))
+                })
+        });
+        assert!(view.read_with(cx, |v, _| v.switch_program.is_none()));
+        // The switch is read again by itself, and its words stand.
+        view.update(cx, |v, cx| v.refresh_switch(cx));
+        wait(cx, "the switch read again", |cx| settled(&view, cx));
+        let note = view.read_with(cx, |v, _| v.switch_note.clone().unwrap());
+        assert!(note.ends_with("It said: no curl"), "{note}");
+
+        click_on(cx, "switch try again");
+        wait(cx, "the yard read with the yardr that was left", |cx| {
+            settled(&view, cx) && view.read_with(cx, |v, _| v.switch_status.is_some())
+        });
+        assert_eq!(
+            view.read_with(cx, |v, _| v.switch_program.clone()),
+            Some(program)
+        );
     }
 
     /// A yard at an address has no switch, in the head or the settings:
@@ -24406,24 +24495,26 @@ yardr.dev
         });
     }
 
-    /// A yardr that was not proved is not kept and never run: the first
-    /// run says why, in the fetch's words, and tries again when asked. A
-    /// program that cannot be fetched is said so, and Esc leaves the first
+    /// Where there is no yardr the first run says so and offers its
+    /// installer, which runs on the person's word alone, shows what it
+    /// prints, and where it fails says what it said and can be tried again.
+    /// A program that cannot be fetched is said so, and Esc leaves the first
     /// run for the first screen.
     #[cfg(unix)]
     #[gpui::test]
-    fn a_yardr_that_failed_its_proof_is_never_run(cx: &mut TestAppContext) {
+    fn a_missing_yardr_is_installed_on_the_person_s_word(cx: &mut TestAppContext) {
         use crate::setup::standin;
         use firstrun::Step;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let (mut means, program, _) = stand_in_means(dir.path(), true);
-        let proved = Arc::new(AtomicBool::new(false));
-        let (fetched, is_proved) = (program.clone(), proved.clone());
-        means.yardr = Arc::new(move || match is_proved.load(Ordering::SeqCst) {
-            true => Ok((fetched.clone(), None)),
-            false => Err(crate::fetch::Refusal::BadSignature.to_string()),
+        means.yardr = Arc::new(|| Err(fetch::NOT_THERE.to_string()));
+        let tries = Arc::new(AtomicUsize::new(0));
+        let (installed, tried) = (program.clone(), tries.clone());
+        means.install = Arc::new(move |_| match tried.fetch_add(1, Ordering::SeqCst) {
+            0 => Err("The installer of yardr failed. It said: no curl".to_string()),
+            _ => Ok(installed.clone()),
         });
         let mut doctor = standin::doctor_bare(&dir.path().join("home"));
         // Nothing listens there: the fetch fails without leaving this
@@ -24434,14 +24525,22 @@ yardr.dev
         view.update(cx, |v, _| v.means = means);
 
         click_on(cx, "way here");
-        wait(cx, "why there is no yardr", |cx| {
-            setup_said(&view, cx).starts_with("The signature of yardr's release is not that")
+        wait(cx, "that there is no yardr", |cx| {
+            setup_said(&view, cx) == fetch::NOT_THERE
         });
         assert_eq!(step_of(&view, cx), Some(Step::Yardr));
         assert!(drawn(cx, "setup again") && !drawn(cx, "setup check"));
+        assert_eq!(tries.load(Ordering::SeqCst), 0);
         assert_eq!(standin::calls(&program), Vec::<String>::new());
 
-        proved.store(true, Ordering::SeqCst);
+        click_on(cx, "setup again");
+        wait(cx, "the installer's words", |cx| {
+            setup_said(&view, cx).ends_with("It said: no curl")
+        });
+        assert_eq!(step_of(&view, cx), Some(Step::Yardr));
+        assert!(drawn(cx, "setup again"));
+        assert_eq!(standin::calls(&program), Vec::<String>::new());
+
         click_on(cx, "setup again");
         at_step(&view, cx, Step::Needs);
         assert_eq!(standin::calls(&program).len(), 2);

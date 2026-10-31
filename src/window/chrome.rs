@@ -21,7 +21,7 @@ use gpui::{
 
 use crate::api::{self, Address, Client};
 use crate::draft;
-use crate::fetch::{self, Kept};
+use crate::fetch::Seen;
 use crate::input;
 use crate::model::{
     self, Effect, Kind, Mode, Model, News, Read, Route, Row, Selected, Target, Top,
@@ -49,7 +49,7 @@ use super::ui::{
     band, card_layer, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
     semaphore_glyph, small_button, track_glyph,
 };
-use super::words::{footplate_words, unread_words, yardr_words};
+use super::words::{footplate_words, unread_words, yardr_place, yardr_words};
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 
 impl Footplate {
@@ -206,17 +206,14 @@ impl Footplate {
             this.show_keys = true;
         }
         // The About shots open with the card standing over the yardmaster's
-        // conversation: the first with the yardr the shot script keeps, the
-        // second with the card pointed at a directory that keeps none. A
+        // conversation: the first with the yardr the shot script installs,
+        // the second with the card pointed at a machine that has none. A
         // debug build's alone, as above.
         #[cfg(debug_assertions)]
         match std::env::var("FOOTPLATE_SHOT").as_deref() {
             Ok("about") => this.show_about(window, cx),
-            Ok("about-unfetched") => {
-                this.means.own = Some(std::env::temp_dir().join(format!(
-                    "footplate-shot-{}-about-unfetched",
-                    std::process::id()
-                )));
+            Ok("about-missing") => {
+                this.means.machine = crate::fetch::Machine::default();
                 this.show_about(window, cx);
             }
             _ => {}
@@ -3451,8 +3448,8 @@ impl Footplate {
         cx.notify();
     }
 
-    /// Shows the About card: the version of this footplate, and the one the
-    /// yardr it keeps gives to `--version`, which is asked now, off the
+    /// Shows the About card: the version of this footplate, and what the
+    /// yardr on this machine gives to `--version`, which is asked now, off the
     /// window's thread; the card stands meanwhile, saying so. One that
     /// stands already is left as it is. The window keeps the focus it had,
     /// as under the cheatsheet, and esc shuts it.
@@ -3460,18 +3457,18 @@ impl Footplate {
         if self.about.is_some() {
             return;
         }
-        self.about = Some(About { kept: None });
+        self.about = Some(About { seen: None });
         cx.notify();
-        let own = self.means.own.clone();
+        let machine = self.means.machine.clone();
         cx.spawn(async move |this, cx| {
-            let kept = cx
+            let seen = cx
                 .background_executor()
-                .spawn(async move { fetch::kept(own.as_deref()) })
+                .spawn(async move { machine.seen() })
                 .await;
             this.update(cx, |this, cx| {
                 // A card that was shut meanwhile has nothing to be told.
                 if let Some(about) = this.about.as_mut() {
-                    about.kept = Some(kept);
+                    about.seen = Some(seen);
                     cx.notify();
                 }
             })
@@ -4263,7 +4260,7 @@ impl Footplate {
         // first, where a desktop shows one, and a Linux desktop shows none.
         let about = setting(
             "about footplate".to_string(),
-            "which footplate this is, and which yardr it keeps".to_string(),
+            "which footplate this is, and which yardr is on this machine".to_string(),
         )
         .child(
             div().flex().child(
@@ -5171,8 +5168,8 @@ impl Footplate {
             )
     }
 
-    /// The About card over the window: which footplate this is and which
-    /// yardr it keeps, each with its version, beside footplate's icon. A
+    /// The About card over the window: which footplate this is, and which
+    /// yardr is on this machine, with its version and path, beside the icon. A
     /// click outside it shuts it, as esc and its button do. Where the
     /// content reaches up into the title bar (`top` pixels) the overlay
     /// starts under that strip, which stays the window's handle: a drag
@@ -5187,10 +5184,10 @@ impl Footplate {
         // The yardr's line is the colour of what it says: the program's own
         // words are text, there being none is quiet, and its not saying
         // warns.
-        let kept_color = match &about.kept {
-            Some(Kept::Says(_)) => palette.text,
-            Some(Kept::Silent(_)) => palette.warn,
-            Some(Kept::Nothing) | None => palette.faint,
+        let seen_color = match &about.seen {
+            Some(Seen::Says { .. }) => palette.text,
+            Some(Seen::Silent { .. }) => palette.warn,
+            Some(Seen::Nothing) | None => palette.faint,
         };
         let row = |name: &'static str, selector: &'static str, words: String, color: Rgba| {
             div()
@@ -5243,15 +5240,18 @@ impl Footplate {
                                 footplate_words(),
                                 palette.text,
                             ))
-                            // Windows fetches no yardr, so "not fetched
-                            // yet" would promise one.
+                            // Windows has no yardr of its own, so "not
+                            // installed" would promise one.
                             .when(!cfg!(windows), |lines| {
                                 lines.child(row(
                                     "yardr",
                                     "about yardr",
-                                    yardr_words(about.kept.as_ref()),
-                                    kept_color,
+                                    yardr_words(about.seen.as_ref()),
+                                    seen_color,
                                 ))
+                            })
+                            .when_some(yardr_place(about.seen.as_ref()), |lines, place| {
+                                lines.child(row("path", "about yardr path", place, palette.faint))
                             }),
                     )
                     .into_any_element(),
