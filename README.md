@@ -1703,10 +1703,11 @@ folder. A change is drawn at once and kept for the next start:
   short is one tap to start again. The microphone is open only
   while a session stands: no session, no microphone. On a Mac, macOS asks
   once, the first time a session opens it. Where the system refuses the
-  microphone, the section and the head say so in words, and where to change
-  it (on a Mac, System Settings, Privacy & Security, Microphone), and no
-  session stands. On Linux, footplate needs ALSA's `libasound.so.2` on the
-  machine ([Installing](#linux)).
+  microphone (on a Mac at that prompt, or later in System Settings, where
+  macOS would give silence and no error), the section and the head say so
+  in words, and where to change it (on a Mac, System Settings, Privacy &
+  Security, Microphone), and no session stands. On Linux, footplate needs
+  ALSA's `libasound.so.2` on the machine ([Installing](#linux)).
 - Telemetry: the yard's opt-in telemetry switch, for the operator's
   window alone on a yard that serves the calls. Off, the consent words
   and Turn on; on, the install id with a copy of it, the next payload

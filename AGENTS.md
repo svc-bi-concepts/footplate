@@ -108,7 +108,13 @@ Platform surface:
   format, and elsewhere `open` says there is no audio. CoreAudio is bound
   through objc2 and needs no C library; Linux's ALSA backend is the one C
   library this adds: `libasound2-dev` (with `pkg-config`) to build, and
-  `libasound.so.2` at run time.
+  `libasound.so.2` at run time. A Mac's consent to the microphone is read
+  apart from the devices, since an app without it is given silence and no
+  error: `Consent` is AVFoundation's authorization status for audio (through
+  objc2-av-foundation, behind `cfg(macos)`), `allowed` turns a refusal into
+  words, and `open` asks the system and waits for its answer when consent has
+  not been determined, before opening the microphone, then reads it again
+  after (`consenting`).
 
 Setup, release and tests:
 

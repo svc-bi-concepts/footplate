@@ -1316,6 +1316,7 @@ mod tests {
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
+    use crate::audio::{self, Consent};
     use crate::fake::{Live, Posthog, Yard};
     use crate::fetch::{self, Machine, Seen};
     use crate::input;
@@ -11177,9 +11178,10 @@ yardr.dev
         open: Arc<AtomicUsize>,
         mics: Arc<Mutex<Vec<voice::Mic>>>,
         order: Arc<Mutex<Vec<&'static str>>>,
-        /// The words the devices refuse to open with, where a test has the
-        /// system say no to the microphone.
-        refuse: Arc<Mutex<Option<String>>>,
+        /// What the Mac says of the microphone's consent, which the devices
+        /// are refused by as `audio::open` refuses them: a test has the system
+        /// say no by setting it.
+        consent: Arc<Mutex<Consent>>,
         /// How far on the clock is: the window's time is the real time and
         /// this.
         later: Rc<Cell<Duration>>,
@@ -11219,7 +11221,7 @@ yardr.dev
                 open: Arc::default(),
                 mics: Arc::default(),
                 order: Arc::default(),
-                refuse: Arc::default(),
+                consent: Arc::new(Mutex::new(Consent::Authorized)),
                 later: Rc::default(),
                 hidden: Rc::default(),
             }
@@ -11231,7 +11233,7 @@ yardr.dev
             let current: Arc<Mutex<Option<Arc<Live>>>> = Arc::default();
             let (open, mics, order) = (self.open.clone(), self.mics.clone(), self.order.clone());
             let (later, hidden) = (self.later.clone(), self.hidden.clone());
-            let refuse = self.refuse.clone();
+            let consent = self.consent.clone();
             let seen = current.clone();
             view.update(cx, |v, _| {
                 v.means.voice = Rc::new(move |on, _, with, tell| {
@@ -11262,9 +11264,7 @@ yardr.dev
                     started
                 });
                 v.means.devices = Arc::new(move |mic, _| {
-                    if let Some(words) = refuse.lock().unwrap().clone() {
-                        return Err(words);
-                    }
+                    audio::allowed(*consent.lock().unwrap())?;
                     mics.lock().unwrap().push(mic);
                     open.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::new(Plugged {
@@ -11801,28 +11801,32 @@ yardr.dev
         click_on(cx, "voice button");
         wait_hung_up(&view, &voicing, &live, 0, cx);
 
-        // The system's no to the microphone: the devices refuse as the
-        // session stands, with words that say where that is changed. The
-        // session ends at once and no devices stand; the words are shown as
-        // they are beside the button, and in the Voice section, which
-        // says it where a person who refused the prompt looks.
+        // The system's no to the microphone, as a Mac's consent says it (the
+        // person's, at the prompt or in System Settings, or a policy's): the
+        // devices are refused by it as the session stands, with words that say
+        // where that is changed. The session ends at once and no devices
+        // stand; the words are shown as they are beside the button, and in the
+        // Voice section, which says it where a person who refused the prompt
+        // looks.
         let no = "the microphone may not be used: allow Footplate in System Settings, Privacy & Security, Microphone, and try again";
-        *voicing.refuse.lock().unwrap() = Some(no.to_string());
-        click_on(cx, "voice button");
-        wait(cx, "the devices' refusal", |cx| {
-            refusal(cx).as_deref() == Some(no)
-        });
-        assert!(!voice_stands(&view, cx));
-        assert_eq!(voice_words(&view, cx), "Voice");
-        assert!(drawn(cx, "voice refusal"));
-        assert_eq!(voicing.open.load(Ordering::SeqCst), 0);
+        for consent in [Consent::Denied, Consent::Restricted] {
+            *voicing.consent.lock().unwrap() = consent;
+            click_on(cx, "voice button");
+            wait(cx, "the devices' refusal", |cx| {
+                refusal(cx).as_deref() == Some(no)
+            });
+            assert!(!voice_stands(&view, cx), "{consent:?}");
+            assert_eq!(voice_words(&view, cx), "Voice", "{consent:?}");
+            assert!(drawn(cx, "voice refusal"), "{consent:?}");
+            assert_eq!(voicing.open.load(Ordering::SeqCst), 0, "{consent:?}");
+        }
         cx.simulate_keystrokes("secondary-,");
         click_on(cx, "settings section voice");
         assert!(drawn(cx, "voice refused"));
         cx.simulate_keystrokes("escape");
         // Allowed in System Settings, the next tap is a new start, and the
         // words go.
-        *voicing.refuse.lock().unwrap() = None;
+        *voicing.consent.lock().unwrap() = Consent::Authorized;
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(refusal(cx), None);
         click_on(cx, "voice button");

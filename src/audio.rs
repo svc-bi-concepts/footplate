@@ -20,6 +20,12 @@
 //! for another rate: cpal's CoreAudio would change the device's own rate for
 //! every program on the machine, so the conversion is here. Elsewhere
 //! [`open`] says there is no audio yet, as Windows has none.
+//!
+//! A Mac's consent to the microphone is not the devices' to report: an app
+//! without it is given buffers of zeros and no error, so a session would stand
+//! and hear nobody. [`open`] reads the consent ([`Consent`]) before the
+//! microphone is opened and again after, waiting for the system's first
+//! answer, and refuses in words ([`allowed`]).
 
 use std::collections::VecDeque;
 use std::sync::mpsc;
@@ -257,6 +263,62 @@ pub fn refused(mac: bool) -> String {
     }
 }
 
+/// What a Mac says of this app's use of the microphone: AVFoundation's
+/// authorization status for audio, in the four words it has. It is the
+/// consent itself and not the devices' word for it, since an app without
+/// consent is given zeros and no error: the devices open, and nobody is heard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consent {
+    /// Not asked yet: opening asks the system and waits for the person's answer.
+    NotDetermined,
+    /// Held back by a policy of the machine (parental controls, a profile),
+    /// whatever the person would answer.
+    Restricted,
+    /// The person said no, at the prompt or in System Settings after it.
+    Denied,
+    Authorized,
+}
+
+/// Whether a session may open the microphone under `consent`, or the words
+/// for the person where it may not: [`refused`]'s, for a Mac, whether the
+/// person or a policy said no. `NotDetermined` may proceed after the system's
+/// prompt has been answered; this function only maps the status to words.
+pub fn allowed(consent: Consent) -> Result<(), String> {
+    match consent {
+        Consent::Denied | Consent::Restricted => Err(refused(true)),
+        Consent::Authorized | Consent::NotDetermined => Ok(()),
+    }
+}
+
+/// Resolves an unanswered consent through the system prompt. Unknown status
+/// stays open as before, without asking; a known refusal never asks again.
+fn resolve_consent(consent: Option<Consent>, request: impl FnOnce() -> bool) -> Consent {
+    match consent {
+        Some(Consent::NotDetermined) => match request() {
+            true => Consent::Authorized,
+            false => Consent::Denied,
+        },
+        Some(consent) => consent,
+        None => Consent::NotDetermined,
+    }
+}
+
+/// Runs `open` between two reads of the consent: before it, so that a
+/// microphone already refused is not opened (and an unanswered consent gets
+/// the system prompt and its answer first), and after it, in case consent
+/// changed while the devices opened. The devices `open` made are dropped on
+/// that second no, closed as they are when a later step of opening them fails.
+/// An `open` that fails says its own words, and the consent is not read again.
+fn consenting<T>(
+    read: impl Fn() -> Consent,
+    open: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    allowed(read())?;
+    let opened = open()?;
+    allowed(read())?;
+    Ok(opened)
+}
+
 /// The devices of a session, open while this stands: the microphone feeding
 /// the session and the speaker playing its [`Queue`]. Dropping it closes
 /// both. The streams live on a thread of their own, since cpal's are
@@ -285,7 +347,8 @@ impl Drop for Devices {
 /// [`crate::voice::Mic`]), and the speaker plays `speaker` (the session's
 /// [`crate::voice::Voice::speaker`]). Where it cannot, the reason is said in
 /// words for the person (no microphone, a format it does not handle, a stream
-/// that would not start). Windows has no voice yet.
+/// that would not start, and on a Mac the consent refused: [`allowed`]).
+/// Windows has no voice yet.
 ///
 /// It returns when the devices are open, and the first time a Mac waits here
 /// for the person's answer to its microphone consent: it is no call for the
@@ -294,7 +357,11 @@ pub fn open(
     sink: impl FnMut(Vec<i16>) + Send + 'static,
     speaker: Arc<Mutex<Queue>>,
 ) -> Result<Devices, String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        consenting(mac::consent, || device::open(sink, speaker))
+    }
+    #[cfg(target_os = "linux")]
     {
         device::open(sink, speaker)
     }
@@ -462,8 +529,8 @@ mod device {
     }
 
     /// Both devices' streams, started, and how each is named. The speaker
-    /// first: a machine with no speaker is told so before the microphone is
-    /// touched, and a Mac asks for its consent at the microphone alone.
+    /// stream is built first; the consent check outside this function applies
+    /// only to the microphone.
     fn build(
         sink: impl FnMut(Vec<i16>) + Send + 'static,
         queue: Arc<Mutex<Queue>>,
@@ -569,6 +636,68 @@ mod device {
             assert_eq!(queue.lock().unwrap().queued_ms(), 0);
             drop(stream);
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    //! The Mac's consent to the microphone, read from AVFoundation. The status
+    //! query never asks the person anything. When it is not determined, the
+    //! system prompt is requested here and its callback is awaited before the
+    //! microphone opens.
+
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_av_foundation::{
+        AVAuthorizationStatus, AVCaptureDevice, AVMediaType, AVMediaTypeAudio,
+    };
+
+    use super::{Consent, resolve_consent};
+
+    /// This app's status for audio; for a program run from a terminal (`cargo
+    /// run`), the terminal's, which answers for it. A new request is awaited
+    /// on the device-opening thread, never the window's thread.
+    pub(super) fn consent() -> Consent {
+        let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
+            return Consent::NotDetermined;
+        };
+        resolve_consent(read(audio), || request_access(audio))
+    }
+
+    /// Reads AVFoundation's status without prompting. An unrecognized status
+    /// is not a refusal.
+    pub(super) fn read(audio: &AVMediaType) -> Option<Consent> {
+        // SAFETY: the media type is AVMediaTypeAudio, one of the two the
+        // method accepts; it is a status query and does not prompt.
+        let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) };
+        consent_of(status)
+    }
+
+    /// Asks through AVFoundation and waits for the person's decision. The
+    /// caller is already on a background thread, so this does not block the
+    /// window while the system displays its prompt.
+    fn request_access(audio: &AVMediaType) -> bool {
+        let (answer, decided) = std::sync::mpsc::channel();
+        let completion = RcBlock::new(move |granted: Bool| {
+            let _ = answer.send(granted.as_bool());
+        });
+        // SAFETY: `audio` is the framework's AVMediaTypeAudio constant, one
+        // of the two supported media types, and the retained block matches
+        // the method's BOOL completion result.
+        unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(audio, &completion) }
+        decided.recv().unwrap_or(false)
+    }
+
+    /// A status the table does not name (a later macOS may add one) is no
+    /// refusal: it reads as unknown and opens as it did before the read.
+    pub(super) fn consent_of(status: AVAuthorizationStatus) -> Option<Consent> {
+        Some(match status {
+            AVAuthorizationStatus::NotDetermined => Consent::NotDetermined,
+            AVAuthorizationStatus::Restricted => Consent::Restricted,
+            AVAuthorizationStatus::Denied => Consent::Denied,
+            AVAuthorizationStatus::Authorized => Consent::Authorized,
+            _ => return None,
+        })
     }
 }
 
@@ -830,6 +959,150 @@ mod tests {
         let elsewhere = refused(false);
         assert!(!elsewhere.contains("System Settings"), "{elsewhere}");
         assert!(elsewhere.contains("refused"), "{elsewhere}");
+
+        // The Mac's consent decides it: a no, the person's or a policy's, is
+        // refused in those words, and a yes and a question that will be asked
+        // before devices open are not.
+        for (consent, said) in [
+            (Consent::Denied, Err(mac.clone())),
+            (Consent::Restricted, Err(mac.clone())),
+            (Consent::Authorized, Ok(())),
+            (Consent::NotDetermined, Ok(())),
+        ] {
+            assert_eq!(allowed(consent), said, "{consent:?}");
+        }
+
+        // An unanswered status asks once and resolves to the callback's
+        // answer. Known statuses and unknown future statuses never ask.
+        for (consent, answer, expected, asks) in [
+            (
+                Some(Consent::NotDetermined),
+                true,
+                Consent::Authorized,
+                true,
+            ),
+            (Some(Consent::NotDetermined), false, Consent::Denied, true),
+            (Some(Consent::Authorized), false, Consent::Authorized, false),
+            (Some(Consent::Denied), true, Consent::Denied, false),
+            (Some(Consent::Restricted), true, Consent::Restricted, false),
+            (None, true, Consent::NotDetermined, false),
+        ] {
+            let asked = std::cell::Cell::new(false);
+            assert_eq!(
+                resolve_consent(consent, || {
+                    asked.set(true);
+                    answer
+                }),
+                expected
+            );
+            assert_eq!(asked.get(), asks, "{consent:?}");
+        }
+    }
+
+    /// The consent is read before the devices open, so that a microphone
+    /// already refused (including at the system prompt) is not opened, and
+    /// again after, in case consent changes while the devices open. An open
+    /// that fails says its own words.
+    #[test]
+    fn the_consent_is_read_before_the_devices_open_and_after_and_a_no_closes_them() {
+        use std::cell::Cell;
+
+        /// Devices that count themselves while they stand.
+        struct Standing<'a>(&'a Cell<u32>);
+
+        impl Drop for Standing<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() - 1);
+            }
+        }
+
+        let no = refused(true);
+        // What the two reads say, whether the devices were opened at all, and
+        // what came of it.
+        for (before, after, opened, said) in [
+            // Given: opened, and they stand.
+            (Consent::Authorized, Consent::Authorized, true, Ok(())),
+            // An unknown or missing status stays open as before.
+            (Consent::NotDetermined, Consent::NotDetermined, true, Ok(())),
+            // Consent changed while opening: the devices are dropped.
+            (Consent::Authorized, Consent::Denied, true, Err(no.clone())),
+            (
+                Consent::Authorized,
+                Consent::Restricted,
+                true,
+                Err(no.clone()),
+            ),
+            // Refused already, including at the prompt: devices are not opened.
+            (Consent::Denied, Consent::Denied, false, Err(no.clone())),
+            (
+                Consent::Restricted,
+                Consent::Restricted,
+                false,
+                Err(no.clone()),
+            ),
+        ] {
+            let case = format!("{before:?}, then {after:?}");
+            let (opens, standing, reads) = (Cell::new(0), Cell::new(0), Cell::new(0));
+            let got = consenting(
+                || {
+                    reads.set(reads.get() + 1);
+                    if reads.get() == 1 { before } else { after }
+                },
+                || {
+                    opens.set(opens.get() + 1);
+                    standing.set(standing.get() + 1);
+                    Ok(Standing(&standing))
+                },
+            );
+            assert_eq!(opens.get(), u32::from(opened), "{case}");
+            assert_eq!(reads.get(), if opened { 2 } else { 1 }, "{case}");
+            assert_eq!(got.as_ref().err(), said.as_ref().err(), "{case}");
+            assert_eq!(standing.get(), u32::from(said.is_ok()), "{case}");
+            drop(got);
+            assert_eq!(standing.get(), 0, "{case}");
+        }
+
+        // A microphone that is not there is said as it is, and the consent is
+        // not read again.
+        let reads = Cell::new(0);
+        let none = "this machine has no default microphone".to_string();
+        let got = consenting(
+            || {
+                reads.set(reads.get() + 1);
+                Consent::Authorized
+            },
+            || Err::<(), _>(none.clone()),
+        );
+        assert_eq!(got, Err(none));
+        assert_eq!(reads.get(), 1);
+    }
+
+    /// AVFoundation's four statuses, and one a later macOS may add, read as the
+    /// consent each means; and the real status query answers on this machine,
+    /// whatever its consent is, with no prompt and no exception (the framework
+    /// throws on a media type it does not take). A new permission request needs
+    /// a person at a Mac and is not tried here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macs_authorization_status_is_read_as_the_consent_it_means() {
+        use objc2_av_foundation::{AVAuthorizationStatus, AVMediaTypeAudio};
+
+        for (status, consent) in [
+            (
+                AVAuthorizationStatus::NotDetermined,
+                Some(Consent::NotDetermined),
+            ),
+            (AVAuthorizationStatus::Restricted, Some(Consent::Restricted)),
+            (AVAuthorizationStatus::Denied, Some(Consent::Denied)),
+            (AVAuthorizationStatus::Authorized, Some(Consent::Authorized)),
+            // No refusal and no prompt: it opens as it did before the read.
+            (AVAuthorizationStatus(99), None),
+        ] {
+            assert_eq!(mac::consent_of(status), consent, "{status:?}");
+        }
+        let audio = unsafe { AVMediaTypeAudio }.expect("audio media type is present");
+        let here = mac::read(audio);
+        println!("consent here: {here:?}");
     }
 
     #[test]

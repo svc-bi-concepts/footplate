@@ -94,6 +94,12 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 # context alone, with its policy and the blocks its answers come to: no
 # other framework of the crate's.
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext"] }
+# A Mac that has refused the microphone gives an app silence and no error, so
+# a voice session reads the consent itself (audio.rs), from AVFoundation,
+# before the microphone opens and again after. Its first request waits on
+# AVCaptureDevice's answer block, so block2 is enabled here; it is already in
+# the tree for the other system calls.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
 
 # On Linux the icon is also a property of the X11 window, set on a
 # connection of our own: gpui hands out no handle to its X11 window. In
