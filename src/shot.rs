@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, Duration, Local};
 use serde_json::json;
 
-use crate::fake::{Posthog, Router, Yard};
+use crate::fake::{Live, Posthog, Router, Yard};
 use crate::yard::Env;
 
 /// The states the window can be shot in, as `FOOTPLATE_SHOT` names them:
@@ -40,7 +40,10 @@ use crate::yard::Env;
 /// stopped, a yard at an
 /// address, the settings on each of their sections, the telemetry
 /// section on with the install id and the next payload and off with
-/// the consent words, the yards with a
+/// the consent words, the yardmaster's conversation with a voice session
+/// standing in it, as a tap on the Voice button makes one, against a
+/// stand-in for OpenAI's socket with the caption of what the person is
+/// saying, the yards with a
 /// far yard's rename form open in its card, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
 /// the composer, an open card whose note carries a page, an image and a file, a
@@ -148,6 +151,7 @@ pub const STATES: &[&str] = &[
     "settings-voice",
     "settings-telemetry",
     "settings-telemetry-off",
+    "voice",
     "reconnecting",
     "page",
     "mail",
@@ -307,6 +311,11 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
     if state == "feedback" {
         let _ = POSTHOG.set(Posthog::start());
     }
+    // The voice shot's session is made against a stand-in for OpenAI's
+    // socket, held for the run in the same way.
+    if state == "voice" {
+        let _ = TALKING.set(stand_voice());
+    }
     start_for_state(env, &state)
 }
 
@@ -318,6 +327,62 @@ static POSTHOG: std::sync::OnceLock<Posthog> = std::sync::OnceLock::new();
 /// ones. None in every other state.
 pub(crate) fn feedback() -> Option<crate::feedback::Project> {
     crate::feedback::Project::at(POSTHOG.get()?.address(), "phc_shot", "shot-survey")
+}
+
+/// What the voice shot's session stands against: a stand-in for OpenAI's
+/// Live socket on a loopback port, held for the run, as the capture of the
+/// feedback shot is. The shot reaches no OpenAI and no microphone, and a
+/// press in a window left up (scripts/shot-mac.sh hold) goes nowhere else.
+struct Talking {
+    url: String,
+    _socket: crate::voice::stand_in::SocketLive,
+}
+
+static TALKING: std::sync::OnceLock<Talking> = std::sync::OnceLock::new();
+
+/// The key the voice shot's session is made with: the stand-in takes it, and
+/// no OpenAI has heard of it.
+pub(crate) const VOICE_KEY: &str = "sk-shot";
+
+/// Where the voice shot's session stands, which its window starts it against
+/// where it taps the Voice button (chrome.rs). None in every other state.
+pub(crate) fn voice() -> Option<&'static str> {
+    TALKING.get().map(|talking| talking.url.as_str())
+}
+
+/// The stand-in for the voice shot: a socket that serves a `Live` whose
+/// person asks the yardmaster one question once the session has started, so
+/// that the caption stands under the head in the middle of the session the
+/// shot shows. The words come with no question mark, as the transcripts of
+/// runs 3 to 6 have them: the server's transcript marks none.
+fn stand_voice() -> Talking {
+    let live = std::sync::Arc::new(Live::start());
+    // An hour on, as a session's moment stands in the window's tests: the
+    // default is a past one, which would end the session as it starts.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    live.expires_at(now + 3600);
+    let socket = crate::voice::stand_in::live_socket(live.clone(), &format!("Bearer {VOICE_KEY}"));
+    let url = socket.url.clone();
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < until {
+            if live
+                .sent()
+                .iter()
+                .any(|event| event["type"] == "session.start")
+            {
+                live.person_says("What's blocking the release", 0, 1800);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    Talking {
+        url,
+        _socket: socket,
+    }
 }
 
 /// The run for `state`: the fake yard serves it, and the run's socket
@@ -1009,9 +1074,10 @@ fn populate(yard: &Yard, state: &str) {
         // outside and the member one, the notice's, whose flows view
         // does not answer, the
         // screen's, whose session's screen opens over it, the
-        // hosted screen's, whose card opens over it with no call, and
-        // the refused screen's, whose card opens over it with the
-        // yard's long refusal in red.
+        // hosted screen's, whose card opens over it with no call, the
+        // refused screen's, whose card opens over it with the
+        // yard's long refusal in red, and the voice shot's, whose
+        // window taps the Voice button once the yard is read.
         "yardmaster"
         | "far"
         | "settings"
@@ -1024,6 +1090,7 @@ fn populate(yard: &Yard, state: &str) {
         | "settings-voice"
         | "settings-telemetry"
         | "settings-telemetry-off"
+        | "voice"
         | "reconnecting"
         | "answered"
         | "signedout"
@@ -2551,6 +2618,7 @@ mod tests {
                 | "settings-voice"
                 | "settings-telemetry"
                 | "settings-telemetry-off"
+                | "voice"
                 | "reconnecting"
                 | "answered"
                 | "signedout"
@@ -3379,5 +3447,37 @@ mod tests {
                 .collect();
             assert_eq!(listed, STATES, "{name}");
         }
+    }
+
+    /// The voice shot's stand-in makes a session as the window starts one,
+    /// with the key the window gives it and a moment that is not past, and
+    /// the person's words come once it stands: before it, the caption would
+    /// have nothing to show; past, the session would end as it began.
+    #[test]
+    fn the_voice_shot_stands_a_session_and_the_person_asks_their_question() {
+        let talking = stand_voice();
+        let (tell, updates) = std::sync::mpsc::channel();
+        let crate::voice::Start::On(voice) = crate::voice::gated_start(
+            true,
+            || Ok(VOICE_KEY.to_string()),
+            &talking.url,
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        let next = || {
+            updates
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("an update in five seconds")
+        };
+        assert_eq!(next(), crate::voice::Update::Started);
+        match next() {
+            crate::voice::Update::Words(fragment) => {
+                assert_eq!(fragment.text, "What's blocking the release")
+            }
+            other => panic!("the person's words were expected, not {other:?}"),
+        }
+        drop(voice);
     }
 }

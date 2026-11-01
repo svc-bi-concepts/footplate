@@ -2525,8 +2525,149 @@ impl Session {
     }
 }
 
+/// The provider's socket stood in for, for the tests and for the voice
+/// screenshot (a debug build's): the server's side of a WebSocket on a
+/// loopback port, whose events are the stand-in [`Live`]'s.
+#[cfg(any(test, debug_assertions))]
+pub(crate) mod stand_in {
+    use super::*;
+    use crate::fake::Live;
+    use std::net::TcpListener;
+
+    /// A WebSocket server on a loopback port, speaking to `live` as the
+    /// provider's socket does: the upgrade (or a scripted 401), then every
+    /// event of the stand-in's, fragmented with a ping between its halves,
+    /// and everything the client sends handed to the stand-in. The pongs it
+    /// got are kept where the test can read them.
+    pub(crate) struct SocketLive {
+        pub(crate) url: String,
+        pub(crate) pongs: Arc<Mutex<Vec<Vec<u8>>>>,
+        pub(crate) thread: JoinHandle<()>,
+    }
+
+    pub(crate) fn live_socket(live: Arc<Live>, accept_key: &str) -> SocketLive {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/v1/live/sessions", listener.local_addr().unwrap());
+        let pongs: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let thread = std::thread::spawn({
+            let pongs = pongs.clone();
+            let accept_key = accept_key.to_string();
+            move || serve_live(listener, live, &accept_key, pongs)
+        });
+        SocketLive { url, pongs, thread }
+    }
+
+    fn serve_live(
+        listener: TcpListener,
+        live: Arc<Live>,
+        accept_key: &str,
+        pongs: Arc<Mutex<Vec<Vec<u8>>>>,
+    ) {
+        let (mut tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let end = loop {
+            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at;
+            }
+            match tcp.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+                Err(_) => return,
+            }
+        };
+        let text = String::from_utf8_lossy(&head[..end]).to_string();
+        let header = |name: &str| {
+            text.split("\r\n")
+                .filter_map(|line| line.split_once(':'))
+                .find(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.trim().to_string())
+        };
+        if header("authorization").as_deref() != Some(accept_key) {
+            // The provider's refusal, with part of the key it was given in
+            // it, as the harness's stand-in answers it.
+            let body = r#"{"error":{"message":"Incorrect API key provided: sk-test***KEY. You can find your API key at https://platform.openai.com.","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+            let _ = tcp.write_all(
+                format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            return;
+        }
+        let key = header("sec-websocket-key").unwrap_or_default();
+        let _ = tcp.write_all(
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                ws_accept_key(&key)
+            )
+            .as_bytes(),
+        );
+        let mut decoder = WsDecoder::new(true);
+        decoder.push(&head[end + 4..]);
+        let mut assembler = WsAssembler::default();
+        let send = |tcp: &mut TcpStream, text: &str| {
+            // Fragmented in two, with a ping between, as the harness's
+            // stand-in sends a delegation.
+            let bytes = text.as_bytes();
+            let half = bytes.len() / 2;
+            let _ = tcp.write_all(&ws_encode_frame(false, WS_TEXT, &bytes[..half], None));
+            let _ = tcp.write_all(&ws_encode_frame(true, WS_PING, b"mid-fragment", None));
+            let _ = tcp.write_all(&ws_encode_frame(
+                true,
+                WS_CONTINUATION,
+                &bytes[half..],
+                None,
+            ));
+        };
+        loop {
+            loop {
+                match decoder.next_frame() {
+                    Ok(Some(frame)) => match assembler.accept(frame) {
+                        Ok(Some(WsIncoming::Text(text))) => live.receive(&text),
+                        Ok(Some(WsIncoming::Pong(body))) => pongs.lock().unwrap().push(body),
+                        Ok(Some(WsIncoming::Ping(body))) => {
+                            let _ = tcp.write_all(&ws_encode_frame(true, WS_PONG, &body, None));
+                        }
+                        Ok(Some(WsIncoming::Close(..))) => {
+                            let _ = tcp.write_all(&ws_encode_frame(
+                                true,
+                                WS_CLOSE,
+                                &1000u16.to_be_bytes(),
+                                None,
+                            ));
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(_) => return,
+                    },
+                    Ok(None) => break,
+                    Err(_) => return,
+                }
+            }
+            for event in live.take() {
+                send(&mut tcp, &event);
+            }
+            match tcp.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => decoder.push(&chunk[..n]),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::stand_in::live_socket;
     use super::*;
     use crate::audio::{CHUNK, Capture, Render};
     use crate::fake::Live;
@@ -4222,136 +4363,6 @@ pub(crate) mod tests {
             next_update(&updates),
             Update::Ended("the peer closed".into())
         );
-    }
-
-    /// A WebSocket server on a loopback port, speaking to `live` as the
-    /// provider's socket does: the upgrade (or a scripted 401), then every
-    /// event of the stand-in's, fragmented with a ping between its halves,
-    /// and everything the client sends handed to the stand-in. The pongs it
-    /// got are kept where the test can read them.
-    pub(crate) struct SocketLive {
-        pub(crate) url: String,
-        pub(crate) pongs: Arc<Mutex<Vec<Vec<u8>>>>,
-        pub(crate) thread: JoinHandle<()>,
-    }
-
-    pub(crate) fn live_socket(live: Arc<Live>, accept_key: &str) -> SocketLive {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("ws://{}/v1/live/sessions", listener.local_addr().unwrap());
-        let pongs: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
-        let thread = std::thread::spawn({
-            let pongs = pongs.clone();
-            let accept_key = accept_key.to_string();
-            move || serve_live(listener, live, &accept_key, pongs)
-        });
-        SocketLive { url, pongs, thread }
-    }
-
-    fn serve_live(
-        listener: TcpListener,
-        live: Arc<Live>,
-        accept_key: &str,
-        pongs: Arc<Mutex<Vec<Vec<u8>>>>,
-    ) {
-        let (mut tcp, _) = listener.accept().unwrap();
-        tcp.set_read_timeout(Some(Duration::from_millis(5)))
-            .unwrap();
-        let mut head = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let end = loop {
-            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
-                break at;
-            }
-            match tcp.read(&mut chunk) {
-                Ok(0) => return,
-                Ok(n) => head.extend_from_slice(&chunk[..n]),
-                Err(_) => return,
-            }
-        };
-        let text = String::from_utf8_lossy(&head[..end]).to_string();
-        let header = |name: &str| {
-            text.split("\r\n")
-                .filter_map(|line| line.split_once(':'))
-                .find(|(n, _)| n.trim().eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.trim().to_string())
-        };
-        if header("authorization").as_deref() != Some(accept_key) {
-            // The provider's refusal, with part of the key it was given in
-            // it, as the harness's stand-in answers it.
-            let body = r#"{"error":{"message":"Incorrect API key provided: sk-test***KEY. You can find your API key at https://platform.openai.com.","type":"invalid_request_error","code":"invalid_api_key"}}"#;
-            let _ = tcp.write_all(
-                format!(
-                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            );
-            return;
-        }
-        let key = header("sec-websocket-key").unwrap_or_default();
-        let _ = tcp.write_all(
-            format!(
-                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-                ws_accept_key(&key)
-            )
-            .as_bytes(),
-        );
-        let mut decoder = WsDecoder::new(true);
-        decoder.push(&head[end + 4..]);
-        let mut assembler = WsAssembler::default();
-        let send = |tcp: &mut TcpStream, text: &str| {
-            // Fragmented in two, with a ping between, as the harness's
-            // stand-in sends a delegation.
-            let bytes = text.as_bytes();
-            let half = bytes.len() / 2;
-            let _ = tcp.write_all(&ws_encode_frame(false, WS_TEXT, &bytes[..half], None));
-            let _ = tcp.write_all(&ws_encode_frame(true, WS_PING, b"mid-fragment", None));
-            let _ = tcp.write_all(&ws_encode_frame(
-                true,
-                WS_CONTINUATION,
-                &bytes[half..],
-                None,
-            ));
-        };
-        loop {
-            loop {
-                match decoder.next_frame() {
-                    Ok(Some(frame)) => match assembler.accept(frame) {
-                        Ok(Some(WsIncoming::Text(text))) => live.receive(&text),
-                        Ok(Some(WsIncoming::Pong(body))) => pongs.lock().unwrap().push(body),
-                        Ok(Some(WsIncoming::Ping(body))) => {
-                            let _ = tcp.write_all(&ws_encode_frame(true, WS_PONG, &body, None));
-                        }
-                        Ok(Some(WsIncoming::Close(..))) => {
-                            let _ = tcp.write_all(&ws_encode_frame(
-                                true,
-                                WS_CLOSE,
-                                &1000u16.to_be_bytes(),
-                                None,
-                            ));
-                            return;
-                        }
-                        Ok(_) => {}
-                        Err(_) => return,
-                    },
-                    Ok(None) => break,
-                    Err(_) => return,
-                }
-            }
-            for event in live.take() {
-                send(&mut tcp, &event);
-            }
-            match tcp.read(&mut chunk) {
-                Ok(0) => return,
-                Ok(n) => decoder.push(&chunk[..n]),
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) => {}
-                Err(_) => return,
-            }
-        }
     }
 
     #[test]

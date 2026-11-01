@@ -36,6 +36,9 @@
 # `settings-yards`, `settings-agents`, `settings-notifications`,
 # `settings-connection`, `settings-voice` and `settings-telemetry` the
 # rest, with `settings-telemetry-off` the telemetry section off),
+# `voice` (the yardmaster's conversation with a voice session standing in
+# it, against a stand-in for OpenAI's socket: the Voice button saying
+# `listening`, the session's minutes and the caption of what is said),
 # `settings-yards-rename` (the yards
 # with the far yard's rename form open in its card), `reconnecting` (a
 # running yard whose server
@@ -118,7 +121,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top older-unread plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-voice settings-telemetry settings-telemetry-off reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top older-unread plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-voice settings-telemetry settings-telemetry-off voice reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

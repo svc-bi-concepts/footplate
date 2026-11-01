@@ -64,8 +64,11 @@ To remove footplate, drag it from Applications to the Trash.
 Take `footplate_<version>_linux_amd64.tar.gz` for a PC with an Intel or AMD
 processor, or `footplate_<version>_linux_arm64.tar.gz` for an ARM machine. It
 is built on Debian 13, so it runs on that and on anything newer. It draws
-with Vulkan, so the machine needs a Vulkan driver, which most desktop
-installs include.
+with Vulkan, so the machine needs a Vulkan driver, and a voice session
+listens and speaks through ALSA, so it needs ALSA's library, `libasound.so.2`
+(Debian's `libasound2t64`); most desktop installs include both. The program
+is linked to the library, so without it footplate does not start at all,
+voice on or off, and the archive does not carry it.
 
 Every step is in the file manager.
 
@@ -130,7 +133,11 @@ Rust, stable (`rustup default stable`), and what gpui needs of the system:
   `runtime_shaders` feature, which compiles the shaders when the window opens.
 - Linux: the development packages gpui builds against, which are those Zed
   lists for building from source: X11 and Wayland, xkbcommon, fontconfig and
-  a Vulkan loader; to run, a Vulkan driver (Mesa's software one will do).
+  a Vulkan loader, and ALSA's, for a voice session's microphone and speaker
+  (`libasound2-dev`, found by `pkg-config`); to run, a Vulkan driver (Mesa's
+  software one will do) and ALSA's library, `libasound.so.2` (Debian's
+  `libasound2t64`), which the program is linked to: without it footplate does
+  not start at all, voice on or off, and the archive does not carry it.
   The yard runs on a Mac and so does the gate: the Linux build is tried by
   hand, in a container (Debian 13, arm64) under Xvfb and under a headless
   sway.
@@ -178,10 +185,14 @@ Application" identity of the keychain, the script signs the bundle with it
 instead, with the hardened runtime and a secure timestamp, and checks the
 signature (`codesign --verify --strict`). Unset, the signature is ad hoc as
 above, which is what a builder's or a contributor's build gets. The bundle
-carries no entitlements: the hardened runtime holds back code made at run
-time, libraries of another maker's, and the camera, the microphone and the
-like, and footplate does none of those. The signature alone leaves the app
-unnotarized, which the release script does next.
+carries one entitlement, `com.apple.security.device.audio-input`, for the
+microphone alone, and both signatures hold it: the hardened runtime holds
+back code made at run time, libraries of another maker's, and the camera,
+the microphone and the like, and of those footplate uses only the
+microphone, for a [voice session](#settings). The Info.plist says why
+(`NSMicrophoneUsageDescription`), which is what macOS shows when it asks,
+once, the first time a session opens the microphone. The signature alone
+leaves the app unnotarized, which the release script does next.
 
 A release is everything the site carries, built by one script from a clean
 tree whose version is the tag:
@@ -436,9 +447,14 @@ card beside a routine one's), `stopped` (the head with a stopped
 yard), `far` (a yard at an address, away), `settings` (the settings
 on each of their sections: `settings` is this window, and
 `settings-appearance`, `settings-yards`, `settings-agents`,
-`settings-notifications`, `settings-connection` and
+`settings-notifications`, `settings-connection`, `settings-voice` and
 `settings-telemetry` the rest, with `settings-telemetry-off` the
 telemetry section off),
+`voice` (the yardmaster's conversation with a voice session standing in
+it, against the fake yard and a stand-in for OpenAI's socket, with no
+microphone or speaker opened: the Voice button saying `listening`, the
+session's minutes and what they cost at the head's right, and the caption
+of what the person is saying under the head),
 `settings-yards-rename` (the yards with the far yard's rename form open
 in its card), `reconnecting` (a running yard whose
 server is then stopped, with a draft in the composer), `refusal` (the
@@ -542,7 +558,7 @@ press Send, and never otherwise, and OpenAI's Live API, to which a
 [voice session](#settings) you started sends the microphone's audio and what
 you say, the yard's name and the name of whom you are talking with, and what
 they answer in that conversation, for as long as the session stands, and
-never otherwise.
+never otherwise: the microphone is open only while a session stands.
 
 | It reads | For |
 |---|---|
@@ -1678,7 +1694,13 @@ folder. A change is drawn at once and kept for the next start:
   when you tap again, open another conversation or yard, switch voice off,
   hide, minimize or close the window, or when nobody has spoken and
   nothing waits for the yard for the minutes the section's `ends after`
-  line says, five until you choose another.
+  line says, five until you choose another. The microphone is open only
+  while a session stands: no session, no microphone. On a Mac, macOS asks
+  once, the first time a session opens it. Where the system refuses the
+  microphone, the section and the head say so in words, and where to change
+  it (on a Mac, System Settings, Privacy & Security, Microphone), and no
+  session stands. On Linux, footplate needs ALSA's `libasound.so.2` on the
+  machine ([Installing](#linux)).
 - Telemetry: the yard's opt-in telemetry switch, for the operator's
   window alone on a yard that serves the calls. Off, the consent words
   and Turn on; on, the install id with a copy of it, the next payload

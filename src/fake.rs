@@ -1900,16 +1900,16 @@ fn serve_posthog(conn: TcpStream, shared: &PosthogShared) -> io::Result<()> {
 /// How many bytes of `content` the stand-in takes in one append. The
 /// reference limits an append to 500 tokens and a token is at least a byte,
 /// so a client under this is under that, and one over it is told so.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const LIVE_APPEND_BYTES: usize = 500;
 
 /// What the model says by itself when a delegation is not answered in its
 /// acknowledgement delay (the 'Lemme check.' of runs 3 and 4).
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const LIVE_FILLER: &str = "Lemme check.";
 
 /// An append a [`Live`] took.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveAppend {
     /// `commentary` or `thinking`.
@@ -1921,7 +1921,7 @@ pub struct LiveAppend {
     pub content: String,
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 #[derive(Default)]
 struct LiveState {
     /// Every event the client sent, as JSON, in order.
@@ -1942,7 +1942,7 @@ struct LiveState {
     dropped: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 impl LiveState {
     /// Queues an event of the server's, with an `event_id` of its own.
     fn say(&mut self, mut event: Value) {
@@ -2064,11 +2064,12 @@ impl LiveState {
     }
 }
 
-/// OpenAI's Live socket for the tests: the server's side of one session as
-/// the events that cross it, text for text, with no socket in between (the
-/// WebSocket client is the session's, and has its own tests). The test hands
-/// it what the client sends ([`Live::receive`]), scripts what the server
-/// says ([`Live::person_says`], [`Live::voice_says`], [`Live::delegate`],
+/// OpenAI's Live socket for the tests and the voice screenshot: the server's
+/// side of one session as the events that cross it, text for text, with no
+/// socket in between (the WebSocket client is the session's, and has its own
+/// tests; `voice::stand_in` serves this over one). The test hands it what the
+/// client sends ([`Live::receive`]), scripts what the server says
+/// ([`Live::person_says`], [`Live::voice_says`], [`Live::delegate`],
 /// [`Live::queue_audio`]) and reads what it says back ([`Live::take`]) and
 /// what it kept ([`Live::sent`], [`Live::appends`]).
 ///
@@ -2081,12 +2082,12 @@ impl LiveState {
 /// speech the server has queued can be dropped, as the server drops it when
 /// the person speaks over it ([`Live::interrupt`]). No yard is asked
 /// anything: this is the provider's, and the yard's fake is never involved.
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 pub struct Live {
     state: Mutex<LiveState>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 impl Live {
     pub fn start() -> Live {
         Live {

@@ -12,6 +12,11 @@
 # hardened runtime and a secure timestamp, which Apple's notary service asks
 # of a signature. Notarizing is the release script's, which asks for a
 # notary profile beside the identity (README.md, "Building").
+#
+# The bundle asks the system for the microphone and for nothing else, for a
+# voice session (src/audio.rs): the Info.plist says why, which is what the
+# system shows when it asks, and the signature, either kind, carries the one
+# entitlement the hardened runtime wants for it.
 set -e
 
 if [ "$(uname -s)" != Darwin ]; then
@@ -40,12 +45,14 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/footplate"
 
+# What is made on the way and stays out of the bundle: the icon's sizes, and
+# the entitlements the signature carries.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' 0
+trap 'exit 1' HUP INT TERM
 # iconutil goes by the directory's ending and by these names: each size in
 # points, and again at twice the pixels.
-iconset_root=$(mktemp -d)
-trap 'rm -rf "$iconset_root"' 0
-trap 'exit 1' HUP INT TERM
-iconset=$iconset_root/footplate.iconset
+iconset=$scratch/footplate.iconset
 mkdir "$iconset"
 for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$icon" --out "$iconset/icon_${size}x${size}.png" >/dev/null
@@ -76,6 +83,25 @@ cat >"$app/Contents/Info.plist" <<PLIST
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>footplate listens through the microphone only while a voice session you start stands, so that you can talk with the yard by voice.</string>
+</dict>
+</plist>
+PLIST
+
+# The one entitlement the bundle carries, for the microphone alone: the
+# hardened runtime of a release's signature holds the microphone back without
+# it. A builder's ad hoc signature carries it too, so that both bundles ask
+# alike. It is written here, as the Info.plist is, and only the signature
+# keeps it.
+entitlements=$scratch/footplate.entitlements
+cat >"$entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>
 PLIST
@@ -89,11 +115,11 @@ if [ -n "$identity" ]; then
     # without a secure timestamp, so both are asked for; and the signature
     # is checked here, so that one that does not hold fails here and not
     # after the wait for Apple.
-    codesign_retry --force --options runtime --timestamp --sign "$identity" "$app"
+    codesign_retry --force --options runtime --timestamp --entitlements "$entitlements" --sign "$identity" "$app"
     codesign --verify --strict "$app"
 else
     # Ad hoc, with no identity: a builder's or a contributor's build.
-    codesign --force --sign - "$app"
+    codesign --force --entitlements "$entitlements" --sign - "$app"
 fi
 
 echo "$app"

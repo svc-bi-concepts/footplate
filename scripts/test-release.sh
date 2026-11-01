@@ -223,10 +223,19 @@ EOF
 # A signed app is one that holds the mark a signature leaves, and a signed
 # image one with a signature line of its own (an image is a manifest, below);
 # --verify asks for it, so that a check before the signing, or of another one,
-# fails, as does signing what is not there.
+# fails, as does signing what is not there. The entitlements a signing is
+# given are a temporary file, gone when the script ends, so they are read as
+# the call comes and logged on a line of their own, flattened.
 cat >"$bin/codesign" <<'EOF'
 #!/bin/sh
 echo "codesign $*" >>"$CALLS"
+prev=
+for arg; do
+    if [ "$prev" = --entitlements ]; then
+        printf 'entitlements %s\n' "$(sed -n '/<dict>/,/<\/dict>/p' "$arg" | tr -d ' \n')" >>"$CALLS"
+    fi
+    prev=$arg
+done
 for last; do :; done
 [ -e "$last" ] || {
     echo "$last: No such file or directory" >&2
@@ -635,6 +644,18 @@ signer="Developer ID Application: Stand In (ABCDE12345)"
 notary=stand-in-profile
 # The identity as a pattern, for the calls that want_line matches whole.
 signer_re=$(printf '%s' "$signer" | sed 's/[][\.*^$()+?{|}]/\\&/g')
+# What an app is signed with besides the identity: the entitlements file the
+# script makes, a temporary one, so any path to it.
+entitled='--entitlements /.*/footplate\.entitlements'
+
+# entitled_apps <n>: <n> signings were given the microphone's entitlement,
+# the one and no other, each its own, and none was given any other.
+entitled_apps() {
+    [ "$(grep -c '^entitlements ' "$calls")" = "$1" ] ||
+        fail "$name: the entitlements were: $(grep -E '^(codesign|entitlements) ' "$calls")"
+    [ "$(grep -c '^entitlements <dict><key>com\.apple\.security\.device\.audio-input</key><true/></dict>$' "$calls")" = "$1" ] ||
+        fail "$name: an app was signed with more than the microphone: $(grep '^entitlements ' "$calls")"
+}
 
 # image_holds <dmg>: the image is the one a drag installs from, made as a
 # compressed read-only HFS+ volume named for the app, which holds the signed
@@ -772,8 +793,9 @@ case "$text" in
     *"signed ad hoc and not notarized"*) ;;
     *) fail "adhoc: it did not say the apps are ad hoc: $text" ;;
 esac
-want_line '^codesign --force --sign - /.*/mac-arm64/Footplate\.app$'
-want_line '^codesign --force --sign - /.*/mac-amd64/Footplate\.app$'
+want_line "^codesign --force $entitled --sign - /.*/mac-arm64/Footplate\\.app\$"
+want_line "^codesign --force $entitled --sign - /.*/mac-amd64/Footplate\\.app\$"
+entitled_apps 2
 lack "--options"
 lack "--timestamp"
 lack "--verify"
@@ -825,8 +847,9 @@ release_run signed "$signer" "$notary"
 case "$text" in
     *"signed ad hoc"*) fail "signed: it says the apps are ad hoc: $text" ;;
 esac
-want "codesign --force --options runtime --timestamp --sign $signer /"
+want_line "^codesign --force --options runtime --timestamp $entitled --sign $signer_re /"
 want "codesign --verify --strict /"
+entitled_apps 2
 want_line "^xcrun notarytool submit /.*/Footplate_0\.3\.0_darwin_arm64\.zip --keychain-profile $notary --wait --output-format json\$"
 want_line "^xcrun notarytool submit /.*/Footplate_0\.3\.0_darwin_amd64\.zip --keychain-profile $notary --wait --output-format json\$"
 want_line '^xcrun stapler staple /.*/mac-arm64/Footplate\.app$'
@@ -874,7 +897,7 @@ case "$text" in
     *"the timestamp was not found; trying again"*) ;;
     *) fail "$name: it did not say the timestamp was tried again: $text" ;;
 esac
-[ "$(grep -c -E "^codesign --force --options runtime --timestamp --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 2 ] ||
+[ "$(grep -c -E "^codesign --force --options runtime --timestamp $entitled --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 2 ] ||
     fail "$name: the arm64 app was signed: $(grep '^codesign' "$calls")"
 archives_in_out
 
@@ -886,7 +909,7 @@ case "$text" in
     *"A timestamp was expected but was not found"*) ;;
     *) fail "$name: it did not name the missing timestamp: $text" ;;
 esac
-[ "$(grep -c -E "^codesign --force --options runtime --timestamp --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 3 ] ||
+[ "$(grep -c -E "^codesign --force --options runtime --timestamp $entitled --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 3 ] ||
     fail "$name: the arm64 app was signed: $(grep '^codesign' "$calls")"
 lack_line '^codesign --verify --strict /.*/mac-arm64/Footplate\.app$'
 [ ! -e "$out" ] || fail "$name: a release with no timestamp wrote its out dir"
@@ -903,7 +926,7 @@ case "$text" in
 esac
 [ "$(grep -c -E "^codesign --force --sign $signer_re --timestamp /.*/Footplate_0\\.3\\.0_darwin_arm64\\.dmg\$" "$calls")" = 2 ] ||
     fail "$name: the arm64 image was signed: $(grep '^codesign' "$calls")"
-[ "$(grep -c -E "^codesign --force --options runtime --timestamp --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 1 ] ||
+[ "$(grep -c -E "^codesign --force --options runtime --timestamp $entitled --sign $signer_re /.*/mac-arm64/Footplate\\.app\$" "$calls")" = 1 ] ||
     fail "$name: the arm64 app was signed: $(grep '^codesign' "$calls")"
 archives_in_out
 
@@ -1097,14 +1120,28 @@ bundle_run() {
         "$tmp/$name/scripts/bundle-mac.sh" "$tmp/$name/footplate" "$tmp/$name/Footplate.app" >/dev/null ||
         fail "$name: bundle-mac.sh failed"
 }
+# The bundle bundle_run made says why it wants the microphone, which is what
+# the system shows when it asks. The entitlements are not in it: only the
+# signature keeps them.
+bundle_asks_for_the_microphone() {
+    plist=$tmp/$name/Footplate.app/Contents/Info.plist
+    grep -q -F '<key>NSMicrophoneUsageDescription</key>' "$plist" ||
+        fail "$name: the Info.plist does not say why the microphone is wanted"
+    [ -z "$(find "$tmp/$name/Footplate.app" -name '*.entitlements')" ] ||
+        fail "$name: the entitlements are in the bundle"
+}
 bundle_run adhoc ""
 [ "$(steps)" = codesign\ sign ] || fail "$name: the calls were: $(cat "$calls")"
-want_line '^codesign --force --sign - /.*/Footplate\.app$'
+want_line "^codesign --force $entitled --sign - /.*/Footplate\\.app\$"
+entitled_apps 1
+bundle_asks_for_the_microphone
 lack "--options"
 bundle_run signed "$signer"
 [ "$(steps)" = "$(printf 'codesign sign\ncodesign verify')" ] || fail "$name: the calls were: $(cat "$calls")"
-want "codesign --force --options runtime --timestamp --sign $signer /"
+want_line "^codesign --force --options runtime --timestamp $entitled --sign $signer_re /"
 want "codesign --verify --strict /"
+entitled_apps 1
+bundle_asks_for_the_microphone
 lack "xcrun"
 
 echo "test-release.sh: pass"

@@ -52,7 +52,8 @@ The window, its state and the yard:
   `src/audio.rs`'s, and the window's Voice button, which starts and ends
   the session and speaks the open conversation's answers to it, is in
   `src/window/bead.rs`. The caption, the meter and the idle rule are
-  plain functions here too.
+  plain functions here too, and `stand_in` serves `src/fake.rs`'s `Live`
+  on a loopback WebSocket, for the tests and the voice shot.
 - `src/yard.rs`: picks which yard opens (socket or address, token files,
   hosted sessions); tokens live beside the settings, never in them.
 - `src/settings.rs`: what the window keeps between runs, one JSON file in the
@@ -117,13 +118,14 @@ Setup, release and tests:
 - `src/setup.rs`: the first run as yardr's commands, with no window (args in,
   JSON out, PATH from doctor's data, never through a shell).
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for
-  screenshots, named by `FOOTPLATE_SHOT`.
+  screenshots, named by `FOOTPLATE_SHOT`; the voice state stands a session
+  against a fake `Live` as well, with no microphone or speaker opened.
 - `src/fake.rs`: a yard for tests (socket or TCP, scripted JSON, tokens and
   pairing; no TLS), a stand-in for PostHog's capture (`Posthog`), and, for
-  tests alone, one for OpenAI's Live socket (`Live`: the server's side of a
-  voice session as events in and out, held to the reference, not to the
-  module that uses it). `Yard::start()` is the socket's on unix and the TCP
-  one's on Windows.
+  tests and the voice shot, one for OpenAI's Live socket (`Live`: the
+  server's side of a voice session as events in and out, held to the
+  reference, not to the module that uses it). `Yard::start()` is the
+  socket's on unix and the TCP one's on Windows.
 - `src/fixtures/`: `shot-page.png` and the terminal screens.
 
 ## Where to start

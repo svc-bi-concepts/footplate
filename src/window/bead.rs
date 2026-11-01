@@ -579,11 +579,17 @@ impl Footplate {
     }
 
     /// Why the last session could not be made, or ended, in the words of
-    /// whoever refused it: a line of the head, in the colour of an error.
-    fn voice_refusal_line(&self, palette: Palette) -> Option<impl IntoElement> {
+    /// whoever refused it: a line of the head, in the colour of an error,
+    /// and of the Voice section, which says it too (`name` is its debug
+    /// selector, one for each place).
+    pub(super) fn voice_refusal_line(
+        &self,
+        name: &'static str,
+        palette: Palette,
+    ) -> Option<impl IntoElement> {
         self.voice_refusal.as_ref().map(|words| {
             div()
-                .debug_selector(|| "voice refusal".to_string())
+                .debug_selector(|| name.to_string())
                 .text_sm()
                 .text_color(palette.warn)
                 .child(words.clone())
@@ -1939,7 +1945,7 @@ impl Footplate {
                             })),
                     ),
             )
-            .children(self.voice_refusal_line(palette))
+            .children(self.voice_refusal_line("voice refusal", palette))
             .children(about.into_iter().enumerate().map(|(i, line)| {
                 // The first says who that is; what follows keeps mail from
                 // arriving.

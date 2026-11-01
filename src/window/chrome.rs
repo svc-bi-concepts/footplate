@@ -90,6 +90,27 @@ impl Footplate {
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings-notifications") {
             this.settings.notifications.on = true;
         }
+        // The voice shot stands a session in the yardmaster's conversation
+        // once the yard is read (below), against a stand-in for OpenAI's
+        // socket and devices that open nothing: it reaches no OpenAI, and
+        // never asks a Mac for the microphone. Voice is on for it. A debug
+        // build's alone, as above, and a unix one's.
+        #[cfg(all(debug_assertions, unix))]
+        if let Some(url) = crate::shot::voice() {
+            let url = url.to_string();
+            this.settings.voice = true;
+            this.means.voice = std::rc::Rc::new(move |on, _, with, tell| {
+                crate::voice::gated_start(
+                    on,
+                    || Ok(crate::shot::VOICE_KEY.to_string()),
+                    &url,
+                    with,
+                    tell,
+                )
+            });
+            this.means.devices =
+                std::sync::Arc::new(|_, _| Ok(Box::new(()) as Box<dyn std::any::Any + Send>));
+        }
         // The reconnecting shot has a draft in the composer: the
         // yardmaster's conversation's, which opens first, in the line
         // once the yard is read.
@@ -1267,6 +1288,15 @@ impl Footplate {
                 self.schedule_return(cx);
                 // What arrived while the yard was away.
                 self.news(cx);
+                // The voice shot taps the Voice button once the yard is
+                // read, as a person does: the session stands in the open
+                // conversation, and the stand-in's socket says the words
+                // the caption shows. Once. A debug build's alone, as above,
+                // and a unix one's.
+                #[cfg(all(debug_assertions, unix))]
+                if self.voices == 0 && crate::shot::voice().is_some() {
+                    self.toggle_voice(cx);
+                }
                 // The yard answers: what a start could not start is
                 // healed, whatever turn of the follower this is.
                 self.switch_troubles = Vec::new();
@@ -4831,7 +4861,13 @@ impl Footplate {
                     .child("voice is on"),
             );
         }
+        // What stands beside the Voice button where a session could not be
+        // made stands here too, in the words of whoever refused it and
+        // never parsed: the keeper's where no key is kept, OpenAI's where it
+        // refuses the key, the devices' where the system said no to the
+        // microphone, with where that is changed.
         section = section
+            .children(self.voice_refusal_line("voice refused", palette))
             .child(
                 div()
                     .flex()

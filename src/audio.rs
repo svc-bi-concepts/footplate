@@ -245,6 +245,18 @@ pub fn named(
     format!("{device} ({rate} Hz, {channels} ch, {format})")
 }
 
+/// What the person is told where the system said no to the microphone: that it
+/// did, and where that is changed, which cpal's own word for it
+/// ("Unauthorized") names neither. A Mac keeps the answer to its consent
+/// prompt in System Settings; on Linux the sound system's own setting decides,
+/// and none is named.
+pub fn refused(mac: bool) -> String {
+    match mac {
+        true => "the microphone may not be used: allow Footplate in System Settings, Privacy & Security, Microphone, and try again".to_string(),
+        false => "the microphone may not be used: the system refused it to this account".to_string(),
+    }
+}
+
 /// The devices of a session, open while this stands: the microphone feeding
 /// the session and the speaker playing its [`Queue`]. Dropping it closes
 /// both. The streams live on a thread of their own, since cpal's are
@@ -334,6 +346,16 @@ mod device {
         }
     }
 
+    /// The microphone's trouble as words for the person: the system's no is
+    /// said as one, with where it is changed ([`refused`]), and anything
+    /// else is cpal's own.
+    fn trouble(what: &str, err: &cpal::Error) -> String {
+        match err.kind() {
+            cpal::ErrorKind::PermissionDenied => refused(cfg!(target_os = "macos")),
+            _ => format!("{what}: {err}"),
+        }
+    }
+
     fn input_stream<T: SizedSample + Send + 'static>(
         device: &cpal::Device,
         config: &cpal::SupportedStreamConfig,
@@ -348,7 +370,7 @@ mod device {
                 on_error("microphone"),
                 None,
             )
-            .map_err(|err| format!("the microphone could not be opened: {err}"))
+            .map_err(|err| trouble("the microphone could not be opened", &err))
     }
 
     fn output_stream<T: SizedSample + Send + 'static>(
@@ -453,7 +475,7 @@ mod device {
             .map_err(|err| format!("the speaker would not start: {err}"))?;
         in_stream
             .play()
-            .map_err(|err| format!("the microphone would not start: {err}"))?;
+            .map_err(|err| trouble("the microphone would not start", &err))?;
         Ok((input, output, in_stream, out_stream))
     }
 
@@ -503,6 +525,22 @@ mod device {
         use super::*;
         use std::f32::consts::PI;
         use std::time::{Duration, Instant};
+
+        /// The system's no is said as one wherever cpal reports it, with
+        /// where it is changed; any other trouble keeps cpal's own words.
+        #[test]
+        fn the_systems_no_to_the_microphone_is_said_as_one_and_other_trouble_in_cpals_words() {
+            let no = cpal::Error::with_message(cpal::ErrorKind::PermissionDenied, "Unauthorized");
+            assert_eq!(
+                trouble("the microphone would not start", &no),
+                refused(cfg!(target_os = "macos"))
+            );
+            let gone = cpal::Error::with_message(cpal::ErrorKind::DeviceNotAvailable, "gone");
+            assert_eq!(
+                trouble("the microphone would not start", &gone),
+                "the microphone would not start: gone"
+            );
+        }
 
         /// The real default speaker takes the queue at the pace of its own
         /// clock, and a drop empties it. The tone is speech to the queue
@@ -779,6 +817,19 @@ mod tests {
             named("an unnamed device", None, 16_000, 1, "i16"),
             "an unnamed device (16000 Hz, 1 ch, i16)"
         );
+    }
+
+    #[test]
+    fn a_refused_microphone_says_where_it_is_changed() {
+        // A Mac keeps its consent in System Settings, which the words name.
+        let mac = refused(true);
+        for place in ["System Settings", "Privacy & Security", "Microphone"] {
+            assert!(mac.contains(place), "{mac}");
+        }
+        // Elsewhere there is no such place to name, and none is.
+        let elsewhere = refused(false);
+        assert!(!elsewhere.contains("System Settings"), "{elsewhere}");
+        assert!(elsewhere.contains("refused"), "{elsewhere}");
     }
 
     #[test]

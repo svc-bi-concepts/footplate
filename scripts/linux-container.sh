@@ -48,7 +48,9 @@ linux_provision() {
     # build to a directory in the target volume, so a build never dirties
     # the checkout it builds.
     # Missing tools are installed: the build's (cc, the libraries gpui
-    # builds against) and the caller's extra ones.
+    # builds against, and ALSA's for the voice session's audio, which the
+    # binary is linked to: libasound2-dev brings libasound.so.2 to run it)
+    # and the caller's extra ones.
     missing=false
     for bin in cc cargo $extra_bins; do
         have "$name" "$bin" || missing=true
@@ -57,7 +59,7 @@ linux_provision() {
         docker exec "$name" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             build-essential curl ca-certificates pkg-config \
             libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libxcb1-dev libx11-dev libvulkan-dev '"$extra_pkgs"' >/tmp/apt.log 2>&1 || { tail -n 20 /tmp/apt.log >&2; exit 1; }' >&2
+            libwayland-dev libxcb1-dev libx11-dev libvulkan-dev libasound2-dev '"$extra_pkgs"' >/tmp/apt.log 2>&1 || { tail -n 20 /tmp/apt.log >&2; exit 1; }' >&2
     fi
     if ! docker exec "$name" sh -c 'id shot' >/dev/null 2>&1; then
         docker exec "$name" useradd -m -s /bin/bash shot

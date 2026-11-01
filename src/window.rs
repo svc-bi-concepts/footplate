@@ -1326,7 +1326,7 @@ mod tests {
     use crate::session::Update;
     use crate::settings::{Notify, Section};
     use crate::theme::Look;
-    use crate::voice::tests::{SocketLive, live_socket};
+    use crate::voice::stand_in::{SocketLive, live_socket};
     use crate::voice::{self, Start};
     use crate::yard;
     use gpui::{
@@ -11176,6 +11176,9 @@ yardr.dev
         open: Arc<AtomicUsize>,
         mics: Arc<Mutex<Vec<voice::Mic>>>,
         order: Arc<Mutex<Vec<&'static str>>>,
+        /// The words the devices refuse to open with, where a test has the
+        /// system say no to the microphone.
+        refuse: Arc<Mutex<Option<String>>>,
         /// How far on the clock is: the window's time is the real time and
         /// this.
         later: Rc<Cell<Duration>>,
@@ -11215,6 +11218,7 @@ yardr.dev
                 open: Arc::default(),
                 mics: Arc::default(),
                 order: Arc::default(),
+                refuse: Arc::default(),
                 later: Rc::default(),
                 hidden: Rc::default(),
             }
@@ -11226,6 +11230,7 @@ yardr.dev
             let current: Arc<Mutex<Option<Arc<Live>>>> = Arc::default();
             let (open, mics, order) = (self.open.clone(), self.mics.clone(), self.order.clone());
             let (later, hidden) = (self.later.clone(), self.hidden.clone());
+            let refuse = self.refuse.clone();
             let seen = current.clone();
             view.update(cx, |v, _| {
                 v.means.voice = Rc::new(move |on, _, with, tell| {
@@ -11256,6 +11261,9 @@ yardr.dev
                     started
                 });
                 v.means.devices = Arc::new(move |mic, _| {
+                    if let Some(words) = refuse.lock().unwrap().clone() {
+                        return Err(words);
+                    }
                     mics.lock().unwrap().push(mic);
                     open.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::new(Plugged {
@@ -11688,8 +11696,10 @@ yardr.dev
 
     /// A session that cannot be made says why beside the button, in the
     /// words of whoever refused it, and no session stands: the keeper's own
-    /// words where no key is kept, OpenAI's where it refuses the key. It is
-    /// never tried again unasked; a new tap is a new start.
+    /// words where no key is kept, OpenAI's where it refuses the key, the
+    /// devices' where the system says no to the microphone, which the Voice
+    /// section says too. It is never tried again unasked; a new tap is a new
+    /// start.
     #[gpui::test]
     fn a_refusal_to_start_stands_beside_the_button_in_its_own_words_and_no_session_stands(
         cx: &mut TestAppContext,
@@ -11713,6 +11723,15 @@ yardr.dev
         voicing.stand_in(&view, cx);
         let refusal =
             |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.voice_refusal.clone());
+
+        // Nothing is refused yet, so the Voice section has nothing of it to
+        // say. (Read before any refusal is drawn: a drawn element's bounds
+        // never clear.)
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section voice");
+        assert!(drawn(cx, "voice key"));
+        assert!(!drawn(cx, "voice refused"));
+        cx.simulate_keystrokes("escape");
 
         // No key kept: the keeper's words, as they are.
         let none = "There is no voice key: nothing is kept. Type your OpenAI key in the settings' Voice section, or set FOOTPLATE_OPENAI_KEY.";
@@ -11754,6 +11773,33 @@ yardr.dev
         assert_eq!(voicing.lives.borrow().len(), 2);
         click_on(cx, "voice button");
         wait_hung_up(&view, &voicing, &live, 0, cx);
+
+        // The system's no to the microphone: the devices refuse as the
+        // session stands, with words that say where that is changed. The
+        // session ends at once and no devices stand; the words are shown as
+        // they are beside the button, and in the Voice section, which
+        // says it where a person who refused the prompt looks.
+        let no = "the microphone may not be used: allow Footplate in System Settings, Privacy & Security, Microphone, and try again";
+        *voicing.refuse.lock().unwrap() = Some(no.to_string());
+        click_on(cx, "voice button");
+        wait(cx, "the devices' refusal", |cx| {
+            refusal(cx).as_deref() == Some(no)
+        });
+        assert!(!voice_stands(&view, cx));
+        assert_eq!(voice_words(&view, cx), "Voice");
+        assert!(drawn(cx, "voice refusal"));
+        assert_eq!(voicing.open.load(Ordering::SeqCst), 0);
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section voice");
+        assert!(drawn(cx, "voice refused"));
+        cx.simulate_keystrokes("escape");
+        // Allowed in System Settings, the next tap is a new start, and the
+        // words go.
+        *voicing.refuse.lock().unwrap() = None;
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(refusal(cx), None);
+        click_on(cx, "voice button");
+        wait_hung_up(&view, &voicing, &live, 1, cx);
 
         // With voice off the button is not offered, and a stale tap
         // starts nothing and reads no key.
