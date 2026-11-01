@@ -55,12 +55,100 @@ minute or two (cpal and its Apple bindings). To build once and run many times:
   `session.closed`, which carries the final usage). A session costs $0.05 a
   minute; the log shows the cost.
 
-Three checks to run first. They need no key and no microphone, and they read no
-key file:
+Four checks to run first. They need no key, they open no microphone (so no
+consent prompt), and they read no key file:
 
-    cargo run --release --locked -- --rehearse       # a whole session against a stand-in, ~3 s
-    cargo run --release --locked -- --devices        # your microphone and speaker, what cpal offers
+    cargo run --release --locked -- --rehearse       # a whole session against a stand-in, ~4 s
+    cargo run --release --locked -- --devices        # every microphone and speaker, the defaults marked
     cargo run --release --locked -- --probe          # reaches api.openai.com with no key; expects a 401
+    cargo run --release --locked -- --speaker-test   # one second of tone through the default speaker
+
+`--speaker-test` is the one that makes a sound: 440 Hz for a second, a little
+under the volume speech is played at, by the same playback path a session uses,
+on the speaker named in its first line. If you hear it, the speaker path works,
+and a session with no sound is the model's or the microphone's. If you do not,
+no session will be heard: look at the device it names (System Settings, Sound,
+Output), its volume and mute, and whether a headset is the default.
+`--devices` names each device with the host's id for it (on a Mac its UID,
+`coreaudio:BuiltInSpeakerDevice`), which tells the real device behind a generic
+name, and the first line of a session's log (`DEVICES`) says the same.
+
+## If a session gives no sound and no words
+
+The first live run (a plain session, 33 s, on a Mac) was accepted and gave
+nothing: no error, no transcript in either direction, no delegation, and the
+level gate never fell quiet. What OpenAI's pages settle about that (read 1 Nov,
+developers.openai.com/api/reference/resources/live/primary-websocket.md and
+api/docs/guides/{live-conversations,voice-websockets}.md), and what they do not:
+
+- **Nothing in `session.start` is missing.** The page's session has `model`,
+  `audio` (`format`, `output.voice`), `client` (a WebRTC frontend's
+  permissions), `delegation`, `input`, `instructions`, `store` and `triggers`,
+  and no setting for transcripts: they come as
+  `session.input_transcript.delta` and `session.output_transcript.delta`
+  "for intervals that contain text". Instructions are optional ("Omitted or
+  blank instructions use server defaults"). The harness waits for
+  `session.started` before it sends audio and sends the microphone's audio
+  without a break, silence included, as the page asks.
+- **The model does not speak first.** "Startup instructions can improve
+  greeting behavior, but do not guarantee that the model will speak." A plain
+  session is silent until it hears you, or is given something to say.
+- **The stream runs on through its silences.** The page does not say so; the
+  run's own numbers do: 32660 ms of audio at the pace of the clock in a 33 s
+  session in which the model said nothing was padding, not speech. The harness
+  used to take every delta for the model speaking; it now sets audio below
+  -50 dBFS (`SOUND_DB` in `src/audio.rs`, a guess) apart as padding, and the
+  acknowledgement and interruption figures read speech only.
+- **What only a live run can settle:** whether that padding is digital zeros or
+  something quiet, whether the microphone's audio reached the model as speech
+  (the first run's level gate says something loud was heard; no level says what),
+  and whether the model hears you and answers. The levels below are for that.
+
+What to run next, in this order, and stop at the first that does not do what it
+says:
+
+1. `--speaker-test` (above): do you hear the tone? No: fix the speaker first.
+2. `--devices` (above): are the microphone and speaker the ones you mean? (A
+   headset that is the default for one and not the other, or a monitor's
+   speakers, are usual.)
+3. A plain session of about a minute (`cargo run --release --locked`). When the
+   `SESSION` lines show, **type a line and press Enter**, for instance
+   `Say hello, and say that you can hear me.` With no delegation a typed line
+   goes out as `session.commentary.append` with `delegation_id: null`, which is
+   the page's own way to make the model speak ("Greet before the caller
+   speaks"), and it needs no microphone. Then speak. Read the `SYNC` lines as
+   below, and look for `SAID` (the model's words), `IN` (yours) and any `WARN`.
+4. Send back the `voice-harness-*.log` it wrote, after reading it: it carries
+   your words.
+
+### Reading the levels
+
+Every `SYNC` line (every 15 s) ends with two levels for the interval since the
+last: `microphone this interval` and `model audio this interval`; the `SUMMARY`
+has the same for the whole session, and typing `/status` prints them so far,
+without waiting for the next `SYNC`. A level is `rms X dBFS, peak Y dBFS`: the
+average loudness of every sample and the highest one, 0 being full scale. A
+voice at a good microphone is around -30 to -20 rms with peaks above -15; a
+quiet room is below -50. `no audio` means none arrived in the interval, and
+`digital silence (every sample exactly 0)` means every sample was zero, which
+nothing alive produces.
+
+| Microphone says | It means | Do |
+| --- | --- | --- |
+| `digital silence` | The system gives the program zeros: consent refused (a `WARN` after 3 s says so), the input muted, or the wrong input | System Settings, Privacy & Security, Microphone: allow the terminal; check `DEVICES` |
+| rms and peak within 2 or 3 dB, gate open the whole interval | A flat signal, not a voice: a DC offset, a hum, or a clipped input | Another input; a headset |
+| rms above -35, gate open nearly all the interval | A noisy room, or you talking without a pause; the gate (-35) never falls quiet | `cargo run --release --locked -- --vad-db -25`; a quieter room; a headset |
+| rms from -60 (an interval of room noise) to -30 (you spoke for part of it), peaks above -20 when you spoke, gate open only while you speak | A working microphone | If the model still says nothing, it is the next table |
+
+| Model audio says | It means |
+| --- | --- |
+| `digital silence`, or nothing above the speech floor | The stream is padding and the model said nothing. With a working microphone and a typed line that got no speech either, send the log back: the model is not answering |
+| low but not zero (rms -70, say), nothing above the floor | Padding with noise in it: the floor (`SOUND_DB`) may be wrong, or the model said nothing |
+| speech-like (rms -30 to -20, peak -15 to -5), some ms above the floor | The model spoke. If you heard nothing, the speaker path is the trouble (`--speaker-test`) |
+
+A model that speaks (words on `SAID` lines, ms above the floor) while no `IN`
+line ever shows your words, with a microphone that reads as a voice, is the
+model not hearing you: send the log back.
 
 ## What to do, and what each run settles
 
@@ -108,18 +196,28 @@ reading them: they carry your words.
 
 ## The log's lines
 
+    DEVICES    the microphone and speaker in use: name, the host's id, format
     START      what was asked of the session (delegation, delay, rate, store false)
-    SESSION    started; the id; expires_at and the seconds it gives the session
+    SESSION    started; the id; expires_at and the seconds it gives the session; then
+               what the server resolved it as (audio format and rate, voice, delegation)
+    WARN       the audio came back resolved as other than the PCM the harness sends and
+               plays; or the microphone has given exact silence for 3 s
     IN         your words as the transcript grows (caption), with audio sent and played
     DELEGATION the delegation and its place on the session's timeline; TASK: its words
     ACK-SPEECH what the model said before the answer (the automatic acknowledgement)
     ANSWER     what was sent for a delegation, typed or --auto-answer; APPEND-OK: its acknowledgement
     SPOKEN     what the model then said; COMPARE: typed and spoken side by side
+    SAID       what the model said that answers no delegation and is no acknowledgement
+    SPEECH     the level gate heard you begin to speak, or stop
     INTERRUPT  you spoke over the model: queued ahead, dropped, the server's last audio, time to silence
     ACK        per delegation, at the end: spoke before the delay / cancelled / nothing
-    SYNC       every 15 s: audio sent, received and played; the caption timeline against the clock
+    SYNC       every 15 s: audio sent, received and played; the caption timeline against the
+               clock; the microphone's level and the model's audio level for the interval
+               (rms and peak in dBFS, `digital silence`, or `no audio`), with how long the
+               level gate was open and how much of the model's audio was above the speech floor
     ECHO?      (on IN) the microphone heard the model's own words
-    SUMMARY    counts, the session's limit, the three drifts, each interruption
+    SUMMARY    counts, each direction's level over the whole session, the session's limit,
+               the three drifts, each interruption
     EVENT/NOTE/ERROR  anything the harness did not expect, shortened; ERROR is the server's
 
 A rehearsal's log, for the shape (all of it from the stand-in, none from OpenAI):
@@ -134,12 +232,19 @@ A rehearsal's log, for the shape (all of it from the stand-in, none from OpenAI)
     [   2.245s] ACK       d1 spoke 905 ms after the delegation: at or after the 800 ms delay
     [   2.245s] ACK       d2 an append at 52 ms, inside the 800 ms delay, and no speech came first: CANCELLED
 
+and two of its `SYNC` lines (the stand-in's stream runs on in silence between
+its speech, as the real one seems to; the rehearsal's SYNC is every second):
+
+    [   1.013s] SYNC      1 s in: audio sent 980 ms; received 1000 ms, played 1000 ms; caption timeline vs wall -1 ms; microphone this interval: digital silence (every sample exactly 0); model audio this interval: digital silence (every sample exactly 0)
+    [   2.043s] SYNC      2 s in: audio sent 1980 ms; received 2480 ms, played 2000 ms; caption timeline vs wall -1 ms; microphone this interval: rms -25.2 dBFS, peak -14.7 dBFS (level gate open 420 of 1000 ms); model audio this interval: rms -24.2 dBFS, peak -20.8 dBFS (1340 of 1480 ms above the -50 dBFS speech floor)
+
 ## Options
 
 `--help` lists them all: `--counterpart`, `--ack-delay-ms`, `--quiet-on-delegation`,
 `--barge-in`, `--holdoff-ms`, `--vad-db` (the level gate, -35 dBFS), `--auto-answer
 MS:TEXT`, `--stop-after SECS`, `--instructions FILE`, `--log FILE`, `--url`
-(for `--probe`; live sessions are pinned to OpenAI's endpoint).
+(for `--probe`; live sessions are pinned to OpenAI's endpoint), and the keyless
+`--rehearse`, `--devices [--play-silence]`, `--probe` and `--speaker-test`.
 
 ## What was and was not tried before this was handed over
 
@@ -163,3 +268,19 @@ home of its own. It gave the same refusals, found a key in the file, and ran
 before, with a `voice.key` beside that any read would refuse. Not tried: a key
 typed into a running footplate window, and a live session on a key read from
 the file.
+
+The first live run's silence was then looked into (bead footplate-3rbp), again
+with no key, no microphone and no live session. Tried: OpenAI's pages read
+against the `session.start` and first events the harness sends and reads (the
+section above). `cargo test --locked` holds, against the stand-in (which now
+runs its stream on in silence between its speech, as the real one seems to), the
+levels of loud and of silent audio in both directions on the `SYNC` lines and in
+the summary, the queue's setting padding apart from speech, the acknowledgement
+and the interruption read from speech and not from padding, and what
+`session.started` resolved. `--speaker-test` ran on a Mac mini's speaker under
+`env -i` with a home of its own whose `voice.key` any read would refuse: it
+named the speaker, the speaker's callback took the whole tone, and no file was
+read, where the same environment in live mode was refused at the file. Not
+tried: a microphone, a real session, and whether the tone was *heard*. So why
+the first run gave nothing is not known; the next run's levels are meant to
+show it.

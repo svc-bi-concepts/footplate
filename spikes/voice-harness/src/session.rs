@@ -216,6 +216,33 @@ pub fn slope_per_min(samples: &[(f64, f64)]) -> Option<f64> {
     Some(num / den * 60.0)
 }
 
+/// The microphone's level for a log line, with how long the level gate was
+/// open in it: a gate that never closes is a noisy room or someone talking.
+fn mic_words(level: &audio::Level) -> String {
+    if level.samples == 0 || level.is_digital_silence() {
+        return level.to_string();
+    }
+    format!(
+        "{level} (level gate open {} of {} ms)",
+        level.marked_ms,
+        audio::samples_ms(level.samples)
+    )
+}
+
+/// The model's audio level for a log line, with how much of it was above the
+/// speech floor: the rest is the server's padding.
+fn model_words(level: &audio::Level) -> String {
+    if level.samples == 0 || level.is_digital_silence() {
+        return level.to_string();
+    }
+    format!(
+        "{level} ({} of {} ms above the {} dBFS speech floor)",
+        level.marked_ms,
+        audio::samples_ms(level.samples),
+        audio::SOUND_DB
+    )
+}
+
 fn series_words(name: &str, samples: &[(f64, f64)]) -> String {
     let Some(first) = samples.first() else {
         return format!("{name}: no samples");
@@ -285,6 +312,9 @@ pub struct Report {
     pub timeline_vs_wall: Vec<(f64, f64)>,
     pub input_lag: Vec<(f64, f64)>,
     pub output_lead: Vec<(f64, f64)>,
+    /// The level of the microphone's audio and of the model's over the whole session.
+    pub mic_level: Option<audio::Level>,
+    pub model_level: Option<audio::Level>,
     pub finished_cleanly: bool,
 }
 
@@ -326,6 +356,28 @@ struct Interrupt {
     /// a gap of `TAIL_GAP` ends the burst, and later audio is a new answer.
     last_delta: Option<Instant>,
     tail_closed: bool,
+}
+
+impl Interrupt {
+    /// Audio of `ms` came from the server at `at`. Only speech counts: the
+    /// stream goes on in padding, which would keep the tail open for as long as
+    /// the interruption is watched.
+    fn heard(&mut self, at: Instant, ms: u64, speech: bool, held_off: bool) {
+        if !speech {
+            return;
+        }
+        if !self.tail_closed {
+            let since = self.last_delta.unwrap_or(self.first_loud);
+            if at.duration_since(since) > TAIL_GAP {
+                self.tail_closed = true;
+            } else {
+                self.last_delta = Some(at);
+            }
+        }
+        if held_off {
+            self.discarded_ms += ms;
+        }
+    }
 }
 
 /// A pause this long in the server's audio ends what it was still saying when
@@ -438,6 +490,9 @@ struct State {
     in_sent_ms: u64,
     vad: Vad,
     speaking: bool,
+    /// What each direction measured, for the SYNC lines and the summary.
+    mic_meter: audio::Meter,
+    rx_meter: audio::Meter,
     /// Chunks in a row that were exact digital silence, and whether that was said.
     zero_run: u32,
     warned_zero: bool,
@@ -467,6 +522,8 @@ pub fn run(cfg: Config, io: Io) -> Result<Report, String> {
         in_sent_ms: 0,
         vad,
         speaking: false,
+        mic_meter: audio::Meter::default(),
+        rx_meter: audio::Meter::default(),
         zero_run: 0,
         warned_zero: false,
         interrupt: None,
@@ -577,7 +634,11 @@ impl State {
 
     fn on_server(&mut self, at: Instant, server: Server) -> Option<String> {
         match server {
-            Server::Started { id, expires_at } => {
+            Server::Started {
+                id,
+                expires_at,
+                resolved,
+            } => {
                 self.started = Some(at);
                 self.report.session_id = Some(id.clone());
                 let now = SystemTime::now()
@@ -596,6 +657,13 @@ impl State {
                 self.io
                     .log
                     .line("SESSION", &format!("started, id {id}; {limit}"));
+                self.io.log.line(
+                    "SESSION",
+                    &format!("the server resolved it as: {}", resolved.words()),
+                );
+                if let Some(why) = resolved.audio_differs(audio::RATE) {
+                    self.io.log.line("WARN", &why);
+                }
             }
             Server::InputTranscript {
                 text,
@@ -609,24 +677,20 @@ impl State {
             } => self.on_output_text(at, text, start_ms, end_ms),
             Server::OutputAudio(pcm) => {
                 let ms = audio::samples_ms(pcm.len() as u64);
+                // The server's stream runs on through its silences, so audio
+                // arriving is not the model speaking: only audio above the floor is.
+                let speech = audio::has_sound(&pcm);
+                self.rx_meter.add(&pcm, speech);
                 let held_off = self.discard_until.is_some_and(|until| at < until);
                 if let Some(interrupt) = self.interrupt.as_mut() {
-                    if !interrupt.tail_closed {
-                        let since = interrupt.last_delta.unwrap_or(interrupt.first_loud);
-                        if at.duration_since(since) > TAIL_GAP {
-                            interrupt.tail_closed = true;
-                        } else {
-                            interrupt.last_delta = Some(at);
-                        }
-                    }
-                    if held_off {
-                        interrupt.discarded_ms += ms;
-                    }
+                    interrupt.heard(at, ms, speech, held_off);
                 }
                 if !held_off {
                     self.io.queue.push(&pcm);
                 }
-                self.speech_began(at);
+                if speech {
+                    self.speech_began(at);
+                }
             }
             Server::Delegation {
                 id,
@@ -766,7 +830,8 @@ impl State {
             || self.io.queue.stats().queued_ms > 0
     }
 
-    /// The model began to speak (audio or words), for the acknowledgement.
+    /// The model began to speak (audio above the floor, or words), for the
+    /// acknowledgement.
     fn speech_began(&mut self, at: Instant) {
         for d in self.delegations.iter_mut() {
             if d.first_speech.is_none() && d.first_append.is_none() && d.answer.is_none() {
@@ -998,15 +1063,18 @@ impl State {
         self.io.log.line(
             "STATUS",
             &format!(
-                "{:.0} s in; {} delegations ({} unanswered); sent {} ms of audio; received {} ms, played {} ms, queued {} ms, dropped {} ms",
+                "{:.0} s in; {} delegations ({} unanswered); sent {} ms of audio; received {} ms ({} ms of it speech), played {} ms, queued {} ms, dropped {} ms; levels so far: microphone {}; model audio {}",
                 self.secs(),
                 self.delegations.len(),
                 self.delegations.iter().filter(|d| d.answer.is_none()).count(),
                 self.in_sent_ms,
                 stats.rx_ms,
+                stats.speech_rx_ms,
                 stats.played_ms,
                 stats.queued_ms,
-                stats.dropped_ms
+                stats.dropped_ms,
+                mic_words(&self.mic_meter.overall()),
+                model_words(&self.rx_meter.overall())
             ),
         );
     }
@@ -1077,6 +1145,7 @@ impl State {
             }
             None => {}
         }
+        self.mic_meter.add(&chunk, self.speaking);
         self.send(live::input_audio_append(&chunk));
     }
 
@@ -1120,15 +1189,19 @@ impl State {
         if self.started.is_some() && now.duration_since(self.last_sync) >= self.cfg.sync_every {
             self.last_sync = now;
             let stats = self.io.queue.stats();
+            let mic = self.mic_meter.take_interval();
+            let model = self.rx_meter.take_interval();
             self.io.log.line(
                 "SYNC",
                 &format!(
-                    "{:.0} s in: audio sent {} ms; received {} ms, played {} ms; caption timeline vs wall {}",
+                    "{:.0} s in: audio sent {} ms; received {} ms, played {} ms; caption timeline vs wall {}; microphone this interval: {}; model audio this interval: {}",
                     self.secs(),
                     self.in_sent_ms,
                     stats.rx_ms,
                     stats.played_ms,
-                    self.report.timeline_vs_wall.last().map(|s| format!("{:+.0} ms", s.1)).unwrap_or_else(|| "(no caption yet)".into())
+                    self.report.timeline_vs_wall.last().map(|s| format!("{:+.0} ms", s.1)).unwrap_or_else(|| "(no caption yet)".into()),
+                    mic_words(&mic),
+                    model_words(&model)
                 ),
             );
         }
@@ -1173,6 +1246,17 @@ impl State {
             "audio: sent {} chunks ({} ms); model audio received {} ms, played {} ms, dropped {} ms",
             self.report.chunks_sent, self.in_sent_ms, stats.rx_ms, stats.played_ms, stats.dropped_ms
         ));
+        let (mic, model) = (self.mic_meter.overall(), self.rx_meter.overall());
+        log.line(
+            "SUMMARY",
+            &format!(
+                "levels over the whole session: microphone {}; model audio {}",
+                mic_words(&mic),
+                model_words(&model)
+            ),
+        );
+        self.report.mic_level = Some(mic);
+        self.report.model_level = Some(model);
         if let (Some(limit), Some(seconds)) = (self.report.limit_secs, self.report.usage_seconds) {
             log.line("SUMMARY", &format!("the session was given {limit} s at its start; {seconds:.1} s of voice used (${:.3})", seconds / 60.0 * 0.05));
         }
@@ -1241,6 +1325,41 @@ mod tests {
             Ack::NoneBeforeAppend { append_ms: 5000 }
         );
         assert_eq!(classify_ack(800, None, None), Ack::Pending);
+    }
+
+    #[test]
+    fn padding_from_the_server_is_no_part_of_what_it_went_on_saying() {
+        let began = Instant::now();
+        let at = |ms: u64| began + Duration::from_millis(ms);
+        let new = || Interrupt {
+            first_loud: began,
+            queued_ms: 0,
+            dropped_ms: None,
+            discarded_ms: 0,
+            last_delta: None,
+            tail_closed: false,
+        };
+        // Speech the server was still sending when the person began to speak
+        // is the tail of what it said; the silence that follows, at the pace
+        // of the clock, is not, however long it goes on.
+        let mut interrupt = new();
+        interrupt.heard(at(100), 20, true, false);
+        interrupt.heard(at(300), 20, true, false);
+        for ms in (320..2000).step_by(20) {
+            interrupt.heard(at(ms), 20, false, false);
+        }
+        assert_eq!(interrupt.last_delta, Some(at(300)));
+        assert!(!interrupt.tail_closed);
+        // Speech after a pause longer than the gap is a new answer.
+        interrupt.heard(at(2000), 20, true, false);
+        assert!(interrupt.tail_closed);
+        assert_eq!(interrupt.last_delta, Some(at(300)));
+        // Of what a holdoff threw away, only the speech is counted.
+        let mut held = new();
+        held.heard(at(50), 480, false, true);
+        assert_eq!(held.discarded_ms, 0);
+        held.heard(at(60), 20, true, true);
+        assert_eq!(held.discarded_ms, 20);
     }
 
     #[test]

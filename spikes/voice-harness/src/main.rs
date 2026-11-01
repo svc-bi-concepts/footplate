@@ -32,8 +32,8 @@ const HELP: &str = "voice-harness: a GPT-Live voice session with a typed yard an
 
 The key is the one typed in footplate's Settings, Voice, which footplate keeps in
 voice.key beside its settings.json. A nonempty FOOTPLATE_OPENAI_KEY, after
-trimming, is the key instead, and the file is not read. --rehearse, --probe and
---devices ask for no key and read no file.
+trimming, is the key instead, and the file is not read. --rehearse, --probe,
+--devices and --speaker-test ask for no key and read no file.
 
 Speak to the model. When it hands a request to the yard the log shows
 DELEGATION and the task taken from what you said; type the yard's answer on a
@@ -59,8 +59,12 @@ options:
   --rehearse              no key, no network: a session against the stand-in
   --probe                 no key: connect to the url and show how it refuses
   --devices [--play-silence]
-                          show the default microphone and speaker; with
-                          --play-silence a second of silence through the speaker
+                          show the default microphone and speaker, and every
+                          device there is; with --play-silence a second of
+                          silence through the speaker
+  --speaker-test          no key, no microphone: a one-second tone through the
+                          default speaker, to tell a dead speaker path from a
+                          model that says nothing
 ";
 
 fn fail(why: impl std::fmt::Display) -> ! {
@@ -83,6 +87,7 @@ struct Args {
     probe: bool,
     devices: bool,
     play_silence: bool,
+    speaker_test: bool,
 }
 
 /// Keep the project key on the one endpoint this harness is meant to call.
@@ -103,6 +108,7 @@ fn parse_args() -> Args {
         probe: false,
         devices: false,
         play_silence: false,
+        speaker_test: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -165,6 +171,7 @@ fn parse_args() -> Args {
             "--probe" => args.probe = true,
             "--devices" => args.devices = true,
             "--play-silence" => args.play_silence = true,
+            "--speaker-test" => args.speaker_test = true,
             other => fail(format!("{other} is not an option (--help lists them)")),
         }
     }
@@ -196,6 +203,20 @@ fn main() {
         #[cfg(feature = "device")]
         {
             print!("{}", audio::device::probe(args.play_silence));
+            return;
+        }
+        #[cfg(not(feature = "device"))]
+        fail("this build has no audio devices (the `device` feature is off)");
+    }
+    if args.speaker_test {
+        // Before the key is read, like the other keyless modes: it opens the
+        // speaker alone, so it asks neither for a key nor for the microphone.
+        #[cfg(feature = "device")]
+        {
+            match audio::device::speaker_test() {
+                Ok(words) => print!("{words}"),
+                Err(why) => fail(why),
+            }
             return;
         }
         #[cfg(not(feature = "device"))]

@@ -9,8 +9,12 @@
 //! fragmented message with a ping between its fragments, an acknowledgement
 //! spoken 900 ms later unless an append came first, the answer spoken as a
 //! paraphrase with audio sent ahead of real time, speech that stops when the
-//! person's voice comes in, a big message, a ping, and a close. It does not
-//! pretend to be the model: what it says is fixed.
+//! person's voice comes in, a big message, a ping, and a close. Between its
+//! speech the audio goes on in silence at the pace of the clock, as the first
+//! live run showed the real server's does (32 s of audio in a 33 s session in
+//! which the model said nothing); `pad_silence` off is the stream with the
+//! silences left out. It does not pretend to be the model: what it says is
+//! fixed.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -38,6 +42,9 @@ pub struct Script {
     pub answer_audio_ms: u64,
     /// How far ahead of real time the answer's audio is sent.
     pub lead_ms: u64,
+    /// Whether the stream goes on in silence, at the pace of the clock, while
+    /// nothing is being said.
+    pub pad_silence: bool,
 }
 
 impl Script {
@@ -50,6 +57,7 @@ impl Script {
                     .into(),
             answer_audio_ms: 2000,
             lead_ms: 600,
+            pad_silence: true,
         }
     }
 }
@@ -101,6 +109,8 @@ struct Server {
     delegations: usize,
     ack_due: Option<Instant>,
     speech: Option<Speech>,
+    /// How much audio has gone out on the stream, speech and padding together.
+    pos_ms: u64,
     loud: usize,
     interrupted: bool,
     asked_first: bool,
@@ -178,6 +188,7 @@ fn serve(listener: TcpListener, script: Script) -> Seen {
         delegations: 0,
         ack_due: None,
         speech: None,
+        pos_ms: 0,
         loud: 0,
         interrupted: false,
         asked_first: false,
@@ -300,7 +311,13 @@ impl Server {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() + 3600)
                     .unwrap_or(0);
-                self.send(json!({"type":"session.started","event_id":"s-start","session":{"id":"live_standin","expires_at":expires,"status":"active","model":"gpt-live-1"}}));
+                // As the page's example resolves it: what was asked, and the default voice.
+                let asked = &event["session"];
+                self.send(json!({"type":"session.started","event_id":"s-start","session":{
+                    "id":"live_standin","expires_at":expires,"status":"active","model":"gpt-live-1",
+                    "audio":{"format":asked["audio"]["format"].clone(),"output":{"voice":"marin"}},
+                    "delegation":asked["delegation"].clone()
+                }}));
                 // A message past 64 KiB, which takes the 64-bit length.
                 self.send(json!({"type":"info","event_id":"s-info","code":"padding","message":"x".repeat(70_000)}));
                 self.frame(true, ws::PING, b"keepalive-1");
@@ -374,6 +391,7 @@ impl Server {
             self.speech = None;
         }
         let Some(speech) = self.speech.as_mut() else {
+            self.pad();
             return;
         };
         let due = (speech.began.elapsed().as_millis() as u64 + speech.lead_ms).min(speech.total_ms);
@@ -381,6 +399,7 @@ impl Server {
         while speech.sent_ms + 20 <= due {
             bytes.extend(tone(20, speech.sent_ms));
             speech.sent_ms += 20;
+            self.pos_ms += 20;
         }
         let done = speech.sent_ms >= speech.total_ms;
         if !bytes.is_empty() {
@@ -391,6 +410,28 @@ impl Server {
             self.speech = None;
         }
     }
+
+    /// While nothing is being said the stream goes on in silence, at the pace
+    /// of the clock: speech that was sent ahead of the clock leaves the stream
+    /// ahead of it, and no silence goes out until the clock has caught up.
+    fn pad(&mut self) {
+        let Some(started) = self.started else {
+            return;
+        };
+        if !self.script.pad_silence {
+            return;
+        }
+        let wall = started.elapsed().as_millis() as u64;
+        let mut bytes = Vec::new();
+        while self.pos_ms + 20 <= wall {
+            bytes.extend(std::iter::repeat_n(0u8, 2 * (RATE as usize / 50)));
+            self.pos_ms += 20;
+        }
+        if !bytes.is_empty() {
+            let delta = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            self.send(json!({"type":"session.output_audio.delta","delta": delta}));
+        }
+    }
 }
 
 /// A whole session against the stand-in, with fake devices and a driver that
@@ -398,9 +439,19 @@ impl Server {
 /// over the answer, answers the correction at once, and ends it. Used by the
 /// test and by `--rehearse`.
 pub fn rehearsal(log: Log, barge_in: bool, key: &str) -> Result<(Report, Seen), String> {
-    let standin = Standin::start(Script::new(key));
+    rehearse(log, barge_in, Script::new(key), Duration::from_secs(1))
+}
+
+/// `rehearsal` with the script and the interval of the SYNC lines chosen.
+pub fn rehearse(
+    log: Log,
+    barge_in: bool,
+    script: Script,
+    sync_every: Duration,
+) -> Result<(Report, Seen), String> {
+    let bearer = format!("Bearer {}", script.key);
+    let standin = Standin::start(script);
     let url = ws::Url::parse(&standin.url).map_err(|e| e.to_string())?;
-    let bearer = format!("Bearer {key}");
     let conn = ws::Conn::connect(&url, &[("Authorization", bearer.as_str())])
         .map_err(|e| e.to_string())?;
     let (tx, rx) = mpsc::channel();
@@ -428,10 +479,11 @@ pub fn rehearsal(log: Log, barge_in: bool, key: &str) -> Result<(Report, Seen), 
                 true
             };
             let q = queue.clone();
-            // The acknowledgement of the first delegation is audio arriving.
+            // The acknowledgement of the first delegation is speech arriving:
+            // audio alone is not, the stream goes on in silence.
             if !wait(
                 "the first acknowledgement",
-                Box::new(move || q.stats().rx_ms > 0),
+                Box::new(move || q.stats().speech_rx_ms > 0),
             ) {
                 return;
             }
@@ -442,7 +494,7 @@ pub fn rehearsal(log: Log, barge_in: bool, key: &str) -> Result<(Report, Seen), 
             // The answer's speech is queued: talk over it.
             if !wait(
                 "the answer's speech",
-                Box::new(move || q.stats().rx_ms >= 1300 && q.stats().queued_ms > 100),
+                Box::new(move || q.stats().speech_rx_ms >= 1300 && q.stats().queued_ms > 100),
             ) {
                 return;
             }
@@ -464,6 +516,7 @@ pub fn rehearsal(log: Log, barge_in: bool, key: &str) -> Result<(Report, Seen), 
             thread::sleep(Duration::from_millis(500));
             let _ = tx.send(Msg::Line("Told them to land without it.".into()));
             thread::sleep(Duration::from_millis(1500));
+            let _ = tx.send(Msg::Line("/status".into()));
             let _ = tx.send(Msg::Line("/q".into()));
         })
     };
@@ -471,7 +524,7 @@ pub fn rehearsal(log: Log, barge_in: bool, key: &str) -> Result<(Report, Seen), 
         counterpart: "yardmaster".into(),
         instructions: live::instructions("yardmaster"),
         barge_in,
-        sync_every: Duration::from_secs(1),
+        sync_every,
         ..Config::default()
     };
     let io = Io {
@@ -504,7 +557,15 @@ mod tests {
     #[test]
     fn a_whole_session_is_framed_read_and_logged() {
         let log = Log::memory();
-        let (report, seen) = rehearsal(log.clone(), true, KEY).expect("the session ran");
+        // SYNC lines every 300 ms, so that the silent start and the loud middle
+        // each have one whatever the machine's pace.
+        let (report, seen) = rehearse(
+            log.clone(),
+            true,
+            Script::new(KEY),
+            Duration::from_millis(300),
+        )
+        .expect("the session ran");
         let lines = log.lines();
         let text = lines.join("\n");
 
@@ -635,6 +696,108 @@ mod tests {
                 .is_some_and(|s| (3500..=3600).contains(&s))
         );
         assert!(lines_with(&lines, "SUMMARY").len() >= 6);
+
+        // What the server resolved is said, and said to match what was sent.
+        assert_eq!(
+            lines_with(&lines, "the server resolved it as").len(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.contains("audio audio/pcm at 24000 Hz, voice marin, delegation client"),
+            "{text}"
+        );
+        assert!(!text.contains("the server resolved the audio as"), "{text}");
+
+        // Levels on the SYNC lines, in both directions, silent and loud: the
+        // microphone is silent until the driver speaks, and the server's stream
+        // is padding until the first acknowledgement is spoken. Exact zeros are
+        // said as such, and speech as its RMS and peak.
+        let syncs = lines_with(&lines, "SYNC");
+        let has = |what: &str| syncs.iter().any(|line| line.contains(what));
+        assert!(has("microphone this interval: digital silence"), "{text}");
+        assert!(has("microphone this interval: rms -"), "{text}");
+        assert!(has("model audio this interval: digital silence"), "{text}");
+        assert!(has("model audio this interval: rms -"), "{text}");
+        assert!(has("above the -50 dBFS speech floor"), "{text}");
+        assert!(has("level gate open"), "{text}");
+        // And over the whole session, in the summary and in the report; and so
+        // far, on /status, without waiting for the next SYNC.
+        let levels = lines_with(&lines, "levels over the whole session");
+        assert_eq!(levels.len(), 1, "{text}");
+        let status = lines_with(&lines, "STATUS");
+        assert_eq!(status.len(), 1, "{text}");
+        assert!(
+            status[0].contains("levels so far: microphone rms -")
+                && status[0].contains("; model audio rms -"),
+            "{}",
+            status[0]
+        );
+        let (mic, model) = (report.mic_level.unwrap(), report.model_level.unwrap());
+        assert!(!mic.is_digital_silence() && mic.marked_ms > 0, "{mic:?}");
+        assert!(
+            (mic.peak_db() + 14.7).abs() < 0.2,
+            "the fake microphone speaks at 6000: {mic:?}"
+        );
+        assert!(
+            !model.is_digital_silence() && model.marked_ms > 1000,
+            "{model:?}"
+        );
+        assert!(
+            (model.peak_db() + 20.8).abs() < 0.2,
+            "the stand-in speaks at 3000: {model:?}"
+        );
+        assert!(
+            model.samples > samples_of(model.marked_ms),
+            "padding is in what was received, but is not speech: {model:?}"
+        );
+
+        // The old shape: nothing is sent between the speech. The
+        // acknowledgement and interruption read as they do with padding, and
+        // what is not there says so, not that it was silent.
+        let log = Log::memory();
+        let script = Script {
+            pad_silence: false,
+            ..Script::new(KEY)
+        };
+        let (report, seen) = rehearse(log.clone(), true, script, Duration::from_millis(300))
+            .expect("the session ran");
+        let text = log.lines().join("\n");
+        assert_eq!(seen.protocol_error, None);
+        assert_eq!(report.delegations.len(), 2, "{text}");
+        assert!(
+            matches!(report.delegations[0].ack, Ack::Spoke { early: false, ms } if (800..1500).contains(&ms)),
+            "{:?}",
+            report.delegations[0].ack
+        );
+        assert!(
+            matches!(report.delegations[1].ack, Ack::Cancelled { append_ms } if append_ms < 800),
+            "{:?}",
+            report.delegations[1].ack
+        );
+        assert_eq!(report.interruptions.len(), 1, "{text}");
+        assert!(
+            report.interruptions[0]
+                .stop_took_ms
+                .is_some_and(|ms| ms < 400),
+            "{:?}",
+            report.interruptions[0]
+        );
+        assert!(
+            text.contains("model audio this interval: no audio"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("model audio this interval: digital silence"),
+            "{text}"
+        );
+        let model = report.model_level.unwrap();
+        assert_eq!(model.samples, samples_of(model.marked_ms), "{model:?}");
+    }
+
+    /// The samples in `ms` of audio.
+    fn samples_of(ms: u64) -> u64 {
+        ms * RATE as u64 / 1000
     }
 
     #[test]

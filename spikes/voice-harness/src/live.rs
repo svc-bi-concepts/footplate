@@ -107,12 +107,60 @@ pub fn session_close() -> Value {
     json!({ "type": "session.close", "event_id": "h-close" })
 }
 
+/// What `session.started` says the session came out as ("the resolved session
+/// configuration, including server defaults", the page says): the audio the
+/// harness sends and plays, the voice, and who handles delegations. A server
+/// that resolved the audio otherwise than the harness asked would explain
+/// sound that is the wrong speed or none.
+#[derive(Debug, Default, PartialEq)]
+pub struct Resolved {
+    pub format: Option<String>,
+    pub rate: Option<u64>,
+    pub voice: Option<String>,
+    pub delegation: Option<String>,
+    pub ack_delay_ms: Option<u64>,
+}
+
+impl Resolved {
+    pub fn words(&self) -> String {
+        let said = |value: &Option<String>| value.clone().unwrap_or_else(|| "not given".into());
+        format!(
+            "audio {} at {} Hz, voice {}, delegation {}{}",
+            said(&self.format),
+            self.rate
+                .map_or_else(|| "not given".into(), |rate| rate.to_string()),
+            said(&self.voice),
+            said(&self.delegation),
+            self.ack_delay_ms
+                .map(|ms| format!(" (acknowledgement_delay_ms {ms})"))
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Words for a session whose audio came out other than the PCM at `rate`
+    /// that the harness sends and plays; nothing where it did, or where the
+    /// server said nothing of its audio.
+    pub fn audio_differs(&self, rate: u32) -> Option<String> {
+        match (self.format.as_deref(), self.rate) {
+            (None, None) => None,
+            (Some("audio/pcm"), Some(got)) if got == u64::from(rate) => None,
+            (format, got) => Some(format!(
+                "the server resolved the audio as {} at {} Hz, and the harness sends and plays audio/pcm at {rate} Hz: \
+                 what it hears and says would be at the wrong speed",
+                format.unwrap_or("no format"),
+                got.map_or_else(|| "no".into(), |got| got.to_string()),
+            )),
+        }
+    }
+}
+
 /// What the server says, as far as the harness reads it.
 #[derive(Debug, PartialEq)]
 pub enum Server {
     Started {
         id: String,
         expires_at: Option<i64>,
+        resolved: Resolved,
     },
     InputTranscript {
         text: String,
@@ -156,10 +204,23 @@ pub fn parse(text: &str) -> Result<Server, String> {
     let kind = v["type"].as_str().ok_or("an event with no type")?;
     let string = |value: &Value| value.as_str().unwrap_or_default().to_string();
     let ms = |value: &Value| value.as_u64().unwrap_or_default();
+    // A string as it is, and anything else (a custom voice is an object) as its JSON.
+    let plain = |value: &Value| match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    };
     Ok(match kind {
         "session.started" => Server::Started {
             id: string(&v["session"]["id"]),
             expires_at: v["session"]["expires_at"].as_i64(),
+            resolved: Resolved {
+                format: plain(&v["session"]["audio"]["format"]["type"]),
+                rate: v["session"]["audio"]["format"]["rate"].as_u64(),
+                voice: plain(&v["session"]["audio"]["output"]["voice"]),
+                delegation: plain(&v["session"]["delegation"]["type"]),
+                ack_delay_ms: v["session"]["delegation"]["acknowledgement_delay_ms"].as_u64(),
+            },
         },
         "session.input_transcript.delta" => Server::InputTranscript {
             text: string(&v["delta"]),
@@ -463,8 +524,36 @@ mod tests {
             started,
             Server::Started {
                 id: "live_1".into(),
-                expires_at: Some(1788307200)
+                expires_at: Some(1788307200),
+                resolved: Resolved::default()
             }
+        );
+        // The page's own example of what the server resolved the session as.
+        let Server::Started { resolved, .. } = parse(
+            r#"{"type":"session.started","event_id":"evt_started_001","client_event_id":"evt_start_001","session":{"id":"live_abc123","model":"gpt-live-1","status":"active","expires_at":1788555600,"instructions":"Help.","input":[],"audio":{"format":{"type":"audio/pcm","rate":24000},"output":{"voice":"marin"}},"delegation":{"type":"client","acknowledgement_delay_ms":800}}}"#,
+        )
+        .unwrap() else {
+            panic!("not a started session");
+        };
+        assert_eq!(
+            resolved.words(),
+            "audio audio/pcm at 24000 Hz, voice marin, delegation client (acknowledgement_delay_ms 800)"
+        );
+        assert_eq!(resolved.audio_differs(24000), None);
+        // Audio resolved otherwise than the harness sends and plays is said; silence about it is not.
+        let at_16k = Resolved {
+            rate: Some(16000),
+            ..resolved
+        };
+        assert!(
+            at_16k
+                .audio_differs(24000)
+                .is_some_and(|why| why.contains("audio/pcm at 16000 Hz"))
+        );
+        assert_eq!(Resolved::default().audio_differs(24000), None);
+        assert_eq!(
+            Resolved::default().words(),
+            "audio not given at not given Hz, voice not given, delegation not given"
         );
         assert_eq!(
             parse(r#"{"type":"session.delegation.created","event_id":"e","offset_ms":3600,"delegation":{"id":"del_abc","type":"delegation","target":"client"}}"#).unwrap(),
