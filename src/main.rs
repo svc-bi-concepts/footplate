@@ -42,6 +42,10 @@ mod settings;
 mod setup;
 #[cfg(all(debug_assertions, unix))]
 mod shot;
+// A Linux desktop's: gpui tells nothing of a window out of view there. The
+// rule is plain and its tests run on any system.
+#[cfg(any(target_os = "linux", test))]
+mod shown;
 // A Linux desktop's: its tests name paths of a unix system's, so Windows
 // has neither.
 #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -62,6 +66,7 @@ mod yard;
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, KeyBinding, Menu, MenuItem, WindowBounds,
@@ -225,10 +230,12 @@ fn unhide() {}
 /// asks while it stands (design 3.2: it does not go on under a window that
 /// shows nothing). It says no when it cannot tell: a window covered by
 /// others, or behind another app, still shows. A test's window has stand-ins
-/// for it ([`window`]'s `Means`), so none calls it there.
+/// for it ([`window`]'s `Means`), so none calls it there. `frame` is when
+/// the window last had a frame, for the desktops that tell nothing else of
+/// it; AppKit does.
 #[cfg(target_os = "macos")]
 #[cfg_attr(test, allow(dead_code))]
-fn hidden() -> bool {
+fn hidden(_frame: Instant) -> bool {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
 
@@ -249,11 +256,21 @@ fn hidden() -> bool {
     own.peek().is_some() && own.all(|window| window.isMiniaturized())
 }
 
-/// No other system hides footplate, or tells that its window went to the
-/// dock.
-#[cfg(not(target_os = "macos"))]
+/// On Linux gpui tells of neither either, and what a desktop answers differs
+/// with it: [`shown`] has the rule, and the desktop's word where it has one.
+/// `frame` is all a Wayland compositor says of a window that shows nothing:
+/// that it sends it none.
+#[cfg(target_os = "linux")]
 #[cfg_attr(test, allow(dead_code))]
-fn hidden() -> bool {
+fn hidden(frame: Instant) -> bool {
+    shown::hidden(gpui::guess_compositor(), shown::x11_hidden, frame.elapsed())
+}
+
+/// No other system hides footplate, or tells that its window went to the
+/// dock. Windows has no voice yet (design decision 7).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg_attr(test, allow(dead_code))]
+fn hidden(_frame: Instant) -> bool {
     false
 }
 

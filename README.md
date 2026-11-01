@@ -1694,7 +1694,13 @@ folder. A change is drawn at once and kept for the next start:
   when you tap again, open another conversation or yard, switch voice off,
   hide, minimize or close the window, or when nobody has spoken and
   nothing waits for the yard for the minutes the section's `ends after`
-  line says, five until you choose another. The microphone is open only
+  line says, five until you choose another. On Linux, under X11 the window
+  manager says when the window is minimized. A Wayland compositor says
+  nothing of it, but sends no frames to a window it shows nowhere, so there
+  the session ends when two seconds pass with none, and that is so while
+  other windows cover this one wholly or it stands on a workspace out of
+  view as well: the microphone is off wherever nothing shows, and a talk cut
+  short is one tap to start again. The microphone is open only
   while a session stands: no session, no microphone. On a Mac, macOS asks
   once, the first time a session opens it. Where the system refuses the
   microphone, the section and the head say so in words, and where to change
@@ -1978,6 +1984,7 @@ options have no icon, so the program sees to it when it starts
 | `src/select.rs` | a message's text, drawn as its blocks, and the selection the mouse makes in it |
 | `src/markdown.rs` | the light Markdown a text is drawn with, as plain functions: fenced and inline code, lists one level deep, headings to the third, bold and italic; the rest stays as written |
 | `src/taskbar.rs` | Linux: the desktop entry and the window's icon, for a taskbar |
+| `src/shown.rs` | Linux: whether the window shows, for a voice session that does not go on under one that shows nothing: the rule as plain functions, then the X server's word on a connection of its own |
 | `src/dock.rs` | macOS: the number on the dock's icon, of what waits |
 | `src/titlebar.rs` | the window's title bar: its options for each platform, its measures (the band's height, where the traffic lights end, where a head may begin), and on macOS, where the content reaches up into it, the drag and the double-click on the window's top strip, as plain functions; then AppKit's move of the window, which gpui has no call for |
 | `src/tray.rs` | the item in the Mac's menu bar and in a Linux desktop's tray: what it says and what its icon shows as plain functions, and its menu of the yards |

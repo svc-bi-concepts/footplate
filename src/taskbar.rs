@@ -179,7 +179,7 @@ pub fn show(name: &'static str, icon: &'static [u8]) {
 }
 
 #[cfg(target_os = "linux")]
-mod x11 {
+pub(crate) mod x11 {
     use std::error::Error;
     use std::thread;
     use std::time::Duration;
@@ -239,8 +239,9 @@ mod x11 {
 
     /// The window of class `name` that this process made, wherever a window
     /// manager has put it under the root. A window that goes away while it
-    /// is asked about is no error: it is not ours.
-    fn find(
+    /// is asked about is no error: it is not ours. (`shown` finds its window
+    /// the same way.)
+    pub(crate) fn find(
         connection: &impl Connection,
         root: Window,
         name: &str,

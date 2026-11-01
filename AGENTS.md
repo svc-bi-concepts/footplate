@@ -79,6 +79,14 @@ Platform surface:
 - `src/taskbar.rs`: the Linux desktop entry and window icon; an entry that
   shows in the menu (the archive's `assets/linux/footplate.desktop`, copied
   there) is the person's, and stays.
+- `src/shown.rs`: whether the window shows, on Linux, where gpui tells of
+  neither a minimized window nor a hidden one (macOS asks AppKit, in
+  `src/main.rs`): the rule is a plain function of the compositor, the X
+  server's word and the age of the window's last frame, tested on any system.
+  Under X11 the word is `_NET_WM_STATE_HIDDEN`, read on a connection of its
+  own that is kept; under Wayland the compositor says nothing, so it is the
+  frames a standing voice session has the window stamp (`Means::frame`),
+  and a window that others cover wholly sends none, so it counts as hidden.
 - `src/unlock.rs`: the system's unlock in front of a weighty approval
   (the Mac's LocalAuthentication, Linux's polkit with the action in
   `assets/linux/`), with the reasons as plain functions; where no
@@ -151,9 +159,10 @@ Setup, release and tests:
   its test, and what the stand-in must say for it in `Live` (`src/fake.rs`).
   GPT-Live's events stay in that module; what is outside speaks of speech
   started, a request, an answer to speak and stop.
-- Platform surface (badge, tray, notifications, Linux icon, the Mac's
-  unlock, title bar, log, voice's microphone and speaker): `src/dock.rs`,
-  `src/tray.rs`, `src/notify.rs`, `src/taskbar.rs`, `src/unlock.rs`,
+- Platform surface (badge, tray, notifications, Linux icon, whether the
+  window shows, the Mac's unlock, title bar, log, voice's microphone and
+  speaker): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
+  `src/taskbar.rs`, `src/shown.rs`, `src/unlock.rs`,
   `src/titlebar.rs`, `src/log.rs`, `src/audio.rs`; rules
   stay plain functions, system calls stay behind `cfg`. A test never writes
   the person's own log: `api::say` keeps in the file its test's thread was

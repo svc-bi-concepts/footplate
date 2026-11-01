@@ -1325,6 +1325,7 @@ mod tests {
     };
     use crate::session::Update;
     use crate::settings::{Notify, Section};
+    use crate::shown;
     use crate::theme::Look;
     use crate::voice::stand_in::{SocketLive, live_socket};
     use crate::voice::{self, Start};
@@ -11581,8 +11582,9 @@ yardr.dev
 
     /// The session ends wherever the person leaves the conversation: a
     /// second tap, another conversation, another yard, the switch turned
-    /// off, the window hidden or minimized, or shut, or nobody speaking
-    /// for the settings' minutes while no request waits.
+    /// off, the window hidden or minimized (where a desktop tells nothing of
+    /// that, its frames stopping), or shut, or nobody speaking for the
+    /// settings' minutes while no request waits.
     #[gpui::test]
     fn a_session_ends_wherever_the_person_leaves_the_conversation(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -11691,6 +11693,31 @@ yardr.dev
         assert!(voice_stands(&view, cx), "four minutes since the answer");
         // Five minutes on, the session's own timer ends it.
         voicing.later.set(Duration::from_secs(46 * 60));
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+
+        // A desktop that tells nothing of a window out of view (Wayland) is
+        // read by the window's frames, which a test window has none of: the
+        // clock stands still and the stamp is moved by hand. The last frame
+        // is long past when the session starts, and it stands, for it starts
+        // on a frame of its own; with none for two seconds it ends.
+        let now = std::time::Instant::now();
+        view.update(cx, |v, _| {
+            let frame = v.means.frame.clone();
+            frame.set(now - shown::STALLED * 2);
+            v.means.now = Rc::new(move || now);
+            v.means.hidden = Rc::new(move || {
+                shown::hidden(
+                    "Wayland",
+                    || None,
+                    now.saturating_duration_since(frame.get()),
+                )
+            });
+        });
+        let live = talk_to(&view, &voicing, cx);
+        tick(&view, cx);
+        assert!(voice_stands(&view, cx), "the last frame was long ago");
+        view.update(cx, |v, _| v.means.frame.set(now - shown::STALLED));
         wait_hung_up(&view, &voicing, &live, n, cx);
     }
 

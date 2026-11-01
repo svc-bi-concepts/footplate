@@ -2,6 +2,7 @@
 //! its mail, and the pictures and attachments of both.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,13 +12,15 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, Div, Focusable, FontWeight, Image, ImageFormat, MouseButton, ObjectFit,
-    Pixels, ScrollHandle, SharedString, Window, div, img, prelude::*, px, rems, rgba, white,
+    Pixels, ScrollHandle, SharedString, WeakEntity, Window, div, img, prelude::*, px, rems, rgba,
+    white,
 };
 
 use super::Expanded;
 use super::Footplate;
 use super::ask::ask_preview_head;
 use super::expanded_text_key;
+use super::firstrun::Clock;
 use super::metrics::{
     ATTACHMENT, IMAGE_HEIGHT, IMAGE_MARGIN, LETTER_GUTTER, READING_WIDTH, drawer_fits,
 };
@@ -273,7 +276,49 @@ impl Footplate {
             state: State::Listening,
             meter: String::new(),
         });
+        // A session starts on a window that shows: it starts on a frame of
+        // its own. A stamp as old as the window's last frame would end it at
+        // its first tick under a desktop that is read by them.
+        self.means.frame.set((self.means.now)());
+        self.watch_frames(id, cx);
         cx.notify();
+    }
+
+    /// Stamps `means.frame` at every frame the window has, for as long as
+    /// session `id` stands: a Wayland compositor tells a client nothing of a
+    /// window out of view, but sends it no frames, and `shown` reads that
+    /// from how long ago the stamp is. Registered anew at each frame, as
+    /// gpui runs each registration once, and by the session's id, so that a
+    /// session that came after another is not stamped twice.
+    fn watch_frames(&self, id: u64, cx: &mut Context<Self>) {
+        fn stamp(
+            window: &Window,
+            id: u64,
+            this: WeakEntity<Footplate>,
+            frame: Rc<Cell<Instant>>,
+            now: Clock,
+        ) {
+            window.on_next_frame(move |window, cx| {
+                frame.set(now());
+                let standing = this
+                    .read_with(cx, |this, _| {
+                        this.voice.as_ref().is_some_and(|talk| talk.id == id)
+                    })
+                    .unwrap_or(false);
+                if standing {
+                    stamp(window, id, this, frame, now);
+                }
+            });
+        }
+        let (this, handle) = (cx.weak_entity(), self.handle);
+        let (frame, now) = (self.means.frame.clone(), self.means.now.clone());
+        // Afterwards: the window is not to be had while a key or click that
+        // came through it is still on its way, and the session a yard's answer
+        // starts (the voice shot's) comes with none.
+        cx.defer(move |cx| {
+            // A window that is closed has no frames to stamp.
+            let _ = handle.update(cx, |_, window, _| stamp(window, id, this, frame, now));
+        });
     }
 
     /// What voice session `id` said, or that a moment passed. A session that

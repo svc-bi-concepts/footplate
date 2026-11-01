@@ -12,6 +12,7 @@
 //! the window opens the yardmaster's conversation.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
@@ -96,6 +97,11 @@ pub struct Means {
     pub devices: Plugs,
     pub now: Clock,
     pub hidden: Hidden,
+    /// When the window last had a frame, as a standing voice session keeps
+    /// it (`Footplate::watch_frames`): a Wayland compositor tells a client
+    /// nothing of a window out of view, only that it sends it no frames, and
+    /// `hidden` reads this for that.
+    pub frame: Rc<Cell<Instant>>,
 }
 
 impl Means {
@@ -107,6 +113,7 @@ impl Means {
         let machine = Machine::here();
         #[cfg(test)]
         let machine = Machine::default();
+        let frame = Rc::new(Cell::new(Instant::now()));
         Means {
             yardr: {
                 let machine = machine.clone();
@@ -144,9 +151,13 @@ impl Means {
             devices: Arc::new(|_, _| Ok(Box::new(()) as Box<dyn Any + Send>)),
             now: Rc::new(Instant::now),
             #[cfg(not(test))]
-            hidden: Rc::new(crate::hidden),
+            hidden: {
+                let frame = frame.clone();
+                Rc::new(move || crate::hidden(frame.get()))
+            },
             #[cfg(test)]
             hidden: Rc::new(|| false),
+            frame,
         }
     }
 }
