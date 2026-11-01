@@ -37,6 +37,13 @@ The window, its state and the yard:
   client library.
 - `src/session.rs`: follows one yard on a thread: login, initial state,
   stream, retry.
+- `src/voice.rs`: the voice session's rules, as plain functions and one small
+  book, tested on any system: the request a spoken sentence stands for (the
+  last one, noise tags and greetings cut), which answer the voice is given to
+  speak and under which delegation's id, the queue its speech waits in and
+  drops, the instructions and the state words, and the events of OpenAI's
+  GPT-Live, which this is the one module to speak (no provider trait, no
+  setting). The live socket, its thread and the audio build on these rules.
 - `src/yard.rs`: picks which yard opens (socket or address, token files,
   hosted sessions); tokens live beside the settings, never in them.
 - `src/settings.rs`: what the window keeps between runs, one JSON file in the
@@ -93,8 +100,11 @@ Setup, release and tests:
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for
   screenshots, named by `FOOTPLATE_SHOT`.
 - `src/fake.rs`: a yard for tests (socket or TCP, scripted JSON, tokens and
-  pairing; no TLS), and a stand-in for PostHog's capture (`Posthog`).
-  `Yard::start()` is the socket's on unix and the TCP one's on Windows.
+  pairing; no TLS), a stand-in for PostHog's capture (`Posthog`), and, for
+  tests alone, one for OpenAI's Live socket (`Live`: the server's side of a
+  voice session as events in and out, held to the reference, not to the
+  module that uses it). `Yard::start()` is the socket's on unix and the TCP
+  one's on Windows.
 - `src/fixtures/`: `shot-page.png` and the terminal screens.
 
 ## Where to start
@@ -116,6 +126,10 @@ Setup, release and tests:
 - A first-run step: the command in `src/setup.rs`, the screen in
   `src/window/firstrun.rs`.
 - A setting: `src/settings.rs`, then where it takes effect.
+- A voice rule: a plain function or a `Book` method in `src/voice.rs` with
+  its test, and what the stand-in must say for it in `Live` (`src/fake.rs`).
+  GPT-Live's events stay in that module; what is outside speaks of speech
+  started, a request, an answer to speak and stop.
 - Platform surface (badge, tray, notifications, Linux icon, the Mac's
   unlock, title bar, log): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
   `src/taskbar.rs`, `src/unlock.rs`, `src/titlebar.rs`, `src/log.rs`; rules

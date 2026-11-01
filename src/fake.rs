@@ -6,8 +6,9 @@
 //! gives a token for a code. Windows has no socket, so the yard there is at
 //! its listener alone, and the yard a test starts with, [`Yard::start`], is
 //! that one there: a test that never names its socket runs on both. Beside
-//! the yard, [`Router`] stands for the edge in front of it and [`Posthog`]
-//! for the capture that feedback is sent to.
+//! the yard, [`Router`] stands for the edge in front of it, [`Posthog`]
+//! for the capture that feedback is sent to, and [`Live`] for OpenAI's Live
+//! socket that a voice session talks to (the provider's, not the yard's).
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -1896,6 +1897,360 @@ fn serve_posthog(conn: TcpStream, shared: &PosthogShared) -> io::Result<()> {
     conn.flush()
 }
 
+/// How many bytes of `content` the stand-in takes in one append. The
+/// reference limits an append to 500 tokens and a token is at least a byte,
+/// so a client under this is under that, and one over it is told so.
+#[cfg(test)]
+const LIVE_APPEND_BYTES: usize = 500;
+
+/// What the model says by itself when a delegation is not answered in its
+/// acknowledgement delay (the 'Lemme check.' of runs 3 and 4).
+#[cfg(test)]
+const LIVE_FILLER: &str = "Lemme check.";
+
+/// An append a [`Live`] took.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveAppend {
+    /// `commentary` or `thinking`.
+    pub kind: String,
+    /// The id the client gave it, which the stand-in's acknowledgement names.
+    pub event_id: String,
+    /// The delegation it came under: none for general context.
+    pub delegation_id: Option<String>,
+    pub content: String,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct LiveState {
+    /// Every event the client sent, as JSON, in order.
+    sent: Vec<Value>,
+    /// What the server sends next, as text, in order.
+    said: VecDeque<String>,
+    appends: Vec<LiveAppend>,
+    /// The delegations raised, by the ids the stand-in gave them.
+    delegations: Vec<String>,
+    /// The delegations whose automatic acknowledgement is still to come.
+    unanswered: Vec<String>,
+    expires_at: i64,
+    started: bool,
+    closed: bool,
+    events: u64,
+    /// The speech the server has queued and not sent.
+    audio: VecDeque<Vec<i16>>,
+    dropped: usize,
+}
+
+#[cfg(test)]
+impl LiveState {
+    /// Queues an event of the server's, with an `event_id` of its own.
+    fn say(&mut self, mut event: Value) {
+        self.events += 1;
+        event["event_id"] = serde_json::json!(format!("evt_{}", self.events));
+        self.said.push_back(event.to_string());
+    }
+
+    /// An `error` that names the client's event, where it had an id.
+    fn refuse(&mut self, client_event_id: Option<String>, message: &str) {
+        let mut error = serde_json::json!({
+            "type": "invalid_request_error",
+            "code": "invalid_event",
+            "message": message,
+        });
+        if let Some(id) = client_event_id {
+            error["client_event_id"] = id.into();
+        }
+        self.say(serde_json::json!({ "type": "error", "error": error }));
+    }
+
+    fn start(&mut self, event: &Value, id: Option<String>) {
+        let session = &event["session"];
+        let format = &session["audio"]["format"];
+        let rate = format["rate"].as_u64().unwrap_or(24_000);
+        let delay = session["delegation"]["acknowledgement_delay_ms"]
+            .as_u64()
+            .unwrap_or(0);
+        let problem = if self.started {
+            Some("The session has started already.")
+        } else if !(format.is_null()
+            || (format["type"] == "audio/pcm" && [16_000, 24_000].contains(&rate)))
+        {
+            Some("Audio is PCM at 16000 or 24000 Hz.")
+        } else if session["delegation"]["type"] != "client" {
+            Some("This stand-in delegates to the client alone.")
+        } else if delay > 800 {
+            Some("acknowledgement_delay_ms is 0 to 800.")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return self.refuse(id, problem);
+        }
+        self.started = true;
+        let started = serde_json::json!({
+            "type": "session.started",
+            "client_event_id": id,
+            "session": {
+                "id": "live_fake",
+                "model": "gpt-live-1",
+                "status": "active",
+                "expires_at": self.expires_at,
+                "instructions": session["instructions"],
+                "input": [],
+                "audio": {
+                    "format": { "type": "audio/pcm", "rate": rate },
+                    "output": { "voice": "marin" },
+                },
+                "delegation": { "type": "client", "acknowledgement_delay_ms": delay },
+            },
+        });
+        self.say(started);
+    }
+
+    /// A `session.commentary.append` or `session.thinking.append`, taken as
+    /// the reference has it: `content` (not `text`), a `delegation_id` that is
+    /// there, and null or an id a delegation of this session gave.
+    fn append(&mut self, kind: &str, event: &Value, id: Option<String>) {
+        let content = event["content"].as_str();
+        let delegation = &event["delegation_id"];
+        let problem = if !self.started {
+            Some("The session has not started.")
+        } else if event.get("delegation_id").is_none() {
+            Some("delegation_id is required: null for general context.")
+        } else if !(delegation.is_null() || delegation.is_string()) {
+            Some("delegation_id is a string or null.")
+        } else if delegation
+            .as_str()
+            .is_some_and(|id| !self.delegations.iter().any(|known| known == id))
+        {
+            Some("delegation_id names no delegation of this session.")
+        } else if content.is_none() {
+            Some("content is required: the field is content, not text.")
+        } else if content.is_some_and(|content| content.len() > LIVE_APPEND_BYTES) {
+            Some("content is over 500 tokens.")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return self.refuse(id, problem);
+        }
+        self.appends.push(LiveAppend {
+            kind: kind.to_string(),
+            event_id: id.clone().unwrap_or_default(),
+            delegation_id: delegation.as_str().map(str::to_string),
+            content: content.unwrap_or_default().to_string(),
+        });
+        // Any thinking or commentary append cancels every acknowledgement
+        // still to come, those of other delegations too.
+        self.unanswered.clear();
+        self.say(serde_json::json!({
+            "type": format!("session.{kind}.appended"),
+            "client_event_id": id,
+            "start_ms": 0,
+            "end_ms": 0,
+        }));
+    }
+
+    fn close(&mut self, reason: &str, id: Option<String>) {
+        self.closed = true;
+        self.say(serde_json::json!({
+            "type": "session.closed",
+            "client_event_id": id,
+            "reason": reason,
+            "usage": { "seconds": 1.5 },
+            "session": {},
+        }));
+    }
+}
+
+/// OpenAI's Live socket for the tests: the server's side of one session as
+/// the events that cross it, text for text, with no socket in between (the
+/// WebSocket client is the session's, and has its own tests). The test hands
+/// it what the client sends ([`Live::receive`]), scripts what the server
+/// says ([`Live::person_says`], [`Live::voice_says`], [`Live::delegate`],
+/// [`Live::queue_audio`]) and reads what it says back ([`Live::take`]) and
+/// what it kept ([`Live::sent`], [`Live::appends`]).
+///
+/// It holds a client to the reference and not to the harness: a start in a
+/// rate the socket does not take, an append with `text` for `content`, one
+/// with no `delegation_id`, one under an id no delegation of the session
+/// gave, one over 500 bytes, each is answered with an `error` that names it
+/// by `client_event_id`. A valid append is acknowledged by that id, and
+/// cancels every acknowledgement still to come ([`Live::delay_passes`]). The
+/// speech the server has queued can be dropped, as the server drops it when
+/// the person speaks over it ([`Live::interrupt`]). No yard is asked
+/// anything: this is the provider's, and the yard's fake is never involved.
+#[cfg(test)]
+pub struct Live {
+    state: Mutex<LiveState>,
+}
+
+#[cfg(test)]
+impl Live {
+    pub fn start() -> Live {
+        Live {
+            state: Mutex::new(LiveState {
+                expires_at: 1_788_555_600,
+                ..LiveState::default()
+            }),
+        }
+    }
+
+    /// The moment, in Unix seconds, `session.started` will say the session
+    /// ends.
+    pub fn expires_at(&self, unix: i64) {
+        self.state.lock().unwrap().expires_at = unix;
+    }
+
+    /// An event of the client's, as it sends it. Kept in [`Live::sent`], and
+    /// answered as the server answers it: `session.start` with
+    /// `session.started`, an append with its acknowledgement, `session.close`
+    /// with `session.closed`; what is wrong with it with an `error`. Once the
+    /// session is closed nothing is heard.
+    pub fn receive(&self, event: &str) {
+        let mut state = self.state.lock().unwrap();
+        let Ok(event) = serde_json::from_str::<Value>(event) else {
+            return state.refuse(None, "The event is not JSON.");
+        };
+        state.sent.push(event.clone());
+        if state.closed {
+            return;
+        }
+        let id = event["event_id"].as_str().map(str::to_string);
+        match event["type"].as_str() {
+            Some("session.start") => state.start(&event, id),
+            Some(kind @ ("session.commentary.append" | "session.thinking.append")) => {
+                let kind = kind
+                    .strip_prefix("session.")
+                    .and_then(|kind| kind.strip_suffix(".append"))
+                    .unwrap_or(kind);
+                state.append(kind, &event, id)
+            }
+            // The microphone's audio: heard, and nothing is made of it.
+            Some("session.input_audio.append") => {}
+            Some("session.close") => state.close("close_requested", id),
+            other => state.refuse(id, &format!("Not an event of this stand-in: {other:?}.")),
+        }
+    }
+
+    /// The person's words, a piece of them, from `start_ms` to `end_ms` on
+    /// the session's timeline.
+    pub fn person_says(&self, text: &str, start_ms: u64, end_ms: u64) {
+        self.state.lock().unwrap().say(serde_json::json!({
+            "type": "session.input_transcript.delta",
+            "delta": text,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        }));
+    }
+
+    /// The voice's own words, a piece of them.
+    pub fn voice_says(&self, text: &str, start_ms: u64, end_ms: u64) {
+        self.state.lock().unwrap().say(serde_json::json!({
+            "type": "session.output_transcript.delta",
+            "delta": text,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        }));
+    }
+
+    /// The model delegates: `session.delegation.created` at `offset_ms` on the
+    /// timeline, with an id of the stand-in's. It carries no words. The
+    /// delegation's acknowledgement is due until an append comes.
+    pub fn delegate(&self, offset_ms: u64) -> String {
+        let mut state = self.state.lock().unwrap();
+        let id = format!("item_fake{}", state.delegations.len() + 1);
+        state.delegations.push(id.clone());
+        state.unanswered.push(id.clone());
+        state.say(serde_json::json!({
+            "type": "session.delegation.created",
+            "offset_ms": offset_ms,
+            "delegation": { "id": id, "type": "delegation", "target": "client" },
+        }));
+        id
+    }
+
+    /// The acknowledgement delay passes. Each delegation no append has come
+    /// for is acknowledged by the model itself, in a word of its own
+    /// ('Lemme check.'), as in runs 3, 4 and 6: how many were.
+    pub fn delay_passes(&self) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let due = std::mem::take(&mut state.unanswered);
+        for _ in &due {
+            state.say(serde_json::json!({
+                "type": "session.output_transcript.delta",
+                "delta": LIVE_FILLER,
+                "start_ms": 0,
+                "end_ms": 0,
+            }));
+        }
+        due.len()
+    }
+
+    /// Speech the server has to say: a piece of PCM, mono 16-bit, queued and
+    /// not sent until [`Live::play`].
+    pub fn queue_audio(&self, pcm: Vec<i16>) {
+        self.state.lock().unwrap().audio.push_back(pcm);
+    }
+
+    /// Sends up to `chunks` of the queued speech, as
+    /// `session.output_audio.delta`, and says how many it sent.
+    pub fn play(&self, chunks: usize) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let mut sent = 0;
+        while sent < chunks
+            && let Some(pcm) = state.audio.pop_front()
+        {
+            let bytes: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+            let delta = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+            state.say(serde_json::json!({
+                "type": "session.output_audio.delta",
+                "delta": delta,
+            }));
+            sent += 1;
+        }
+        sent
+    }
+
+    /// The person speaks over the voice, and the server stops: the speech it
+    /// has queued and not sent is dropped, and how many chunks were is said.
+    /// What it had sent stands sent.
+    pub fn interrupt(&self) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let dropped = state.audio.len();
+        state.audio.clear();
+        state.dropped += dropped;
+        dropped
+    }
+
+    /// The session's moment comes: the server closes it, as it says it will
+    /// in `session.started`.
+    pub fn expire(&self) {
+        self.state.lock().unwrap().close("expired", None);
+    }
+
+    /// What the server has said since the last call, in order.
+    pub fn take(&self) -> Vec<String> {
+        self.state.lock().unwrap().said.drain(..).collect()
+    }
+
+    /// Every event the client sent, in order, as JSON.
+    pub fn sent(&self) -> Vec<Value> {
+        self.state.lock().unwrap().sent.clone()
+    }
+
+    /// The appends it took, in order.
+    pub fn appends(&self) -> Vec<LiveAppend> {
+        self.state.lock().unwrap().appends.clone()
+    }
+
+    /// How many chunks of queued speech were dropped by interruptions.
+    pub fn dropped(&self) -> usize {
+        self.state.lock().unwrap().dropped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1982,5 +2337,270 @@ mod tests {
         assert_eq!(yard.calls_held("Head"), 0);
         assert_eq!(yard.client().head().unwrap(), 21);
         caller.join().unwrap();
+    }
+
+    /// The events a [`Live`] has said, as JSON, in order.
+    fn said(live: &Live) -> Vec<Value> {
+        live.take()
+            .iter()
+            .map(|event| serde_json::from_str(event).unwrap())
+            .collect()
+    }
+
+    const LIVE_START: &str = r#"{"type":"session.start","event_id":"s1","session":{"model":"gpt-live-1","instructions":"Help.","audio":{"format":{"type":"audio/pcm","rate":24000}},"delegation":{"type":"client","acknowledgement_delay_ms":800},"store":false}}"#;
+
+    /// A scripted session, as the reference has its events: started with the
+    /// moment it ends, deltas of both voices, a delegation, appends recorded
+    /// and acknowledged under their ids, speech sent and then dropped, a
+    /// close. The client's side is raw JSON here, so that the stand-in is
+    /// held to the reference and not to the module that uses it.
+    #[test]
+    fn the_live_stand_in_answers_a_scripted_session_end_to_end() {
+        let live = Live::start();
+        live.expires_at(1_788_555_600);
+        live.receive(LIVE_START);
+        let started = said(&live);
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0]["type"], "session.started");
+        assert_eq!(started[0]["client_event_id"], "s1");
+        assert_eq!(started[0]["session"]["expires_at"], 1_788_555_600);
+        assert_eq!(started[0]["session"]["instructions"], "Help.");
+        assert_eq!(started[0]["session"]["audio"]["format"]["rate"], 24000);
+        assert_eq!(
+            started[0]["session"]["delegation"]["acknowledgement_delay_ms"],
+            800
+        );
+
+        // Deltas, both ways, with their places on the timeline.
+        live.person_says("Hello", 2000, 2200);
+        live.voice_says("Hi!", 2200, 2600);
+        let id = live.delegate(3600);
+        let events = said(&live);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["type"], "session.input_transcript.delta");
+        assert_eq!(events[0]["delta"], "Hello");
+        assert_eq!(
+            (events[0]["start_ms"].as_u64(), events[0]["end_ms"].as_u64()),
+            (Some(2000), Some(2200))
+        );
+        assert_eq!(events[1]["type"], "session.output_transcript.delta");
+        assert_eq!(events[1]["delta"], "Hi!");
+        assert_eq!(events[2]["type"], "session.delegation.created");
+        assert_eq!(events[2]["offset_ms"], 3600);
+        assert_eq!(events[2]["delegation"]["id"], id.as_str());
+        // Every event of the server's has an id of its own.
+        assert!(events.iter().all(|event| event["event_id"].is_string()));
+        assert_ne!(events[0]["event_id"], events[1]["event_id"]);
+
+        // Appends are recorded and acknowledged by the id the client gave.
+        live.receive(&format!(
+            r#"{{"type":"session.thinking.append","event_id":"e1","delegation_id":"{id}","content":""}}"#
+        ));
+        live.receive(&format!(
+            r#"{{"type":"session.commentary.append","event_id":"e2","delegation_id":"{id}","content":"It shipped."}}"#
+        ));
+        live.receive(
+            r#"{"type":"session.thinking.append","event_id":"e3","delegation_id":null,"content":"A decision waits."}"#,
+        );
+        let acknowledged = said(&live);
+        assert_eq!(
+            acknowledged
+                .iter()
+                .map(|event| (
+                    event["type"].as_str().unwrap(),
+                    event["client_event_id"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("session.thinking.appended", "e1"),
+                ("session.commentary.appended", "e2"),
+                ("session.thinking.appended", "e3"),
+            ]
+        );
+        assert_eq!(
+            live.appends(),
+            [
+                LiveAppend {
+                    kind: "thinking".into(),
+                    event_id: "e1".into(),
+                    delegation_id: Some(id.clone()),
+                    content: String::new()
+                },
+                LiveAppend {
+                    kind: "commentary".into(),
+                    event_id: "e2".into(),
+                    delegation_id: Some(id.clone()),
+                    content: "It shipped.".into()
+                },
+                LiveAppend {
+                    kind: "thinking".into(),
+                    event_id: "e3".into(),
+                    delegation_id: None,
+                    content: "A decision waits.".into()
+                },
+            ]
+        );
+        // The microphone's audio is heard and nothing is made of it.
+        live.receive(r#"{"type":"session.input_audio.append","audio":"AAA="}"#);
+        assert!(live.take().is_empty());
+
+        // Speech queued, some of it sent, the rest dropped when the person
+        // speaks over it.
+        for n in 1..=4 {
+            live.queue_audio(vec![n, -n]);
+        }
+        assert_eq!(live.play(2), 2);
+        let audio = said(&live);
+        assert_eq!(audio[0]["type"], "session.output_audio.delta");
+        assert_eq!(audio[0]["delta"], "AQD//w==");
+        assert_eq!(audio[1]["delta"], "AgD+/w==");
+        assert_eq!(live.interrupt(), 2);
+        assert_eq!(live.play(2), 0);
+        assert!(live.take().is_empty());
+        assert_eq!(live.dropped(), 2);
+
+        // A close is answered, and after it nothing is heard.
+        live.receive(r#"{"type":"session.close","event_id":"c1"}"#);
+        let closed = said(&live);
+        assert_eq!(closed[0]["type"], "session.closed");
+        assert_eq!(closed[0]["reason"], "close_requested");
+        live.receive(&format!(
+            r#"{{"type":"session.commentary.append","event_id":"e4","delegation_id":"{id}","content":"late"}}"#
+        ));
+        assert!(live.take().is_empty());
+        assert_eq!(live.appends().len(), 3);
+        // All of it, kept as it was sent.
+        assert_eq!(
+            live.sent()
+                .iter()
+                .map(|event| event["type"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "session.start",
+                "session.thinking.append",
+                "session.commentary.append",
+                "session.thinking.append",
+                "session.input_audio.append",
+                "session.close",
+                "session.commentary.append",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_live_stand_in_refuses_what_the_reference_refuses() {
+        let refused = |live: &Live, event: &str| -> Option<String> {
+            live.receive(event);
+            let said = said(live);
+            assert_eq!(said.len(), 1, "{event}: {said:?}");
+            assert_eq!(said[0]["type"], "error", "{event}");
+            said[0]["error"]["client_event_id"]
+                .as_str()
+                .map(str::to_string)
+        };
+        // Before the session starts there is nothing to append to.
+        let live = Live::start();
+        let early = r#"{"type":"session.commentary.append","event_id":"a0","delegation_id":null,"content":"x"}"#;
+        assert_eq!(refused(&live, early).as_deref(), Some("a0"));
+        // Audio the socket does not take, another way to delegate, a delay
+        // past the greatest, a second start.
+        for start in [
+            LIVE_START.replace("24000", "44100"),
+            LIVE_START.replace("audio/pcm", "audio/pcmu"),
+            LIVE_START.replace(r#""type":"client""#, r#""type":"responses""#),
+            LIVE_START.replace("800", "900"),
+        ] {
+            assert_eq!(refused(&live, &start).as_deref(), Some("s1"), "{start}");
+        }
+        live.receive(LIVE_START);
+        assert_eq!(said(&live).len(), 1);
+        assert_eq!(refused(&live, LIVE_START).as_deref(), Some("s1"));
+        let id = live.delegate(0);
+        assert_eq!(said(&live).len(), 1);
+        // Each fault in an append is an error that names the append.
+        let with = |fields: &str| {
+            format!(r#"{{"type":"session.commentary.append","event_id":"a1",{fields}}}"#)
+        };
+        for fields in [
+            // `text`, not `content`.
+            format!(r#""delegation_id":"{id}","text":"x""#),
+            // No delegation_id at all: it is required, and may be null.
+            r#""content":"x""#.to_string(),
+            // An id no delegation of the session gave.
+            r#""delegation_id":"item_other","content":"x""#.to_string(),
+            r#""delegation_id":7,"content":"x""#.to_string(),
+            // Over the limit of 500 tokens, as 500 bytes bound it.
+            format!(r#""delegation_id":"{id}","content":"{}""#, "x".repeat(501)),
+        ] {
+            assert_eq!(
+                refused(&live, &with(&fields)).as_deref(),
+                Some("a1"),
+                "{fields}"
+            );
+        }
+        assert!(live.appends().is_empty());
+        // The edge of the limit, and a null id, are fine.
+        live.receive(&with(&format!(
+            r#""delegation_id":"{id}","content":"{}""#,
+            "x".repeat(500)
+        )));
+        live.receive(&with(r#""delegation_id":null,"content":"""#));
+        assert_eq!(said(&live).len(), 2);
+        assert_eq!(live.appends().len(), 2);
+        // What is not JSON, and what the stand-in does not model, is refused
+        // too; an event with no id is refused without one to name.
+        assert_eq!(refused(&live, "not json"), None);
+        assert_eq!(
+            refused(&live, r#"{"type":"session.update","event_id":"u1"}"#).as_deref(),
+            Some("u1")
+        );
+        assert_eq!(
+            refused(
+                &live,
+                r#"{"type":"session.commentary.append","delegation_id":null}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_live_stand_in_speaks_its_filler_unless_an_append_came_first() {
+        let live = Live::start();
+        live.receive(LIVE_START);
+        live.take();
+        // Two delegations, no append: the delay passes and each is
+        // acknowledged by the model itself.
+        live.delegate(1000);
+        live.delegate(2000);
+        live.take();
+        assert_eq!(live.delay_passes(), 2);
+        let spoken = said(&live);
+        assert!(
+            spoken
+                .iter()
+                .all(|event| event["type"] == "session.output_transcript.delta"
+                    && event["delta"] == "Lemme check.")
+        );
+        // Once they were, none is due again.
+        assert_eq!(live.delay_passes(), 0);
+        // An append under one delegation cancels the acknowledgement of that
+        // one and of every other still to come: here two were due.
+        let third = live.delegate(3000);
+        live.delegate(4000);
+        live.take();
+        live.receive(&format!(
+            r#"{{"type":"session.thinking.append","event_id":"q1","delegation_id":"{third}","content":""}}"#
+        ));
+        assert_eq!(live.delay_passes(), 0);
+        assert!(
+            said(&live)
+                .iter()
+                .all(|event| event["type"] == "session.thinking.appended")
+        );
+        // The session's moment comes, and the server closes it.
+        live.expire();
+        let closed = said(&live);
+        assert_eq!(closed.last().unwrap()["type"], "session.closed");
+        assert_eq!(closed.last().unwrap()["reason"], "expired");
     }
 }
