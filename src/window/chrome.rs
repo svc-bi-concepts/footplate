@@ -434,6 +434,9 @@ impl Footplate {
             return;
         };
         let news = model.take_news();
+        // A voice session in the conversation is directed to the cards the
+        // other side asks.
+        self.voice_asked(&news);
         let in_view = self.front && !self.settings_open;
         let yard = self.yard.clone();
         self.tell(&yard, news, in_view, cx);
@@ -718,6 +721,10 @@ impl Footplate {
     /// held aside, with no row open, and goes on being followed; where
     /// `keep` says not, it is followed no longer.
     pub(crate) fn leave_yard(&mut self, to: &str, keep: bool, cx: &mut Context<Self>) {
+        // A voice session is of the conversation it was started in, in the
+        // yard that is left: it ends, and is held with nothing.
+        self.end_voice(cx);
+        self.voice_refusal = None;
         // The line's text is the open row's of the yard that is left: it
         // stays with that, and is in the line again when the row is open.
         if let Some(from) = self.model.as_ref().and_then(|m| m.selected().cloned()) {
@@ -1264,7 +1271,12 @@ impl Footplate {
                 // healed, whatever turn of the follower this is.
                 self.switch_troubles = Vec::new();
             }
-            Update::Event(event) => self.change(cx, |m| m.event(&event)),
+            Update::Event(event) => {
+                // A voice session in the conversation is given the other
+                // side's mail as it arrives.
+                self.voice_hears(&event);
+                self.change(cx, |m| m.event(&event))
+            }
             Update::Down(why, short) => {
                 self.down = Some(why);
                 self.away = Away::Trying;
@@ -1298,6 +1310,10 @@ impl Footplate {
         // for every asking.
         if was_down != self.down.is_some() {
             self.refresh_switch(cx);
+        }
+        // A voice session that waits for the yard's answer is told it went.
+        if self.down.is_some() && !was_down {
+            self.voice_yard_away(cx);
         }
         cx.notify();
     }
@@ -2167,9 +2183,15 @@ impl Footplate {
     /// what was typed in the one that is open, if one is.
     pub(crate) fn turned(&mut self, from: Option<Selected>, cx: &mut Context<Self>) {
         let to = self.model.as_ref().and_then(|m| m.selected().cloned());
+        // A voice session belongs to the conversation it was started in.
+        if !self.voice_is_here() {
+            self.end_voice(cx);
+        }
         let Some(from) = from.filter(|from| Some(from) != to.as_ref()) else {
             return;
         };
+        // What was said beside the Voice button was of the row that is left.
+        self.voice_refusal = None;
         // What was selected is of the conversation that is no longer shown.
         self.selection
             .update(cx, |selection, cx| selection.clear(cx));
@@ -3360,9 +3382,27 @@ impl Footplate {
     /// Talking with the yard by voice is on, or no longer. The switch
     /// alone sends nothing: only a voice session the person starts does.
     pub(crate) fn voice_on(&mut self, on: bool, cx: &mut Context<Self>) {
+        // Nothing is sent while voice is off: a session that stands ends
+        // with the switch.
+        if !on {
+            self.end_voice(cx);
+            self.voice_refusal = None;
+        }
         self.set(
             Settings {
                 voice: on,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
+    /// A voice session left standing with nobody speaking ends itself after
+    /// `minutes`.
+    pub(crate) fn voice_idle(&mut self, minutes: u8, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                voice_idle: minutes,
                 ..self.settings.clone()
             },
             cx,
@@ -4832,6 +4872,38 @@ impl Footplate {
                     .child(said.clone()),
             );
         }
+        // How long a session may stand with nobody speaking: Live bills by
+        // the second, so a forgotten one ends itself.
+        let idle = self.settings.voice_idle;
+        section = section
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(rems(4.)).flex_none().child("ends after"))
+                    .child(div().flex().child(segmented(
+                        [2u8, 5, 10, 30]
+                            .map(|minutes| {
+                                segment(format!("{minutes} min"), minutes == idle, palette)
+                                    .id(SharedString::from(format!("voice idle {minutes}")))
+                                    .debug_selector(move || format!("voice idle {minutes}"))
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.voice_idle(minutes, cx)),
+                                    )
+                            })
+                            .into_iter()
+                            .collect(),
+                        palette,
+                    ))),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "voice idle line".to_string())
+                    .text_sm()
+                    .text_color(palette.faint)
+                    .child("with nobody speaking and nothing waited for, since OpenAI bills a session by the second"),
+            );
         section.child(
             div()
                 .debug_selector(|| "voice plain".to_string())

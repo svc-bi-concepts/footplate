@@ -1123,6 +1123,89 @@ impl State {
     }
 }
 
+/// How long the voice still reads as speaking after the speaker's queue was
+/// last seen holding speech. The server sends its speech in pieces and the
+/// speaker plays each as it comes, so the queue is empty between pieces of
+/// one sentence, and the word would flicker with every gap.
+const SPEAKING_HOLD: Duration = Duration::from_millis(600);
+
+/// Whether the voice is speaking, from the speaker's queue ([`Queue::queued_ms`]):
+/// speech standing unplayed, held for [`SPEAKING_HOLD`] past the last that
+/// stood. The audio's arriving says nothing of it (see [`State`]).
+#[derive(Debug, Default)]
+pub struct Speaking(Option<Instant>);
+
+impl Speaking {
+    /// The queue holds `queued_ms` of speech at `now`: whether the voice is
+    /// speaking.
+    pub fn seen(&mut self, queued_ms: u64, now: Instant) -> bool {
+        if queued_ms > 0 {
+            self.0 = Some(now);
+        }
+        self.0
+            .is_some_and(|at| now.saturating_duration_since(at) < SPEAKING_HOLD)
+    }
+
+    /// The person spoke over the voice: its queue was dropped, and it is
+    /// not speaking, whatever the hold says.
+    pub fn stop(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// What the person is saying, as the caption under the conversation's head
+/// shows it: the words of the utterance they are in, replaced as they grow,
+/// and by the next utterance when a pause has ended this one. It joins and
+/// cuts as the request is ([`task_from`]: the pieces as the server sent
+/// them, the noise tags out) but cuts no greeting, since a caption shows what
+/// was said. It is kept nowhere past the session.
+#[derive(Debug, Default)]
+pub struct Caption(Vec<Fragment>);
+
+impl Caption {
+    pub fn heard(&mut self, fragment: Fragment) {
+        if fragment.text.is_empty() {
+            return;
+        }
+        let ended = self.0.iter().map(|piece| piece.end_ms).max();
+        if ended.is_some_and(|end| fragment.start_ms.saturating_sub(end) >= UTTERANCE_GAP_MS) {
+            self.0.clear();
+        }
+        self.0.push(fragment);
+    }
+
+    /// The utterance as words: empty before anything was said, and while
+    /// all that has come is the beginning of a noise tag.
+    pub fn text(&self) -> String {
+        utterances(&self.0)
+            .last()
+            .map(|words| tidy(&without_tags(words)))
+            .unwrap_or_default()
+    }
+}
+
+/// What Live charges for a minute of a session, in cents: $0.05, billed by
+/// the second (design section 2).
+const CENTS_A_MINUTE: u64 = 5;
+
+/// A session's minutes and what they have cost, in the quiet words the head
+/// carries at its right: `3 min · $0.15`. The cost counts the seconds and
+/// leaves the part of a cent out, so that the figure never says more than
+/// the rate does.
+pub fn meter(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let cents = seconds * CENTS_A_MINUTE / 60;
+    format!("{} min · ${}.{:02}", seconds / 60, cents / 100, cents % 100)
+}
+
+/// Whether a session has been left standing: nobody has spoken since
+/// `quiet_since`, and no request waits for its answer, for `limit`. Live
+/// bills by the second, so such a session ends itself (design section 5,
+/// decision 6); one that speaks or waits never meets the limit.
+pub fn idle(quiet_since: Instant, now: Instant, limit: Duration, waiting: bool) -> bool {
+    !waiting && now.saturating_duration_since(quiet_since) >= limit
+}
+
 /// The session's instructions, in the shape OpenAI's prompting guide gives:
 /// the voice's part, then the guide's `Backchannel policy`, `Interruption
 /// policy` and `Delegation policy` headings in that order. `{counterpart}` is
@@ -2056,8 +2139,9 @@ pub fn start_session(
 }
 
 /// [`start_session`] with where the session stands and how its key is read, for the
-/// tests: against a stand-in socket, with a key they script.
-fn gated_start(
+/// tests: against a stand-in socket, with a key they script. The window's
+/// tests start theirs through it, by the window's `Means`.
+pub(crate) fn gated_start(
     voice_on: bool,
     key: impl FnOnce() -> Result<String, String>,
     url: &str,
@@ -2442,7 +2526,7 @@ impl Session {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::audio::{CHUNK, Capture, Render};
     use crate::fake::Live;
@@ -3353,6 +3437,103 @@ mod tests {
     }
 
     #[test]
+    fn the_voice_reads_as_speaking_through_the_gaps_of_its_sentence_and_not_past_an_interruption() {
+        let now = Instant::now();
+        let at = |ms: u64| now + Duration::from_millis(ms);
+        let mut speaking = Speaking::default();
+        assert!(!speaking.seen(0, at(0)));
+        // A piece of speech stands in the queue; the speaker plays it, and
+        // the queue is empty before the next piece comes.
+        assert!(speaking.seen(20, at(100)));
+        assert!(speaking.seen(0, at(300)));
+        assert!(speaking.seen(0, at(650)));
+        // Nothing more came: it is silent once the hold has passed.
+        assert!(!speaking.seen(0, at(700)));
+        // The person spoke over it: the queue was dropped, and the word goes
+        // at once, not after the hold.
+        assert!(speaking.seen(20, at(1000)));
+        speaking.stop();
+        assert!(!speaking.seen(0, at(1010)));
+    }
+
+    #[test]
+    fn the_caption_grows_with_the_utterance_and_is_replaced_by_the_next() {
+        let mut caption = Caption::default();
+        assert_eq!(caption.text(), "");
+        // Run 4: the caption shows what was said, not what the request
+        // cuts: the greeting stays while it is the utterance.
+        let mut shown = Vec::new();
+        for (text, start_ms, end_ms) in RUN_4 {
+            caption.heard(Fragment {
+                text: text.to_string(),
+                start_ms: *start_ms,
+                end_ms: *end_ms,
+            });
+            shown.push(caption.text());
+        }
+        // 'Hello' alone; then a pause of 2200 ms began another utterance,
+        // whose '[sniff' is the beginning of a noise tag and says nothing
+        // yet; the tag closed 800 ms later in the same utterance, and went.
+        assert_eq!(
+            shown,
+            [
+                "Hello",
+                "",
+                "What's",
+                "What's blocking",
+                "What's blocking the",
+                "What's blocking the release",
+            ]
+        );
+        // Run 6: a pause of 1.6 s inside a question does not end it.
+        let mut caption = Caption::default();
+        for fragment in said(RUN_6_SECOND) {
+            caption.heard(fragment);
+        }
+        assert_eq!(caption.text(), "Um. And what part is outstanding there");
+        // Words with nothing in them change nothing.
+        caption.heard(Fragment {
+            text: String::new(),
+            start_ms: 90_000,
+            end_ms: 90_000,
+        });
+        assert_eq!(caption.text(), "Um. And what part is outstanding there");
+    }
+
+    #[test]
+    fn the_meter_counts_minutes_and_the_cost_of_the_seconds() {
+        for (seconds, words) in [
+            (0, "0 min · $0.00"),
+            (11, "0 min · $0.00"),
+            (12, "0 min · $0.01"),
+            (59, "0 min · $0.04"),
+            (60, "1 min · $0.05"),
+            (90, "1 min · $0.07"),
+            (300, "5 min · $0.25"),
+            (3600, "60 min · $3.00"),
+            (10_800, "180 min · $9.00"),
+        ] {
+            assert_eq!(meter(Duration::from_secs(seconds)), words, "{seconds} s");
+        }
+        // The part of a second is not billed here.
+        assert_eq!(meter(Duration::from_millis(59_999)), "0 min · $0.04");
+    }
+
+    #[test]
+    fn a_session_is_idle_when_nobody_spoke_and_nothing_waits_for_the_limit() {
+        let quiet = Instant::now();
+        let five = Duration::from_secs(5 * 60);
+        let at = |seconds: u64| quiet + Duration::from_secs(seconds);
+        assert!(!idle(quiet, at(299), five, false));
+        assert!(idle(quiet, at(300), five, false));
+        // A request that waits for its answer is a working conversation,
+        // however long the yard takes.
+        assert!(!idle(quiet, at(3600), five, true));
+        // A clock that reads earlier than the moment says no.
+        assert!(!idle(at(10), quiet, five, false));
+    }
+
+    #[test]
     fn the_instructions_hold_the_delegation_words_and_both_policy_headings() {
         let text = instructions("yardmaster");
         assert!(!text.contains("{counterpart}"));
@@ -4048,13 +4229,13 @@ mod tests {
     /// event of the stand-in's, fragmented with a ping between its halves,
     /// and everything the client sends handed to the stand-in. The pongs it
     /// got are kept where the test can read them.
-    struct SocketLive {
-        url: String,
-        pongs: Arc<Mutex<Vec<Vec<u8>>>>,
-        thread: JoinHandle<()>,
+    pub(crate) struct SocketLive {
+        pub(crate) url: String,
+        pub(crate) pongs: Arc<Mutex<Vec<Vec<u8>>>>,
+        pub(crate) thread: JoinHandle<()>,
     }
 
-    fn live_socket(live: Arc<Live>, accept_key: &str) -> SocketLive {
+    pub(crate) fn live_socket(live: Arc<Live>, accept_key: &str) -> SocketLive {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("ws://{}/v1/live/sessions", listener.local_addr().unwrap());
         let pongs: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();

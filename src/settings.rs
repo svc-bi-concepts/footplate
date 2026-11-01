@@ -29,6 +29,12 @@ use crate::yard;
 pub const TEXT: u8 = 14;
 pub const TEXT_MIN: u8 = 11;
 pub const TEXT_MAX: u8 = 20;
+/// How many minutes a voice session may stand with nobody speaking and
+/// nothing waited for before it ends itself (design section 5, decision 6),
+/// the fewest and the most a file may say.
+pub const VOICE_IDLE: u8 = 5;
+pub const VOICE_IDLE_MIN: u8 = 1;
+pub const VOICE_IDLE_MAX: u8 = 60;
 
 /// What the one yard is called that a file names none for: this machine's,
 /// by this run's socket.
@@ -409,6 +415,12 @@ pub struct Settings {
     /// itself is never here: it stands in `voice.key` beside the file.
     #[serde(skip_serializing_if = "is_off")]
     pub voice: bool,
+    /// How many minutes a voice session stands with nobody speaking and no
+    /// request waiting for its answer before it ends itself: Live bills by
+    /// the second. Five until chosen, and left out of the file while it is
+    /// five, as the text size is while it is usual.
+    #[serde(skip_serializing_if = "is_usual_idle")]
+    pub voice_idle: u8,
     /// The settings' open section: the one the side list shows. Left out
     /// of the file while it is the first, as the modes are.
     #[serde(skip_serializing_if = "Section::is_first")]
@@ -421,6 +433,10 @@ fn is_on(on: &bool) -> bool {
 
 fn is_off(on: &bool) -> bool {
     !*on
+}
+
+fn is_usual_idle(minutes: &u8) -> bool {
+    *minutes == VOICE_IDLE
 }
 
 fn nobody_chose(yards: &[Yard]) -> bool {
@@ -446,6 +462,7 @@ struct Kept {
     menu_bar: bool,
     tray: Look,
     voice: bool,
+    voice_idle: u8,
     section: Section,
     web_view: String,
     run_base: String,
@@ -466,6 +483,7 @@ impl Default for Kept {
             menu_bar: true,
             tray: Look::Auto,
             voice: false,
+            voice_idle: VOICE_IDLE,
             section: Section::default(),
             web_view: String::new(),
             run_base: String::new(),
@@ -542,6 +560,7 @@ impl From<Kept> for Settings {
             menu_bar: kept.menu_bar,
             tray: kept.tray,
             voice: kept.voice,
+            voice_idle: kept.voice_idle,
             section: kept.section,
         }
     }
@@ -646,6 +665,7 @@ impl Default for Settings {
             menu_bar: true,
             tray: Look::Auto,
             voice: false,
+            voice_idle: VOICE_IDLE,
             section: Section::default(),
         }
     }
@@ -661,8 +681,17 @@ impl Settings {
             .unwrap_or_default();
         Settings {
             text: kept.text.clamp(TEXT_MIN, TEXT_MAX),
+            voice_idle: kept.voice_idle.clamp(VOICE_IDLE_MIN, VOICE_IDLE_MAX),
             ..kept
         }
+    }
+
+    /// How long a voice session may stand with nobody speaking and nothing
+    /// waited for.
+    pub fn voice_idle_limit(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            u64::from(self.voice_idle.clamp(VOICE_IDLE_MIN, VOICE_IDLE_MAX)) * 60,
+        )
     }
 
     /// Keeps them in `file`, whose directory is made when it is not there.
@@ -1260,6 +1289,31 @@ mod tests {
             "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"voice\": true\n}\n"
         );
         assert_eq!(Settings::read(&file), set);
+
+        // A session left standing with nobody speaking ends itself after
+        // five minutes until another number is chosen, which the file keeps
+        // beside the switch, within what makes sense.
+        assert_eq!(Settings::default().voice_idle, VOICE_IDLE);
+        assert_eq!(
+            Settings::default().voice_idle_limit(),
+            std::time::Duration::from_secs(300)
+        );
+        let set = Settings {
+            voice: true,
+            voice_idle: 10,
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"voice\": true,\n  \"voice_idle\": 10\n}\n"
+        );
+        assert_eq!(Settings::read(&file), set);
+        assert_eq!(set.voice_idle_limit(), std::time::Duration::from_secs(600));
+        for (written, read) in [(0, VOICE_IDLE_MIN), (200, VOICE_IDLE_MAX)] {
+            fs::write(&file, format!("{{\"voice_idle\": {written}}}")).unwrap();
+            assert_eq!(Settings::read(&file).voice_idle, read, "{written}");
+        }
     }
 
     #[test]

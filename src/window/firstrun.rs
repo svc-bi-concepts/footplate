@@ -11,9 +11,11 @@
 //! (`yardr up`); a folder becomes its first depot, with a first bead. Then
 //! the window opens the yardmaster's conversation.
 
+use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
 
 use gpui::{
     AnyElement, AnyWindowHandle, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
@@ -27,6 +29,7 @@ use crate::input::{Line, Submitted};
 use crate::setup::{self, Doctor, Form, Item, Login, Need, Offer, Yardr};
 use crate::theme::Palette;
 use crate::titlebar::{self, Gesture};
+use crate::voice::{Mic, Queue, Start, Update};
 
 /// Gives the yardr to run: where it is, and what there is to say of it
 /// where the one an older footplate kept could not be moved. In a sentence,
@@ -44,8 +47,30 @@ pub type Opens = Rc<dyn Fn(&str, &mut App)>;
 /// What the window does for a gesture on its top strip: moves, or zooms.
 pub type Strip = Rc<dyn Fn(Gesture, &mut Window, &mut App)>;
 
-/// What the first run, the window's top strip and its Feedback form reach
-/// outside the window with. A test has a stand-in for each.
+/// Starts a voice session ([`voice::start_session`]): whether voice is on,
+/// the settings' file, whom the conversation is with, and where the session
+/// tells its updates.
+pub type Starts = Rc<dyn Fn(bool, Option<&Path>, &str, mpsc::Sender<Update>) -> Start>;
+
+/// Opens the microphone and the speaker for a session ([`crate::audio::open`]):
+/// the microphone's frames go to the session, the speaker plays its queue.
+/// What it gives is held while the devices stand open, and closes them when
+/// it is dropped; in a sentence, why there are none. It may wait for a person
+/// (a Mac asks for the microphone's consent), so it is no call for the
+/// window's thread.
+pub type Plugs =
+    Arc<dyn Fn(Mic, Arc<Mutex<Queue>>) -> Result<Box<dyn Any + Send>, String> + Send + Sync>;
+
+/// The time, for the minutes a session has stood and for how long nobody has
+/// spoken in it.
+pub type Clock = Rc<dyn Fn() -> Instant>;
+
+/// Whether the window is out of view: footplate is hidden, or its window is
+/// minimized.
+pub type Hidden = Rc<dyn Fn() -> bool>;
+
+/// What the first run, the window's top strip, its Feedback form and its
+/// voice session reach outside the window with. A test has a stand-in for each.
 #[derive(Clone)]
 pub struct Means {
     pub yardr: Finds,
@@ -64,6 +89,13 @@ pub struct Means {
     /// Where feedback goes, if it is offered: yardr's PostHog project, none
     /// while its survey is. A form is never offered that sends nowhere.
     pub feedback: Option<Project>,
+    /// How a voice session is started, what it hears and speaks through, the
+    /// time it keeps, and whether the window is out of view. A test starts its
+    /// sessions against a stand-in for OpenAI's socket, with stand-in devices.
+    pub voice: Starts,
+    pub devices: Plugs,
+    pub now: Clock,
+    pub hidden: Hidden,
 }
 
 impl Means {
@@ -92,6 +124,29 @@ impl Means {
             // Tests send nothing: a test that sends feedback stands in for
             // PostHog.
             feedback: Project::yardr().filter(|_| !cfg!(test)),
+            // Tests reach no OpenAI, and open no microphone: a test that
+            // talks stands in for both.
+            #[cfg(not(test))]
+            voice: Rc::new(crate::voice::start_session),
+            #[cfg(test)]
+            voice: Rc::new(|_, _, _, _| Start::Refused("no voice in a test".to_string())),
+            #[cfg(not(test))]
+            devices: Arc::new(|mic, speaker| {
+                let devices = crate::audio::open(
+                    move |frames| {
+                        mic.send(frames);
+                    },
+                    speaker,
+                )?;
+                Ok(Box::new(devices) as Box<dyn Any + Send>)
+            }),
+            #[cfg(test)]
+            devices: Arc::new(|_, _| Ok(Box::new(()) as Box<dyn Any + Send>)),
+            now: Rc::new(Instant::now),
+            #[cfg(not(test))]
+            hidden: Rc::new(crate::hidden),
+            #[cfg(test)]
+            hidden: Rc::new(|| false),
         }
     }
 }

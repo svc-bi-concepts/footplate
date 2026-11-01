@@ -535,10 +535,14 @@ JSON object a line. `src/api.rs` is the whole client.
 Or a yard that is not on this machine, at the address of its listener: see
 [A yard at an address](#a-yard-at-an-address). The calls are the same ones.
 
-Beside the yard it speaks to two sites that are no yard's: yardr.dev, for
-yardr's installer when you ask for it ([yardr, a dependency](#yardr-a-dependency)), and PostHog's EU
+Beside the yard it speaks to three sites that are no yard's: yardr.dev, for
+yardr's installer when you ask for it ([yardr, a dependency](#yardr-a-dependency)), PostHog's EU
 capture, to which [the Feedback form](#feedback) sends a message when you
-press Send, and never otherwise.
+press Send, and never otherwise, and OpenAI's Live API, to which a
+[voice session](#settings) you started sends the microphone's audio and what
+you say, the yard's name and the name of whom you are talking with, and what
+they answer in that conversation, for as long as the session stands, and
+never otherwise.
 
 | It reads | For |
 |---|---|
@@ -1659,7 +1663,22 @@ folder. A change is drawn at once and kept for the next start:
   for you alone, never in the settings file; where
   `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
   read. Under the field, one plain line says what a voice session
-  sends to OpenAI and what is kept of it.
+  sends to OpenAI and what is kept of it. With voice on, the head of an
+  open conversation has a Voice button: a tap starts a session with whom
+  you are talking, and a second tap ends it. While it stands the button
+  says what is going on in quiet words (`listening`, `yardmaster is
+  working`, `speaking`), a line under the head shows what you are saying,
+  and the head's right counts the minutes and what they have cost at
+  OpenAI's rate, $0.05 a minute. What you ask of the yard goes to it as
+  your own mail in that conversation, as Enter would send it; while the
+  yard is away it is refused, once, and nothing is queued or sent when the
+  yard returns. The mail the other side answers with is spoken by the voice
+  in its own words, and the written mail stays the record. A decision that comes up in the window is
+  never answered by voice: the voice says it waits there. A session ends
+  when you tap again, open another conversation or yard, switch voice off,
+  hide, minimize or close the window, or when nobody has spoken and
+  nothing waits for the yard for the minutes the section's `ends after`
+  line says, five until you choose another.
 - Telemetry: the yard's opt-in telemetry switch, for the operator's
   window alone on a yard that serves the calls. Off, the consent words
   and Turn on; on, the install id with a copy of it, the next payload

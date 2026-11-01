@@ -5309,19 +5309,7 @@ impl Model {
             }
             return Vec::new();
         }
-        // Mail the user wrote to themselves is both: their own, and unread
-        // in their inbox until their row shows it. So is what they wrote
-        // from a linked yard under a name trusted as them, to anyone but
-        // themselves: it stands in the row of whoever it was written to,
-        // as yardr chat's mail has it, and being theirs it is not
-        // counted, acknowledged or notified.
-        let mine = e.actor == self.me
-            || (to != self.me
-                && self
-                    .trust
-                    .get(&e.actor)
-                    .is_some_and(|user| *user == self.me));
-        let for_me = to == self.me && e.flag("to_user");
+        let (mine, for_me) = self.mail_sides(e);
         if !mine && !for_me {
             return Vec::new();
         }
@@ -5352,6 +5340,59 @@ impl Model {
             effects.push(Effect::Users);
         }
         effects
+    }
+
+    /// Whose a mail event is: the user's own, and to the user. Mail the
+    /// user wrote to themselves is both: their own, and unread in their
+    /// inbox until their row shows it. So is what they wrote from a linked
+    /// yard under a name trusted as them, to anyone but themselves: it
+    /// stands in the row of whoever it was written to, as yardr chat's mail
+    /// has it, and being theirs it is not counted, acknowledged or
+    /// notified.
+    fn mail_sides(&self, e: &Event) -> (bool, bool) {
+        let to = e.text("to");
+        let mine = e.actor == self.me
+            || (to != self.me
+                && self
+                    .trust
+                    .get(&e.actor)
+                    .is_some_and(|user| *user == self.me));
+        let for_me = to == self.me && e.flag("to_user");
+        (mine, for_me)
+    }
+
+    /// The text of `e` where it is the other side's mail in the
+    /// conversation with `with`: mail to the user from whom that row shows,
+    /// which [`Model::event`] adds to it. Never the user's own mail, what
+    /// they wrote under a name trusted as them, or what they sent to a
+    /// linked yard. What a voice session in that conversation is given to
+    /// speak, and nothing else of the yard.
+    pub fn answer_in<'a>(&self, e: &'a Event, with: &str) -> Option<&'a str> {
+        if e.kind != "mail" || !e.text("to_peer").is_empty() {
+            return None;
+        }
+        let (mine, for_me) = self.mail_sides(e);
+        let shown = self
+            .sources(&Selected::Conversation(with.to_string()))
+            .contains(&e.actor);
+        (for_me && !mine && shown).then(|| e.text("text"))
+    }
+
+    /// Whether the ask that `news` tells of asks for a secret: a voice
+    /// session is told of such an ask not even that it is there. Judged
+    /// from the open asks by what the news carries, and any match that
+    /// asks for a secret makes it one.
+    pub fn secret_ask(&self, news: &News) -> bool {
+        let Selected::Decision(bead) = &news.target else {
+            return false;
+        };
+        news.kind == Kind::Decision
+            && self.open.iter().any(|a| {
+                a.secret.is_some()
+                    && a.bead == *bead
+                    && a.asker == news.from
+                    && a.question == news.text
+            })
     }
 
     /// A reaction event: the target letter's reactions gain the
@@ -8224,6 +8265,102 @@ mod tests {
             json!({"to": "mckean", "as": "mckean", "text": "hi"}),
         ));
         assert_eq!(m.entries(), []);
+    }
+
+    /// What a voice in a conversation is given to speak is the other side's
+    /// mail there, and the model says which mail that is by what it does with
+    /// it: the same mail it adds to the row as theirs, and none it adds as
+    /// the user's own, sends on to a linked yard, or drops.
+    #[test]
+    fn the_other_side_s_mail_in_a_conversation_is_what_a_voice_there_is_given() {
+        let (mut m, _) = Model::new(
+            yard(&[]),
+            Mode::Chat,
+            Some(Selected::Conversation("yardmaster".into())),
+        );
+        m.conversation("yardmaster", vec![]);
+        let mail = |seq: u64, from: &str, data: Value| event(seq, "mail", from, data);
+        let theirs = mail_to_jo(22, "yardmaster");
+        let rows = [
+            // The yardmaster's mail to the user, in the yardmaster's row.
+            (&theirs, "yardmaster", Some("mail 22")),
+            // The same mail is not the answer in another conversation.
+            (&theirs, "assembly", None),
+            // The user's own mail in this row is not the yardmaster's.
+            (
+                &mail(23, "jo", json!({"to": "yardmaster", "text": "mine"})),
+                "yardmaster",
+                None,
+            ),
+            // Nor is a mail to someone else, or one that is not to the
+            // user's inbox: the model shows neither.
+            (
+                &mail(24, "yardmaster", json!({"to": "assembly", "text": "x"})),
+                "yardmaster",
+                None,
+            ),
+            (
+                &mail(25, "yardmaster", json!({"to": "jo", "text": "x"})),
+                "yardmaster",
+                None,
+            ),
+            // The user's mail to a linked yard is queued, not answered.
+            (
+                &mail(
+                    26,
+                    "jo",
+                    json!({"to": "clerk", "to_peer": "north", "text": "x"}),
+                ),
+                "clerk@north",
+                None,
+            ),
+            // A linked yard's person answers through the peer, by the
+            // address the row has.
+            (
+                &mail_to_jo(27, "clerk@north"),
+                "clerk@north",
+                Some("mail 27"),
+            ),
+            // Events of other kinds say nothing.
+            (
+                &event(
+                    28,
+                    "noted",
+                    "yardmaster",
+                    json!({"to": "jo", "to_user": true}),
+                ),
+                "yardmaster",
+                None,
+            ),
+        ];
+        for (event, with, answer) in rows {
+            assert_eq!(m.answer_in(event, with), answer, "{} in {with}", event.seq);
+            // The model adds the answer to the row, as theirs, and nothing
+            // that is not one.
+            let before = m.entries().len();
+            m.event(event);
+            let added = m.entries().len() > before && !m.entries().last().unwrap().mine;
+            if answer.is_some() && with == "yardmaster" {
+                assert!(added, "{}", event.seq);
+            }
+        }
+
+        // A name of a linked yard trusted as the user is the user's own
+        // word, not an answer: here mckean@yardr writing from the other
+        // yard to the mayor.
+        let (mut m, _) = Model::new(
+            plantime(),
+            Mode::Chat,
+            Some(Selected::Conversation("mayor".into())),
+        );
+        m.conversation("mayor", vec![]);
+        let own = mail(
+            22,
+            "mckean@yardr",
+            json!({"to": "mayor", "as": "mckean", "text": "hi"}),
+        );
+        assert_eq!(m.answer_in(&own, "mayor"), None);
+        assert_eq!(m.answer_in(&own, "mckean@yardr"), None);
     }
 
     #[test]
@@ -16755,6 +16892,36 @@ mod tests {
                 news("assembly", "And the keys?", "yardr-n8ta", true),
             ]
         );
+
+        // A secret ask is news like the rest. A voice is told of it nothing,
+        // not even that it is there, so the model says which one it is; the
+        // plain ones before it are not.
+        let mut secret = open_ask(
+            "yardr-s3cr",
+            "Keys",
+            "",
+            11,
+            "Which key?",
+            "yardmaster",
+            "2026-10-10T12:30:00Z",
+        );
+        secret.secret = Some(books());
+        open.push(secret);
+        m.asks(Asks {
+            open,
+            decided: vec![],
+        });
+        let arrived = m.take_news();
+        assert_eq!(arrived.len(), 1);
+        assert!(m.secret_ask(&arrived[0]));
+        assert!(!m.secret_ask(&news("assembly", "And the keys?", "yardr-n8ta", true)));
+        // Mail is no ask.
+        assert!(!m.secret_ask(&mail_news(
+            "yardmaster",
+            "Which key?",
+            Selected::Conversation("yardmaster".into()),
+            true
+        )));
     }
 
     #[test]

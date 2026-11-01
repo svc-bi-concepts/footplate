@@ -52,7 +52,9 @@ use metrics::READING_WIDTH;
 pub(crate) use metrics::WINDOW_MIN;
 use rail::{ImageOpen, Picture, ViewUp};
 use screen::ScreenOpen;
-use state::{About, Adding, AgentsBusy, Anchor, Away, Held, Piece, Place, SwitchBusy, SwitchFor};
+use state::{
+    About, Adding, AgentsBusy, Anchor, Away, Held, Piece, Place, SwitchBusy, SwitchFor, Talk,
+};
 use ui::small_button;
 use words::count_words;
 
@@ -517,6 +519,17 @@ pub struct Footplate {
     /// draft, and Enter keeps it beside the settings and clears the field.
     voice_key: Entity<Line>,
     voice_said: Option<String>,
+    /// The voice session of the open conversation, while one stands or is
+    /// being made. Never held with a yard: leaving the conversation, the
+    /// yard or the window ends it.
+    voice: Option<Talk>,
+    /// Why the last session could not be made, or ended: the words of
+    /// whoever refused it, shown beside the Voice button and never parsed.
+    /// A new tap, or another conversation, clears them.
+    voice_refusal: Option<String>,
+    /// How many voice sessions the window started, which tells their words
+    /// apart.
+    voices: u64,
     /// "Set up a yard here", while it is underway: it stands where the
     /// yard that is not there would, and where its conversation will.
     first_run: Option<Entity<FirstRun>>,
@@ -809,6 +822,9 @@ impl Footplate {
         // Quitting does not ask here.
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
+            // Shut or hidden, the window shows nothing from here on: a voice
+            // session does not go on under it (design 3.2).
+            let _ = this.update(cx, |this, cx| this.end_voice(cx));
             let hides = this.read_with(cx, |this, _| this.closing_hides());
             if !hides.unwrap_or(false) {
                 return true;
@@ -940,6 +956,9 @@ impl Footplate {
             run_said: None,
             voice_key,
             voice_said: None,
+            voice: None,
+            voice_refusal: None,
+            voices: 0,
             first_run: None,
             means: Means::real(),
             title_press: titlebar::Press::default(),
@@ -1297,7 +1316,7 @@ mod tests {
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
-    use crate::fake::{Posthog, Yard};
+    use crate::fake::{Live, Posthog, Yard};
     use crate::fetch::{self, Machine, Seen};
     use crate::input;
     use crate::model::{
@@ -1307,15 +1326,20 @@ mod tests {
     use crate::session::Update;
     use crate::settings::{Notify, Section};
     use crate::theme::Look;
+    use crate::voice::tests::{SocketLive, live_socket};
+    use crate::voice::{self, Start};
     use crate::yard;
     use gpui::{
         Bounds, ClipboardItem, MouseButton, TestAppContext, VisualTestContext, WindowAppearance, px,
     };
     use serde_json::{Value, json};
+    use std::any::Any;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn pairing_failures_name_the_pairing_and_give_a_next_step() {
@@ -11008,6 +11032,24 @@ yardr.dev
                 .unwrap()
                 .contains("\"voice\": true")
         );
+        // A session left standing ends itself after five minutes until
+        // another is chosen: the file keeps the choice, and says nothing of
+        // the usual.
+        assert_eq!(settings_of(&view, cx).voice_idle, 5);
+        click_on(cx, "voice idle 10");
+        assert_eq!(settings_of(&view, cx).voice_idle, 10);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"voice_idle\": 10")
+        );
+        click_on(cx, "voice idle 5");
+        assert_eq!(settings_of(&view, cx).voice_idle, 5);
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("voice_idle")
+        );
         // With no key typed, saving asks for one, and nothing is kept.
         click_on(cx, "voice save");
         assert_eq!(
@@ -11063,16 +11105,20 @@ yardr.dev
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
         assert!(!settings_of(&view, cx).voice);
-        // No voice control stands: the switch, the state, the field, its
-        // save, what it said, and the plain line are all gone.
+        // No voice control stands: the Voice button in the open
+        // conversation's head, the switch, the state, the field, its save,
+        // what it said, the idle limit and the plain line are all gone.
         let voice_gone = |cx: &mut VisualTestContext| {
             for gone in [
+                "voice button",
                 "voice off",
                 "voice on",
                 "voice state",
                 "voice key",
                 "voice save",
                 "voice said",
+                "voice idle 5",
+                "voice idle line",
                 "voice plain",
             ] {
                 assert!(!drawn(cx, gone), "{gone}");
@@ -11103,9 +11149,714 @@ yardr.dev
         // undrawn here.
         click_on(cx, "settings section voice");
         assert!(drawn(cx, "voice on") && drawn(cx, "voice key"));
+        assert!(drawn(cx, "voice idle 5") && drawn(cx, "voice idle line"));
         assert!(drawn(cx, "voice plain"));
+        // Switched on, the button stands in the conversation's head.
+        click_on(cx, "voice on");
         cx.simulate_keystrokes("escape");
         assert!(!settings_open(&view, cx));
+        assert!(drawn(cx, "voice button"));
+    }
+
+    /// What a window test's voice reaches outside with, in place of OpenAI
+    /// and the machine's devices: for each session the window starts, a
+    /// stand-in for OpenAI's Live socket on a loopback port of its own;
+    /// devices that count themselves open and note whether the session had
+    /// been hung up on when they closed; a clock the test moves; and whether
+    /// the window shows.
+    struct Voicing {
+        /// The sessions started so far, oldest first.
+        lives: Rc<RefCell<Vec<Started>>>,
+        /// The key the sessions are started with: the stand-in takes
+        /// `sk-test`, and the keeper may have none.
+        key: Rc<RefCell<Result<String, String>>>,
+        /// How many sets of devices stand open, the microphones they were
+        /// given, and for each set, in the order they closed, whether the
+        /// hang-up had been sent.
+        open: Arc<AtomicUsize>,
+        mics: Arc<Mutex<Vec<voice::Mic>>>,
+        order: Arc<Mutex<Vec<&'static str>>>,
+        /// How far on the clock is: the window's time is the real time and
+        /// this.
+        later: Rc<Cell<Duration>>,
+        hidden: Rc<Cell<bool>>,
+    }
+
+    /// A session the window started: what the stand-in for OpenAI heard, and
+    /// the socket that served it.
+    type Started = (Arc<Live>, SocketLive);
+
+    /// Devices that are open while this stands.
+    struct Plugged {
+        open: Arc<AtomicUsize>,
+        live: Option<Arc<Live>>,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for Plugged {
+        fn drop(&mut self) {
+            let hung_up = self
+                .live
+                .as_ref()
+                .is_some_and(|live| live.sent().iter().any(|e| e["type"] == "session.close"));
+            self.order.lock().unwrap().push(match hung_up {
+                true => "after the hang-up",
+                false => "before the hang-up",
+            });
+            self.open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Voicing {
+        fn new() -> Voicing {
+            Voicing {
+                lives: Rc::default(),
+                key: Rc::new(RefCell::new(Ok("sk-test".to_string()))),
+                open: Arc::default(),
+                mics: Arc::default(),
+                order: Arc::default(),
+                later: Rc::default(),
+                hidden: Rc::default(),
+            }
+        }
+
+        /// The window's voice reaches these and not the machine's.
+        fn stand_in(&self, view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+            let (lives, key) = (self.lives.clone(), self.key.clone());
+            let current: Arc<Mutex<Option<Arc<Live>>>> = Arc::default();
+            let (open, mics, order) = (self.open.clone(), self.mics.clone(), self.order.clone());
+            let (later, hidden) = (self.later.clone(), self.hidden.clone());
+            let seen = current.clone();
+            view.update(cx, |v, _| {
+                v.means.voice = Rc::new(move |on, _, with, tell| {
+                    if !on {
+                        return Start::Off;
+                    }
+                    let key = key.borrow().clone();
+                    // No key: nothing is connected to.
+                    if key.is_err() {
+                        return voice::gated_start(
+                            true,
+                            || key,
+                            "ws://127.0.0.1:1/never",
+                            with,
+                            tell,
+                        );
+                    }
+                    let live = Arc::new(Live::start());
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                    live.expires_at(now + 3600);
+                    let server = live_socket(live.clone(), "Bearer sk-test");
+                    let started = voice::gated_start(true, || key, &server.url, with, tell);
+                    *current.lock().unwrap() = Some(live.clone());
+                    lives.borrow_mut().push((live, server));
+                    started
+                });
+                v.means.devices = Arc::new(move |mic, _| {
+                    mics.lock().unwrap().push(mic);
+                    open.fetch_add(1, Ordering::SeqCst);
+                    Ok(Box::new(Plugged {
+                        open: open.clone(),
+                        live: seen.lock().unwrap().clone(),
+                        order: order.clone(),
+                    }) as Box<dyn Any + Send>)
+                });
+                v.means.now = Rc::new(move || std::time::Instant::now() + later.get());
+                v.means.hidden = Rc::new(move || hidden.get());
+            });
+        }
+
+        /// The stand-in of the `n`th session started.
+        fn live(&self, n: usize) -> Arc<Live> {
+            self.lives.borrow()[n].0.clone()
+        }
+    }
+
+    /// The Voice button's words: its name, or the session's state.
+    fn voice_words(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| v.voice_label())
+    }
+
+    fn voice_stands(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
+        view.read_with(cx, |v, _| v.voice.is_some())
+    }
+
+    /// Waits until the Voice button says `words`.
+    fn wait_voice(view: &Entity<Footplate>, cx: &mut VisualTestContext, words: &str) {
+        wait(cx, words, |cx| voice_words(view, cx) == words);
+    }
+
+    /// Taps the Voice button, and waits until the session stands and its
+    /// devices are open: the stand-in of the session.
+    fn talk_to(
+        view: &Entity<Footplate>,
+        voicing: &Voicing,
+        cx: &mut VisualTestContext,
+    ) -> Arc<Live> {
+        let before = voicing.lives.borrow().len();
+        click_on(cx, "voice button");
+        wait(cx, "the session standing", |cx| {
+            view.read_with(cx, |v, _| {
+                v.voice.as_ref().is_some_and(|talk| talk.stood.is_some())
+            })
+        });
+        wait(cx, "the devices open", |_| {
+            voicing.open.load(Ordering::SeqCst) == 1
+        });
+        voicing.live(before)
+    }
+
+    /// Waits until the session of `live` is over as a hang-up ends it, its
+    /// devices being the `n`th set opened: the button says Voice, the devices
+    /// are closed, before the hang-up, which went out, and the microphone's
+    /// frames go nowhere.
+    fn wait_hung_up(
+        view: &Entity<Footplate>,
+        voicing: &Voicing,
+        live: &Live,
+        n: usize,
+        cx: &mut VisualTestContext,
+    ) {
+        wait(cx, "the session over", |cx| !voice_stands(view, cx));
+        wait(cx, "the devices closed", |_| {
+            voicing.open.load(Ordering::SeqCst) == 0
+        });
+        assert_eq!(voice_words(view, cx), "Voice");
+        wait(cx, "the hang-up sent", |_| {
+            live.sent().iter().any(|e| e["type"] == "session.close")
+        });
+        assert_eq!(
+            voicing.order.lock().unwrap()[n],
+            "before the hang-up",
+            "the devices close first"
+        );
+        let mic = voicing.mics.lock().unwrap()[n].clone();
+        wait(cx, "the microphone's frames going nowhere", |_| {
+            !mic.send(vec![0; 480])
+        });
+    }
+
+    /// One tick of a standing session, now, as its loop's timer does.
+    fn tick(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        view.update(cx, |v, cx| {
+            let now = (v.means.now)();
+            v.voice_tick(now, cx)
+        });
+    }
+
+    fn caption_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
+        view.read_with(cx, |v, _| {
+            v.voice
+                .as_ref()
+                .map(|talk| talk.caption.text())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The yardmaster's mail to jo, as the stream tells of it.
+    fn answer_event(seq: u64, text: &str) -> String {
+        json!({"seq": seq, "kind": "mail", "actor": "yardmaster",
+               "data": {"to": "jo", "to_user": true, "text": text},
+               "at": "2026-10-08T09:32:00Z"})
+        .to_string()
+    }
+
+    /// A person speaks a request, a voice takes it for the yard, and the
+    /// yard's answer is spoken under it; the person speaks over the voice;
+    /// a decision comes up that the voice cannot answer.
+    #[gpui::test]
+    fn a_person_speaks_a_request_and_hears_the_yard_s_answer_in_the_open_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+
+        // With voice on the button stands in the head of the conversation,
+        // saying its name, and no caption stands before a session does.
+        assert!(drawn(cx, "voice button"));
+        assert_eq!(voice_words(&view, cx), "Voice");
+        assert!(!drawn(cx, "voice caption") && !drawn(cx, "voice meter"));
+
+        // A tap starts the session: the head says it is starting, then
+        // that it is listening, with the caption line standing empty and
+        // the meter counting.
+        let live = talk_to(&view, &voicing, cx);
+        wait_voice(&view, cx, "listening");
+        assert!(drawn(cx, "voice caption") && drawn(cx, "voice meter"));
+        assert_eq!(caption_of(&view, cx), "");
+        assert_eq!(
+            view.read_with(cx, |v, _| v.voice.as_ref().unwrap().meter.clone()),
+            "0 min · $0.00"
+        );
+
+        // The person speaks: the caption shows their words as they come.
+        // The model delegates, and the request goes to the yard as their
+        // own mail in the open conversation, as Enter's would.
+        live.person_says("What's blocking", 1000, 1600);
+        wait(cx, "the first words", |cx| {
+            caption_of(&view, cx) == "What's blocking"
+        });
+        live.person_says(" the release?", 1700, 2200);
+        wait(cx, "the caption", |cx| {
+            caption_of(&view, cx) == "What's blocking the release?"
+        });
+        let first = live.delegate(0);
+        wait(cx, "the mail sent", |_| {
+            yard.asked("Mail")
+                == [
+                    json!({"to": "yardmaster", "text": "What's blocking the release?", "actor": "jo"}),
+                ]
+        });
+        // While the yard works the head says so, as the row names them.
+        wait_voice(&view, cx, "yardmaster is working");
+
+        // The stream tells of the person's own mail, which is not spoken,
+        // and of the yardmaster's answer, which is: whole, under the
+        // delegation's id and no other, with both mails standing in the
+        // conversation as the record.
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "What's blocking the release?"}, "at": "2026-10-08T09:31:00Z"}"#);
+        yard.emit(&answer_event(22, "Only the Windows zip is left."));
+        wait(cx, "both mails in the conversation", |cx| {
+            texts(&view, cx)
+                == [
+                    "Shall I land it?",
+                    "What's blocking the release?",
+                    "Only the Windows zip is left.",
+                ]
+        });
+        wait(cx, "the answer spoken", |_| {
+            live.appends().iter().any(|a| a.kind == "commentary")
+        });
+        let spoken: Vec<_> = live
+            .appends()
+            .into_iter()
+            .filter(|a| a.kind == "commentary")
+            .collect();
+        assert_eq!(spoken.len(), 1, "the person's own mail is not spoken");
+        assert_eq!(
+            (
+                spoken[0].delegation_id.as_deref(),
+                spoken[0].content.as_str()
+            ),
+            (Some(first.as_str()), "Only the Windows zip is left.")
+        );
+        wait_voice(&view, cx, "listening");
+
+        // A mail with no request waiting for it is shown, and not spoken.
+        yard.emit(&answer_event(23, "Unasked."));
+        wait(cx, "the unasked mail", |cx| texts(&view, cx).len() == 4);
+        cx.run_until_parked();
+        assert_eq!(
+            live.appends()
+                .iter()
+                .filter(|a| a.kind == "commentary")
+                .count(),
+            1
+        );
+
+        // The voice speaks, and the head says so; the person speaks over
+        // it, and what was queued for the speaker is dropped.
+        for _ in 0..4 {
+            live.queue_audio(vec![7000; 2400]);
+        }
+        assert_eq!(live.play(4), 4);
+        wait_voice(&view, cx, "speaking");
+        live.person_says("Wait", 40000, 40200);
+        wait(cx, "the voice dropped", |cx| {
+            voice_words(&view, cx) == "listening"
+                && caption_of(&view, cx) == "Wait"
+                && view.read_with(cx, |v, _| {
+                    v.voice
+                        .as_ref()
+                        .unwrap()
+                        .speaker
+                        .lock()
+                        .unwrap()
+                        .queued_ms()
+                        == 0
+                })
+        });
+
+        // A decision of the yardmaster's comes up: the voice is directed
+        // to the card in the window, with nothing of it, and given nothing
+        // to answer it with.
+        let ask = |bead: &str, ask: u64, question: &str, secret: bool| {
+            let mut open = json!({"bead": bead, "bead_title": "Land it", "ask": ask,
+                "question": question, "asker": "yardmaster", "since": "2026-10-08T09:40:00Z"});
+            if secret {
+                open["secret"] = json!({"source": "books", "env": ["BOOKS_TOKEN"],
+                    "line": "a secret: BOOKS_TOKEN, for the source books"});
+            }
+            open
+        };
+        let asks = |open: &[Value]| json!({"result": {"open": open, "decided": []}}).to_string();
+        let noted = |seq: u64| {
+            json!({"seq": seq, "kind": "noted", "actor": "yardmaster", "bead": "yd-land",
+                   "data": {}, "at": "2026-10-08T09:40:00Z"})
+            .to_string()
+        };
+        let plain = ask("yd-land", 3, "Land it now?", false);
+        yard.answer("UserAsks", &asks(std::slice::from_ref(&plain)));
+        yard.emit(&noted(30));
+        wait(cx, "the direction", |_| {
+            live.appends()
+                .iter()
+                .any(|a| a.kind == "thinking" && a.delegation_id.is_none())
+        });
+        let direction = live
+            .appends()
+            .into_iter()
+            .find(|a| a.kind == "thinking" && a.delegation_id.is_none())
+            .unwrap();
+        assert!(
+            direction.content.contains("Take no answer to it by voice")
+                && direction.content.contains("waits in the window"),
+            "{}",
+            direction.content
+        );
+        for private in ["Land it now?", "yd-land", "yardmaster"] {
+            assert!(!direction.content.contains(private), "{private}");
+        }
+
+        // A secret ask directs nothing, not even that it is there: a plain
+        // ask after it is directed, and is the only one that is.
+        let before = live.appends().len();
+        let secret = ask("yd-keys", 4, "Which key?", true);
+        yard.answer("UserAsks", &asks(&[plain.clone(), secret.clone()]));
+        yard.emit(&noted(31));
+        wait(cx, "the secret card read", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().secret("yd-keys", 4).is_some()
+            })
+        });
+        yard.answer(
+            "UserAsks",
+            &asks(&[plain, secret, ask("yd-more", 5, "And then?", false)]),
+        );
+        yard.emit(&noted(32));
+        wait(cx, "the next ask's direction", |_| {
+            live.appends().len() > before
+        });
+        assert_eq!(live.appends().len(), before + 1);
+        assert!(
+            live.appends()
+                .iter()
+                .all(|a| !a.content.contains("Which key") && !a.content.contains("BOOKS_TOKEN"))
+        );
+
+        // A second tap ends it.
+        click_on(cx, "voice button");
+        wait_hung_up(&view, &voicing, &live, 0, cx);
+        let server = voicing.lives.borrow_mut().remove(0).1;
+        wait(cx, "the socket's thread gone", |_| {
+            server.thread.is_finished()
+        });
+    }
+
+    /// The session ends wherever the person leaves the conversation: a
+    /// second tap, another conversation, another yard, the switch turned
+    /// off, the window hidden or minimized, or shut, or nobody speaking
+    /// for the settings' minutes while no request waits.
+    #[gpui::test]
+    fn a_session_ends_wherever_the_person_leaves_the_conversation(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Yard::start();
+        a_yard_of_jo(&near);
+        let second = Yard::start();
+        a_second_yard_of_jo(&second);
+        let file = two_yards(dir.path(), &second);
+        Settings {
+            voice: true,
+            ..Settings::read(&file)
+        }
+        .write(&file)
+        .unwrap();
+        let env = env_on(&near, &file);
+        let (view, cx) = opened_at(env, &file, cx);
+        wait(cx, "this machine's yard", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        wait(cx, "what waits in the second home", |cx| {
+            state_of(&view, cx, "second home") == "2 mail"
+        });
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let mut n = 0;
+
+        // Another conversation: the next row, a linked yard's.
+        let live = talk_to(&view, &voicing, cx);
+        cx.simulate_keystrokes("tab");
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+        // The row that was left is not the one that is open.
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .model
+                .as_ref()
+                .unwrap()
+                .selected_conversation()
+                .map(str::to_string)),
+            Some("clerk@north".to_string())
+        );
+
+        // Another yard.
+        let live = talk_to(&view, &voicing, cx);
+        cx.simulate_keystrokes("secondary-2");
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+        wait(cx, "the second home's yard", |cx| {
+            texts(&view, cx) == ["From the second home."]
+        });
+
+        // The switch turned off in the settings: nothing is sent while
+        // voice is off, so a session that stands goes with it.
+        let live = talk_to(&view, &voicing, cx);
+        view.update(cx, |v, cx| v.voice_on(false, cx));
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+        view.update(cx, |v, cx| v.voice_on(true, cx));
+
+        // The window hidden, or minimized: out of view.
+        let live = talk_to(&view, &voicing, cx);
+        voicing.hidden.set(true);
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+        voicing.hidden.set(false);
+
+        // The window shut, or hid itself as closing does on a Mac.
+        let live = talk_to(&view, &voicing, cx);
+        cx.simulate_close();
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+
+        // A second tap.
+        let live = talk_to(&view, &voicing, cx);
+        click_on(cx, "voice button");
+        wait_hung_up(&view, &voicing, &live, n, cx);
+        n += 1;
+
+        // Idle: five minutes with nobody speaking and no request waiting.
+        // Words start the quiet over; a request that waits for its answer
+        // is a working conversation, however long the yard takes; the
+        // answer starts it over again.
+        let live = talk_to(&view, &voicing, cx);
+        voicing.later.set(Duration::from_secs(4 * 60));
+        tick(&view, cx);
+        assert!(voice_stands(&view, cx), "four minutes of quiet");
+        live.person_says("Hello", 1000, 1200);
+        wait(cx, "the words", |cx| caption_of(&view, cx) == "Hello");
+        voicing.later.set(Duration::from_secs(8 * 60));
+        tick(&view, cx);
+        assert!(voice_stands(&view, cx), "four minutes since the words");
+        // The yard that is open is the second home's by now.
+        live.person_says("What is left?", 9000, 10000);
+        live.delegate(0);
+        wait(cx, "the request sent", |_| second.asked("Mail").len() == 1);
+        voicing.later.set(Duration::from_secs(40 * 60));
+        tick(&view, cx);
+        assert!(voice_stands(&view, cx), "a request waits for its answer");
+        // The answer: spoken, and the quiet starts over from it.
+        second.emit(&answer_event(30, "Nothing."));
+        wait(cx, "the answer", |cx| {
+            view.read_with(cx, |v, _| !v.voice.as_ref().unwrap().unanswered)
+        });
+        voicing.later.set(Duration::from_secs(44 * 60));
+        tick(&view, cx);
+        assert!(voice_stands(&view, cx), "four minutes since the answer");
+        // Five minutes on, the session's own timer ends it.
+        voicing.later.set(Duration::from_secs(46 * 60));
+        wait_hung_up(&view, &voicing, &live, n, cx);
+    }
+
+    /// A session that cannot be made says why beside the button, in the
+    /// words of whoever refused it, and no session stands: the keeper's own
+    /// words where no key is kept, OpenAI's where it refuses the key. It is
+    /// never tried again unasked; a new tap is a new start.
+    #[gpui::test]
+    fn a_refusal_to_start_stands_beside_the_button_in_its_own_words_and_no_session_stands(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let refusal =
+            |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.voice_refusal.clone());
+
+        // No key kept: the keeper's words, as they are.
+        let none = "There is no voice key: nothing is kept. Type your OpenAI key in the settings' Voice section, or set FOOTPLATE_OPENAI_KEY.";
+        *voicing.key.borrow_mut() = Err(none.to_string());
+        click_on(cx, "voice button");
+        assert_eq!(refusal(cx).as_deref(), Some(none));
+        assert!(drawn(cx, "voice refusal"));
+        assert!(!voice_stands(&view, cx));
+        assert_eq!(voice_words(&view, cx), "Voice");
+        assert!(voicing.lives.borrow().is_empty());
+
+        // A key that OpenAI refuses: its words, with the key taken out.
+        *voicing.key.borrow_mut() = Ok("sk-wrong".to_string());
+        click_on(cx, "voice button");
+        wait(cx, "OpenAI's refusal", |cx| {
+            refusal(cx).is_some_and(|words| words.contains("401"))
+        });
+        let words = refusal(cx).unwrap();
+        assert!(
+            words.contains("Incorrect API key provided: sk-…"),
+            "{words}"
+        );
+        assert!(
+            !words.contains("sk-wrong") && !words.contains("sk-test"),
+            "{words}"
+        );
+        assert!(!voice_stands(&view, cx));
+        assert_eq!(voice_words(&view, cx), "Voice");
+        // No devices were opened for it, and it was not tried again.
+        cx.run_until_parked();
+        assert_eq!(voicing.open.load(Ordering::SeqCst), 0);
+        assert!(voicing.mics.lock().unwrap().is_empty());
+        assert_eq!(voicing.lives.borrow().len(), 1);
+
+        // A new tap is a new start, and the words beside the button go.
+        *voicing.key.borrow_mut() = Ok("sk-test".to_string());
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(refusal(cx), None);
+        assert_eq!(voicing.lives.borrow().len(), 2);
+        click_on(cx, "voice button");
+        wait_hung_up(&view, &voicing, &live, 0, cx);
+
+        // With voice off the button is not offered, and a stale tap
+        // starts nothing and reads no key.
+        view.update(cx, |v, cx| v.voice_on(false, cx));
+        *voicing.key.borrow_mut() = Err("the key was read while voice is off".to_string());
+        view.update(cx, |v, cx| v.toggle_voice(cx));
+        assert_eq!(refusal(cx), None);
+        assert!(!voice_stands(&view, cx));
+    }
+
+    /// A request spoken while the yard is away is refused once: the voice
+    /// is told the yard does not answer, the caption says so, and the mail
+    /// is never queued, so it is not sent when the yard returns. So with a
+    /// request that waits when the yard goes: its answer will not be spoken.
+    // Names the socket: a yard stopped and started again at its path.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_request_spoken_while_the_yard_is_away_is_refused_once_and_never_queued_or_resent(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("yard.sock");
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        // The follower tries a yard that went away again after a breath.
+        let env = Env {
+            socket: socket.clone(),
+            ..Env::default()
+        };
+        let (view, cx) = watching_at(env, &file, cx);
+        wait(cx, "the yardmaster's conversation", |cx| {
+            texts(&view, cx) == ["Shall I land it?"]
+        });
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let live = talk_to(&view, &voicing, cx);
+        let refused = |live: &Live| {
+            live.appends()
+                .into_iter()
+                .filter(|a| a.kind == "commentary" && a.content == "the yard does not answer")
+                .collect::<Vec<_>>()
+        };
+
+        // The yard goes: a request is not sent, whatever else, and nothing
+        // is queued for when it is back.
+        yard.stop();
+        wait(cx, "that the yard is away", |cx| {
+            view.read_with(cx, |v, _| v.reconnecting())
+        });
+        live.person_says("What's blocking the release?", 1000, 2200);
+        let first = live.delegate(0);
+        wait(cx, "the refusal spoken", |_| !refused(&live).is_empty());
+        assert_eq!(refused(&live).len(), 1);
+        assert_eq!(
+            refused(&live)[0].delegation_id.as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(
+            view.read_with(cx, |v, _| v.voice.as_ref().unwrap().words.clone()),
+            Some("the yard is away, so nothing was sent".to_string())
+        );
+        assert!(yard.asked("Mail").is_empty());
+        assert_eq!(voice_words(&view, cx), "listening");
+
+        // The yard is back: the mail is not sent now, and is not spoken of
+        // again.
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        wait(cx, "the yard again", |cx| {
+            view.read_with(cx, |v, _| v.down.is_none())
+        });
+        cx.run_until_parked();
+        assert!(yard.asked("Mail").is_empty());
+        assert_eq!(refused(&live).len(), 1);
+
+        // A request that went, and waits for its answer when the yard goes:
+        // the same words, once, under its delegation.
+        live.person_says("And who owns it?", 30000, 31000);
+        let second = live.delegate(0);
+        wait(cx, "the mail sent", |_| yard.asked("Mail").len() == 1);
+        wait_voice(&view, cx, "yardmaster is working");
+        yard.stop();
+        wait(cx, "the refusal spoken", |_| refused(&live).len() == 2);
+        assert_eq!(
+            refused(&live)[1].delegation_id.as_deref(),
+            Some(second.as_str())
+        );
+        wait_voice(&view, cx, "listening");
+        let yard = Yard::start_at(&socket);
+        a_yard_of_jo(&yard);
+        wait(cx, "the yard again", |cx| {
+            view.read_with(cx, |v, _| v.down.is_none())
+        });
+        cx.run_until_parked();
+        assert!(yard.asked("Mail").is_empty());
+        assert_eq!(refused(&live).len(), 2);
     }
 
     /// The layout at the smallest and the largest text: the rows of the
@@ -22852,6 +23603,7 @@ yardr.dev
             apple,
             titlebar: None,
             feedback: None,
+            ..Means::real()
         };
         (means, program, opened)
     }

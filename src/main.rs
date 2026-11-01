@@ -220,6 +220,43 @@ fn unhide() {
 #[cfg(not(target_os = "macos"))]
 fn unhide() {}
 
+/// Whether the window is out of view: footplate is hidden (⌘H), or its
+/// window is minimized to the Dock. gpui tells of neither, so a voice session
+/// asks while it stands (design 3.2: it does not go on under a window that
+/// shows nothing). It says no when it cannot tell: a window covered by
+/// others, or behind another app, still shows. A test's window has stand-ins
+/// for it ([`window`]'s `Means`), so none calls it there.
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
+fn hidden() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(main_thread);
+    if app.isHidden() {
+        return true;
+    }
+    // The windows that can be the application's main window are its own: the
+    // menu bar item's cannot be.
+    let windows = app.windows();
+    let mut own = windows
+        .iter()
+        .filter(|window| window.canBecomeMainWindow())
+        .peekable();
+    own.peek().is_some() && own.all(|window| window.isMiniaturized())
+}
+
+/// No other system hides footplate, or tells that its window went to the
+/// dock.
+#[cfg(not(target_os = "macos"))]
+#[cfg_attr(test, allow(dead_code))]
+fn hidden() -> bool {
+    false
+}
+
 /// On Linux it is the desktop entry of the window's id, and under X11 a
 /// property of the window too.
 #[cfg(target_os = "linux")]

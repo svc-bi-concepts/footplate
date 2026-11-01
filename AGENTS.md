@@ -49,7 +49,10 @@ The window, its state and the yard:
   SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
   `FollowControl` manner, which owns the microphone's frames in and the
   speaker's queue out; the devices that plug into those ends are
-  `src/audio.rs`'s, and the window's button is not here yet.
+  `src/audio.rs`'s, and the window's Voice button, which starts and ends
+  the session and speaks the open conversation's answers to it, is in
+  `src/window/bead.rs`. The caption, the meter and the idle rule are
+  plain functions here too.
 - `src/yard.rs`: picks which yard opens (socket or address, token files,
   hosted sessions); tokens live beside the settings, never in them.
 - `src/settings.rs`: what the window keeps between runs, one JSON file in the

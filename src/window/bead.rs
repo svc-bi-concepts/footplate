@@ -1,9 +1,13 @@
 //! One bead's views: the bead whole, the conversation thread with
 //! its mail, and the pictures and attachments of both.
 
+use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, Div, Focusable, FontWeight, Image, ImageFormat, MouseButton, ObjectFit,
@@ -18,16 +22,19 @@ use super::metrics::{
     ATTACHMENT, IMAGE_HEIGHT, IMAGE_MARGIN, LETTER_GUTTER, READING_WIDTH, drawer_fits,
 };
 use super::panel::{day_break, reading_column, reading_row};
-use super::rail::{ImageOpen, OpenTip, Picture, Unsent, post};
+use super::rail::{ImageOpen, OpenTip, Picture, RailTip, Unsent, post};
 use super::screen::{screen_control, screen_icon};
-use super::state::Piece;
+use super::state::{Piece, Talk};
 use super::ui::{keys_hint, send_held, small_button};
 use super::words::{ask_words, bead_back_name, bead_sub, remark_color, worker_words};
-use crate::api::{self, Address, BlobRef, Reaction};
+use crate::api::{self, Address, BlobRef, Event, Reaction};
 use crate::draft::{self, Attachment, Found};
-use crate::model::{self, ArrivalDetail, AskPreview, Entry, Model, Selected, Target, Top};
+use crate::model::{
+    self, ArrivalDetail, AskPreview, Entry, Kind, Model, News, Selected, Target, Top,
+};
 use crate::select;
 use crate::theme::Palette;
+use crate::voice::{self, Ask, Caption, Speaking, Start, State, Update};
 
 /// Whether the letter `seq` shows its time in the gutter: it reads
 /// under another's head, and the pointer stands on it. A letter with
@@ -41,6 +48,24 @@ pub(crate) fn hover_clock(head: bool, hover: Option<(u64, Piece)>, seq: u64) -> 
 /// The rows of the conversation's list that stand before its mail: the
 /// line above the oldest mail, which `talk_conversation` puts first.
 pub(crate) const ROWS_BEFORE_MAIL: usize = 1;
+
+/// How often a voice session that stands looks at itself: the state words it
+/// draws from the speaker's queue, the minutes it counts, and whether it has
+/// stood idle too long. The update loop's own timer.
+const VOICE_TICK: Duration = Duration::from_millis(200);
+
+/// What the voice session's loop is told: something the session said, or
+/// that a moment passed with nothing said.
+pub(crate) enum Heard {
+    Said(Update),
+    Tick,
+}
+
+/// What the voice is given to speak of a request that went nowhere because
+/// the yard was away, or went: Enter holds its mail in the same case, and a
+/// session queues nothing, since a mail sent as the connection broke cannot
+/// be told apart from one that never arrived.
+const YARD_AWAY: &str = "the yard does not answer";
 
 /// Where the bar of reactions stands over the row of the list that draws
 /// it, as the `top` it takes from that row's top edge: its own 36 pixels
@@ -170,6 +195,422 @@ impl Footplate {
                 Err(unsent) => this.unsent(&yard, &to, &at, unsent, cx),
             },
         );
+    }
+
+    /// The Voice button: starts a voice session in the open conversation, or
+    /// ends the one that stands, as a second tap does. A session that cannot
+    /// be made says why beside the button, in the words of whoever refused it,
+    /// and is made again only by another tap. While voice is off nothing is
+    /// started and no key is read.
+    pub(crate) fn toggle_voice(&mut self, cx: &mut Context<Self>) {
+        if self.voice.is_some() {
+            return self.end_voice(cx);
+        }
+        let Some((with, _)) = self.open() else {
+            return;
+        };
+        self.voice_refusal = None;
+        let (tell, told) = mpsc::channel();
+        let voice = match (self.means.voice)(self.settings.voice, self.kept.as_deref(), &with, tell)
+        {
+            Start::On(voice) => voice,
+            Start::Off => return cx.notify(),
+            Start::Refused(words) => {
+                self.voice_refusal = Some(words);
+                return cx.notify();
+            }
+        };
+        // What the session tells comes to the window as the yard's follower's
+        // words do: from a thread of its own, through a channel, to one loop
+        // that applies each on the window. The same thread is the loop's timer.
+        let (feed, fed) = async_channel::unbounded::<Heard>();
+        let forwarding = thread::Builder::new()
+            .name("voice updates".into())
+            .spawn(move || {
+                loop {
+                    let heard = match told.recv_timeout(VOICE_TICK) {
+                        Ok(update) => Heard::Said(update),
+                        Err(RecvTimeoutError::Timeout) => Heard::Tick,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    if feed.send_blocking(heard).is_err() {
+                        break;
+                    }
+                }
+            });
+        if let Err(err) = forwarding {
+            self.voice_refusal = Some(format!(
+                "footplate could not start the voice session: {err}"
+            ));
+            return cx.notify();
+        }
+        self.voices += 1;
+        let id = self.voices;
+        let updates = cx.spawn(async move |this, cx| {
+            while let Ok(heard) = fed.recv().await {
+                if this
+                    .update(cx, |this, cx| this.voice_heard(id, heard, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.voice = Some(Talk {
+            id,
+            with,
+            devices: None,
+            speaker: voice.speaker(),
+            voice,
+            _updates: updates,
+            stood: None,
+            caption: Caption::default(),
+            words: None,
+            unanswered: false,
+            quiet_since: (self.means.now)(),
+            speaking: Speaking::default(),
+            answered_through: 0,
+            state: State::Listening,
+            meter: String::new(),
+        });
+        cx.notify();
+    }
+
+    /// What voice session `id` said, or that a moment passed. A session that
+    /// ended says nothing to the one that came after it.
+    fn voice_heard(&mut self, id: u64, heard: Heard, cx: &mut Context<Self>) {
+        if self.voice.as_ref().map(|talk| talk.id) != Some(id) {
+            return;
+        }
+        let now = (self.means.now)();
+        match heard {
+            Heard::Tick => self.voice_tick(now, cx),
+            Heard::Said(update) => self.voice_told(update, now, cx),
+        }
+    }
+
+    /// The session said `update`, in plain terms; the window does what it
+    /// asks for. A session that could not be made, or lost, says why beside
+    /// the button; one that ended otherwise (the person's hang-up, the
+    /// provider's close, its moment) leaves the button saying Voice again.
+    fn voice_told(&mut self, update: Update, now: Instant, cx: &mut Context<Self>) {
+        let Some(talk) = self.voice.as_mut() else {
+            return;
+        };
+        match update {
+            // The session stands: its minutes count from here, and the
+            // devices open, off the window's thread, since a Mac waits for
+            // the person's answer to the microphone's consent.
+            Update::Started => {
+                talk.stood = Some(now);
+                talk.quiet_since = now;
+                talk.meter = voice::meter(Duration::ZERO);
+                let (id, mic, speaker) = (talk.id, talk.voice.microphone(), talk.speaker.clone());
+                let plug = self.means.devices.clone();
+                cx.spawn(async move |this, cx| {
+                    let opened = cx
+                        .background_executor()
+                        .spawn(async move { plug(mic, speaker) })
+                        .await;
+                    this.update(cx, |this, cx| this.voice_plugged(id, opened, cx))
+                        .ok();
+                })
+                .detach();
+            }
+            // The session dropped what the voice had queued as the person
+            // began: what the head says of the voice speaking goes with it.
+            Update::SpeechStarted => talk.speaking.stop(),
+            Update::Words(fragment) => {
+                talk.caption.heard(fragment);
+                talk.words = None;
+                talk.quiet_since = now;
+            }
+            Update::Request(text) => return self.voice_request(text, now, cx),
+            Update::Ended(_) => return self.end_voice(cx),
+            Update::Refused(words) => {
+                self.voice_refusal = Some(words);
+                return self.end_voice(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The devices of voice session `id` are open, or why they are not.
+    fn voice_plugged(
+        &mut self,
+        id: u64,
+        opened: Result<Box<dyn Any + Send>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        // A session that ended meanwhile has no devices to hold: they close
+        // as `opened` is dropped.
+        let Some(talk) = self.voice.as_mut().filter(|talk| talk.id == id) else {
+            return;
+        };
+        match opened {
+            Ok(devices) => talk.devices = Some(devices),
+            Err(why) => {
+                self.voice_refusal = Some(why);
+                self.end_voice(cx);
+            }
+        }
+    }
+
+    /// A request: what the person said, to go to the open conversation as
+    /// their own mail, as Enter sends what they typed, with no file and in
+    /// the yard it was spoken in. Under the same refusal: while the yard is
+    /// reconnecting nothing is sent, and nothing is queued, since a mail
+    /// sent as the connection broke cannot be told apart from one that never
+    /// arrived. Where it is not sent the voice is told once, and the caption
+    /// says so.
+    fn voice_request(&mut self, text: String, now: Instant, cx: &mut Context<Self>) {
+        let Some(talk) = self.voice.as_mut() else {
+            return;
+        };
+        let (id, with) = (talk.id, talk.with.clone());
+        talk.quiet_since = now;
+        talk.unanswered = true;
+        talk.words = None;
+        // The conversation spoken in is the open one, or the mail goes to
+        // nobody.
+        let Some((to, target)) = self.open().filter(|(to, _)| *to == with) else {
+            return self.end_voice(cx);
+        };
+        if self.reconnecting() {
+            let shown = "the yard is away, so nothing was sent".to_string();
+            return self.voice_refused(id, YARD_AWAY, shown, cx);
+        }
+        let session = self.session;
+        self.ask_through(
+            cx,
+            move |client, me| {
+                post(client, me, &target, &text, &[])
+                    .map(|_| ())
+                    .map_err(|(_, why)| why)
+            },
+            move |this, sent, cx| match sent {
+                // It went in the yard it was spoken in, whose model has it
+                // wherever the window is by now.
+                Ok(()) => this.change_in(session, cx, |m| m.sent(&to)),
+                Err(why) => {
+                    let shown = format!("not sent to {to}: {why}");
+                    this.voice_refused(id, &why, shown, cx)
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// The request of voice session `id` did not go, or the yard went away
+    /// after it: the voice is given `words` to speak, once, and the caption
+    /// says `shown`. The mail is not sent again.
+    fn voice_refused(&mut self, id: u64, words: &str, shown: String, cx: &mut Context<Self>) {
+        let Some(talk) = self.voice.as_mut().filter(|talk| talk.id == id) else {
+            return;
+        };
+        talk.voice.refused(words);
+        talk.unanswered = false;
+        talk.quiet_since = (self.means.now)();
+        talk.words = Some(shown);
+        cx.notify();
+    }
+
+    /// The yard went away. A request that waits for its answer will not get
+    /// one spoken: the answer, if it comes, comes with the state the yard
+    /// is read in when it is back. The voice says the yard does not answer,
+    /// as it does of a mail the yard refused.
+    pub(crate) fn voice_yard_away(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .voice
+            .as_ref()
+            .filter(|talk| talk.unanswered)
+            .map(|talk| talk.id)
+        else {
+            return;
+        };
+        let shown = "the yard went away, so its answer will not be spoken".to_string();
+        self.voice_refused(id, YARD_AWAY, shown, cx);
+    }
+
+    /// The stream told of `event`. Where it is the other side's mail in the
+    /// voiced conversation, the voice is given its text, and its text only:
+    /// the session knows whether an answer is waited for, and speaks it only
+    /// then. The person's own mail never goes.
+    pub(crate) fn voice_hears(&mut self, event: &Event) {
+        let (Some(talk), Some(model)) = (self.voice.as_mut(), self.model.as_ref()) else {
+            return;
+        };
+        let Some(text) = model.answer_in(event, &talk.with) else {
+            return;
+        };
+        if event.seq <= talk.answered_through {
+            return;
+        }
+        talk.answered_through = event.seq;
+        talk.unanswered = false;
+        talk.quiet_since = (self.means.now)();
+        talk.voice.answered(text);
+    }
+
+    /// Asks that arrived from the other side of the voiced conversation: the
+    /// voice is directed to the card in the window, never given anything to
+    /// answer it with, and of a secret ask it is told nothing at all.
+    pub(crate) fn voice_asked(&self, news: &[News]) {
+        let (Some(talk), Some(model)) = (self.voice.as_ref(), self.model.as_ref()) else {
+            return;
+        };
+        for news in news
+            .iter()
+            .filter(|news| news.kind == Kind::Decision && news.from == talk.with)
+        {
+            talk.voice.asked(match model.secret_ask(news) {
+                true => Ask::Secret,
+                false => Ask::Plain,
+            });
+        }
+    }
+
+    /// Whether the voiced conversation is the open row of the open yard.
+    /// A session belongs to it, and ends when another is open.
+    pub(crate) fn voice_is_here(&self) -> bool {
+        self.voice.as_ref().is_none_or(|talk| {
+            self.model.as_ref().and_then(|m| m.selected_conversation()) == Some(talk.with.as_str())
+        })
+    }
+
+    /// A moment of a standing session, at `now`: it ends where the window no
+    /// longer shows its conversation, or has stood idle for the settings'
+    /// minutes (Live bills by the second); else the head is drawn again if
+    /// what it says changed.
+    pub(crate) fn voice_tick(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let here = self.voice_is_here();
+        let hidden = (self.means.hidden)();
+        let limit = self.settings.voice_idle_limit();
+        let Some(talk) = self.voice.as_mut() else {
+            return;
+        };
+        let idle =
+            talk.stood.is_some() && voice::idle(talk.quiet_since, now, limit, talk.unanswered);
+        if !here || hidden || idle {
+            return self.end_voice(cx);
+        }
+        let queued = talk.speaker.lock().map_or(0, |queue| queue.queued_ms());
+        let state = State::of(talk.speaking.seen(queued, now), talk.unanswered);
+        let meter = talk
+            .stood
+            .map(|at| voice::meter(now.saturating_duration_since(at)))
+            .unwrap_or_default();
+        if (state, &meter) != (talk.state, &talk.meter) {
+            talk.state = state;
+            talk.meter = meter;
+            cx.notify();
+        }
+    }
+
+    /// Ends the voice session, if one stands: the devices first, so that
+    /// nothing more of the room goes to the session, then the hang-up, which
+    /// waits for the provider's close and so is no call for the window's
+    /// thread. Every leaving of the conversation comes here.
+    pub(crate) fn end_voice(&mut self, cx: &mut Context<Self>) {
+        let Some(Talk { devices, voice, .. }) = self.voice.take() else {
+            return;
+        };
+        drop(devices);
+        // A thread that cannot be started leaves the hang-up to the
+        // handle's drop, which stops the session as the control does.
+        let _ = thread::Builder::new()
+            .name("voice hang-up".into())
+            .spawn(move || voice.stop());
+        cx.notify();
+    }
+
+    /// What the Voice button says: its name, then the session's state in
+    /// quiet words while one stands, as the row names the counterpart.
+    pub(crate) fn voice_label(&self) -> String {
+        match &self.voice {
+            None => "Voice".to_string(),
+            Some(talk) if talk.stood.is_none() => "starting…".to_string(),
+            Some(talk) => talk.state.words(&talk.with),
+        }
+    }
+
+    /// The Voice button, in the conversation's head beside its name, where
+    /// voice is on and the conversation is with someone other than the person
+    /// themselves. While a session stands it says the session's state in
+    /// quiet words, and a second tap ends it.
+    fn voice_control(
+        &self,
+        model: &Model,
+        with: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        (self.settings.voice && with != model.me() && model.target().is_some()).then(|| {
+            let tip = match &self.voice {
+                None => format!("voice: talk with {with} by voice"),
+                Some(_) => "voice: tap to end the session".to_string(),
+            };
+            small_button(self.voice_label(), palette)
+                .id("voice button")
+                .debug_selector(|| "voice button".to_string())
+                .flex_none()
+                .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+                // The press takes no focus: what is typed stays in the line.
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_voice(cx);
+                }))
+        })
+    }
+
+    /// The session's minutes and what they have cost, quiet at the head's
+    /// right: counts are words, at the right.
+    fn voice_meter(&self, palette: Palette) -> Option<impl IntoElement> {
+        let talk = self.voice.as_ref().filter(|talk| !talk.meter.is_empty())?;
+        Some(
+            div()
+                .debug_selector(|| "voice meter".to_string())
+                .flex_none()
+                .text_sm()
+                .text_color(palette.faint)
+                .child(talk.meter.clone()),
+        )
+    }
+
+    /// Why the last session could not be made, or ended, in the words of
+    /// whoever refused it: a line of the head, in the colour of an error.
+    fn voice_refusal_line(&self, palette: Palette) -> Option<impl IntoElement> {
+        self.voice_refusal.as_ref().map(|words| {
+            div()
+                .debug_selector(|| "voice refusal".to_string())
+                .text_sm()
+                .text_color(palette.warn)
+                .child(words.clone())
+        })
+    }
+
+    /// The caption: what the person is saying, one line under the head and
+    /// over the mail, while a session stands; the window's own words stand
+    /// in its place where what was said did not go. The line keeps its height
+    /// when empty, so that the mail does not move as the person speaks.
+    fn voice_caption(&self, palette: Palette) -> Option<impl IntoElement> {
+        let talk = self.voice.as_ref()?;
+        let (said, color) = match &talk.words {
+            Some(words) => (words.clone(), palette.warn),
+            None => (talk.caption.text(), palette.text),
+        };
+        Some(
+            div()
+                .debug_selector(|| "voice caption".to_string())
+                .flex_none()
+                .px_3()
+                .py_1()
+                .min_h(rems(1.75))
+                .text_sm()
+                .text_color(color)
+                .child(said),
+        )
     }
 
     /// Puts `emoji` on the mail `seq` as the user: a tap on the user's
@@ -1447,6 +1888,7 @@ impl Footplate {
     ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let about = model.about();
+        let voice = self.voice_control(model, with, palette, cx);
         let head = div()
             .p_3()
             .border_b_1()
@@ -1477,15 +1919,27 @@ impl Footplate {
                                     .debug_selector(|| "conversation state".to_string())
                                     .text_color(palette.faint)
                                     .child(format!("· {state}"))
-                            })),
+                            }))
+                            // The Voice button, beside the name, and the
+                            // session's state in its place while one stands.
+                            .children(voice),
                     )
-                    // The crew member's screen, at the header's right edge.
-                    // Who is no member of this yard's crew has no session,
-                    // and the header carries no icon.
-                    .children(model.screen_for_crew(with).map(|session| {
-                        screen_icon(session, format!("talk screen {with}"), palette, cx)
-                    })),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            // A voice session's minutes and cost, quiet.
+                            .children(self.voice_meter(palette))
+                            // The crew member's screen, at the header's right
+                            // edge. Who is no member of this yard's crew has no
+                            // session, and the header carries no icon.
+                            .children(model.screen_for_crew(with).map(|session| {
+                                screen_icon(session, format!("talk screen {with}"), palette, cx)
+                            })),
+                    ),
             )
+            .children(self.voice_refusal_line(palette))
             .children(about.into_iter().enumerate().map(|(i, line)| {
                 // The first says who that is; what follows keeps mail from
                 // arriving.
@@ -1578,6 +2032,7 @@ impl Footplate {
         let reasons = self.drafts.reasons(with);
         pane.children(self.reconnect_strip(palette))
             .child(head)
+            .children(self.voice_caption(palette))
             .child(mail)
             // The notice stands in the reading column with the composer
             // under it, and has the side margins the composer's frame has,

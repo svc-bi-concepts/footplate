@@ -2,8 +2,11 @@
 //! it was left, what waits in the yards it follows, and what the
 //! switch and the settings are asking or doing.
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use gpui::{Pixels, Task};
 
@@ -14,6 +17,7 @@ use crate::model::{Mode, Model, Outcome, Selected};
 use crate::session;
 use crate::settings;
 use crate::setup;
+use crate::voice::{Caption, Queue, Speaking, State, Voice};
 
 /// A pairing's code as it was typed where the yard's address is known
 /// already: what a pairing's QR code holds, `<address>#<code>`, may be
@@ -441,6 +445,49 @@ impl Drop for Held {
             stop.stop();
         }
     }
+}
+
+/// A voice session as the window keeps it: the thread that holds the socket,
+/// the devices it hears and speaks through, and what the conversation's head
+/// shows of it. One at a time, in the conversation it was started in, and
+/// never held with a yard: leaving the conversation, the yard or the window
+/// ends it (design 3.2).
+pub(crate) struct Talk {
+    /// Which session of all the window started this is: what it tells
+    /// carries it, and what an earlier one tells after it ended is told of
+    /// no more.
+    pub(crate) id: u64,
+    /// The conversation voiced, by the name its row has.
+    pub(crate) with: String,
+    /// The microphone and the speaker, once the session stands. Dropped
+    /// before the session is stopped.
+    pub(crate) devices: Option<Box<dyn Any + Send>>,
+    pub(crate) voice: Voice,
+    /// The speaker's end of the session, to read what is queued from.
+    pub(crate) speaker: Arc<Mutex<Queue>>,
+    /// Hands on the loop that tells the window what the session says, for as
+    /// long as it is held here.
+    pub(crate) _updates: Task<()>,
+    /// When the session stood, which its minutes count from: none before.
+    pub(crate) stood: Option<Instant>,
+    /// What the person is saying, which the caption shows.
+    pub(crate) caption: Caption,
+    /// The window's own words in the caption's place, where what was said did
+    /// not go to the yard: why. Gone when the person speaks again.
+    pub(crate) words: Option<String>,
+    /// A request's mail is sent and its answer not yet in: the yard is
+    /// working.
+    pub(crate) unanswered: bool,
+    /// Since when nobody has spoken and no request waited.
+    pub(crate) quiet_since: Instant,
+    pub(crate) speaking: Speaking,
+    /// The newest mail of the other side that the voice has been given: one
+    /// the stream tells of twice is spoken once.
+    pub(crate) answered_through: u64,
+    /// What the head draws: the state's words and the minutes and cost, as
+    /// the last look at the session saw them.
+    pub(crate) state: State,
+    pub(crate) meter: String,
 }
 
 #[cfg(test)]
