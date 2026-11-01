@@ -15,17 +15,39 @@ On the Mac, from a footplate checkout (or the unpacked archive from the bead's
 note), with a microphone and, best, a headset:
 
     cd spikes/voice-harness
+    cargo run --release --locked
+
+The key is your own OpenAI project's. Type it into the masked field in
+footplate's Settings, Voice section. footplate keeps it in `voice.key` beside
+its `settings.json`, and the harness reads it from there. The other way is the
+environment, for when there is no footplate to type it in, or when one run
+should use another key:
+
     FOOTPLATE_OPENAI_KEY=sk-... cargo run --release --locked
 
 `--locked` builds what the committed `Cargo.lock` names; the first build takes a
 minute or two (cpal and its Apple bindings). To build once and run many times:
 `cargo build --release --locked`, then `./target/release/voice-harness [options]`.
 
-- The key is read from `FOOTPLATE_OPENAI_KEY` and is never printed, never in
-  the log, never in an error (a refusal's text has anything key-shaped taken
-  out). The log holds what you said and what the model said, since that is
-  what it is for: it is written to `voice-harness-<time>.log` here, readable by
-  you alone, and to your terminal.
+- When `FOOTPLATE_OPENAI_KEY` has a non-empty value after trimming, it is the
+  key and the file is not read. An empty or whitespace-only value falls back
+  to the Settings key. A variable left in your shell therefore wins over what
+  you typed in Settings. Run `unset FOOTPLATE_OPENAI_KEY` to use the Settings
+  key.
+- Otherwise the key is in `voice.key` beside footplate's `settings.json`, where
+  footplate keeps its settings: `~/Library/Application Support/footplate/` on a
+  Mac, `~/.config/footplate/` on Linux, or `$XDG_CONFIG_HOME/footplate/` when
+  that is an absolute path.
+- The harness refuses what footplate refuses, in words: a file others can read
+  (`chmod 600` it, or type the key again in Settings), a file that is not a
+  regular file, a file without the key on its first line and footplate's marker
+  under it (one made by hand), and a variable that is not one line. With no key
+  at all it says to type one in Settings, Voice, or to set the variable.
+- The key is never printed, never in the log, never in an error. A server's
+  refusal has anything key-shaped taken out, and the harness's own words about
+  the key's file never say what it holds. The log holds what you said and what
+  the model said, since that is what it is for. It is written to
+  `voice-harness-<time>.log` here, readable by you alone, and to your terminal.
 - The first time, macOS asks whether your terminal may use the microphone:
   allow it. Where consent was refused macOS gives the program silence, not an
   error; the harness says so (`WARN`) after 3 s of exact silence.
@@ -33,7 +55,8 @@ minute or two (cpal and its Apple bindings). To build once and run many times:
   `session.closed`, which carries the final usage). A session costs $0.05 a
   minute; the log shows the cost.
 
-Three checks that need no key and no microphone, to run first:
+Three checks to run first. They need no key and no microphone, and they read no
+key file:
 
     cargo run --release --locked -- --rehearse       # a whole session against a stand-in, ~3 s
     cargo run --release --locked -- --devices        # your microphone and speaker, what cpal offers
@@ -130,3 +153,13 @@ against the clock, and the speaker going quiet 13 to 16 ms after a queue drop.
 The microphone's conversions are unit-tested. Not tried, since the builder's
 machine has no microphone and no key: a microphone opened, any real session, and
 any sound heard.
+
+The reading of the key from footplate's file came after, and was tried against
+temporary directories only. `cargo test --locked` holds the order of the
+variable and the file, a file written the way footplate's `keep_voice_key`
+writes it, and each refusal. The built program also ran under `env -i` with a
+home of its own. It gave the same refusals, found a key in the file, and ran
+`--rehearse`, `--devices` and `--probe` (against a listener of its own) as
+before, with a `voice.key` beside that any read would refuse. Not tried: a key
+typed into a running footplate window, and a live session on a key read from
+the file.

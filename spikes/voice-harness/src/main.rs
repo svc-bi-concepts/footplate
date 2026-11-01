@@ -4,9 +4,12 @@
 //! by `session.commentary.append` to be spoken, and a log for a person to read
 //! back. Nothing here is footplate's product code.
 //!
-//! The key is read from FOOTPLATE_OPENAI_KEY and is never printed or logged.
+//! The key is the one typed in footplate's Settings, Voice, which key.rs reads
+//! from `voice.key` beside footplate's settings, or FOOTPLATE_OPENAI_KEY where
+//! that is set. It is never printed or logged.
 
 mod audio;
+mod key;
 mod live;
 mod session;
 mod standin;
@@ -21,11 +24,16 @@ use std::time::Duration;
 use session::{Config, Io, Log, Msg};
 
 const DEFAULT_URL: &str = "wss://api.openai.com/v1/live/sessions";
-const KEY_VARIABLE: &str = "FOOTPLATE_OPENAI_KEY";
 
 const HELP: &str = "voice-harness: a GPT-Live voice session with a typed yard answer, and a log.
 
+  voice-harness [options]
   FOOTPLATE_OPENAI_KEY=sk-... voice-harness [options]
+
+The key is the one typed in footplate's Settings, Voice, which footplate keeps in
+voice.key beside its settings.json. A nonempty FOOTPLATE_OPENAI_KEY, after
+trimming, is the key instead, and the file is not read. --rehearse, --probe and
+--devices ask for no key and read no file.
 
 Speak to the model. When it hands a request to the yard the log shows
 DELEGATION and the task taken from what you said; type the yard's answer on a
@@ -223,23 +231,19 @@ fn main() {
         );
     }
 
-    let key = std::env::var(KEY_VARIABLE)
-        .ok()
-        .filter(|k| !k.trim().is_empty());
-    let bearer = key.as_ref().map(|k| format!("Bearer {}", k.trim()));
-    if bearer.is_none() {
-        fail(format!("set {KEY_VARIABLE} to your OpenAI project key"));
-    }
+    // Read here and not earlier. --devices, --rehearse and --probe have
+    // returned already, and they ask for no key and read no file.
+    let bearer = format!(
+        "Bearer {}",
+        key::voice_key().unwrap_or_else(|why| fail(why))
+    );
     let mut cfg = args.cfg;
     cfg.instructions = match args.instructions {
         Some(text) => text.replace("{counterpart}", &cfg.counterpart),
         None => live::instructions(&cfg.counterpart),
     };
     let log = Log::new(Some(open_log(args.log.as_deref())), false);
-    let headers: Vec<(&str, &str)> = bearer
-        .iter()
-        .map(|b| ("Authorization", b.as_str()))
-        .collect();
+    let headers: Vec<(&str, &str)> = vec![("Authorization", bearer.as_str())];
     let conn = ws::Conn::connect(&url, &headers).unwrap_or_else(|err| fail(err));
     drop(headers);
 
