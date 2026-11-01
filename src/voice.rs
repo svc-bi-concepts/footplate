@@ -25,7 +25,8 @@
 //! waits on, and nothing here runs on the window's thread. The microphone
 //! and speaker devices are not here: the thread owns their seam — mono
 //! PCM16 at [`RATE`] in through [`Mic`], and speech out through the
-//! droppable [`Queue`] it shares — and the devices plug into it next.
+//! droppable [`Queue`] it shares — and [`crate::audio`] plugs the devices
+//! into it.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -949,6 +950,29 @@ impl Book {
 /// harness chose and runs 3 to 6 did not measure.
 pub const HOLDOFF: Duration = Duration::from_millis(300);
 
+/// Below this level (the RMS of one delta from the server, in dBFS) audio from
+/// the server is padding and not speech. The first live run received 32660 ms
+/// of audio in a 33 s session in which the model said nothing, so the stream
+/// runs on through its silences at the pace of the clock; speech is far above
+/// this. The harness's floor, a guess that runs 3 to 6 lived with.
+pub const SOUND_DB: f32 = -50.0;
+
+/// The most the queue holds, in samples (a minute of speech). A speaker that
+/// is alive takes the voice at the pace it arrives, so this is only for one
+/// that has stopped taking it: past it the oldest goes, and memory stays
+/// bounded however long the session runs.
+const MAX_QUEUED: usize = 60 * RATE as usize;
+
+/// Whether a delta from the server is more than padding.
+fn has_sound(pcm: &[i16]) -> bool {
+    if pcm.is_empty() {
+        return false;
+    }
+    let squares: f64 = pcm.iter().map(|&s| (f64::from(s) / 32768.0).powi(2)).sum();
+    let rms = (squares / pcm.len() as f64).sqrt();
+    rms > 1e-6 && 20.0 * rms.log10() >= f64::from(SOUND_DB)
+}
+
 /// The voice's speech on its way to the speaker: the audio the server sent
 /// and the speaker has not played yet. The socket has no interrupted event
 /// and its audio no timing marker, so what is queued is this module's own
@@ -956,43 +980,114 @@ pub const HOLDOFF: Duration = Duration::from_millis(300);
 /// the session drops what is queued ([`Queue::drop_queued`]), and the audio
 /// that arrives for [`HOLDOFF`] after is thrown away. The server stops by
 /// itself when talked over (run 5); this adds to that and does not rest on it.
+///
+/// What is queued is the speech and the pauses inside it. The server's stream
+/// runs on through its silences (see [`SOUND_DB`]), so padding that comes
+/// with no speech queued ahead of it is not queued: the speaker plays silence
+/// whether it is or not. Padding behind the last speech goes as the speech
+/// goes out. A pause in a stall's backlog therefore does not stay as latency
+/// for the rest of the session, and [`Queue::queued_ms`] reads speech.
 #[derive(Default)]
 pub struct Queue {
-    waiting: VecDeque<Vec<i16>>,
+    /// Samples, mono 16-bit at [`RATE`], in the order they are to play.
+    waiting: VecDeque<i16>,
+    /// How many samples of the stream have left `waiting` or never entered
+    /// it: played, skipped as padding, dropped. The front of `waiting` is at
+    /// this place in the stream, and the end of what was received is at this
+    /// plus `waiting.len()`.
+    gone: u64,
+    /// Where in the stream the last speech received ends.
+    speech_end: u64,
     /// Until when the audio that arrives is thrown away.
     thrown_away_until: Option<Instant>,
+    /// Changes with every drop, so that the speaker lets go of the audio it
+    /// holds beyond the queue ([`Queue::generation`]).
+    generation: u64,
+    /// Samples dropped from the queue by the person's speaking, and samples
+    /// of speech (not padding) thrown away in a holdoff, over the session.
+    dropped: u64,
+    thrown_away: u64,
 }
 
 impl Queue {
     /// Audio that arrived at `now`, mono 16-bit at [`RATE`]. True when it is
     /// queued to be played, false when it came in the holdoff and was thrown
-    /// away.
+    /// away, or was padding with no speech ahead of it and was let go.
     pub fn push(&mut self, pcm: Vec<i16>, now: Instant) -> bool {
+        let speech = has_sound(&pcm);
         if self.thrown_away_until.is_some_and(|until| now < until) {
+            // Counted as the harness counts it: only speech is audio that
+            // would have been heard; the stream's padding is not.
+            if speech {
+                self.thrown_away += pcm.len() as u64;
+            }
             return false;
         }
-        self.waiting.push_back(pcm);
+        let speech_ahead = self.gone < self.speech_end;
+        if speech {
+            self.speech_end = self.gone + (self.waiting.len() + pcm.len()) as u64;
+        } else if !speech_ahead {
+            self.gone += pcm.len() as u64;
+            return false;
+        }
+        self.waiting.extend(pcm);
+        if let Some(excess) = self.waiting.len().checked_sub(MAX_QUEUED) {
+            self.waiting.drain(..excess);
+            self.gone += excess as u64;
+        }
         true
     }
 
-    /// The next audio for the speaker.
-    pub fn pop(&mut self) -> Option<Vec<i16>> {
-        self.waiting.pop_front()
+    /// Fills `out` from the queue for the speaker, with silence where it runs
+    /// short, and says how many samples were audio.
+    pub fn pull(&mut self, out: &mut [i16]) -> usize {
+        let real = out.len().min(self.waiting.len());
+        for (slot, sample) in out.iter_mut().zip(self.waiting.drain(..real)) {
+            *slot = sample;
+        }
+        out[real..].fill(0);
+        self.gone += real as u64;
+        // Padding queued behind the last speech has nothing to follow it:
+        // once the speech is out, the rest is played as it comes.
+        if self.gone >= self.speech_end {
+            self.gone += self.waiting.len() as u64;
+            self.waiting.clear();
+        }
+        real
     }
 
     /// How much speech is queued, in milliseconds.
     pub fn queued_ms(&self) -> u64 {
-        let samples: usize = self.waiting.iter().map(Vec::len).sum();
-        samples as u64 * 1000 / u64::from(RATE)
+        self.waiting.len() as u64 * 1000 / u64::from(RATE)
     }
 
     /// The person began to speak over the voice at `now`: what is queued and
     /// not played is dropped, and the milliseconds of it are said.
     pub fn drop_queued(&mut self, now: Instant) -> u64 {
         let dropped = self.queued_ms();
+        self.dropped += self.waiting.len() as u64;
+        self.gone += self.waiting.len() as u64;
         self.waiting.clear();
+        self.generation += 1;
         self.thrown_away_until = Some(now + HOLDOFF);
         dropped
+    }
+
+    /// Changes whenever the queue is dropped. The speaker keeps a little
+    /// audio of its own past the queue (what it has taken and not yet played,
+    /// and the resampler's tail), and lets go of it when this changes.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Over the session so far: the milliseconds of queued speech the
+    /// person's speaking dropped, and of speech the holdoffs threw away.
+    pub fn dropped_ms(&self) -> u64 {
+        self.dropped * 1000 / u64::from(RATE)
+    }
+
+    pub fn thrown_away_ms(&self) -> u64 {
+        self.thrown_away * 1000 / u64::from(RATE)
     }
 }
 
@@ -1844,9 +1939,9 @@ enum Cmd {
     Close,
 }
 
-/// The microphone's end of the audio seam: the devices (next part) send
-/// mono PCM16 at [`RATE`] here, and the session's thread puts them on the
-/// socket. Frames sent before the session stands, or after it ends, go
+/// The microphone's end of the audio seam: the devices ([`crate::audio`])
+/// send mono PCM16 at [`RATE`] here, and the session's thread puts them on
+/// the socket. Frames sent before the session stands, or after it ends, go
 /// nowhere.
 #[derive(Clone)]
 pub struct Mic(mpsc::Sender<Cmd>);
@@ -1883,9 +1978,9 @@ impl Voice {
     }
 
     /// The speaker's end: what the voice says waits here, to be taken by
-    /// [`Queue::pop`] as the speaker plays it, and is dropped whole when
-    /// the person speaks over it (the thread drops it, and audio for
-    /// [`HOLDOFF`] after is thrown away).
+    /// [`Queue::pull`] as the speaker plays it ([`crate::audio`]), and is
+    /// dropped whole when the person speaks over it (the thread drops it,
+    /// and audio for [`HOLDOFF`] after is thrown away).
     pub fn speaker(&self) -> Arc<Mutex<Queue>> {
         self.speaker.clone()
     }
@@ -2002,8 +2097,9 @@ fn start_at(url: &str, key: String, counterpart: &str, tell: mpsc::Sender<Update
 
 /// Says a session's opening, ending or refusal in the log, as the window's
 /// other sayings are kept, without transcript or mail text. A test never
-/// writes the person's own log.
-fn say(line: &str) {
+/// writes the person's own log. The devices say their names here too
+/// ([`crate::audio`]).
+pub(crate) fn say(line: &str) {
     #[cfg(test)]
     let file: Option<std::path::PathBuf> = None;
     #[cfg(not(test))]
@@ -2067,6 +2163,17 @@ fn run(
     };
     session.follow(&mut conn, &cmds);
     session.control.socket_ended();
+    session.say_interruptions();
+}
+
+/// What a session says in the log of the person's speaking over the voice, if
+/// it took anything from it.
+fn interruptions(dropped_ms: u64, thrown_away_ms: u64) -> Option<String> {
+    (dropped_ms + thrown_away_ms > 0).then(|| {
+        format!(
+            "voice session: speaking over the voice dropped {dropped_ms} ms of its queued speech and threw away {thrown_away_ms} ms of speech the server had already sent"
+        )
+    })
 }
 
 /// One session as its thread follows it: the book decides, the thread does
@@ -2086,6 +2193,23 @@ struct Session {
 }
 
 impl Session {
+    /// What the person's speaking over the voice took from it, in the log,
+    /// when the session is over and only if it took anything: the queued
+    /// speech their next utterance dropped, and the speech the holdoff threw
+    /// away after it. The design (3.3, step 5) leaves open whether the drop
+    /// and the holdoff remove anything the server has not already stopped;
+    /// these are the figures a person's own sessions give for it, with no
+    /// words of anyone's.
+    fn say_interruptions(&self) {
+        let (dropped, thrown_away) = {
+            let queue = self.speaker.lock().unwrap();
+            (queue.dropped_ms(), queue.thrown_away_ms())
+        };
+        if let Some(line) = interruptions(dropped, thrown_away) {
+            say(&line);
+        }
+    }
+
     fn follow(&mut self, conn: &mut WsConn, cmds: &mpsc::Receiver<Cmd>) {
         loop {
             if self.control.stopped() {
@@ -2320,6 +2444,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{CHUNK, Capture, Render};
     use crate::fake::Live;
     use std::net::TcpListener;
 
@@ -3091,42 +3216,116 @@ mod tests {
         }));
     }
 
+    /// What the speaker would take from the queue: up to `samples`, the
+    /// audio only (the silence a short queue is filled out with is not).
+    fn taken(queue: &mut Queue, samples: usize) -> Vec<i16> {
+        let mut out = vec![0; samples];
+        let audio = queue.pull(&mut out);
+        out.truncate(audio);
+        out
+    }
+
     #[test]
     fn queued_speech_is_dropped_and_audio_for_300_ms_after_it_is_thrown_away() {
         let began = Instant::now();
         let at = |ms: u64| began + Duration::from_millis(ms);
-        let twenty_ms = || vec![1_i16; 480];
+        // 20 ms of speech (-12 dBFS) carrying `n`, and 20 ms of the stream's
+        // padding.
+        let speech = |n: i16| vec![8000 + n; 480];
+        let padding = || vec![0_i16; 480];
         let mut queue = Queue::default();
         assert_eq!(queue.queued_ms(), 0);
         // Nothing to drop: the holdoff still begins.
-        assert!(queue.push(twenty_ms(), at(0)));
-        assert!(queue.push(twenty_ms(), at(20)));
+        assert!(queue.push(speech(1), at(0)));
+        assert!(queue.push(speech(2), at(20)));
         assert_eq!(queue.queued_ms(), 40);
-        // What the speaker took is no longer queued, and is not dropped.
-        assert_eq!(queue.pop(), Some(twenty_ms()));
+        // The speaker takes what it needs by the sample, across the blocks,
+        // in order; what it took is no longer queued, and is not dropped.
+        assert_eq!(taken(&mut queue, 480), speech(1));
         assert_eq!(queue.queued_ms(), 20);
+        assert_eq!(taken(&mut queue, 240), vec![8002; 240]);
+        assert_eq!(queue.queued_ms(), 10);
+        // Where the queue runs short the rest of its buffer is silence.
+        let mut out = [1_i16; 400];
+        assert_eq!(queue.pull(&mut out), 240);
+        assert_eq!(out[..240], [8002; 240]);
+        assert!(out[240..].iter().all(|&s| s == 0));
+        assert!(queue.push(speech(3), at(40)));
+        let generation = queue.generation();
         assert_eq!(queue.drop_queued(at(1000)), 20);
+        assert_ne!(queue.generation(), generation, "the speaker lets go too");
         assert_eq!(queue.queued_ms(), 0);
-        assert_eq!(queue.pop(), None);
-        // What the server had already sent is thrown away for 300 ms.
-        assert!(!queue.push(twenty_ms(), at(1000)));
-        assert!(!queue.push(twenty_ms(), at(1299)));
-        assert!(queue.push(twenty_ms(), at(1300)));
+        assert!(taken(&mut queue, 480).is_empty());
+        // What the server had already sent is thrown away for 300 ms, and
+        // only its speech is counted as thrown away, not its padding.
+        assert!(!queue.push(speech(4), at(1000)));
+        assert!(!queue.push(padding(), at(1100)));
+        assert!(!queue.push(speech(5), at(1299)));
+        assert_eq!((queue.dropped_ms(), queue.thrown_away_ms()), (20, 40));
+        assert!(queue.push(speech(6), at(1300)));
         assert_eq!(queue.queued_ms(), 20);
-        // A second drop holds off from its own moment.
+        // A second drop holds off from its own moment, and drops again even
+        // where nothing is queued: the speaker's own audio still goes.
         assert_eq!(queue.drop_queued(at(6000)), 20);
-        assert!(!queue.push(twenty_ms(), at(6100)));
-        assert!(queue.push(twenty_ms(), at(6300)));
+        let generation = queue.generation();
+        assert_eq!(queue.drop_queued(at(6050)), 0);
+        assert_ne!(queue.generation(), generation);
+        assert!(!queue.push(speech(7), at(6100)));
+        assert!(!queue.push(speech(8), at(6349)));
+        assert!(queue.push(speech(9), at(6350)));
+        assert_eq!((queue.dropped_ms(), queue.thrown_away_ms()), (40, 80));
         assert_eq!(HOLDOFF, Duration::from_millis(300));
         // Audio whole seconds long counts as it is: 24000 samples, a second.
-        assert_eq!(
-            Queue {
-                waiting: [vec![0; 24_000]].into(),
-                ..Queue::default()
-            }
-            .queued_ms(),
-            1000
-        );
+        let mut queue = Queue::default();
+        assert!(queue.push(vec![8000; 24_000], at(0)));
+        assert_eq!(queue.queued_ms(), 1000);
+
+        // The server's stream runs on through its silences. Padding that
+        // comes with no speech queued ahead is not queued: the speaker plays
+        // silence whether it is or not.
+        let mut queue = Queue::default();
+        assert!(!queue.push(padding(), at(0)));
+        assert_eq!(queue.queued_ms(), 0);
+        // A pause inside speech is kept, so that the speech keeps its timing,
+        // and so is the padding behind it, until the speech is out.
+        assert!(queue.push(speech(1), at(20)));
+        assert!(queue.push(padding(), at(40)));
+        assert!(queue.push(speech(2), at(60)));
+        assert!(queue.push(padding(), at(80)));
+        assert_eq!(queue.queued_ms(), 80);
+        let heard = taken(&mut queue, 3 * 480);
+        assert_eq!(heard.len(), 3 * 480);
+        assert_eq!(heard[480], 0, "the pause is in its place");
+        assert_eq!(heard[2 * 480], 8002);
+        // The padding behind the last speech is let go as the speech goes out.
+        assert_eq!(queue.queued_ms(), 0);
+        // Nothing is ahead after a drop either.
+        assert!(queue.push(speech(3), at(100)));
+        assert_eq!(queue.drop_queued(at(120)), 20);
+        assert!(!queue.push(padding(), at(500)));
+        assert_eq!(queue.queued_ms(), 0);
+
+        // A speaker that stalled leaves a backlog, and the backlog is not
+        // latency for the rest of the session: the padding in it goes once
+        // the speech is out, and what comes after is played as it comes.
+        let mut queue = Queue::default();
+        assert!(queue.push(speech(1), at(0)));
+        for n in 1..=100 {
+            queue.push(padding(), at(n * 20));
+        }
+        assert_eq!(queue.queued_ms(), 2020);
+        assert_eq!(taken(&mut queue, 480), speech(1));
+        assert_eq!(queue.queued_ms(), 0);
+        assert!(!queue.push(padding(), at(2100)));
+
+        // A speaker that has stopped taking it does not make the queue grow
+        // without end: past a minute the oldest speech goes.
+        let mut queue = Queue::default();
+        for n in 0..70_i16 {
+            assert!(queue.push(vec![8000 + n; 24_000], at(0)));
+        }
+        assert_eq!(queue.queued_ms(), 60_000);
+        assert_eq!(taken(&mut queue, 1), [8010], "the oldest ten seconds went");
     }
 
     #[test]
@@ -3579,12 +3778,12 @@ mod tests {
         let mut session = Driver::start(Live::start());
         // The voice has a long answer queued; some of it reaches the speaker.
         for n in 1..=5 {
-            session.live.queue_audio(vec![n; 480]);
+            session.live.queue_audio(vec![n * 1000; 480]);
         }
         assert_eq!(session.live.play(2), 2);
         session.pump_at(100);
         assert_eq!(session.queue.queued_ms(), 40);
-        assert_eq!(session.queue.pop(), Some(vec![1; 480]));
+        assert_eq!(taken(&mut session.queue, 480), vec![1000; 480]);
         // The person speaks over it. The server stops by itself and drops
         // what it has not sent; the session drops what it has queued, as the
         // person's next utterance begins, and throws away what the server had
@@ -3595,16 +3794,22 @@ mod tests {
         session.pump_at(1000);
         assert_eq!(session.began, 1);
         assert_eq!(session.dropped_ms, 20);
-        assert_eq!(session.queue.pop(), None);
-        session.live.queue_audio(vec![9; 480]);
+        assert!(taken(&mut session.queue, 480).is_empty());
+        session.live.queue_audio(vec![9000; 480]);
         session.live.play(1);
         session.pump_at(1200);
-        assert_eq!(session.queue.pop(), None, "inside the 300 ms");
-        session.live.queue_audio(vec![8; 480]);
+        assert!(
+            taken(&mut session.queue, 480).is_empty(),
+            "inside the 300 ms"
+        );
+        session.live.queue_audio(vec![8000; 480]);
         session.live.play(1);
         session.pump_at(1300);
-        assert_eq!(session.queue.pop(), Some(vec![8; 480]));
+        assert_eq!(taken(&mut session.queue, 480), vec![8000; 480]);
         assert_eq!(session.live.dropped(), 3);
+        // What the holdoff threw away is the speech of the audio that came
+        // inside it, counted as the harness counts it.
+        assert_eq!(session.queue.thrown_away_ms(), 20);
     }
 
     // ---- the socket, against the RFC's bytes and a loopback stand-in ----
@@ -3795,6 +4000,24 @@ mod tests {
             .expect("an update in five seconds")
     }
 
+    /// The microphone's audio as the stand-in provider has it so far: every
+    /// `session.input_audio.append`, decoded from base64 to samples.
+    fn heard_by(live: &Live) -> Vec<i16> {
+        live.sent()
+            .iter()
+            .filter(|e| e["type"] == "session.input_audio.append")
+            .flat_map(|e| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(e["audio"].as_str().unwrap())
+                    .unwrap();
+                bytes
+                    .chunks(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     #[test]
     fn a_socket_write_failure_ends_a_standing_session_in_words() {
         let (tell, updates) = mpsc::channel();
@@ -3971,13 +4194,39 @@ mod tests {
         };
         assert_eq!(next_update(&updates), Update::Started);
 
-        // The microphone's frames reach the stand-in as its audio append.
-        assert!(voice.microphone().send(vec![1_i16; 480]));
-        wait_until(|| {
-            live.sent()
-                .iter()
-                .any(|e| e["type"] == "session.input_audio.append")
+        // A stand-in microphone, as the Linux desktop's default of runs 3 to
+        // 6 runs (48000 Hz, two channels), calls back in pieces of 333
+        // frames, half a second of a 1 kHz tone. The same `Capture` a real
+        // device's callbacks go through makes it mono PCM16 at 24 kHz, and
+        // its frames reach the stand-in as audio appends: 12000 samples, 25
+        // frames of 20 ms, the socket's rate and nothing lost or doubled.
+        let mut capture = Capture::new(2, 48_000, {
+            let mic = voice.microphone();
+            move |frame| assert!(mic.send(frame))
         });
+        let half_second: Vec<f32> = (0..24_000)
+            .flat_map(|i| {
+                let v = 0.5 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin();
+                [v, v]
+            })
+            .collect();
+        for callback in half_second.chunks(333 * 2) {
+            capture.feed(callback, |s| s);
+        }
+        wait_until(|| heard_by(&live).len() == 25 * CHUNK);
+        let heard = heard_by(&live);
+        let level = 20.0
+            * (heard
+                .iter()
+                .map(|&s| (f64::from(s) / 32768.0).powi(2))
+                .sum::<f64>()
+                / heard.len() as f64)
+                .sqrt()
+                .log10();
+        assert!(
+            (level + 9.0).abs() < 1.5,
+            "{level} dBFS for a half-scale sine"
+        );
         // The stand-in's pings, between the fragments of what it sent, were
         // answered with pongs of the same bytes.
         wait_until(|| !server.pongs.lock().unwrap().is_empty());
@@ -4073,15 +4322,26 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(live.appends().len(), count);
 
-        // Speech out waits in the queue the thread shares; when the person
+        // Speech out waits in the queue the thread shares, and a stand-in
+        // speaker (two channels at 48000 Hz) takes it through the same
+        // `Render` a real device's callbacks go through. When the person
         // speaks over it, the queue is dropped whole. This speech comes
         // after the holdoff that followed the person's last utterance, so
         // that it is queued and not thrown away as already-sent audio.
         std::thread::sleep(Duration::from_millis(350));
-        live.queue_audio(vec![7_i16; 480]);
-        assert_eq!(live.play(1), 1);
         let speaker = voice.speaker();
-        wait_until(|| speaker.lock().unwrap().queued_ms() == 20);
+        let mut render = Render::new(2, 48_000, speaker.clone());
+        for _ in 0..10 {
+            live.queue_audio(vec![7000_i16; 480]);
+        }
+        assert_eq!(live.play(10), 10);
+        wait_until(|| speaker.lock().unwrap().queued_ms() == 200);
+        // The voice is heard: a callback of 10 ms takes a little of the queue.
+        let mut callback = vec![0f32; 480 * 2];
+        render.fill(&mut callback, |s| s);
+        assert!(callback.iter().any(|v| v.abs() > 0.1));
+        let queued = speaker.lock().unwrap().queued_ms();
+        assert!(queued < 200);
         live.person_says("Wait", 40000, 40200);
         assert_eq!(
             next_update(&updates),
@@ -4092,10 +4352,33 @@ mod tests {
             })
         );
         assert_eq!(next_update(&updates), Update::SpeechStarted);
-        assert_eq!(speaker.lock().unwrap().pop(), None);
+        // All of what was queued is dropped and the speaker is silent at
+        // once, though it held audio of its own; what the server had already
+        // sent is thrown away, and that is counted.
+        assert_eq!(speaker.lock().unwrap().queued_ms(), 0);
+        assert_eq!(speaker.lock().unwrap().dropped_ms(), queued);
+        let mut callback = vec![1f32; 480 * 2];
+        render.fill(&mut callback, |s| s);
+        assert!(callback.iter().all(|v| *v == 0.0), "silence after a drop");
+        live.queue_audio(vec![7000_i16; 480]);
+        assert_eq!(live.play(1), 1);
+        wait_until(|| speaker.lock().unwrap().thrown_away_ms() == 20);
+        render.fill(&mut callback, |s| s);
+        assert!(callback.iter().all(|v| *v == 0.0), "inside the holdoff");
+        assert_eq!(speaker.lock().unwrap().queued_ms(), 0);
+        // The session says so in the log when it is over, with no words of
+        // anyone's, and says nothing where nobody spoke over the voice.
+        assert_eq!(
+            interruptions(queued, 20).unwrap(),
+            format!(
+                "voice session: speaking over the voice dropped {queued} ms of its queued speech and threw away 20 ms of speech the server had already sent"
+            )
+        );
+        assert_eq!(interruptions(0, 0), None);
 
         // A hang-up: session.close goes out, session.closed ends it, and
         // stop joins the thread — none is left.
+        drop(render);
         voice.stop();
         assert_eq!(
             next_update(&updates),

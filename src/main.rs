@@ -18,6 +18,11 @@
 
 mod ansi;
 mod api;
+// The voice session's microphone and speaker, behind cfg: the window's
+// button plugs them into the session next, so until it lands only the
+// tests reach them.
+#[cfg_attr(not(test), allow(dead_code))]
+mod audio;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod dock;
 mod draft;
@@ -47,8 +52,8 @@ mod titlebar;
 mod tray;
 mod unlock;
 // The voice session: its rules, its hand-written socket and its thread,
-// tested on any system. The window's button and the audio devices plug into
-// it next, so until they land only its tests reach the session's handle.
+// tested on any system. The window's button plugs into it next (the devices
+// are audio's), so until it lands only its tests reach the session's handle.
 #[cfg_attr(not(test), allow(dead_code))]
 mod voice;
 mod window;

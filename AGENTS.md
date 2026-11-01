@@ -18,7 +18,7 @@ product takes it, each its own cargo package and its own workspace, so that
 neither the gate nor a release sees it: `spikes/voice-harness/` is the GPT-Live
 voice session of `docs/design/2026-10-31-footplate-vqze-voice.md`, run by a
 person with a key (its `RUN.md` has the command); it is deleted when
-`src/voice.rs` takes what it proved.
+`src/voice.rs` and `src/audio.rs` take what it proved.
 
 The window, its state and the yard:
 
@@ -41,14 +41,15 @@ The window, its state and the yard:
   book, tested on any system: the request a spoken sentence stands for (the
   last one, noise tags and greetings cut), which answer the voice is given to
   speak and under which delegation's id, the queue its speech waits in and
-  drops, the instructions and the state words, and the events of OpenAI's
+  drops (the server's padding let go, a holdoff that counts what it throws
+  away), the instructions and the state words, and the events of OpenAI's
   GPT-Live, which this is the one module to speak (no provider trait, no
   setting). Below the rules, the live socket itself: a hand-written
   WebSocket over `src/api.rs`'s TLS (its upgrade's accept key is the one
   SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
   `FollowControl` manner, which owns the microphone's frames in and the
-  speaker's queue out; the devices that plug into those ends are not here
-  yet, and neither is the window's button.
+  speaker's queue out; the devices that plug into those ends are
+  `src/audio.rs`'s, and the window's button is not here yet.
 - `src/yard.rs`: picks which yard opens (socket or address, token files,
   hosted sessions); tokens live beside the settings, never in them.
 - `src/settings.rs`: what the window keeps between runs, one JSON file in the
@@ -86,6 +87,16 @@ Platform surface:
   platform's log directory, with the time, where an app started by the
   Finder or launchd has no stderr to find it on; the path rules as plain
   functions, then the file and its cap.
+- `src/audio.rs`: the voice session's microphone and speaker, mono PCM16 at
+  24 kHz in and out whatever the devices speak, and nothing of any provider.
+  The rules are plain functions tested with no device, calling the callbacks
+  as a device does (the resampler, `Capture` for the microphone's, `Render`
+  for the speaker's, the names a person tells the devices by); the devices
+  are cpal's behind `cfg(any(macos, linux))`, opened on their own default
+  format, and elsewhere `open` says there is no audio. CoreAudio is bound
+  through objc2 and needs no C library; Linux's ALSA backend is the one C
+  library this adds: `libasound2-dev` (with `pkg-config`) to build, and
+  `libasound.so.2` at run time.
 
 Setup, release and tests:
 
@@ -136,8 +147,9 @@ Setup, release and tests:
   GPT-Live's events stay in that module; what is outside speaks of speech
   started, a request, an answer to speak and stop.
 - Platform surface (badge, tray, notifications, Linux icon, the Mac's
-  unlock, title bar, log): `src/dock.rs`, `src/tray.rs`, `src/notify.rs`,
-  `src/taskbar.rs`, `src/unlock.rs`, `src/titlebar.rs`, `src/log.rs`; rules
+  unlock, title bar, log, voice's microphone and speaker): `src/dock.rs`,
+  `src/tray.rs`, `src/notify.rs`, `src/taskbar.rs`, `src/unlock.rs`,
+  `src/titlebar.rs`, `src/log.rs`, `src/audio.rs`; rules
   stay plain functions, system calls stay behind `cfg`. A test never writes
   the person's own log: `api::say` keeps in the file its test's thread was
   given (`tests::keep_in`), or none.
