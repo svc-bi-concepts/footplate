@@ -18,6 +18,10 @@
 # `column-top` (that conversation scrolled to stand a letter's head at the
 # top of the list, with the pointer on it: its bar of reactions stops at
 # the list's top, clear of the Screen control in the header),
+# `older-unread` (the conversation of 120 mails, ninety of them
+# unread and forty of those older than its newest fifty, opened: the
+# window reads back to the oldest unread mail, so the yardmaster's row
+# shows no count while the assembly's, not open, shows its three),
 # `plain` (an open decision card of a plain ask), `plain-select`
 # (that card with a selection posed over its context), `lines` (that
 # card with one of jo's beads changed, so Lines carries its badge), `page` (an
@@ -114,7 +118,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-voice settings-telemetry settings-telemetry-off reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top older-unread plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-voice settings-telemetry settings-telemetry-off reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

@@ -26,7 +26,11 @@ use crate::yard::Env;
 /// itself too, so its copy control shows, that conversation with a
 /// letter's head scrolled to the list's top and the pointer posed on
 /// it, so its bar of reactions stops at the list's top, clear of the
-/// Screen control in the header, an open decision card of a plain
+/// Screen control in the header, the yardmaster's conversation of 120
+/// mails, ninety of them unread and forty of those older than its newest
+/// fifty, with three of the assembly's unread after them, opened as the
+/// window reads back to the oldest unread mail, so that its row shows no
+/// count where the assembly's shows three, an open decision card of a plain
 /// ask, that card with a selection posed over its context, that card
 /// with one of jo's beads changed, so Lines carries its badge, an open
 /// card of a run ask, an open card of a teammate invite, the
@@ -123,6 +127,7 @@ pub const STATES: &[&str] = &[
     "column-hover",
     "column-copy",
     "column-top",
+    "older-unread",
     "plain",
     "plain-select",
     "lines",
@@ -1568,6 +1573,47 @@ fn populate(yard: &Yard, state: &str) {
             );
             yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
         }
+        "older-unread" => {
+            // The yardmaster's conversation of 120 mails, the last ninety
+            // unread, and three of the assembly's unread after them. The
+            // yard serves the conversation in pages, as the real one
+            // does: the newest fifty, 71 to 120, are all unread, and the
+            // oldest unread mail, 31, stands on the page before. The
+            // window reads back to it as the conversation opens, so the
+            // yardmaster's row shows no count while the reader stands at
+            // the newest, and the assembly's, which is not open, shows its
+            // three.
+            let start = DateTime::parse_from_rfc3339("2026-10-13T09:30:00Z").unwrap();
+            let mail = |seq: u64, from: &str, read: bool| {
+                let at = start + Duration::minutes(3 * seq as i64);
+                json!({"seq": seq, "at": at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                       "from": from, "to": "jo", "read": read,
+                       "text": format!("No. {seq}: all is quiet.")})
+            };
+            let waiting: Vec<_> = (31..=120)
+                .map(|seq| mail(seq, "yardmaster", false))
+                .chain((121..=123).map(|seq| mail(seq, "assembly", false)))
+                .collect();
+            yard.answer(
+                "UserInbox",
+                &json!({"result": {"mail": waiting, "unread": waiting.len(), "last": 123,
+                    "from": ["assembly", "yardmaster"]}})
+                .to_string(),
+            );
+            yard.converse(
+                "yardmaster",
+                (1..=120)
+                    .map(|seq| mail(seq, "yardmaster", seq < 31))
+                    .collect(),
+            );
+            yard.converse(
+                "assembly",
+                (121..=123)
+                    .map(|seq| mail(seq, "assembly", false))
+                    .collect(),
+            );
+            yard.answer("UserAsks", r#"{"result": {"open": [], "decided": []}}"#);
+        }
         "drawer" => {
             // The yardmaster's conversation naming the bead the drawer
             // shows beside it: yd-zulu travels on the board every state
@@ -2926,6 +2972,37 @@ mod tests {
                         letters[11].text, "```\nyardr review -g box-approvers\n```",
                         "{state}"
                     );
+                }
+                "older-unread" => {
+                    assert!(loaded.asks.open.is_empty(), "{state}");
+                    // Ninety of the yardmaster's mails are unread, and
+                    // three of the assembly's. The newest page the window
+                    // asks for stops short of the oldest of the
+                    // yardmaster's, which stands on the page before: what
+                    // opening the conversation reads back to.
+                    let unread_of = |name: &str| -> Vec<u64> {
+                        let from = loaded.unread.iter().filter(|l| l.from == name);
+                        from.map(|l| l.seq).collect()
+                    };
+                    let yardmaster = unread_of("yardmaster");
+                    assert_eq!(yardmaster.len(), 90, "{state}");
+                    assert_eq!(unread_of("assembly").len(), 3, "{state}");
+                    let oldest = *yardmaster.iter().min().unwrap();
+                    let client = yard.client();
+                    let page = crate::model::PAGE;
+                    let newest = client
+                        .conversation_page("jo", "yardmaster", page, 0)
+                        .unwrap();
+                    assert!(newest.more, "{state}");
+                    let first = newest.letters[0].seq;
+                    assert!(oldest < first, "{state}");
+                    let before = client
+                        .conversation_page("jo", "yardmaster", page, first)
+                        .unwrap();
+                    assert!(before.letters.iter().any(|l| l.seq == oldest), "{state}");
+                    // The assembly's row holds its three, for a click.
+                    let assembly = client.conversation("jo", "assembly", 0).unwrap();
+                    assert_eq!(assembly.len(), 3, "{state}");
                 }
                 "mail" | "image" => {
                     assert!(loaded.asks.open.is_empty(), "{state}");

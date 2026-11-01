@@ -417,6 +417,10 @@ control shows at the block's top right, clear of the bar),
 `column-top` (that conversation scrolled to stand a letter's head at
 the top of the list, with the pointer on it: its bar of reactions stops
 at the list's top, clear of the Screen control in the header),
+`older-unread` (the yardmaster's conversation of 120 mails, ninety of
+them unread and forty of those older than its newest fifty, opened: the
+window reads back to the oldest unread mail, so the yardmaster's row
+shows no count while the assembly's, not open, shows its three),
 `plain` (an open decision card of a plain ask), `plain-select`
 (that card with a selection posed over its context), `lines` (that
 card with one of jo's beads changed, so Lines carries its badge), `page` (an
@@ -1422,9 +1426,12 @@ scrolled where the window is too short for them.
 A conversation opens on its newest fifty mails. Towards its top the fifty
 before are read and put in above, and the mail in view stays where it is;
 the top says `Loading older mail…` until the conversation starts there.
-Unread mail older than what was read stays unread, and counts on the row,
-until its page is shown. A yard built before `Conversation` had pages
-answers the whole conversation at once.
+Where unread mail is older than those fifty, opening reads the pages back
+to the oldest of it and no further, so that the count on the row does not
+stay for mail the reader cannot see from the newest. Nothing is marked read
+until it is shown, and a conversation that is not open keeps its count. A
+yard built before `Conversation` had pages answers the whole conversation
+at once.
 
 Above the cards the head names the yard, the bead and the topic once. A
 card shows, in this order: the question, the largest text, with how long it

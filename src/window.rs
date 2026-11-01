@@ -29346,6 +29346,33 @@ yardr.dev
         );
     }
 
+    /// The yardmaster's conversation is the mails 1 to `n`, those from
+    /// `unread` on unread, and the assembly has three unread mails after
+    /// them. The yard holds the conversation and answers it in pages, and
+    /// the inbox lists the unread mail.
+    fn unread_conversation(yard: &Yard, n: u64, unread: u64) {
+        let mail = |seq: u64, from: &str, to: &str, read: bool| {
+            json!({"seq": seq, "at": mailed(seq - 1), "from": from, "to": to,
+                "read": read, "text": format!("Mail {seq}")})
+        };
+        let waiting: Vec<serde_json::Value> = (unread..=n)
+            .map(|seq| mail(seq, "yardmaster", "jo", false))
+            .chain((n + 1..=n + 3).map(|seq| mail(seq, "assembly", "jo", false)))
+            .collect();
+        yard.answer(
+            "UserInbox",
+            &json!({"result": {"mail": waiting, "unread": waiting.len(), "last": n + 3,
+                "from": ["assembly", "yardmaster"]}})
+            .to_string(),
+        );
+        yard.converse(
+            "yardmaster",
+            (1..=n)
+                .map(|seq| mail(seq, "yardmaster", "jo", seq < unread))
+                .collect(),
+        );
+    }
+
     /// The window on `yard`, once the yardmaster's conversation shows `n`
     /// mails and is drawn at its newest.
     fn opened_on<'a>(
@@ -29559,6 +29586,49 @@ yardr.dev
         assert_eq!(yard.asked("Conversation").len(), 3);
         assert_eq!(texts(&view, cx).len(), 120);
         assert!(drawn(cx, "conversation top"));
+    }
+
+    /// footplate-zvwy: the yardmaster's row said "40 unread" while its
+    /// reader stood at the bottom of the open conversation, for mail older
+    /// than the page it opened on, and lost the count only when they
+    /// scrolled up to that page. Opening reads back to the oldest unread
+    /// mail and no further; the count goes with it, the yard is told that
+    /// all of it was read, and a row that is not open keeps its count.
+    #[gpui::test]
+    fn unread_mail_older_than_the_first_page_is_read_back_on_opening(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        // 31 to 120 are unread: the newest page, 71 to 120, shows fifty of
+        // the ninety, and forty stand older than it.
+        unread_conversation(&yard, 120, 31);
+        // The page before, 21 to 70, holds the oldest unread mail: with it
+        // the conversation shows a hundred mails.
+        let (view, cx) = opened_on(&yard, 100, cx);
+        let counts = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| {
+                let m = v.model.as_ref().unwrap();
+                (m.unread("yardmaster"), m.unread("assembly"))
+            })
+        };
+        wait(cx, "the yardmaster's mail acknowledged", |_| {
+            yard.asked("AckUserInbox") == [json!({"name": "jo", "through": 120})]
+        });
+        // The assembly's three were not shown, and count on its row.
+        assert_eq!(counts(cx), (0, 3));
+        // No further back than the oldest unread mail: the twenty before
+        // it were not read, and the assembly's conversation was not.
+        assert_eq!(
+            yard.asked("Conversation"),
+            [
+                json!({"a": "jo", "b": "yardmaster", "limit": 50}),
+                json!({"a": "jo", "b": "yardmaster", "limit": 50, "before": 71}),
+            ]
+        );
+        assert_eq!(top_of(&view, cx), Top::Older);
+        // The reader stands where they opened it: at the newest.
+        frames(cx);
+        assert!(at_bottom(&view, cx));
+        assert_eq!(new_below(&view, cx), 0);
     }
 
     /// A yard built before the conversation had pages still shows all of
