@@ -484,8 +484,9 @@ pub(crate) struct Talk {
     /// The newest mail of the other side that the voice has been given: one
     /// the stream tells of twice is spoken once.
     pub(crate) answered_through: u64,
-    /// What the head draws: the state's words and the minutes and cost, as
-    /// the last look at the session saw them.
+    /// What the window draws: the state's words beside the composer's
+    /// button and the minutes and cost in the head, as the last look at the
+    /// session saw them.
     pub(crate) state: State,
     pub(crate) meter: String,
 }

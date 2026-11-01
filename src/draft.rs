@@ -732,6 +732,14 @@ pub fn unsendable(text: &str, attachments: &[Attachment]) -> Option<String> {
     }
 }
 
+/// Whether a draft holds nothing: no text but spaces, and no attachment,
+/// which is what [`unsendable`] says with no reason. A marked attachment is
+/// something: the draft is not empty, and the send that is tried says why
+/// it cannot go.
+pub fn empty(text: &str, attachments: &[Attachment]) -> bool {
+    unsendable(text, attachments).is_some_and(|why| why.is_empty())
+}
+
 /// Why attachments cannot go, each reason once: for the line their send
 /// is typed in.
 pub fn reasons(attachments: &[Attachment]) -> Vec<String> {
@@ -1172,11 +1180,16 @@ mod tests {
         let mut drafts = Drafts::default();
         assert_eq!(unsendable("  ", &[]), Some(String::new()));
         assert_eq!(unsendable("hello", &[]), None);
+        // Nothing is spaces and no file; the composer's button is Voice
+        // for it and Send for anything else.
+        assert!(empty("", &[]) && empty(" \n ", &[]));
+        assert!(!empty("hello", &[]));
         drafts.attach("yardmaster", image(PNG));
         let attached = drafts.attachments("yardmaster");
         // A file is a mail without text.
         assert_eq!(unsendable("", attached), None);
         assert_eq!(unsendable("Like this.", attached), None);
+        assert!(!empty("", attached) && !empty("  ", attached));
         // How long a text is does not hold it back: the yard splits it, or
         // refuses it in its words.
         let long = "x".repeat(30 * 1024);
@@ -1196,6 +1209,8 @@ mod tests {
             unsendable("Like this.", drafts.attachments("yardmaster")).as_deref(),
             Some("2 attachments are marked and cannot go: remove them, then send")
         );
+        // A marked draft is not empty, with words or without.
+        assert!(!empty("", drafts.attachments("yardmaster")));
         // Each reason is said once.
         assert_eq!(drafts.reasons("yardmaster"), ["too large"]);
     }

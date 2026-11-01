@@ -524,7 +524,7 @@ pub struct Footplate {
     /// yard or the window ends it.
     voice: Option<Talk>,
     /// Why the last session could not be made, or ended: the words of
-    /// whoever refused it, shown beside the Voice button and never parsed.
+    /// whoever refused it, shown in the conversation's head and never parsed.
     /// A new tap, or another conversation, clears them.
     voice_refusal: Option<String>,
     /// How many voice sessions the window started, which tells their words
@@ -1302,7 +1302,7 @@ mod tests {
         setup_keys, take_back_label, texts_label, typeback_line, typeback_mismatch, words_send,
     };
     use super::asks::{dir_url, file_url};
-    use super::bead::{bar_top, hover_clock};
+    use super::bead::{Button, bar_top, hover_clock};
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, RAIL, drawer_fits};
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
@@ -10122,9 +10122,20 @@ yardr.dev
     }
 
     /// A words-wanted card sends the answer from its Send button, open and
-    /// dealt with, as Enter does. The look is untried.
+    /// dealt with, as Enter does. The look is untried. Voice being on makes
+    /// no difference on a card, where no conversation is open and so none is
+    /// offered voice: the button is Send alone, inert while the line is
+    /// empty.
     #[gpui::test]
     fn a_words_wanted_card_sends_the_answer_from_its_send_button(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
         let yard = Yard::start();
         a_yard_of_jo(&yard);
         yard.answer("UserAsks", &asks_words_only());
@@ -10135,7 +10146,8 @@ yardr.dev
             bind_keys(cx);
         });
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let view = Footplate::new(yard.client(), "jo".into(), window, cx);
+            let view = Footplate::new(yard.client(), "jo".into(), window, cx)
+                .kept_in(Some(file.clone()), cx);
             window.focus(&view.line.focus_handle(cx));
             view
         });
@@ -10148,6 +10160,7 @@ yardr.dev
             })
         });
         wait(cx, "the bead", |cx| has_bead(&view, cx, "bead-w"));
+        assert!(view.read_with(cx, |v, _| v.settings.voice && v.open().is_none()));
         assert!(drawn(cx, "send bead-w 9"));
         assert_eq!(typed(&view, cx), "");
         click_on(cx, "send bead-w 9");
@@ -11094,7 +11107,8 @@ yardr.dev
 
     /// With voice off, nothing but the Voice settings section offers
     /// voice: no control outside the settings, and in the settings only
-    /// the side list's row — until the section itself is open.
+    /// the side list's row — until the section itself is open. The composer
+    /// keeps Send alone, faint and inert while the line is empty.
     #[gpui::test]
     fn with_voice_off_nothing_but_the_voice_section_offers_voice(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -11107,12 +11121,14 @@ yardr.dev
         });
         let (view, cx) = opened_kept(&yard, &file, cx);
         assert!(!settings_of(&view, cx).voice);
-        // No voice control stands: the Voice button in the open
-        // conversation's head, the switch, the state, the field, its save,
+        // No voice control stands: the composer's Voice and Stop buttons and
+        // the session's words, the switch, the state, the field, its save,
         // what it said, the idle limit and the plain line are all gone.
         let voice_gone = |cx: &mut VisualTestContext| {
             for gone in [
                 "voice button",
+                "stop button",
+                "voice words",
                 "voice off",
                 "voice on",
                 "voice state",
@@ -11126,9 +11142,15 @@ yardr.dev
                 assert!(!drawn(cx, gone), "{gone}");
             }
         };
-        // Shut, not even the section's row stands.
+        // Shut, not even the section's row stands. The composer's button is
+        // Send alone, and a tap on it while the line is empty sends nothing.
         voice_gone(cx);
         assert!(!drawn(cx, "settings section voice"));
+        assert_eq!(button_of(&view, cx), Button::SendDisabled);
+        assert!(drawn(cx, "send button"));
+        click_on(cx, "send button");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("Mail"), Vec::<Value>::new());
         // Open on every other section, only the side list's row stands.
         // Telemetry is not offered on this yard, and Agents reads yardr,
         // which these means do not stand in for.
@@ -11153,10 +11175,12 @@ yardr.dev
         assert!(drawn(cx, "voice on") && drawn(cx, "voice key"));
         assert!(drawn(cx, "voice idle 5") && drawn(cx, "voice idle line"));
         assert!(drawn(cx, "voice plain"));
-        // Switched on, the button stands in the conversation's head.
+        // Switched on, the composer's button is Voice while the line is
+        // empty.
         click_on(cx, "voice on");
         cx.simulate_keystrokes("escape");
         assert!(!settings_open(&view, cx));
+        assert_eq!(button_of(&view, cx), Button::Voice);
         assert!(drawn(cx, "voice button"));
     }
 
@@ -11284,16 +11308,41 @@ yardr.dev
         }
     }
 
-    /// The Voice button's words: its name, or the session's state.
+    /// The state words beside the composer's button: the session's, and none
+    /// while no session stands.
     fn voice_words(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> String {
-        view.read_with(cx, |v, _| v.voice_label())
+        view.read_with(cx, |v, _| v.voice_label().unwrap_or_default())
+    }
+
+    /// Which of voice, send and stop the composer's button is now.
+    fn button_of(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> Button {
+        view.read_with(cx, |v, cx| {
+            let model = v.model.as_ref().unwrap();
+            v.composer_button(model, model.selected_conversation().unwrap(), cx)
+        })
+    }
+
+    /// Taps the composer's button, which must be `face`. The faces stand in
+    /// one place, and a selector once drawn keeps its bounds in a test frame:
+    /// a tap on the name of a face that is gone would land on the one that
+    /// stands, so the face is read first.
+    fn tap(view: &Entity<Footplate>, cx: &mut VisualTestContext, face: Button) {
+        assert_eq!(button_of(view, cx), face);
+        click_on(
+            cx,
+            match face {
+                Button::Voice => "voice button",
+                Button::Send | Button::SendDisabled => "send button",
+                Button::Stop => "stop button",
+            },
+        );
     }
 
     fn voice_stands(view: &Entity<Footplate>, cx: &mut VisualTestContext) -> bool {
         view.read_with(cx, |v, _| v.voice.is_some())
     }
 
-    /// Waits until the Voice button says `words`.
+    /// Waits until the state words beside the button say `words`.
     fn wait_voice(view: &Entity<Footplate>, cx: &mut VisualTestContext, words: &str) {
         wait(cx, words, |cx| voice_words(view, cx) == words);
     }
@@ -11306,7 +11355,7 @@ yardr.dev
         cx: &mut VisualTestContext,
     ) -> Arc<Live> {
         let before = voicing.lives.borrow().len();
-        click_on(cx, "voice button");
+        tap(view, cx, Button::Voice);
         wait(cx, "the session standing", |cx| {
             view.read_with(cx, |v, _| {
                 v.voice.as_ref().is_some_and(|talk| talk.stood.is_some())
@@ -11319,9 +11368,9 @@ yardr.dev
     }
 
     /// Waits until the session of `live` is over as a hang-up ends it, its
-    /// devices being the `n`th set opened: the button says Voice, the devices
-    /// are closed, before the hang-up, which went out, and the microphone's
-    /// frames go nowhere.
+    /// devices being the `n`th set opened: the button is no longer Stop and
+    /// the state words are gone, the devices are closed, before the hang-up,
+    /// which went out, and the microphone's frames go nowhere.
     fn wait_hung_up(
         view: &Entity<Footplate>,
         voicing: &Voicing,
@@ -11333,7 +11382,8 @@ yardr.dev
         wait(cx, "the devices closed", |_| {
             voicing.open.load(Ordering::SeqCst) == 0
         });
-        assert_eq!(voice_words(view, cx), "Voice");
+        assert_ne!(button_of(view, cx), Button::Stop);
+        assert_eq!(voice_words(view, cx), "");
         wait(cx, "the hang-up sent", |_| {
             live.sent().iter().any(|e| e["type"] == "session.close")
         });
@@ -11398,17 +11448,21 @@ yardr.dev
         let voicing = Voicing::new();
         voicing.stand_in(&view, cx);
 
-        // With voice on the button stands in the head of the conversation,
-        // saying its name, and no caption stands before a session does.
+        // With voice on and the box empty the composer's button is Voice,
+        // and no state words, caption or meter stand before a session does.
         assert!(drawn(cx, "voice button"));
-        assert_eq!(voice_words(&view, cx), "Voice");
-        assert!(!drawn(cx, "voice caption") && !drawn(cx, "voice meter"));
+        assert_eq!(button_of(&view, cx), Button::Voice);
+        assert!(
+            !drawn(cx, "voice words") && !drawn(cx, "voice caption") && !drawn(cx, "voice meter")
+        );
 
-        // A tap starts the session: the head says it is starting, then
-        // that it is listening, with the caption line standing empty and
-        // the meter counting.
+        // A tap starts the session: the button is Stop, with the state words
+        // beside it saying it is starting, then that it is listening, the
+        // caption line standing empty and the meter counting.
         let live = talk_to(&view, &voicing, cx);
         wait_voice(&view, cx, "listening");
+        assert_eq!(button_of(&view, cx), Button::Stop);
+        assert!(drawn(cx, "stop button") && drawn(cx, "voice words"));
         assert!(drawn(cx, "voice caption") && drawn(cx, "voice meter"));
         assert_eq!(caption_of(&view, cx), "");
         assert_eq!(
@@ -11434,7 +11488,8 @@ yardr.dev
                     json!({"to": "yardmaster", "text": "What's blocking the release?", "actor": "jo"}),
                 ]
         });
-        // While the yard works the head says so, as the row names them.
+        // While the yard works the words beside the button say so, as the
+        // row names them.
         wait_voice(&view, cx, "yardmaster is working");
 
         // The stream tells of the person's own mail, which is not spoken,
@@ -11481,8 +11536,9 @@ yardr.dev
             1
         );
 
-        // The voice speaks, and the head says so; the person speaks over
-        // it, and what was queued for the speaker is dropped.
+        // The voice speaks, and the words beside the button say so; the
+        // person speaks over it, and what was queued for the speaker is
+        // dropped.
         for _ in 0..4 {
             live.queue_audio(vec![7000; 2400]);
         }
@@ -11571,13 +11627,159 @@ yardr.dev
                 .all(|a| !a.content.contains("Which key") && !a.content.contains("BOOKS_TOKEN"))
         );
 
-        // A second tap ends it.
-        click_on(cx, "voice button");
+        // A second tap, on Stop, ends it: the box being empty, the button
+        // is Voice again.
+        tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 0, cx);
+        assert_eq!(button_of(&view, cx), Button::Voice);
         let server = voicing.lives.borrow_mut().remove(0).1;
         wait(cx, "the socket's thread gone", |_| {
             server.thread.is_finished()
         });
+    }
+
+    /// The composer's one button, for each combination of whether a session
+    /// stands, whether voice is offered and whether the box holds anything.
+    #[test]
+    fn the_composer_s_one_button_is_voice_send_or_stop_by_the_session_the_offer_and_the_box() {
+        for (session, offered, empty, button) in [
+            // No session and voice offered: Voice while the box is empty,
+            // Send once it holds anything.
+            (false, true, true, Button::Voice),
+            (false, true, false, Button::Send),
+            // Voice not offered: Send alone, faint and inert while the box
+            // is empty.
+            (false, false, true, Button::SendDisabled),
+            (false, false, false, Button::Send),
+            // A session stands or starts: Stop, whatever the box holds and
+            // whatever is offered.
+            (true, true, true, Button::Stop),
+            (true, true, false, Button::Stop),
+            (true, false, true, Button::Stop),
+            (true, false, false, Button::Stop),
+        ] {
+            assert_eq!(
+                Button::of(session, offered, empty),
+                button,
+                "session {session}, offered {offered}, empty {empty}"
+            );
+        }
+    }
+
+    /// The button follows the box and the session. With no session it is
+    /// Voice while the box is empty or holds spaces, and Send once it holds
+    /// words or a file; a tap on Send sends as Enter does. While a session
+    /// stands it is Stop, whatever the box holds: Enter still sends what is
+    /// typed, and a tap on Stop ends the session, sends nothing, and leaves
+    /// the text in the line, which keeps the focus. Where voice is not
+    /// offered, in the person's own conversation, it is Send alone, faint and
+    /// inert while the box is empty.
+    #[gpui::test]
+    fn the_composer_s_button_is_voice_send_or_stop_and_a_tap_on_stop_sends_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer(
+            "PutBlob",
+            &json!({"result": {"hash": HASH, "type": "application/pdf", "bytes": 17}}).to_string(),
+        );
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let mail = |text: &str| json!({"to": "yardmaster", "text": text, "actor": "jo"});
+
+        // No session, an empty box: Voice. Spaces are as empty as nothing,
+        // as Enter counts them.
+        assert_eq!(button_of(&view, cx), Button::Voice);
+        cx.simulate_input("   ");
+        assert_eq!(button_of(&view, cx), Button::Voice);
+        // Words: Send, and a tap sends them as Enter does, trimmed, with the
+        // line emptied and the button Voice again.
+        cx.simulate_input("Land it.");
+        tap(&view, cx, Button::Send);
+        wait(cx, "the mail sent", |_| {
+            yard.asked("Mail") == [mail("Land it.")]
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(button_of(&view, cx), Button::Voice);
+
+        // A file with no words is something to send: Send, and a tap sends
+        // it.
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.pdf");
+        std::fs::write(&notes, b"%PDF-1.7 and more").unwrap();
+        view.update(cx, |v, cx| v.dropped(std::slice::from_ref(&notes), cx));
+        wait(cx, "the dropped file", |cx| {
+            attached(&view, cx) == [(1, "notes.pdf".to_string(), None)]
+        });
+        tap(&view, cx, Button::Send);
+        wait(cx, "the file sent", |_| yard.asked("Mail").len() == 2);
+        assert_eq!(attached(&view, cx), []);
+        assert_eq!(button_of(&view, cx), Button::Voice);
+
+        // A session stands: Stop, with the box empty or not. Enter sends what
+        // is typed all the same, and the session goes on.
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(button_of(&view, cx), Button::Stop);
+        cx.simulate_input("Typed while talking.");
+        assert_eq!(button_of(&view, cx), Button::Stop);
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the typed mail sent", |_| {
+            yard.asked("Mail").last() == Some(&mail("Typed while talking."))
+        });
+        assert_eq!(yard.asked("Mail").len(), 3);
+        assert!(voice_stands(&view, cx));
+        assert_eq!(button_of(&view, cx), Button::Stop);
+
+        // A tap on Stop with text in the box ends the session and sends
+        // nothing; the text stays in the line, which keeps the focus, and
+        // the button is Send for it now.
+        cx.simulate_input("Not yet.");
+        assert_eq!(button_of(&view, cx), Button::Stop);
+        tap(&view, cx, Button::Stop);
+        wait_hung_up(&view, &voicing, &live, 0, cx);
+        cx.run_until_parked();
+        assert_eq!(yard.asked("Mail").len(), 3);
+        assert_eq!(typed(&view, cx), "Not yet.");
+        assert!(cx.update(|window, cx| view.read(cx).line.focus_handle(cx).is_focused(window)));
+        assert_eq!(button_of(&view, cx), Button::Send);
+
+        // The person's own conversation is no place for voice: the button is
+        // Send alone, faint and inert while the box is empty, and it sends
+        // what is written.
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| m.select(Selected::Conversation("jo".into())))
+        });
+        wait(cx, "the person's own conversation", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model.as_ref().unwrap().selected_conversation() == Some("jo")
+            })
+        });
+        assert_eq!(typed(&view, cx), "");
+        assert_eq!(button_of(&view, cx), Button::SendDisabled);
+        click_on(cx, "send button");
+        cx.run_until_parked();
+        assert_eq!(yard.asked("Mail").len(), 3);
+        cx.simulate_input("A note to myself.");
+        tap(&view, cx, Button::Send);
+        wait(cx, "the note sent", |_| yard.asked("Mail").len() == 4);
+        assert_eq!(
+            yard.asked("Mail").last(),
+            Some(&json!({"to": "jo", "text": "A note to myself.", "actor": "jo"}))
+        );
     }
 
     /// The session ends wherever the person leaves the conversation: a
@@ -11657,10 +11859,11 @@ yardr.dev
         wait_hung_up(&view, &voicing, &live, n, cx);
         n += 1;
 
-        // A second tap.
+        // A second tap, on Stop.
         let live = talk_to(&view, &voicing, cx);
-        click_on(cx, "voice button");
+        tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, n, cx);
+        assert_eq!(button_of(&view, cx), Button::Voice);
         n += 1;
 
         // Idle: five minutes with nobody speaking and no request waiting.
@@ -11721,14 +11924,14 @@ yardr.dev
         wait_hung_up(&view, &voicing, &live, n, cx);
     }
 
-    /// A session that cannot be made says why beside the button, in the
-    /// words of whoever refused it, and no session stands: the keeper's own
-    /// words where no key is kept, OpenAI's where it refuses the key, the
-    /// devices' where the system says no to the microphone, which the Voice
-    /// section says too. It is never tried again unasked; a new tap is a new
-    /// start.
+    /// A session that cannot be made says why in the head, in the words of
+    /// whoever refused it, and no session stands: the keeper's own words
+    /// where no key is kept, OpenAI's where it refuses the key, the devices'
+    /// where the system says no to the microphone, which the Voice section
+    /// says too. The button stays Voice. It is never tried again unasked; a
+    /// new tap is a new start.
     #[gpui::test]
-    fn a_refusal_to_start_stands_beside_the_button_in_its_own_words_and_no_session_stands(
+    fn a_refusal_to_start_stands_in_the_head_in_its_own_words_and_no_session_stands(
         cx: &mut TestAppContext,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -11763,16 +11966,17 @@ yardr.dev
         // No key kept: the keeper's words, as they are.
         let none = "There is no voice key: nothing is kept. Type your OpenAI key in the settings' Voice section, or set FOOTPLATE_OPENAI_KEY.";
         *voicing.key.borrow_mut() = Err(none.to_string());
-        click_on(cx, "voice button");
+        tap(&view, cx, Button::Voice);
         assert_eq!(refusal(cx).as_deref(), Some(none));
         assert!(drawn(cx, "voice refusal"));
         assert!(!voice_stands(&view, cx));
-        assert_eq!(voice_words(&view, cx), "Voice");
+        assert_eq!(button_of(&view, cx), Button::Voice);
+        assert_eq!(voice_words(&view, cx), "");
         assert!(voicing.lives.borrow().is_empty());
 
         // A key that OpenAI refuses: its words, with the key taken out.
         *voicing.key.borrow_mut() = Ok("sk-wrong".to_string());
-        click_on(cx, "voice button");
+        tap(&view, cx, Button::Voice);
         wait(cx, "OpenAI's refusal", |cx| {
             refusal(cx).is_some_and(|words| words.contains("401"))
         });
@@ -11786,37 +11990,37 @@ yardr.dev
             "{words}"
         );
         assert!(!voice_stands(&view, cx));
-        assert_eq!(voice_words(&view, cx), "Voice");
+        assert_eq!(button_of(&view, cx), Button::Voice);
         // No devices were opened for it, and it was not tried again.
         cx.run_until_parked();
         assert_eq!(voicing.open.load(Ordering::SeqCst), 0);
         assert!(voicing.mics.lock().unwrap().is_empty());
         assert_eq!(voicing.lives.borrow().len(), 1);
 
-        // A new tap is a new start, and the words beside the button go.
+        // A new tap is a new start, and the words in the head go.
         *voicing.key.borrow_mut() = Ok("sk-test".to_string());
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(refusal(cx), None);
         assert_eq!(voicing.lives.borrow().len(), 2);
-        click_on(cx, "voice button");
+        tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 0, cx);
 
         // The system's no to the microphone, as a Mac's consent says it (the
         // person's, at the prompt or in System Settings, or a policy's): the
         // devices are refused by it as the session stands, with words that say
         // where that is changed. The session ends at once and no devices
-        // stand; the words are shown as they are beside the button, and in the
+        // stand; the words are shown as they are in the head, and in the
         // Voice section, which says it where a person who refused the prompt
         // looks.
         let no = "the microphone may not be used: allow Footplate in System Settings, Privacy & Security, Microphone, and try again";
         for consent in [Consent::Denied, Consent::Restricted] {
             *voicing.consent.lock().unwrap() = consent;
-            click_on(cx, "voice button");
+            tap(&view, cx, Button::Voice);
             wait(cx, "the devices' refusal", |cx| {
                 refusal(cx).as_deref() == Some(no)
             });
             assert!(!voice_stands(&view, cx), "{consent:?}");
-            assert_eq!(voice_words(&view, cx), "Voice", "{consent:?}");
+            assert_eq!(button_of(&view, cx), Button::Voice, "{consent:?}");
             assert!(drawn(cx, "voice refusal"), "{consent:?}");
             assert_eq!(voicing.open.load(Ordering::SeqCst), 0, "{consent:?}");
         }
@@ -11829,11 +12033,11 @@ yardr.dev
         *voicing.consent.lock().unwrap() = Consent::Authorized;
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(refusal(cx), None);
-        click_on(cx, "voice button");
+        tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 1, cx);
 
-        // With voice off the button is not offered, and a stale tap
-        // starts nothing and reads no key.
+        // With voice off Voice is not offered, and a stale tap starts
+        // nothing and reads no key.
         view.update(cx, |v, cx| v.voice_on(false, cx));
         *voicing.key.borrow_mut() = Err("the key was read while voice is off".to_string());
         view.update(cx, |v, cx| v.toggle_voice(cx));
@@ -23214,20 +23418,25 @@ yardr.dev
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
         assert!(drawn(cx, "rows") && drawn(cx, "conversation top"));
         assert!(drawn(cx, "reconnecting") && drawn(cx, "send held"));
-        // Send is held: the draft stays, and nothing goes.
+        // Send is held: the draft stays, and nothing goes. The composer's
+        // button, which would send it, stands disabled, and a tap on it
+        // does nothing either.
         assert_eq!(typed(&view, cx), "Land it when green.");
+        assert_eq!(button_of(&view, cx), Button::SendDisabled);
+        click_on(cx, "send button");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(typed(&view, cx), "Land it when green.");
         assert_eq!(yard.asked("Mail"), Vec::<Value>::new());
         // It is back: the hold is gone with the state, everything is
-        // read again, and the draft goes on Enter.
+        // read again, the button is Send, and the draft goes on Enter.
         let yard = Yard::start_at(&socket);
         a_yard_of_jo(&yard);
         wait(cx, "the yard again", |cx| {
             view.read_with(cx, |v, _| v.down.is_none())
         });
         assert!(view.read_with(cx, |v, _| !v.reconnecting()));
+        assert_eq!(button_of(&view, cx), Button::Send);
         assert_eq!(texts(&view, cx), ["Shall I land it?"]);
         assert_eq!(typed(&view, cx), "Land it when green.");
         cx.simulate_keystrokes("enter");

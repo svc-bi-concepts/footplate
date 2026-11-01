@@ -1091,10 +1091,11 @@ impl Queue {
     }
 }
 
-/// What the Voice button says while a session stands, in the design system's
-/// quiet words. Which of them holds is for the session to tell from what it
-/// sees: the voice's audio runs on at the pace of the clock, padded with
-/// silence, so its arriving does not say the voice is speaking.
+/// What the words beside the composer's button say while a session stands, in
+/// the design system's quiet words. Which of them holds is for the session to
+/// tell from what it sees: the voice's audio runs on at the pace of the
+/// clock, padded with silence, so its arriving does not say the voice is
+/// speaking.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum State {
     Listening,

@@ -41,12 +41,14 @@ use crate::yard::Env;
 /// address, the settings on each of their sections, the telemetry
 /// section on with the install id and the next payload and off with
 /// the consent words, the yardmaster's conversation with a voice session
-/// standing in it, as a tap on the Voice button makes one, against a
-/// stand-in for OpenAI's socket with the caption of what the person is
-/// saying, the yards with a
+/// standing in it, as a tap on the composer's Voice button makes one, so that
+/// the button is Stop, against a stand-in for OpenAI's socket with the
+/// caption of what the person is saying, and the same conversation with
+/// voice on and no session, the button saying Voice, and with a line typed
+/// in the composer, the button saying Send, the yards with a
 /// far yard's rename form open in its card, a running
 /// yard whose server is then stopped, shot reconnecting with a draft in
-/// the composer, an open card whose note carries a page, an image and a file, a
+/// the composer, its Send held, an open card whose note carries a page, an image and a file, a
 /// mail with a page and an image, that mail's image open full size over
 /// the window, the first screen's way to a yard at an address, with a
 /// pairing's http address refused under its fields, the
@@ -152,6 +154,8 @@ pub const STATES: &[&str] = &[
     "settings-telemetry",
     "settings-telemetry-off",
     "voice",
+    "voice-ready",
+    "voice-draft",
     "reconnecting",
     "page",
     "mail",
@@ -311,9 +315,10 @@ pub(super) fn start_if_asked(env: Env) -> (Env, Option<ShotYard>) {
     if state == "feedback" {
         let _ = POSTHOG.set(Posthog::start());
     }
-    // The voice shot's session is made against a stand-in for OpenAI's
-    // socket, held for the run in the same way.
-    if state == "voice" {
+    // The voice shots' session is made against a stand-in for OpenAI's
+    // socket, held for the run in the same way. Only the first taps the
+    // button: the others show it before a tap.
+    if matches!(state.as_str(), "voice" | "voice-ready" | "voice-draft") {
         let _ = TALKING.set(stand_voice());
     }
     start_for_state(env, &state)
@@ -329,9 +334,9 @@ pub(crate) fn feedback() -> Option<crate::feedback::Project> {
     crate::feedback::Project::at(POSTHOG.get()?.address(), "phc_shot", "shot-survey")
 }
 
-/// What the voice shot's session stands against: a stand-in for OpenAI's
+/// What the voice shots' session stands against: a stand-in for OpenAI's
 /// Live socket on a loopback port, held for the run, as the capture of the
-/// feedback shot is. The shot reaches no OpenAI and no microphone, and a
+/// feedback shot is. The shots reach no OpenAI and no microphone, and a
 /// press in a window left up (scripts/shot-mac.sh hold) goes nowhere else.
 struct Talking {
     url: String,
@@ -344,8 +349,9 @@ static TALKING: std::sync::OnceLock<Talking> = std::sync::OnceLock::new();
 /// no OpenAI has heard of it.
 pub(crate) const VOICE_KEY: &str = "sk-shot";
 
-/// Where the voice shot's session stands, which its window starts it against
-/// where it taps the Voice button (chrome.rs). None in every other state.
+/// Where the voice shots' session stands, which their window starts it against
+/// where it taps the Voice button (chrome.rs: the `voice` shot taps it, the
+/// others leave it for a hand). None in every other state.
 pub(crate) fn voice() -> Option<&'static str> {
     TALKING.get().map(|talking| talking.url.as_str())
 }
@@ -1076,8 +1082,8 @@ fn populate(yard: &Yard, state: &str) {
         // screen's, whose session's screen opens over it, the
         // hosted screen's, whose card opens over it with no call, the
         // refused screen's, whose card opens over it with the
-        // yard's long refusal in red, and the voice shot's, whose
-        // window taps the Voice button once the yard is read.
+        // yard's long refusal in red, and the voice shots', the first
+        // of which taps the Voice button once the yard is read.
         "yardmaster"
         | "far"
         | "settings"
@@ -1091,6 +1097,8 @@ fn populate(yard: &Yard, state: &str) {
         | "settings-telemetry"
         | "settings-telemetry-off"
         | "voice"
+        | "voice-ready"
+        | "voice-draft"
         | "reconnecting"
         | "answered"
         | "signedout"
@@ -2619,6 +2627,8 @@ mod tests {
                 | "settings-telemetry"
                 | "settings-telemetry-off"
                 | "voice"
+                | "voice-ready"
+                | "voice-draft"
                 | "reconnecting"
                 | "answered"
                 | "signedout"

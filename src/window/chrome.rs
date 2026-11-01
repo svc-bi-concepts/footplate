@@ -93,8 +93,9 @@ impl Footplate {
         // The voice shot stands a session in the yardmaster's conversation
         // once the yard is read (below), against a stand-in for OpenAI's
         // socket and devices that open nothing: it reaches no OpenAI, and
-        // never asks a Mac for the microphone. Voice is on for it. A debug
-        // build's alone, as above, and a unix one's.
+        // never asks a Mac for the microphone. Voice is on for it, and for
+        // the two shots that stand no session. A debug build's alone, as
+        // above, and a unix one's.
         #[cfg(all(debug_assertions, unix))]
         if let Some(url) = crate::shot::voice() {
             let url = url.to_string();
@@ -111,11 +112,14 @@ impl Footplate {
             this.means.devices =
                 std::sync::Arc::new(|_, _| Ok(Box::new(()) as Box<dyn std::any::Any + Send>));
         }
-        // The reconnecting shot has a draft in the composer: the
-        // yardmaster's conversation's, which opens first, in the line
-        // once the yard is read.
+        // The reconnecting shot and the voice-draft shot have a draft in the
+        // composer: the yardmaster's conversation's, which opens first, in
+        // the line once the yard is read.
         #[cfg(debug_assertions)]
-        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("reconnecting") {
+        if matches!(
+            std::env::var("FOOTPLATE_SHOT").as_deref(),
+            Ok("reconnecting") | Ok("voice-draft")
+        ) {
             this.drafts.put_text(
                 "yardmaster",
                 "Land it once the last bead is green.".to_string(),
@@ -1292,9 +1296,12 @@ impl Footplate {
                 // read, as a person does: the session stands in the open
                 // conversation, and the stand-in's socket says the words
                 // the caption shows. Once. A debug build's alone, as above,
-                // and a unix one's.
+                // and a unix one's. The other voice shots leave it standing.
                 #[cfg(all(debug_assertions, unix))]
-                if self.voices == 0 && crate::shot::voice().is_some() {
+                if self.voices == 0
+                    && crate::shot::voice().is_some()
+                    && std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("voice")
+                {
                     self.toggle_voice(cx);
                 }
                 // The yard answers: what a start could not start is
@@ -2220,7 +2227,8 @@ impl Footplate {
         let Some(from) = from.filter(|from| Some(from) != to.as_ref()) else {
             return;
         };
-        // What was said beside the Voice button was of the row that is left.
+        // What the head said of a session that could not be made was of the
+        // row that is left.
         self.voice_refusal = None;
         // What was selected is of the conversation that is no longer shown.
         self.selection
@@ -4861,11 +4869,11 @@ impl Footplate {
                     .child("voice is on"),
             );
         }
-        // What stands beside the Voice button where a session could not be
-        // made stands here too, in the words of whoever refused it and
-        // never parsed: the keeper's where no key is kept, OpenAI's where it
-        // refuses the key, the devices' where the system said no to the
-        // microphone, with where that is changed.
+        // What the head says where a session could not be made stands here
+        // too, in the words of whoever refused it and never parsed: the
+        // keeper's where no key is kept, OpenAI's where it refuses the key,
+        // the devices' where the system said no to the microphone, with
+        // where that is changed.
         section = section
             .children(self.voice_refusal_line("voice refused", palette))
             .child(

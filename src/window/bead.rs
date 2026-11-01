@@ -11,9 +11,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, Div, Focusable, FontWeight, Image, ImageFormat, MouseButton, ObjectFit,
-    Pixels, ScrollHandle, SharedString, WeakEntity, Window, div, img, prelude::*, px, rems, rgba,
-    white,
+    AnyElement, App, Context, Div, Focusable, FontWeight, Image, ImageFormat, MouseButton,
+    ObjectFit, Pixels, ScrollHandle, SharedString, WeakEntity, Window, div, img, prelude::*, px,
+    rems, rgba, white,
 };
 
 use super::Expanded;
@@ -80,6 +80,36 @@ const YARD_AWAY: &str = "the yard does not answer";
 /// and the letter stays the pointer's until the next move.
 pub(crate) fn bar_top(below: Pixels, height: Pixels) -> Option<Pixels> {
     (below + height > px(0.)).then(|| px(-36.).max(-below))
+}
+
+/// What the composer's one button is, at its bottom right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Button {
+    /// Starts a voice session, where the box holds nothing to send.
+    Voice,
+    /// Sends the draft, exactly as Enter does.
+    Send,
+    /// Send with nothing to send and no voice to offer in its place, or with
+    /// the yard away: drawn faint, and it takes no tap.
+    SendDisabled,
+    /// Ends the session that stands, or is starting, and sends nothing.
+    Stop,
+}
+
+impl Button {
+    /// The button by whether a voice session `session` stands or is starting,
+    /// whether voice is `offered` in this conversation, and whether the
+    /// draft is `empty` ([`draft::empty`]). A session comes first, whatever
+    /// the box holds, so that a tap can never send when the person meant to
+    /// end; Enter sends what is typed all the same.
+    pub(crate) fn of(session: bool, offered: bool, empty: bool) -> Button {
+        match (session, empty, offered) {
+            (true, _, _) => Button::Stop,
+            (false, false, _) => Button::Send,
+            (false, true, true) => Button::Voice,
+            (false, true, false) => Button::SendDisabled,
+        }
+    }
 }
 
 impl Footplate {
@@ -200,11 +230,11 @@ impl Footplate {
         );
     }
 
-    /// The Voice button: starts a voice session in the open conversation, or
-    /// ends the one that stands, as a second tap does. A session that cannot
-    /// be made says why beside the button, in the words of whoever refused it,
-    /// and is made again only by another tap. While voice is off nothing is
-    /// started and no key is read.
+    /// The composer's Voice and Stop: starts a voice session in the open
+    /// conversation, or ends the one that stands, as a second tap does. A
+    /// session that cannot be made says why in the head, in the words of
+    /// whoever refused it, and is made again only by another tap. While voice
+    /// is off nothing is started and no key is read.
     pub(crate) fn toggle_voice(&mut self, cx: &mut Context<Self>) {
         if self.voice.is_some() {
             return self.end_voice(cx);
@@ -335,9 +365,10 @@ impl Footplate {
     }
 
     /// The session said `update`, in plain terms; the window does what it
-    /// asks for. A session that could not be made, or lost, says why beside
-    /// the button; one that ended otherwise (the person's hang-up, the
-    /// provider's close, its moment) leaves the button saying Voice again.
+    /// asks for. A session that could not be made, or lost, says why in the
+    /// head; one that ended otherwise (the person's hang-up, the provider's
+    /// close, its moment) leaves the composer's button saying Voice again,
+    /// or Send where the box holds something.
     fn voice_told(&mut self, update: Update, now: Instant, cx: &mut Context<Self>) {
         let Some(talk) = self.voice.as_mut() else {
             return;
@@ -363,7 +394,8 @@ impl Footplate {
                 .detach();
             }
             // The session dropped what the voice had queued as the person
-            // began: what the head says of the voice speaking goes with it.
+            // began: what the state words say of the voice speaking goes
+            // with it.
             Update::SpeechStarted => talk.speaking.stop(),
             Update::Words(fragment) => {
                 talk.caption.heard(fragment);
@@ -525,8 +557,8 @@ impl Footplate {
 
     /// A moment of a standing session, at `now`: it ends where the window no
     /// longer shows its conversation, or has stood idle for the settings'
-    /// minutes (Live bills by the second); else the head is drawn again if
-    /// what it says changed.
+    /// minutes (Live bills by the second); else the state words and the
+    /// meter are drawn again if what they say changed.
     pub(crate) fn voice_tick(&mut self, now: Instant, cx: &mut Context<Self>) {
         let here = self.voice_is_here();
         let hidden = (self.means.hidden)();
@@ -569,44 +601,115 @@ impl Footplate {
         cx.notify();
     }
 
-    /// What the Voice button says: its name, then the session's state in
-    /// quiet words while one stands, as the row names the counterpart.
-    pub(crate) fn voice_label(&self) -> String {
-        match &self.voice {
-            None => "Voice".to_string(),
-            Some(talk) if talk.stood.is_none() => "starting…".to_string(),
-            Some(talk) => talk.state.words(&talk.with),
+    /// The session's state in quiet words, as the row names the counterpart,
+    /// beside the composer's button: starting… until the session stands, then
+    /// what is going on. None where no session stands.
+    pub(crate) fn voice_label(&self) -> Option<String> {
+        self.voice.as_ref().map(|talk| match talk.stood {
+            None => "starting…".to_string(),
+            Some(_) => talk.state.words(&talk.with),
+        })
+    }
+
+    /// Whether voice is offered in the conversation with `with`: it is on,
+    /// the conversation is with someone other than the person themselves, and
+    /// what they say has somewhere to go.
+    fn voice_offered(&self, model: &Model, with: &str) -> bool {
+        self.settings.voice && with != model.me() && model.target().is_some()
+    }
+
+    /// The composer's button now: the rule's, for the session, the
+    /// conversation and the draft as they stand, and Send stands disabled
+    /// while the yard is reconnecting, as the card's buttons do. Enter is
+    /// held then too; the reason stands under the line.
+    pub(crate) fn composer_button(&self, model: &Model, with: &str, cx: &App) -> Button {
+        let empty = draft::empty(self.line.read(cx).text(), self.drafts.attachments(with));
+        match Button::of(self.voice.is_some(), self.voice_offered(model, with), empty) {
+            Button::Send if self.reconnecting() => Button::SendDisabled,
+            button => button,
         }
     }
 
-    /// The Voice button, in the conversation's head beside its name, where
-    /// voice is on and the conversation is with someone other than the person
-    /// themselves. While a session stands it says the session's state in
-    /// quiet words, and a second tap ends it.
-    fn voice_control(
+    /// The composer's one button, at its bottom right, in the shape of
+    /// `button`: Send in the accent, as the card's send button is; Voice and
+    /// Stop bordered; a disabled Send faint, with no tap. The words are the
+    /// design system's plainest, as it has no mark for voice or send. A tap
+    /// sends as Enter does, or starts or ends the session. A press here
+    /// claims no focus of its own: the composer's frame has it for the line,
+    /// so what is typed stays there.
+    fn composer_control(
         &self,
-        model: &Model,
+        button: Button,
         with: &str,
         palette: Palette,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        (self.settings.voice && with != model.me() && model.target().is_some()).then(|| {
-            let tip = match &self.voice {
-                None => format!("voice: talk with {with} by voice"),
-                Some(_) => "voice: tap to end the session".to_string(),
-            };
-            small_button(self.voice_label(), palette)
-                .id("voice button")
-                .debug_selector(|| "voice button".to_string())
-                .flex_none()
-                .tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
-                // The press takes no focus: what is typed stays in the line.
-                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.toggle_voice(cx);
+    ) -> impl IntoElement {
+        let (id, words, tip) = match button {
+            Button::Voice => (
+                "voice button",
+                "Voice",
+                Some(format!("voice: talk with {with} by voice")),
+            ),
+            Button::Send | Button::SendDisabled => ("send button", "Send", None),
+            Button::Stop => (
+                "stop button",
+                "Stop",
+                Some("voice: tap to end the session".to_string()),
+            ),
+        };
+        div()
+            .id(id)
+            .debug_selector(|| id.to_string())
+            .flex_none()
+            .min_w(rems(4.))
+            .min_h(px(32.))
+            .px_3()
+            .py_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .border_1()
+            .text_sm()
+            .map(|el| match button {
+                Button::Send => el
+                    .bg(palette.accent)
+                    .border_color(palette.accent)
+                    .text_color(palette.on_accent)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer(),
+                Button::SendDisabled => el.border_color(palette.line).text_color(palette.faint),
+                Button::Voice | Button::Stop => el
+                    .border_color(palette.line)
+                    .text_color(palette.text)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(palette.hover)),
+            })
+            .when_some(tip, |el, tip| {
+                el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
+            })
+            .when(button != Button::SendDisabled, |el| {
+                el.on_click(cx.listener(move |this, _, _, cx| match button {
+                    Button::Send => this.send(cx),
+                    _ => this.toggle_voice(cx),
                 }))
-        })
+            })
+            .child(words)
+    }
+
+    /// The session's state beside the composer's button: quiet words, while
+    /// a session stands.
+    fn voice_words(&self, palette: Palette) -> Option<impl IntoElement> {
+        let words = self.voice_label()?;
+        Some(
+            div()
+                .debug_selector(|| "voice words".to_string())
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(palette.faint)
+                .child(words),
+        )
     }
 
     /// The session's minutes and what they have cost, quiet at the head's
@@ -1939,7 +2042,6 @@ impl Footplate {
     ) -> impl IntoElement {
         let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
         let about = model.about();
-        let voice = self.voice_control(model, with, palette, cx);
         let head = div()
             .p_3()
             .border_b_1()
@@ -1970,10 +2072,7 @@ impl Footplate {
                                     .debug_selector(|| "conversation state".to_string())
                                     .text_color(palette.faint)
                                     .child(format!("· {state}"))
-                            }))
-                            // The Voice button, beside the name, and the
-                            // session's state in its place while one stands.
-                            .children(voice),
+                            })),
                     )
                     .child(
                         div()
@@ -2081,6 +2180,7 @@ impl Footplate {
                 .children(attached.iter().map(|a| self.attachment(a, palette, cx)))
         });
         let reasons = self.drafts.reasons(with);
+        let button = self.composer_button(model, with, cx);
         pane.children(self.reconnect_strip(palette))
             .child(head)
             .children(self.voice_caption(palette))
@@ -2145,15 +2245,31 @@ impl Footplate {
                             // The draft stays as typed while the yard is
                             // reconnecting, with the reason beside the line.
                             .when(self.reconnecting(), |el| el.child(send_held(palette)))
-                            // The cheatsheet's hint, where `?` is the line's
-                            // text: the keys open it with a click instead.
+                            // The bottom row: the cheatsheet's hint, where `?`
+                            // is the line's text and the keys open it with a
+                            // click instead; the session's state in quiet words
+                            // while one stands; and the one button, which is
+                            // voice, send or stop.
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
-                                    .justify_end()
-                                    .text_xs()
-                                    .child(keys_hint("keys hint line", palette, cx)),
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().flex_none().text_xs().child(keys_hint(
+                                        "keys hint line",
+                                        palette,
+                                        cx,
+                                    )))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .justify_end()
+                                            .children(self.voice_words(palette)),
+                                    )
+                                    .child(self.composer_control(button, with, palette, cx)),
                             ),
                     ),
                 ),

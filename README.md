@@ -452,14 +452,17 @@ on each of their sections: `settings` is this window, and
 telemetry section off),
 `voice` (the yardmaster's conversation with a voice session standing in
 it, against the fake yard and a stand-in for OpenAI's socket, with no
-microphone or speaker opened: the Voice button saying `listening`, the
-session's minutes and what they cost at the head's right, and the caption
-of what the person is saying under the head),
+microphone or speaker opened: the composer's button saying Stop with
+`listening` beside it, the session's minutes and what they cost at the
+head's right, and the caption of what the person is saying under the
+head), `voice-ready` and `voice-draft` (that conversation with voice on
+and no session standing: the composer's button saying Voice, and saying
+Send with a line typed in the composer),
 `settings-yards-rename` (the yards with the far yard's rename form open
 in its card), `reconnecting` (a running yard whose
-server is then stopped, with a draft in the composer), `refusal` (the
-first screen's way to a yard at an address, with a pairing's http address
-refused under its fields), `undelivered` (the conversation with one of
+server is then stopped, with a draft in the composer, its Send held),
+`refusal` (the first screen's way to a yard at an address, with a
+pairing's http address refused under its fields), `undelivered` (the conversation with one of
 a linked yard whose mail was refused over the hour), `answered` (the
 first screen with a way's fields open after the yard answered, with the
 line that esc opens it), `setup` (step 2 of setting up a yard here,
@@ -583,9 +586,9 @@ never otherwise: the microphone is open only while a session stands.
 
 | It writes | When |
 |---|---|
-| `Mail` | Enter, in a conversation with a crew member or a user of this yard, your own too |
-| `PutBlob` for each file, then `Mail` with their hashes and names | Enter, when files are attached to the draft |
-| `MailPeer` | Enter, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
+| `Mail` | Enter or the Send button, in a conversation with a crew member or a user of this yard, your own too |
+| `PutBlob` for each file, then `Mail` with their hashes and names | Enter or the Send button, when files are attached to the draft |
+| `MailPeer` | Enter or the Send button, in a conversation with one of a linked yard, or in a user's row when a name trusted as them wrote last; after `PutBlob` for each file, with their hashes and names |
 | `React` | a tap on one of the bar of reactions floating over the hovered mail: the emoji, or nothing on the user's own current one, which takes it away |
 | `AnswerAsk` | Enter, or the Answer button, on a card: the option chosen — the recommendation until another is picked — with the line's words in the one answer; an ask with no options is answered with words. A mapping pick sends `weighed` after the weighty gate |
 | `AddNote` | Enter, with words and no option chosen and none recommended: a plain note, the ask stays open |
@@ -1430,6 +1433,22 @@ a line for one the yard did not take): they come after the notice, and show when
 says it has them, with the row left open; or a bead's open
 asks, each as its card.
 
+The line's frame ends in one button at its bottom right, beside the
+`? all keys` hint: Voice, Send or Stop, by what the line holds and whether
+a voice session stands ([Settings](#settings)). With nothing in the line
+(spaces are nothing) and no file attached it says Voice, where voice is on
+and the conversation is with someone other than yourself: a tap starts a
+session. With words or a file it says Send, and a tap sends the draft
+exactly as Enter does, with the same refusals and the same hold while the
+yard is away, when Send stands faint with its reason under the line. While
+a session stands, or is starting, it says Stop, whatever the line holds, so
+that a tap never sends when you meant to end: it ends the session, sends
+nothing and leaves what you typed in the line, and Enter still sends it.
+Where voice is not on offer (voice off in the settings, your own row, or
+no target for the open conversation) it is Send alone, faint and without a
+tap while the line is empty. A card has no voice to offer either: the button
+that answers there is the card's own, faint until there is something to send.
+
 Where the window runs as the yard's operator, a crew member's conversation
 carries a terminal icon at the right of its header, and a bead a session
 works carries Screen where the window says so (its row of the arrivals, its
@@ -1608,7 +1627,7 @@ its card under "Decided".
 
 | Key | Does |
 |---|---|
-| `enter` | sends the draft, the line and the files attached, as one mail to the one whose conversation is open (a long text as several: "A long text"); on a card, the pick with the line's words |
+| `enter` | sends the draft, the line and the files attached, as one mail to the one whose conversation is open (a long text as several: "A long text"), as the Send button does; on a card, the pick with the line's words |
 | `shift+enter` | breaks the line where the cursor is; a text wider than the box goes on in the next row, and the box grows with its rows up to a third of the window, then scrolls |
 | `up`, `down` in a text of several rows | the row above, below, in the same column; `home` and `end` are the row's |
 | `cmd+v` (`ctrl+v` on Linux) | pastes text into the line, with its line breaks; a file is attached to the draft |
@@ -1679,19 +1698,23 @@ folder. A change is drawn at once and kept for the next start:
   for you alone, never in the settings file; where
   `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
   read. Under the field, one plain line says what a voice session
-  sends to OpenAI and what is kept of it. With voice on, the head of an
-  open conversation has a Voice button: a tap starts a session with whom
-  you are talking, and a second tap ends it. While it stands the button
-  says what is going on in quiet words (`listening`, `yardmaster is
-  working`, `speaking`), a line under the head shows what you are saying,
-  and the head's right counts the minutes and what they have cost at
-  OpenAI's rate, $0.05 a minute. What you ask of the yard goes to it as
+  sends to OpenAI and what is kept of it. With voice on, the composer of an
+  open conversation has one button at its bottom right: Voice while the
+  line is empty, and a tap starts a session with whom you are talking;
+  Send once the line holds words or a file; and Stop while a session
+  stands, whatever the line holds, which a second tap ends without
+  sending what you typed (it stays in the line, and Enter sends it).
+  While a session stands, quiet words beside the button say what is going
+  on (`starting…`, `listening`, `yardmaster is working`, `speaking`), a
+  line under the head shows what you are saying, and the head's right
+  counts the minutes and what they have cost at OpenAI's rate, $0.05 a
+  minute. What you ask of the yard goes to it as
   your own mail in that conversation, as Enter would send it; while the
   yard is away it is refused, once, and nothing is queued or sent when the
   yard returns. The mail the other side answers with is spoken by the voice
   in its own words, and the written mail stays the record. A decision that comes up in the window is
   never answered by voice: the voice says it waits there. A session ends
-  when you tap again, open another conversation or yard, switch voice off,
+  when you tap Stop, open another conversation or yard, switch voice off,
   hide, minimize or close the window, or when nobody has spoken and
   nothing waits for the yard for the minutes the section's `ends after`
   line says, five until you choose another. On Linux, under X11 the window
