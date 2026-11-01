@@ -46,9 +46,9 @@ mod titlebar;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tray;
 mod unlock;
-// The voice session's rules, tested on any system. The session that follows
-// them (the socket, its thread, the audio) is built on them next, so until it
-// lands only their tests reach them.
+// The voice session: its rules, its hand-written socket and its thread,
+// tested on any system. The window's button and the audio devices plug into
+// it next, so until they land only its tests reach the session's handle.
 #[cfg_attr(not(test), allow(dead_code))]
 mod voice;
 mod window;

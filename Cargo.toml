@@ -34,6 +34,10 @@ socket2 = "0.6"
 # flate2 are in gpui's tree already: the file's checksum, and its gzip. The
 # tar inside is read by fetch.rs itself, which takes one name and nothing else.
 sha2 = "0.10"
+# The voice socket's upgrade checks Sec-WebSocket-Accept, the SHA-1 of the
+# client's key and a fixed string (voice.rs): no security in it, and the one
+# use. Already in the tree as uuid's dependency, so no new package.
+sha1_smol = "1"
 flate2 = "1"
 # A session's screen arrives with the terminal's ANSI styling, which is
 # untrusted bytes (anything an agent printed, including malformed

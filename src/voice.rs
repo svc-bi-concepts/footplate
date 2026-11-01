@@ -17,12 +17,26 @@
 //! answers. The voice speaks the answer in its own words; the written mail in
 //! the conversation is the record.
 //!
-//! The session's socket and thread, and the microphone and speaker, are not
-//! here: they build on these rules.
+//! Below the rules stand the session itself: a hand-written WebSocket
+//! client over the TLS [`crate::api`] already speaks (no WebSocket crate,
+//! and nothing for the socket joins Cargo.toml but `sha1_smol`, for the
+//! upgrade's accept key), and the one thread that holds the socket, in the
+//! manner of [`crate::session::FollowControl`]: stopping it wakes what it
+//! waits on, and nothing here runs on the window's thread. The microphone
+//! and speaker devices are not here: the thread owns their seam — mono
+//! PCM16 at [`RATE`] in through [`Mic`], and speech out through the
+//! droppable [`Queue`] it shares — and the devices plug into it next.
 
 use std::collections::VecDeque;
+use std::fmt;
+use std::io::{self, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -135,6 +149,17 @@ pub fn start(instructions: &str) -> String {
 /// `session.close`: the server answers with `session.closed`.
 pub fn close() -> String {
     json!({ "type": "session.close", "event_id": CLOSE_ID }).to_string()
+}
+
+/// `session.input_audio.append`: the microphone's frames, mono PCM16 at
+/// [`RATE`] as little-endian bytes in base64, as the harness sent them.
+pub fn input_audio(pcm: &[i16]) -> String {
+    let bytes: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+    json!({
+        "type": "session.input_audio.append",
+        "audio": base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+    .to_string()
 }
 
 /// A piece of what the person said, as the input transcript gives it, with
@@ -1060,10 +1085,1243 @@ pub fn instructions(counterpart: &str) -> String {
     INSTRUCTIONS.replace("{counterpart}", name)
 }
 
+// ---- the WebSocket client --------------------------------------------------
+//
+// Hand-written over api.rs's TLS, as decided (design section 5, decision 3):
+// an HTTP upgrade, then client-masked frames, fragmentation, ping and pong.
+// Carried over in spirit from spikes/voice-harness/src/ws.rs, which the live
+// runs proved; its tests came with it. Nothing joins Cargo.toml for the
+// socket itself; the accept key's SHA-1 is sha1_smol, already in Cargo.lock.
+
+/// The string RFC 6455 has the accept key made with.
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+/// A message larger than this is refused: a frame's length is the server's
+/// word, and nothing here allocates on it unchecked.
+const WS_MAX_MESSAGE: usize = 64 << 20;
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WS_HEADER_LIMIT: usize = 16 << 10;
+
+#[derive(Debug)]
+enum WsError {
+    Io(io::Error),
+    /// The server answered the upgrade with something else: its status line
+    /// and what it said, with anything that looks like a key taken out.
+    Refused(String),
+    /// A frame or handshake that breaks RFC 6455.
+    Protocol(String),
+    /// The connection ended without a close frame.
+    Closed,
+}
+
+impl fmt::Display for WsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WsError::Io(err) => write!(f, "{err}"),
+            WsError::Refused(why) => write!(f, "OpenAI refused the connection: {why}"),
+            WsError::Protocol(why) => write!(f, "websocket protocol error: {why}"),
+            WsError::Closed => write!(f, "the connection ended without a close frame"),
+        }
+    }
+}
+
+impl From<io::Error> for WsError {
+    fn from(err: io::Error) -> WsError {
+        WsError::Io(err)
+    }
+}
+
+fn ws_protocol(why: impl Into<String>) -> WsError {
+    WsError::Protocol(why.into())
+}
+
+/// `ws://host[:port]/path` or `wss://...`.
+#[derive(Clone, Debug, PartialEq)]
+struct WsUrl {
+    tls: bool,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+impl WsUrl {
+    fn parse(text: &str) -> Result<WsUrl, WsError> {
+        let (tls, rest) = if let Some(rest) = text.strip_prefix("wss://") {
+            (true, rest)
+        } else if let Some(rest) = text.strip_prefix("ws://") {
+            (false, rest)
+        } else {
+            return Err(ws_protocol(format!(
+                "{text:?} is not a ws:// or wss:// address"
+            )));
+        };
+        let (authority, path) = match rest.find('/') {
+            Some(at) => (&rest[..at], &rest[at..]),
+            None => (rest, "/"),
+        };
+        let default = if tls { 443 } else { 80 };
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) if !host.ends_with(']') || host.starts_with('[') => {
+                let port = port
+                    .parse()
+                    .map_err(|_| ws_protocol(format!("{port:?} is not a port")))?;
+                (host.trim_matches(['[', ']']), port)
+            }
+            _ => (authority, default),
+        };
+        if host.is_empty() {
+            return Err(ws_protocol("the address names no host"));
+        }
+        Ok(WsUrl {
+            tls,
+            host: host.to_string(),
+            port,
+            path: path.to_string(),
+        })
+    }
+
+    fn authority(&self) -> String {
+        let default = if self.tls { 443 } else { 80 };
+        if self.port == default {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+const WS_CONTINUATION: u8 = 0x0;
+const WS_TEXT: u8 = 0x1;
+const WS_BINARY: u8 = 0x2;
+const WS_CLOSE: u8 = 0x8;
+const WS_PING: u8 = 0x9;
+const WS_PONG: u8 = 0xA;
+
+/// One frame as it stands on the wire, unmasked.
+#[derive(Debug, PartialEq)]
+struct WsFrame {
+    fin: bool,
+    opcode: u8,
+    payload: Vec<u8>,
+}
+
+/// A frame's bytes. A client masks every frame it sends (`mask` is `Some`),
+/// a server none; the key is the caller's.
+fn ws_encode_frame(fin: bool, opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 14);
+    out.push(if fin { 0x80 } else { 0 } | opcode);
+    let masked = if mask.is_some() { 0x80 } else { 0 };
+    match payload.len() {
+        len if len < 126 => out.push(masked | len as u8),
+        len if len <= 0xFFFF => {
+            out.push(masked | 126);
+            out.extend_from_slice(&(len as u16).to_be_bytes());
+        }
+        len => {
+            out.push(masked | 127);
+            out.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+    }
+    match mask {
+        Some(key) => {
+            out.extend_from_slice(&key);
+            out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+        }
+        None => out.extend_from_slice(payload),
+    }
+    out
+}
+
+/// Frames out of the bytes as they arrive, however they are cut.
+struct WsDecoder {
+    buf: Vec<u8>,
+    /// A client expects every frame unmasked; a server (a test's stand-in)
+    /// every frame masked. The RFC has either side close on the other.
+    expect_masked: bool,
+}
+
+impl WsDecoder {
+    fn new(expect_masked: bool) -> WsDecoder {
+        WsDecoder {
+            buf: Vec::new(),
+            expect_masked,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// The next whole frame, or `None` while its bytes are not all here.
+    fn next_frame(&mut self) -> Result<Option<WsFrame>, WsError> {
+        let buf = &self.buf;
+        if buf.len() < 2 {
+            return Ok(None);
+        }
+        let (b0, b1) = (buf[0], buf[1]);
+        if b0 & 0x70 != 0 {
+            return Err(ws_protocol(
+                "a reserved bit is set (no extension was asked for)",
+            ));
+        }
+        let fin = b0 & 0x80 != 0;
+        let opcode = b0 & 0x0F;
+        if !matches!(opcode, 0..=2 | 8..=10) {
+            return Err(ws_protocol(format!("opcode {opcode} is reserved")));
+        }
+        let masked = b1 & 0x80 != 0;
+        if masked != self.expect_masked {
+            return Err(ws_protocol(if masked {
+                "the server sent a masked frame"
+            } else {
+                "the client sent an unmasked frame"
+            }));
+        }
+        let (len, mut at) = match b1 & 0x7F {
+            126 => {
+                if buf.len() < 4 {
+                    return Ok(None);
+                }
+                (u16::from_be_bytes([buf[2], buf[3]]) as u64, 4)
+            }
+            127 => {
+                if buf.len() < 10 {
+                    return Ok(None);
+                }
+                let mut eight = [0u8; 8];
+                eight.copy_from_slice(&buf[2..10]);
+                (u64::from_be_bytes(eight), 10)
+            }
+            short => (short as u64, 2),
+        };
+        if len >> 63 != 0 {
+            return Err(ws_protocol("a frame's length has its top bit set"));
+        }
+        if opcode >= WS_CLOSE && (len > 125 || !fin) {
+            return Err(ws_protocol(
+                "a control frame is longer than 125 bytes or fragmented",
+            ));
+        }
+        if len > WS_MAX_MESSAGE as u64 {
+            return Err(ws_protocol(format!(
+                "a frame of {len} bytes is over the limit"
+            )));
+        }
+        let len = len as usize;
+        let key = if masked {
+            if buf.len() < at + 4 {
+                return Ok(None);
+            }
+            let key = [buf[at], buf[at + 1], buf[at + 2], buf[at + 3]];
+            at += 4;
+            Some(key)
+        } else {
+            None
+        };
+        if buf.len() < at + len {
+            return Ok(None);
+        }
+        let mut payload = buf[at..at + len].to_vec();
+        if let Some(key) = key {
+            for (i, byte) in payload.iter_mut().enumerate() {
+                *byte ^= key[i % 4];
+            }
+        }
+        self.buf.drain(..at + len);
+        Ok(Some(WsFrame {
+            fin,
+            opcode,
+            payload,
+        }))
+    }
+}
+
+/// What the far end sent, as whole messages: data in one piece, control
+/// frames as they came (they may stand between a message's fragments).
+#[derive(Debug, PartialEq)]
+enum WsIncoming {
+    Text(String),
+    Binary(Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Close(Option<u16>, String),
+}
+
+fn ws_extend_bounded(data: &mut Vec<u8>, bytes: &[u8], limit: usize) -> Result<(), WsError> {
+    if data.len() > limit || bytes.len() > limit - data.len() {
+        return Err(ws_protocol("a message is over the limit"));
+    }
+    data.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Joins fragments into messages and checks the order the RFC asks for.
+#[derive(Default)]
+struct WsAssembler {
+    opcode: Option<u8>,
+    data: Vec<u8>,
+}
+
+impl WsAssembler {
+    fn accept(&mut self, frame: WsFrame) -> Result<Option<WsIncoming>, WsError> {
+        match frame.opcode {
+            WS_PING => Ok(Some(WsIncoming::Ping(frame.payload))),
+            WS_PONG => Ok(Some(WsIncoming::Pong(frame.payload))),
+            WS_CLOSE => match frame.payload.len() {
+                0 => Ok(Some(WsIncoming::Close(None, String::new()))),
+                1 => Err(ws_protocol("a close frame has a one-byte body")),
+                _ => {
+                    let code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+                    let reason = String::from_utf8(frame.payload[2..].to_vec())
+                        .map_err(|_| ws_protocol("a close reason is not UTF-8"))?;
+                    Ok(Some(WsIncoming::Close(Some(code), reason)))
+                }
+            },
+            WS_CONTINUATION => {
+                if self.opcode.is_none() {
+                    return Err(ws_protocol("a continuation frame with no message begun"));
+                }
+                ws_extend_bounded(&mut self.data, &frame.payload, WS_MAX_MESSAGE)?;
+                self.finish_if(frame.fin)
+            }
+            opcode => {
+                if self.opcode.is_some() {
+                    return Err(ws_protocol("a new message begun inside another"));
+                }
+                self.opcode = Some(opcode);
+                self.data.clear();
+                ws_extend_bounded(&mut self.data, &frame.payload, WS_MAX_MESSAGE)?;
+                self.finish_if(frame.fin)
+            }
+        }
+    }
+
+    fn finish_if(&mut self, fin: bool) -> Result<Option<WsIncoming>, WsError> {
+        if !fin {
+            return Ok(None);
+        }
+        let data = std::mem::take(&mut self.data);
+        match self.opcode.take() {
+            Some(WS_TEXT) => String::from_utf8(data)
+                .map(|text| Some(WsIncoming::Text(text)))
+                .map_err(|_| ws_protocol("a text message is not UTF-8")),
+            _ => Ok(Some(WsIncoming::Binary(data))),
+        }
+    }
+}
+
+/// The `Sec-WebSocket-Accept` for `key`: the base64 of its SHA-1 with the
+/// RFC's fixed string. No security in it; `sha1_smol` is already in the tree.
+fn ws_accept_key(key: &str) -> String {
+    let mut sha = sha1_smol::Sha1::new();
+    sha.update(format!("{key}{WS_GUID}").as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(sha.digest().bytes())
+}
+
+/// Random bytes from the TLS library's own source: a mask key must not be
+/// predictable, and rustls has the generator already.
+fn ws_random(buf: &mut [u8]) {
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(buf)
+        .expect("the system's random source works");
+}
+
+/// Takes what looks like a key out of text a server sent back: OpenAI's 401
+/// repeats part of the key it was given, and no refusal is shown or logged
+/// with it in.
+pub(crate) fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("sk-") {
+        out.push_str(&rest[..at]);
+        out.push_str("sk-…");
+        let tail = &rest[at + 3..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*')))
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+enum WsStream {
+    Plain(TcpStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl WsStream {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            WsStream::Plain(tcp) => tcp,
+            WsStream::Tls(tls) => &tls.sock,
+        }
+    }
+}
+
+impl Read for WsStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            WsStream::Plain(tcp) => tcp.read(buf),
+            WsStream::Tls(tls) => tls.read(buf),
+        }
+    }
+}
+
+impl Write for WsStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            WsStream::Plain(tcp) => tcp.write(buf),
+            WsStream::Tls(tls) => tls.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            WsStream::Plain(tcp) => tcp.flush(),
+            WsStream::Tls(tls) => tls.flush(),
+        }
+    }
+}
+
+/// A handle that wakes a read blocked on the socket, as
+/// [`crate::api::EventStop`] wakes a stream's: it shuts the socket down,
+/// which ends the read on the session's thread.
+struct WsStop(TcpStream);
+
+impl WsStop {
+    fn stop(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// One WebSocket connection: the upgrade done, frames both ways.
+struct WsConn {
+    stream: WsStream,
+    decoder: WsDecoder,
+    assembler: WsAssembler,
+    /// A message longer than this goes out in fragments of this size.
+    max_frame: usize,
+    close_sent: bool,
+}
+
+impl WsConn {
+    /// Connects and upgrades. `headers` are sent as given, and never printed
+    /// here: the key stands among them. TLS is api.rs's, against the
+    /// system's roots.
+    fn connect(url: &WsUrl, headers: &[(&str, &str)]) -> Result<WsConn, WsError> {
+        let mut last = io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} names no address", url.host),
+        );
+        let mut tcp = None;
+        for addr in (url.host.as_str(), url.port).to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, WS_CONNECT_TIMEOUT) {
+                Ok(conn) => {
+                    tcp = Some(conn);
+                    break;
+                }
+                Err(err) => last = err,
+            }
+        }
+        let tcp = tcp.ok_or(last)?;
+        tcp.set_nodelay(true)?;
+        tcp.set_read_timeout(Some(WS_CONNECT_TIMEOUT))?;
+        tcp.set_write_timeout(Some(WS_CONNECT_TIMEOUT))?;
+        let stream = if url.tls {
+            let name = rustls::pki_types::ServerName::try_from(url.host.clone())
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+            let session = rustls::ClientConnection::new(crate::api::tls()?, name)
+                .map_err(io::Error::other)?;
+            WsStream::Tls(Box::new(rustls::StreamOwned::new(session, tcp)))
+        } else {
+            WsStream::Plain(tcp)
+        };
+        let mut conn = WsConn {
+            stream,
+            decoder: WsDecoder::new(false),
+            assembler: WsAssembler::default(),
+            max_frame: usize::MAX,
+            close_sent: false,
+        };
+        conn.upgrade(url, headers)?;
+        Ok(conn)
+    }
+
+    fn upgrade(&mut self, url: &WsUrl, headers: &[(&str, &str)]) -> Result<(), WsError> {
+        let mut raw = [0u8; 16];
+        ws_random(&mut raw);
+        let key = base64::engine::general_purpose::STANDARD.encode(raw);
+        let mut request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n",
+            url.path,
+            url.authority()
+        );
+        for (name, value) in headers {
+            if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
+                return Err(ws_protocol(format!(
+                    "header {name:?} cannot be sent as written"
+                )));
+            }
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
+        self.stream.write_all(request.as_bytes())?;
+        self.stream.flush()?;
+
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let end = loop {
+            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at;
+            }
+            if head.len() > WS_HEADER_LIMIT {
+                return Err(ws_protocol("the server's headers are over 16 KiB"));
+            }
+            match self.stream.read(&mut chunk)? {
+                0 => {
+                    return Err(ws_protocol(
+                        "the server closed before it answered the upgrade",
+                    ));
+                }
+                n => head.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let text = String::from_utf8_lossy(&head[..end]).to_string();
+        let mut lines = text.split("\r\n");
+        let status = lines.next().unwrap_or_default().to_string();
+        let header = |wanted: &str| {
+            lines
+                .clone()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case(wanted))
+                .map(|(_, value)| value.trim().to_string())
+        };
+        if status.split_whitespace().nth(1) != Some("101") {
+            // Whatever the server said besides, without any key it echoed:
+            // the refusal is carried in its own words, never parsed.
+            let mut body = head[end + 4..].to_vec();
+            let _ = self.read_refusal_body(&mut body, 2048);
+            let body = redact(&String::from_utf8_lossy(&body));
+            return Err(WsError::Refused(format!("{status} {}", body.trim())));
+        }
+        let upgraded = header("upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+        let connection = header("connection").is_some_and(|v| {
+            v.to_ascii_lowercase()
+                .split(',')
+                .any(|t| t.trim() == "upgrade")
+        });
+        if !upgraded || !connection {
+            return Err(ws_protocol(
+                "the answer is 101 but names no websocket upgrade",
+            ));
+        }
+        if header("sec-websocket-accept").as_deref() != Some(ws_accept_key(&key).as_str()) {
+            return Err(ws_protocol(
+                "the Sec-WebSocket-Accept key is not the one asked for",
+            ));
+        }
+        if header("sec-websocket-extensions").is_some() {
+            return Err(ws_protocol(
+                "the server chose an extension that was not offered",
+            ));
+        }
+        // Frames may already follow the headers in what was read.
+        self.decoder.push(&head[end + 4..]);
+        Ok(())
+    }
+
+    /// A refusal's body, read for a moment at most: the server may keep the
+    /// connection open after it.
+    fn read_refusal_body(&mut self, out: &mut Vec<u8>, limit: usize) -> io::Result<()> {
+        let _ = self
+            .stream
+            .tcp()
+            .set_read_timeout(Some(Duration::from_millis(500)));
+        let mut chunk = [0u8; 1024];
+        while out.len() < limit {
+            match self.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// How long `poll` waits for bytes.
+    fn set_poll(&mut self, wait: Duration) -> io::Result<()> {
+        self.stream.tcp().set_read_timeout(Some(wait))
+    }
+
+    fn stop_handle(&self) -> io::Result<WsStop> {
+        Ok(WsStop(self.stream.tcp().try_clone()?))
+    }
+
+    fn write_frame(&mut self, fin: bool, opcode: u8, payload: &[u8]) -> Result<(), WsError> {
+        let mut key = [0u8; 4];
+        ws_random(&mut key);
+        self.stream
+            .write_all(&ws_encode_frame(fin, opcode, payload, Some(key)))?;
+        self.stream.flush()?;
+        Ok(())
+    }
+
+    /// A text message, in fragments where it is longer than `max_frame`.
+    fn send_text(&mut self, text: &str) -> Result<(), WsError> {
+        let bytes = text.as_bytes();
+        if bytes.len() <= self.max_frame {
+            return self.write_frame(true, WS_TEXT, bytes);
+        }
+        let mut chunks = bytes.chunks(self.max_frame).peekable();
+        let mut opcode = WS_TEXT;
+        while let Some(chunk) = chunks.next() {
+            let fin = chunks.peek().is_none();
+            self.write_frame(fin, opcode, chunk)?;
+            opcode = WS_CONTINUATION;
+        }
+        Ok(())
+    }
+
+    /// The close frame; the connection ends when the far end's comes back.
+    fn send_close(&mut self, code: u16, reason: &str) -> Result<(), WsError> {
+        if self.close_sent {
+            return Ok(());
+        }
+        self.close_sent = true;
+        let mut body = code.to_be_bytes().to_vec();
+        body.extend_from_slice(reason.as_bytes());
+        self.write_frame(true, WS_CLOSE, &body)
+    }
+
+    /// What arrives within the poll interval, as messages. A ping is
+    /// answered here with its own bytes before it is returned, and a close
+    /// from the far end is answered with a close.
+    fn poll(&mut self) -> Result<Vec<WsIncoming>, WsError> {
+        let mut chunk = [0u8; 16 << 10];
+        match self.stream.read(&mut chunk) {
+            Ok(0) => return Err(WsError::Closed),
+            Ok(n) => self.decoder.push(&chunk[..n]),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(err) => return Err(err.into()),
+        }
+        let mut out = Vec::new();
+        while let Some(frame) = self.decoder.next_frame()? {
+            if let Some(message) = self.assembler.accept(frame)? {
+                match &message {
+                    WsIncoming::Ping(body) => self.write_frame(true, WS_PONG, body)?,
+                    WsIncoming::Close(code, _) if !self.close_sent => {
+                        self.send_close(code.unwrap_or(1000), "")?;
+                    }
+                    _ => {}
+                }
+                out.push(message);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Read for WsConn {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.read(buf)
+    }
+}
+
+// ---- the session thread ----------------------------------------------------
+
+/// Where a live session stands: OpenAI's Live socket, with the person's own
+/// key as its bearer. A test's session stands elsewhere (`start_at`).
+pub const LIVE_URL: &str = "wss://api.openai.com/v1/live/sessions";
+
+/// How often the thread looks at its socket and its commands. Short, so a
+/// stop and the session's own moment are never waited on for long; the read
+/// itself is woken by [`Control::stop`] besides.
+const POLL: Duration = Duration::from_millis(10);
+/// How long the thread waits for `session.closed` after it has sent
+/// `session.close`, before it ends the session anyway.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
+
+/// What the session thread tells its caller, in plain terms: no GPT-Live
+/// event, delegation or append stands among them.
+#[derive(Debug, PartialEq)]
+pub enum Update {
+    /// The session stands: the voice is listening.
+    Started,
+    /// The person's next utterance began: speech started. What the voice
+    /// had queued and not yet played is dropped at the same moment.
+    SpeechStarted,
+    /// A piece of what the person said, with its place on the session's
+    /// timeline: the caption's words, kept nowhere past the session.
+    Words(Fragment),
+    /// A request: the person's words, to go to the yard as their own
+    /// message in the open conversation, as Enter would send them. Its
+    /// answer comes back by [`Voice::answered`], or its refusal by
+    /// [`Voice::refused`].
+    Request(String),
+    /// The session ended: why, in a word of the provider's (`expired`,
+    /// `close_requested`) or in words for a connection that ended.
+    Ended(String),
+    /// A session that could not be made, or an append the provider refused:
+    /// the refusal in its own words, never parsed, its key taken out. It is
+    /// never retried unasked: a new session is a new start.
+    Refused(String),
+}
+
+/// Stops a voice session, waking it from what it waits on, in the
+/// [`crate::session::FollowControl`] manner: the socket is shut down under
+/// a blocked read, so a yard switch never waits for the socket. The window
+/// keeps one per session it starts.
+#[derive(Clone, Default)]
+pub struct Control(Arc<ControlState>);
+
+#[derive(Default)]
+struct ControlState {
+    inner: Mutex<ControlInner>,
+}
+
+#[derive(Default)]
+struct ControlInner {
+    stopped: bool,
+    socket: Option<WsStop>,
+}
+
+impl Control {
+    pub fn stop(&self) {
+        let socket = {
+            let mut inner = self.0.inner.lock().unwrap();
+            inner.stopped = true;
+            inner.socket.take()
+        };
+        if let Some(socket) = socket {
+            socket.stop();
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.0.inner.lock().unwrap().stopped
+    }
+
+    fn follow_socket(&self, socket: WsStop) {
+        let stop = {
+            let mut inner = self.0.inner.lock().unwrap();
+            if inner.stopped {
+                Some(socket)
+            } else {
+                inner.socket = Some(socket);
+                None
+            }
+        };
+        if let Some(socket) = stop {
+            socket.stop();
+        }
+    }
+
+    fn socket_ended(&self) {
+        self.0.inner.lock().unwrap().socket = None;
+    }
+}
+
+/// What the caller asks the session's thread, besides the microphone's
+/// frames, which are their own command.
+enum Cmd {
+    /// The counterpart's next mail in the open conversation: an answer to
+    /// speak, under the delegation that waited for it.
+    Answered(String),
+    /// The yard refused the mail, or went away: its own words to speak once.
+    Refused(String),
+    /// An ask arrived in the conversation being voiced.
+    Asked(Ask),
+    /// The microphone's next frames: mono PCM16 at [`RATE`].
+    Mic(Vec<i16>),
+    /// End the session as a hang-up does: `session.close`, and wait for
+    /// `session.closed`.
+    Close,
+}
+
+/// The microphone's end of the audio seam: the devices (next part) send
+/// mono PCM16 at [`RATE`] here, and the session's thread puts them on the
+/// socket. Frames sent before the session stands, or after it ends, go
+/// nowhere.
+#[derive(Clone)]
+pub struct Mic(mpsc::Sender<Cmd>);
+
+impl Mic {
+    pub fn send(&self, pcm: Vec<i16>) -> bool {
+        self.0.send(Cmd::Mic(pcm)).is_ok()
+    }
+}
+
+/// One voice session, on its own thread: the handle the caller keeps. The
+/// thread owns the socket, the [`Book`] and the speaker's end of the
+/// [`Queue`]; this handle owns the microphone's end and the commands.
+///
+/// Dropping it stops the thread as [`Control::stop`] does, and joins it:
+/// no thread is left.
+pub struct Voice {
+    control: Control,
+    cmds: mpsc::Sender<Cmd>,
+    speaker: Arc<Mutex<Queue>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Voice {
+    /// The control the window keeps to stop the session from outside, as
+    /// when the yard is switched: it wakes the thread's read at once.
+    pub fn control(&self) -> Control {
+        self.control.clone()
+    }
+
+    /// The microphone's frames go here.
+    pub fn microphone(&self) -> Mic {
+        Mic(self.cmds.clone())
+    }
+
+    /// The speaker's end: what the voice says waits here, to be taken by
+    /// [`Queue::pop`] as the speaker plays it, and is dropped whole when
+    /// the person speaks over it (the thread drops it, and audio for
+    /// [`HOLDOFF`] after is thrown away).
+    pub fn speaker(&self) -> Arc<Mutex<Queue>> {
+        self.speaker.clone()
+    }
+
+    /// The counterpart's answer, to be spoken under the delegation that
+    /// waited for it. One that arrives with no delegation waiting is not
+    /// spoken; the mail in the conversation is its record.
+    pub fn answered(&self, text: &str) {
+        let _ = self.cmds.send(Cmd::Answered(text.to_string()));
+    }
+
+    /// The yard refused the mail, or went away after it was sent: its own
+    /// words are spoken once, and the mail is not sent again.
+    pub fn refused(&self, words: &str) {
+        let _ = self.cmds.send(Cmd::Refused(words.to_string()));
+    }
+
+    /// An ask arrived in the conversation being voiced.
+    pub fn asked(&self, ask: Ask) {
+        let _ = self.cmds.send(Cmd::Asked(ask));
+    }
+
+    /// Ends the session as a hang-up does — `session.close`, wait for
+    /// `session.closed` — and joins the thread: no thread is left.
+    pub fn stop(mut self) {
+        let _ = self.cmds.send(Cmd::Close);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Voice {
+    fn drop(&mut self) {
+        self.control.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What a start came to.
+pub enum Start {
+    /// The session's thread stands. Whether the session itself stands is
+    /// told by [`Update::Started`]; that it could not be made, by
+    /// [`Update::Refused`], in the provider's own words.
+    On(Voice),
+    /// Voice is off: no thread was started and no key was read.
+    Off,
+    /// No key stands, in the keeper's own words: no session was made.
+    Refused(String),
+}
+
+/// Starts a voice session, where voice is on and a key stands. The key is
+/// [`crate::yard::voice_key`]: `FOOTPLATE_OPENAI_KEY` read first, else the
+/// file beside `settings`. While `voice_on` is off the thread is never
+/// started and the key is never read — the closure that reads it is not
+/// called — so a person who never turns voice on has the footplate of
+/// today. A session is made on its own thread; this call only starts it.
+pub fn start_session(
+    voice_on: bool,
+    settings: Option<&Path>,
+    counterpart: &str,
+    tell: mpsc::Sender<Update>,
+) -> Start {
+    gated_start(
+        voice_on,
+        || crate::yard::voice_key(settings),
+        LIVE_URL,
+        counterpart,
+        tell,
+    )
+}
+
+/// [`start_session`] with where the session stands and how its key is read, for the
+/// tests: against a stand-in socket, with a key they script.
+fn gated_start(
+    voice_on: bool,
+    key: impl FnOnce() -> Result<String, String>,
+    url: &str,
+    counterpart: &str,
+    tell: mpsc::Sender<Update>,
+) -> Start {
+    if !voice_on {
+        return Start::Off;
+    }
+    let key = match key() {
+        Ok(key) => key,
+        Err(words) => return Start::Refused(words),
+    };
+    start_at(url, key, counterpart, tell)
+}
+
+/// A session's thread at `url` with `key`, whatever stands there: the live
+/// socket in [`start_session`], a stand-in in the tests.
+fn start_at(url: &str, key: String, counterpart: &str, tell: mpsc::Sender<Update>) -> Start {
+    let control = Control::default();
+    let (cmds, heard_cmds) = mpsc::channel();
+    let speaker = Arc::new(Mutex::new(Queue::default()));
+    let thread = std::thread::spawn({
+        let control = control.clone();
+        let speaker = speaker.clone();
+        let counterpart = counterpart.to_string();
+        let url = url.to_string();
+        move || run(url, key, counterpart, heard_cmds, speaker, control, tell)
+    });
+    Start::On(Voice {
+        control,
+        cmds,
+        speaker,
+        thread: Some(thread),
+    })
+}
+
+/// Says a session's opening, ending or refusal in the log, as the window's
+/// other sayings are kept, without transcript or mail text. A test never
+/// writes the person's own log.
+fn say(line: &str) {
+    #[cfg(test)]
+    let file: Option<std::path::PathBuf> = None;
+    #[cfg(not(test))]
+    let file = crate::log::file();
+    crate::log::say(|text| eprintln!("{text}"), file.as_deref(), line);
+}
+
+/// The session's thread: connects, makes the session as the harness proved
+/// it, and follows it until it ends — on its own moment (`expires_at`, read
+/// from `session.started` and expected), on the provider's close, on a
+/// hang-up ([`Cmd::Close`]) or on [`Control::stop`], which wakes its read.
+fn run(
+    url: String,
+    key: String,
+    counterpart: String,
+    cmds: mpsc::Receiver<Cmd>,
+    speaker: Arc<Mutex<Queue>>,
+    control: Control,
+    tell: mpsc::Sender<Update>,
+) {
+    let parsed = match WsUrl::parse(&url) {
+        Ok(url) => url,
+        Err(err) => {
+            let _ = tell.send(Update::Refused(redact(&err.to_string())));
+            return;
+        }
+    };
+    let bearer = format!("Bearer {key}");
+    let mut conn = match WsConn::connect(&parsed, &[("Authorization", bearer.as_str())]) {
+        Ok(conn) => conn,
+        Err(err) => {
+            // No network, or a key OpenAI refuses: the provider's own words,
+            // never parsed, never retried unasked.
+            let words = redact(&err.to_string());
+            say(&format!("voice session refused: {words}"));
+            let _ = tell.send(Update::Refused(words));
+            return;
+        }
+    };
+    if let Ok(stop) = conn.stop_handle() {
+        control.follow_socket(stop);
+    }
+    if control.stopped() {
+        return;
+    }
+    let _ = conn.set_poll(POLL);
+    if conn.send_text(&start(&instructions(&counterpart))).is_err() {
+        let _ = tell.send(Update::Refused("the session could not be started".into()));
+        return;
+    }
+    say("voice session started");
+    let mut session = Session {
+        book: Book::new(),
+        speaker,
+        control,
+        tell,
+        started: false,
+        deadline: None,
+        closing: None,
+        expired: false,
+    };
+    session.follow(&mut conn, &cmds);
+    session.control.socket_ended();
+}
+
+/// One session as its thread follows it: the book decides, the thread does
+/// what it says — the appends to the socket, the requests to the caller.
+struct Session {
+    book: Book,
+    speaker: Arc<Mutex<Queue>>,
+    control: Control,
+    tell: mpsc::Sender<Update>,
+    started: bool,
+    /// The session's moment, from `session.started`: it is expected, and
+    /// the session is ended there as a hang-up ends it.
+    deadline: Option<Instant>,
+    /// Since when `session.close` has been sent, awaiting `session.closed`.
+    closing: Option<Instant>,
+    expired: bool,
+}
+
+impl Session {
+    fn follow(&mut self, conn: &mut WsConn, cmds: &mpsc::Receiver<Cmd>) {
+        loop {
+            if self.control.stopped() {
+                return;
+            }
+            if !self.expired
+                && let Some(deadline) = self.deadline
+                && Instant::now() >= deadline
+            {
+                // Its moment came: end it as a hang-up does, and say so.
+                self.expired = true;
+                if let Err(err) = self.close(conn) {
+                    self.failed(err);
+                    return;
+                }
+            }
+            if self
+                .closing
+                .is_some_and(|since| since.elapsed() > CLOSE_WAIT)
+            {
+                let _ = self
+                    .tell
+                    .send(Update::Ended(self.end_words("close_requested")));
+                return;
+            }
+            while let Ok(cmd) = cmds.try_recv() {
+                match cmd {
+                    Cmd::Answered(text) => {
+                        let steps = self.book.answered(&text);
+                        if let Err(err) = self.obey(conn, steps) {
+                            self.failed(err);
+                            return;
+                        }
+                    }
+                    Cmd::Refused(words) => {
+                        let steps = self.book.refused(&words);
+                        if let Err(err) = self.obey(conn, steps) {
+                            self.failed(err);
+                            return;
+                        }
+                    }
+                    Cmd::Asked(ask) => {
+                        let steps = self.book.asked(ask);
+                        if let Err(err) = self.obey(conn, steps) {
+                            self.failed(err);
+                            return;
+                        }
+                    }
+                    Cmd::Mic(pcm) => {
+                        // Nothing is sent before the session stands, and
+                        // nothing once it is ending: what is said after a
+                        // hang-up does not go to the provider.
+                        if self.started
+                            && self.closing.is_none()
+                            && let Err(err) = conn.send_text(&input_audio(&pcm))
+                        {
+                            self.failed(err);
+                            return;
+                        }
+                    }
+                    Cmd::Close => {
+                        if let Err(err) = self.close(conn) {
+                            self.failed(err);
+                            return;
+                        }
+                    }
+                }
+            }
+            if self.control.stopped() {
+                return;
+            }
+            match conn.poll() {
+                Ok(messages) => {
+                    for message in messages {
+                        if !self.on_message(conn, message) {
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.failed(err);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `session.close`, once, and the wait for `session.closed` begins.
+    fn close(&mut self, conn: &mut WsConn) -> Result<(), WsError> {
+        if self.closing.is_some() {
+            return Ok(());
+        }
+        self.closing = Some(Instant::now());
+        conn.send_text(&close())
+    }
+
+    fn end_words(&self, fallback: &str) -> String {
+        if self.expired {
+            "expired".to_string()
+        } else {
+            fallback.to_string()
+        }
+    }
+
+    /// What the book says, done: a request to the caller, an append to the
+    /// socket. A failed write ends the session in words.
+    fn obey(&mut self, conn: &mut WsConn, steps: Vec<Step>) -> Result<(), WsError> {
+        for step in steps {
+            match step {
+                Step::Request(text) => {
+                    let _ = self.tell.send(Update::Request(text));
+                }
+                Step::Append(append) => {
+                    conn.send_text(&append.wire())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Carries a socket failure to the caller. Stopping is not an ending to
+    /// report: the window asked for it and has already changed its state.
+    fn failed(&self, err: WsError) {
+        if self.control.stopped() {
+            return;
+        }
+        let words = redact(&err.to_string());
+        if self.closing.is_some() {
+            let _ = self.tell.send(Update::Ended(self.end_words(&words)));
+        } else if !self.started {
+            say(&format!("voice session refused: {words}"));
+            let _ = self.tell.send(Update::Refused(words));
+        } else {
+            say(&format!("voice session ended: {words}"));
+            let _ = self.tell.send(Update::Ended(words));
+        }
+    }
+
+    /// One message of the server's. False when the session is over.
+    fn on_message(&mut self, conn: &mut WsConn, message: WsIncoming) -> bool {
+        let text = match message {
+            WsIncoming::Text(text) => text,
+            WsIncoming::Ping(_) | WsIncoming::Pong(_) => return true,
+            WsIncoming::Binary(_) => return true,
+            WsIncoming::Close(_, _) => {
+                let _ = self
+                    .tell
+                    .send(Update::Ended(self.end_words("close_requested")));
+                return false;
+            }
+        };
+        let event = match parse(&text) {
+            Ok(event) => event,
+            Err(why) => {
+                say(&format!(
+                    "voice session: an event that could not be read ({why})"
+                ));
+                return true;
+            }
+        };
+        match event {
+            Server::Started { expires_at, .. } => {
+                self.started = true;
+                self.deadline = expires_at.and_then(|at| {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+                    let left = at.saturating_sub(now).max(0) as u64;
+                    Some(Instant::now() + Duration::from_secs(left))
+                });
+                let _ = self.tell.send(Update::Started);
+                true
+            }
+            Server::Heard(fragment) => {
+                let _ = self.tell.send(Update::Words(fragment.clone()));
+                if self.book.heard(fragment) {
+                    // Speech started: what the voice had queued is dropped,
+                    // and what it had already sent is thrown away a while.
+                    self.speaker.lock().unwrap().drop_queued(Instant::now());
+                    let _ = self.tell.send(Update::SpeechStarted);
+                }
+                true
+            }
+            Server::Said(_) => true,
+            Server::Audio(pcm) => {
+                self.speaker.lock().unwrap().push(pcm, Instant::now());
+                true
+            }
+            Server::Delegation { id, .. } => {
+                // The empty thinking append goes at once, under the id,
+                // whatever comes of it (the book's word).
+                let steps = self.book.raised(&id);
+                match self.obey(conn, steps) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        self.failed(err);
+                        false
+                    }
+                }
+            }
+            Server::Appended { .. } => true,
+            Server::Closed { reason } => {
+                let words = self.end_words(&reason);
+                say(&format!("voice session ended: {words}"));
+                let _ = self.tell.send(Update::Ended(words));
+                false
+            }
+            Server::Error {
+                message,
+                client_event_id,
+                ..
+            } => {
+                let words = redact(&message);
+                if !self.started {
+                    say(&format!("voice session refused: {words}"));
+                    let _ = self.tell.send(Update::Refused(words));
+                    return false;
+                }
+                // An append refused is logged, and the mail stands as the
+                // record; the session goes on.
+                say(&format!(
+                    "voice append refused{}: {words}",
+                    client_event_id
+                        .map(|id| format!(" ({id})"))
+                        .unwrap_or_default()
+                ));
+                true
+            }
+            Server::Other(_) => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fake::Live;
+    use std::net::TcpListener;
 
     fn said(pieces: &[(&str, u64, u64)]) -> Vec<Fragment> {
         pieces
@@ -2016,6 +3274,10 @@ mod tests {
         assert_eq!(sent["content"], "");
         let bye: Value = serde_json::from_str(&close()).unwrap();
         assert_eq!(bye["type"], "session.close");
+        // The microphone's frames: mono PCM16, little-endian, in base64.
+        let mic: Value = serde_json::from_str(&input_audio(&[1, -254])).unwrap();
+        assert_eq!(mic["type"], "session.input_audio.append");
+        assert_eq!(mic["audio"], "AQAC/w==");
     }
 
     #[test]
@@ -2343,5 +3605,697 @@ mod tests {
         session.pump_at(1300);
         assert_eq!(session.queue.pop(), Some(vec![8; 480]));
         assert_eq!(session.live.dropped(), 3);
+    }
+
+    // ---- the socket, against the RFC's bytes and a loopback stand-in ----
+
+    fn ws_decode_all(wire: &[u8], expect_masked: bool) -> Vec<WsFrame> {
+        let mut decoder = WsDecoder::new(expect_masked);
+        decoder.push(wire);
+        let mut out = Vec::new();
+        while let Some(frame) = decoder.next_frame().unwrap() {
+            out.push(frame);
+        }
+        out
+    }
+
+    #[test]
+    fn the_accept_key_is_the_rfcs_and_frames_are_its_bytes() {
+        // RFC 6455 section 1.3, by way of the SHA-1 sha1_smol gives.
+        assert_eq!(
+            ws_accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+        // RFC 6455 section 5.7: "Hello" unmasked, and masked with 0x37fa213d.
+        assert_eq!(
+            ws_encode_frame(true, WS_TEXT, b"Hello", None),
+            [0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]
+        );
+        let masked = [
+            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ];
+        assert_eq!(
+            ws_encode_frame(true, WS_TEXT, b"Hello", Some([0x37, 0xfa, 0x21, 0x3d])),
+            masked
+        );
+        // Two fragments of "Hello", a 16-bit length, a 64-bit one.
+        assert_eq!(
+            ws_encode_frame(false, WS_TEXT, b"Hel", None),
+            [0x01, 0x03, 0x48, 0x65, 0x6c]
+        );
+        assert_eq!(
+            ws_encode_frame(true, WS_CONTINUATION, b"lo", None),
+            [0x80, 0x02, 0x6c, 0x6f]
+        );
+        let bytes = vec![7u8; 256];
+        let frame = ws_encode_frame(true, WS_BINARY, &bytes, None);
+        assert_eq!(frame[..4], [0x82, 0x7e, 0x01, 0x00]);
+        let bytes = vec![7u8; 65536];
+        let frame = ws_encode_frame(true, WS_BINARY, &bytes, Some([1, 2, 3, 4]));
+        assert_eq!(frame[..10], [0x82, 0xff, 0, 0, 0, 0, 0, 1, 0, 0]);
+        // And what a client writes masked, a server reads back unmasked.
+        let frames = ws_decode_all(&frame, true);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, bytes);
+    }
+
+    #[test]
+    fn a_ws_decoder_waits_however_the_bytes_are_cut_and_refuses_what_the_rfc_refuses() {
+        let mut wire = ws_encode_frame(true, WS_TEXT, b"Hello", None);
+        wire.extend(ws_encode_frame(true, WS_BINARY, &vec![9u8; 300], None));
+        let mut decoder = WsDecoder::new(false);
+        let mut got = Vec::new();
+        for byte in &wire {
+            decoder.push(&[*byte]);
+            while let Some(frame) = decoder.next_frame().unwrap() {
+                got.push(frame);
+            }
+        }
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].payload, b"Hello");
+        assert_eq!(got[1].payload.len(), 300);
+
+        let refuses = |wire: &[u8]| {
+            let mut decoder = WsDecoder::new(false);
+            decoder.push(wire);
+            decoder.next_frame().is_err()
+        };
+        // A masked frame from the server, a reserved bit, a reserved opcode.
+        assert!(refuses(&[0x81, 0x85, 1, 2, 3, 4, 0, 0, 0, 0, 0]));
+        assert!(refuses(&[0xC1, 0x00]));
+        assert!(refuses(&[0x83, 0x00]));
+        // A ping of 126 bytes, a fragmented ping, a length's top bit set.
+        assert!(refuses(&[0x89, 0x7e, 0x00, 0x7e]));
+        assert!(refuses(&[0x09, 0x00]));
+        assert!(refuses(&[0x82, 0x7f, 0x80, 0, 0, 0, 0, 0, 0, 0]));
+        // And the server's side: a client frame that is not masked.
+        let mut server = WsDecoder::new(true);
+        server.push(&[0x81, 0x00]);
+        assert!(server.next_frame().is_err());
+    }
+
+    #[test]
+    fn ws_fragments_join_with_a_ping_between_them() {
+        let mut asm = WsAssembler::default();
+        let mut wire = ws_encode_frame(false, WS_TEXT, b"Hel", None);
+        wire.extend(ws_encode_frame(true, WS_PING, b"mid", None));
+        wire.extend(ws_encode_frame(true, WS_CONTINUATION, b"lo", None));
+        let got: Vec<_> = ws_decode_all(&wire, false)
+            .into_iter()
+            .filter_map(|frame| asm.accept(frame).unwrap())
+            .collect();
+        assert_eq!(
+            got,
+            [
+                WsIncoming::Ping(b"mid".to_vec()),
+                WsIncoming::Text("Hello".into())
+            ]
+        );
+        // The orders the RFC forbids, and text that is not UTF-8.
+        let mut asm = WsAssembler::default();
+        assert!(
+            asm.accept(WsFrame {
+                fin: true,
+                opcode: WS_CONTINUATION,
+                payload: vec![]
+            })
+            .is_err()
+        );
+        asm.accept(WsFrame {
+            fin: false,
+            opcode: WS_TEXT,
+            payload: b"a".to_vec(),
+        })
+        .unwrap();
+        assert!(
+            asm.accept(WsFrame {
+                fin: true,
+                opcode: WS_TEXT,
+                payload: b"b".to_vec()
+            })
+            .is_err()
+        );
+        let mut asm = WsAssembler::default();
+        assert!(
+            asm.accept(WsFrame {
+                fin: true,
+                opcode: WS_TEXT,
+                payload: vec![0xff, 0xfe]
+            })
+            .is_err()
+        );
+        // A close, with its code and reason.
+        let mut body = 1001u16.to_be_bytes().to_vec();
+        body.extend_from_slice(b"going away");
+        assert_eq!(
+            WsAssembler::default()
+                .accept(WsFrame {
+                    fin: true,
+                    opcode: WS_CLOSE,
+                    payload: body
+                })
+                .unwrap(),
+            Some(WsIncoming::Close(Some(1001), "going away".into()))
+        );
+    }
+
+    #[test]
+    fn ws_addresses_parse_and_a_key_in_a_refusal_is_taken_out() {
+        let url = WsUrl::parse("wss://api.openai.com/v1/live/sessions").unwrap();
+        assert_eq!(
+            (url.tls, url.host.as_str(), url.port),
+            (true, "api.openai.com", 443)
+        );
+        assert_eq!(url.path, "/v1/live/sessions");
+        assert_eq!(url.authority(), "api.openai.com");
+        let url = WsUrl::parse("ws://127.0.0.1:8123").unwrap();
+        assert_eq!((url.tls, url.port, url.path.as_str()), (false, 8123, "/"));
+        assert_eq!(url.authority(), "127.0.0.1:8123");
+        assert!(WsUrl::parse("https://example.com").is_err());
+        assert!(WsUrl::parse("ws://:80/").is_err());
+        assert_eq!(
+            redact("Incorrect API key provided: sk-proj-ab***yz. You can find it"),
+            "Incorrect API key provided: sk-…. You can find it"
+        );
+        assert_eq!(redact("no key here"), "no key here");
+    }
+
+    /// Waits until `done` holds, for the session's thread and the stand-in
+    /// to cross their socket. Gives up after five seconds.
+    fn wait_until(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "not done in five seconds");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn next_update(rx: &mpsc::Receiver<Update>) -> Update {
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("an update in five seconds")
+    }
+
+    #[test]
+    fn a_socket_write_failure_ends_a_standing_session_in_words() {
+        let (tell, updates) = mpsc::channel();
+        let session = Session {
+            book: Book::new(),
+            speaker: Arc::new(Mutex::new(Queue::default())),
+            control: Control::default(),
+            tell,
+            started: true,
+            deadline: None,
+            closing: None,
+            expired: false,
+        };
+
+        session.failed(WsError::Io(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "the peer closed",
+        )));
+
+        assert_eq!(
+            next_update(&updates),
+            Update::Ended("the peer closed".into())
+        );
+    }
+
+    /// A WebSocket server on a loopback port, speaking to `live` as the
+    /// provider's socket does: the upgrade (or a scripted 401), then every
+    /// event of the stand-in's, fragmented with a ping between its halves,
+    /// and everything the client sends handed to the stand-in. The pongs it
+    /// got are kept where the test can read them.
+    struct SocketLive {
+        url: String,
+        pongs: Arc<Mutex<Vec<Vec<u8>>>>,
+        thread: JoinHandle<()>,
+    }
+
+    fn live_socket(live: Arc<Live>, accept_key: &str) -> SocketLive {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/v1/live/sessions", listener.local_addr().unwrap());
+        let pongs: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let thread = std::thread::spawn({
+            let pongs = pongs.clone();
+            let accept_key = accept_key.to_string();
+            move || serve_live(listener, live, &accept_key, pongs)
+        });
+        SocketLive { url, pongs, thread }
+    }
+
+    fn serve_live(
+        listener: TcpListener,
+        live: Arc<Live>,
+        accept_key: &str,
+        pongs: Arc<Mutex<Vec<Vec<u8>>>>,
+    ) {
+        let (mut tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let end = loop {
+            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at;
+            }
+            match tcp.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+                Err(_) => return,
+            }
+        };
+        let text = String::from_utf8_lossy(&head[..end]).to_string();
+        let header = |name: &str| {
+            text.split("\r\n")
+                .filter_map(|line| line.split_once(':'))
+                .find(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.trim().to_string())
+        };
+        if header("authorization").as_deref() != Some(accept_key) {
+            // The provider's refusal, with part of the key it was given in
+            // it, as the harness's stand-in answers it.
+            let body = r#"{"error":{"message":"Incorrect API key provided: sk-test***KEY. You can find your API key at https://platform.openai.com.","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+            let _ = tcp.write_all(
+                format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            return;
+        }
+        let key = header("sec-websocket-key").unwrap_or_default();
+        let _ = tcp.write_all(
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                ws_accept_key(&key)
+            )
+            .as_bytes(),
+        );
+        let mut decoder = WsDecoder::new(true);
+        decoder.push(&head[end + 4..]);
+        let mut assembler = WsAssembler::default();
+        let send = |tcp: &mut TcpStream, text: &str| {
+            // Fragmented in two, with a ping between, as the harness's
+            // stand-in sends a delegation.
+            let bytes = text.as_bytes();
+            let half = bytes.len() / 2;
+            let _ = tcp.write_all(&ws_encode_frame(false, WS_TEXT, &bytes[..half], None));
+            let _ = tcp.write_all(&ws_encode_frame(true, WS_PING, b"mid-fragment", None));
+            let _ = tcp.write_all(&ws_encode_frame(
+                true,
+                WS_CONTINUATION,
+                &bytes[half..],
+                None,
+            ));
+        };
+        loop {
+            loop {
+                match decoder.next_frame() {
+                    Ok(Some(frame)) => match assembler.accept(frame) {
+                        Ok(Some(WsIncoming::Text(text))) => live.receive(&text),
+                        Ok(Some(WsIncoming::Pong(body))) => pongs.lock().unwrap().push(body),
+                        Ok(Some(WsIncoming::Ping(body))) => {
+                            let _ = tcp.write_all(&ws_encode_frame(true, WS_PONG, &body, None));
+                        }
+                        Ok(Some(WsIncoming::Close(..))) => {
+                            let _ = tcp.write_all(&ws_encode_frame(
+                                true,
+                                WS_CLOSE,
+                                &1000u16.to_be_bytes(),
+                                None,
+                            ));
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(_) => return,
+                    },
+                    Ok(None) => break,
+                    Err(_) => return,
+                }
+            }
+            for event in live.take() {
+                send(&mut tcp, &event);
+            }
+            match tcp.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => decoder.push(&chunk[..n]),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_over_the_socket_starts_delegates_answers_and_closes_on_stop() {
+        let live = Arc::new(Live::start());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        live.expires_at(now + 3600);
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-test".to_string()),
+            &server.url,
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        assert_eq!(next_update(&updates), Update::Started);
+
+        // The microphone's frames reach the stand-in as its audio append.
+        assert!(voice.microphone().send(vec![1_i16; 480]));
+        wait_until(|| {
+            live.sent()
+                .iter()
+                .any(|e| e["type"] == "session.input_audio.append")
+        });
+        // The stand-in's pings, between the fragments of what it sent, were
+        // answered with pongs of the same bytes.
+        wait_until(|| !server.pongs.lock().unwrap().is_empty());
+        assert!(
+            server
+                .pongs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|p| p == b"mid-fragment")
+        );
+
+        // Run 4's words, then a delegation: the request is the last of them,
+        // and the empty thinking append went out as it arrived.
+        for (text, start, end) in RUN_4 {
+            live.person_says(text, *start, *end);
+        }
+        let delegation = live.delegate(0);
+        let mut saw_words = false;
+        let mut saw_speech = false;
+        loop {
+            match next_update(&updates) {
+                Update::Words(_) => saw_words = true,
+                Update::SpeechStarted => saw_speech = true,
+                Update::Request(text) => {
+                    assert_eq!(text, "What's blocking the release");
+                    break;
+                }
+                other => panic!("not expected: {other:?}"),
+            }
+        }
+        assert!(
+            saw_words && saw_speech,
+            "the caption's words, and speech started"
+        );
+        wait_until(|| !live.appends().is_empty());
+        let appends = live.appends();
+        assert_eq!(
+            (
+                appends[0].kind.as_str(),
+                appends[0].delegation_id.as_deref(),
+                appends[0].content.as_str()
+            ),
+            ("thinking", Some(delegation.as_str()), "")
+        );
+        // The append inside the acknowledgement delay cancels the filler
+        // the model would have spoken when the delay passed.
+        assert_eq!(live.delay_passes(), 0);
+
+        // The yard answers: spoken under the delegation's own id, and the
+        // filler stays cancelled.
+        voice.answered("Only the Windows zip is left.");
+        wait_until(|| live.appends().iter().any(|a| a.kind == "commentary"));
+        let appends = live.appends();
+        let spoken = appends.last().unwrap();
+        assert_eq!(
+            (spoken.delegation_id.as_deref(), spoken.content.as_str()),
+            (Some(delegation.as_str()), "Only the Windows zip is left.")
+        );
+        assert_eq!(live.delay_passes(), 0);
+
+        // The yard refuses the next mail: its own words are spoken once,
+        // under that delegation, and the mail is not sent again.
+        live.person_says("And who owns it?", 30000, 31000);
+        let second = live.delegate(0);
+        loop {
+            match next_update(&updates) {
+                Update::Words(_) | Update::SpeechStarted => {}
+                Update::Request(text) => {
+                    assert_eq!(text, "And who owns it?");
+                    break;
+                }
+                other => panic!("not expected: {other:?}"),
+            }
+        }
+        voice.refused("the yard does not answer");
+        wait_until(|| {
+            live.appends()
+                .iter()
+                .any(|a| a.kind == "commentary" && a.content == "the yard does not answer")
+        });
+        let refused = live.appends().last().unwrap().clone();
+        assert_eq!(refused.delegation_id.as_deref(), Some(second.as_str()));
+        let appends = live.appends();
+
+        // An ask is direction under no delegation; a secret is nothing.
+        voice.asked(Ask::Plain);
+        wait_until(|| live.appends().len() > appends.len());
+        assert_eq!(live.appends().last().unwrap().delegation_id, None);
+        let count = live.appends().len();
+        voice.asked(Ask::Secret);
+        // Nothing to wait for: what stands after a moment has not grown.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(live.appends().len(), count);
+
+        // Speech out waits in the queue the thread shares; when the person
+        // speaks over it, the queue is dropped whole. This speech comes
+        // after the holdoff that followed the person's last utterance, so
+        // that it is queued and not thrown away as already-sent audio.
+        std::thread::sleep(Duration::from_millis(350));
+        live.queue_audio(vec![7_i16; 480]);
+        assert_eq!(live.play(1), 1);
+        let speaker = voice.speaker();
+        wait_until(|| speaker.lock().unwrap().queued_ms() == 20);
+        live.person_says("Wait", 40000, 40200);
+        assert_eq!(
+            next_update(&updates),
+            Update::Words(Fragment {
+                text: "Wait".into(),
+                start_ms: 40000,
+                end_ms: 40200,
+            })
+        );
+        assert_eq!(next_update(&updates), Update::SpeechStarted);
+        assert_eq!(speaker.lock().unwrap().pop(), None);
+
+        // A hang-up: session.close goes out, session.closed ends it, and
+        // stop joins the thread — none is left.
+        voice.stop();
+        assert_eq!(
+            next_update(&updates),
+            Update::Ended("close_requested".into())
+        );
+        assert!(live.sent().iter().any(|e| e["type"] == "session.close"));
+        server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn the_microphone_goes_nowhere_once_the_session_is_ending() {
+        let live = Arc::new(Live::start());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        live.expires_at(now + 3600);
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-test".to_string()),
+            &server.url,
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        assert_eq!(next_update(&updates), Update::Started);
+        // The devices do not stop with the hang-up: their frames follow it,
+        // while the thread still waits for session.closed.
+        let mic = voice.microphone();
+        voice.cmds.send(Cmd::Close).unwrap();
+        mic.send(vec![1_i16; 480]);
+        assert_eq!(
+            next_update(&updates),
+            Update::Ended("close_requested".into())
+        );
+        drop(voice);
+        server.thread.join().unwrap();
+        let sent = live.sent();
+        let closed = sent
+            .iter()
+            .position(|e| e["type"] == "session.close")
+            .expect("the close went out");
+        assert!(
+            sent[closed..]
+                .iter()
+                .all(|e| e["type"] != "session.input_audio.append"),
+            "audio after the hang-up: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_ends_at_the_moment_its_start_named() {
+        let live = Arc::new(Live::start());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        live.expires_at(now + 2);
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-test".to_string()),
+            &server.url,
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        assert_eq!(next_update(&updates), Update::Started);
+        // Nobody ends it: the thread expects the moment, sends its close
+        // there, and the session is over as expired.
+        assert_eq!(next_update(&updates), Update::Ended("expired".into()));
+        assert!(live.sent().iter().any(|e| e["type"] == "session.close"));
+        drop(voice);
+        server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn stopping_a_session_wakes_its_thread_and_leaves_none() {
+        let live = Arc::new(Live::start());
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-test".to_string()),
+            &server.url,
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        assert_eq!(next_update(&updates), Update::Started);
+        // The FollowControl manner: stop shuts the socket under the blocked
+        // read, and dropping the handle joins the thread.
+        voice.control().stop();
+        drop(voice);
+        server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_refused_key_is_carried_in_the_providers_own_words_without_the_key() {
+        let live = Arc::new(Live::start());
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-wrong".to_string()),
+            &server.url,
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        let Update::Refused(words) = next_update(&updates) else {
+            panic!("a refusal, in words");
+        };
+        assert!(words.contains("401"), "{words}");
+        assert!(
+            words.contains("Incorrect API key provided: sk-…"),
+            "{words}"
+        );
+        assert!(
+            !words.contains("sk-wrong") && !words.contains("sk-test"),
+            "{words}"
+        );
+        // No retry unasked: nothing more is told, and the thread is gone
+        // with the handle.
+        assert!(updates.try_recv().is_err());
+        drop(voice);
+        server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_reached_is_refused_once_and_not_retried() {
+        // A port nothing listens on: no network, in the connector's words.
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-test".to_string()),
+            &format!("ws://127.0.0.1:{port}/v1/live/sessions"),
+            "yardmaster",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        let Update::Refused(words) = next_update(&updates) else {
+            panic!("a refusal, in words");
+        };
+        assert!(!words.is_empty());
+        // Nothing more is told: it is not retried unasked.
+        assert!(updates.try_recv().is_err());
+        drop(voice);
+    }
+
+    #[test]
+    fn with_voice_off_no_key_is_read_and_with_no_key_no_session_is_made() {
+        // Off: the key is not even read — the closure that would read it
+        // fails the test if it is called — and nothing is told.
+        let (tell, updates) = mpsc::channel();
+        let off = gated_start(
+            false,
+            || -> Result<String, String> { panic!("the key was read while voice is off") },
+            "ws://127.0.0.1:1/never",
+            "yardmaster",
+            tell.clone(),
+        );
+        assert!(matches!(off, Start::Off));
+        assert!(updates.try_recv().is_err());
+        // The same through the public start, with a key file beside the
+        // settings that reading would refuse: still off, still nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(dir.path().join("voice.key"), "not a kept key\n").unwrap();
+        let off = start_session(false, Some(&settings), "yardmaster", tell);
+        assert!(matches!(off, Start::Off));
+
+        // On, with no key standing: the keeper's own words, and no session.
+        let (tell, updates) = mpsc::channel();
+        let refused = gated_start(
+            true,
+            || Err("There is no voice key: it is not there.".to_string()),
+            "ws://127.0.0.1:1/never",
+            "yardmaster",
+            tell,
+        );
+        match refused {
+            Start::Refused(words) => {
+                assert_eq!(words, "There is no voice key: it is not there.")
+            }
+            _ => panic!("no session is made without a key"),
+        }
+        assert!(updates.try_recv().is_err());
     }
 }

@@ -43,7 +43,12 @@ The window, its state and the yard:
   speak and under which delegation's id, the queue its speech waits in and
   drops, the instructions and the state words, and the events of OpenAI's
   GPT-Live, which this is the one module to speak (no provider trait, no
-  setting). The live socket, its thread and the audio build on these rules.
+  setting). Below the rules, the live socket itself: a hand-written
+  WebSocket over `src/api.rs`'s TLS (its upgrade's accept key is the one
+  SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
+  `FollowControl` manner, which owns the microphone's frames in and the
+  speaker's queue out; the devices that plug into those ends are not here
+  yet, and neither is the window's button.
 - `src/yard.rs`: picks which yard opens (socket or address, token files,
   hosted sessions); tokens live beside the settings, never in them.
 - `src/settings.rs`: what the window keeps between runs, one JSON file in the

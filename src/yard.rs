@@ -606,9 +606,8 @@ pub fn session_for(file: &Path, address: &Address) -> Result<String, String> {
 /// file beside the settings. The secret is read here, at its use, and
 /// held nowhere: neither the settings nor the environment's struct keeps
 /// it. Why there is none is said in words.
-// Read by the voice session, which this bead's keeper blocks
-// (footplate-2550): until it lands the window only keeps the key.
-#[allow(dead_code)]
+// Read by the voice session (voice::start_session), at its start alone: while
+// voice is off the session is never made and this is never called.
 pub fn voice_key(settings: Option<&Path>) -> Result<String, String> {
     voice_key_as(std::env::var("FOOTPLATE_OPENAI_KEY").ok(), settings)
 }

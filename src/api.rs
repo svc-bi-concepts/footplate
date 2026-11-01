@@ -2015,7 +2015,7 @@ fn in_order(host: &str, tls: bool, addrs: impl Iterator<Item = SocketAddr>) -> V
 /// How a server is trusted: by the roots this system trusts, read once.
 /// yardr does no TLS itself, so what answers is the operator's proxy or
 /// tunnel, with a certificate as any site has one.
-fn tls() -> io::Result<Arc<rustls::ClientConfig>> {
+pub(crate) fn tls() -> io::Result<Arc<rustls::ClientConfig>> {
     static CONFIG: OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>> =
         OnceLock::new();
     CONFIG
