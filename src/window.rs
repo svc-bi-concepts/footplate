@@ -5228,6 +5228,19 @@ mod tests {
             yard.asked("Mail") == [json!({"to": "yardmaster", "text": text, "actor": "jo"})]
         });
         assert_eq!(typed(&view, cx), "");
+
+        // A draft that wraps stands its rows tall, and the frame with
+        // it: a column measured at no width kept one row's height, and
+        // drew the rest over the row below.
+        let draft = ["Ship it once the last bead is green and the yard is quiet."; 4].join(" ");
+        cx.simulate_input(&draft);
+        assert_eq!(typed(&view, cx), draft);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let (rows, shown) = view.read_with(cx, |v, cx| v.line.read(cx).rows());
+        assert!(rows > 1, "the draft stands one row tall: {rows}");
+        assert_eq!(shown, rows, "the box shows {shown} of its {rows} rows");
     }
 
     /// A text of any length goes to the yard as it is, the yard splits one
@@ -16619,6 +16632,16 @@ yardr.dev
         let (view, cx) = opened_on(&yard, 50, cx);
         cx.simulate_resize(gpui::size(px(1920.), px(1080.)));
         rows_tile(&view, cx);
+        // The rows stand as tall as the lines they wrap to: a column
+        // measured at no width made a wrapped paragraph one line tall,
+        // and drew the text over the rows below. Mail 99 is the short
+        // one, mail 100 the long one that wraps in the column.
+        let one = bounds_of(cx, "text 99").size.height;
+        let wrapped = bounds_of(cx, "text 100").size.height;
+        assert!(
+            wrapped > one * 1.9,
+            "mail 100 is {wrapped:?}, a line {one:?}"
+        );
         scroll_to(&view, cx, 100.);
         wait(cx, "the page before", |cx| texts(&view, cx).len() == 100);
         rows_tile(&view, cx);
@@ -23162,6 +23185,24 @@ yardr.dev
                 "{at} stands left of the text column: {el:?} {text:?}"
             );
         }
+        // The words stand as tall as the lines they wrap to, and the
+        // pair-again row as one: a column measured at no width made a
+        // wrapped paragraph one line tall, and drew the text over the
+        // rows below.
+        let one = bounds_of(cx, "away why").size.height;
+        let lead = bounds_of(cx, "away lead").size.height;
+        assert!(
+            lead > one * 1.9,
+            "the away lead is {lead:?}, a line {one:?}"
+        );
+        let again = bounds_of(cx, "pair again").size.height;
+        // One small button stands a base line and its padding tall
+        // here; two of its lines with the row's gap stand past one
+        // and three fifths.
+        assert!(
+            again < one * 1.6,
+            "the pair-again row is {again:?}, a line {one:?}"
+        );
         for way in ["way near", "way far"] {
             click_on(cx, way);
             assert!(drawn(cx, "yard help"), "{way}");
