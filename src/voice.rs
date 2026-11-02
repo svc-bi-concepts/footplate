@@ -2558,6 +2558,40 @@ pub(crate) mod stand_in {
         SocketLive { url, pongs, thread }
     }
 
+    /// How long a client has, from the accept, to send its request head. A
+    /// client that the machine's load keeps from sending it for longer than
+    /// the read timeout is late, not gone, and the stand-in takes one accept
+    /// only, so it would have no second try.
+    const HEAD_WAIT: Duration = Duration::from_secs(5);
+
+    /// The request head off `tcp`, which has a short read timeout, and where
+    /// its blank line is; the bytes may run on into the first frames. A read
+    /// that times out is a client that is late, as the frames' loop takes
+    /// it, and the head is waited for until `deadline`. `None` is a
+    /// connection closed or broken, or a head that did not come in time.
+    pub(super) fn read_head(tcp: &mut TcpStream, deadline: Instant) -> Option<(Vec<u8>, usize)> {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                return Some((head, at));
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            match tcp.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return None,
+            }
+        }
+    }
+
     fn serve_live(
         listener: TcpListener,
         live: Arc<Live>,
@@ -2565,20 +2599,13 @@ pub(crate) mod stand_in {
         pongs: Arc<Mutex<Vec<Vec<u8>>>>,
     ) {
         let (mut tcp, _) = listener.accept().unwrap();
+        let deadline = Instant::now() + HEAD_WAIT;
         tcp.set_read_timeout(Some(Duration::from_millis(5)))
             .unwrap();
-        let mut head = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let end = loop {
-            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
-                break at;
-            }
-            match tcp.read(&mut chunk) {
-                Ok(0) => return,
-                Ok(n) => head.extend_from_slice(&chunk[..n]),
-                Err(_) => return,
-            }
+        let Some((head, end)) = read_head(&mut tcp, deadline) else {
+            return;
         };
+        let mut chunk = [0u8; 4096];
         let text = String::from_utf8_lossy(&head[..end]).to_string();
         let header = |name: &str| {
             text.split("\r\n")
@@ -2668,7 +2695,7 @@ pub(crate) mod stand_in {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::stand_in::live_socket;
+    use super::stand_in::{live_socket, read_head};
     use super::*;
     use crate::audio::{CHUNK, Capture, Render};
     use crate::fake::Live;
@@ -4706,6 +4733,85 @@ pub(crate) mod tests {
         assert!(updates.try_recv().is_err());
         drop(voice);
         server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_request_head_that_comes_late_is_answered_and_not_dropped() {
+        let live = Arc::new(Live::start());
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let url = WsUrl::parse(&server.url).unwrap();
+        // A client the scheduler kept away for ten times the read timeout the
+        // stand-in polls with: connected, and its head not written yet.
+        let mut client = TcpStream::connect(url.authority()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        client
+            .write_all(
+                format!(
+                    "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                     Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\
+                     Authorization: Bearer sk-test\r\n\r\n",
+                    url.path,
+                    url.authority()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut answer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !answer.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = client.read(&mut chunk).expect("an answer in five seconds");
+            assert_ne!(n, 0, "closed without an answer: {answer:?}");
+            answer.extend_from_slice(&chunk[..n]);
+        }
+        let answer = String::from_utf8_lossy(&answer);
+        assert!(
+            answer.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains(&format!("Sec-WebSocket-Accept: {}\r\n", ws_accept_key(key))),
+            "{answer}"
+        );
+        // It serves the one connection, and ends with it.
+        drop(client);
+        server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_head_that_does_not_come_is_waited_for_until_the_deadline_unless_the_client_left() {
+        // The waiting is asked of read_head on its own, on a connection as
+        // serve_live holds it, with a deadline of a tenth of a second where
+        // serve_live gives it five.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = |deadline: Instant| {
+            let client = TcpStream::connect(addr).unwrap();
+            let (mut tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_millis(5)))
+                .unwrap();
+            let reader = std::thread::spawn(move || read_head(&mut tcp, deadline));
+            (client, reader)
+        };
+
+        // A client that connects and hangs up has said all it will: the read
+        // ends with it, however far off the deadline is.
+        let (client, reader) = held(Instant::now() + Duration::from_secs(10));
+        drop(client);
+        wait_until(|| reader.is_finished());
+        assert!(reader.join().unwrap().is_none());
+
+        // One that connects and sends nothing is waited for to the deadline
+        // and let go of there, not held.
+        let began = Instant::now();
+        let wait = Duration::from_millis(100);
+        let (_silent, reader) = held(began + wait);
+        wait_until(|| reader.is_finished());
+        assert!(reader.join().unwrap().is_none());
+        assert!(began.elapsed() >= wait, "given up on before the deadline");
     }
 
     #[test]
