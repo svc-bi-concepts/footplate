@@ -22953,6 +22953,8 @@ yardr.dev
     /// named to them, from the form and from the yard's card, and opens
     /// nothing. The same code presented in another account's session is
     /// refused in the edge's words, spent, and adds no device.
+    // Unix: reads the token file's mode (`mode_of`), which Windows has none of.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_member_pairs_this_device_from_their_own_session(cx: &mut TestAppContext) {
         use crate::fake::{KRATOS_EMAIL, KRATOS_PASSWORD, Router, TOKEN};
