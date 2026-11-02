@@ -11638,6 +11638,137 @@ yardr.dev
         });
     }
 
+    /// A mail typed in the open conversation while a session stands has
+    /// its answer spoken under no delegation, once the person has stopped
+    /// talking; a mail typed with no session standing, or in another
+    /// conversation, registers nothing, and unasked mail is never spoken.
+    #[gpui::test]
+    fn a_typed_mails_answer_is_spoken_once_the_person_has_stopped_talking(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let commentary = |live: &Live| {
+            live.appends()
+                .into_iter()
+                .filter(|a| a.kind == "commentary")
+                .collect::<Vec<_>>()
+        };
+
+        // A mail typed before any session stands registers nothing: its
+        // answer, arriving once a session stands, is shown and not spoken.
+        cx.simulate_input("What is left before voice?");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the typed mail sent", |_| {
+            yard.asked("Mail")
+                == [
+                    json!({"to": "yardmaster", "text": "What is left before voice?", "actor": "jo"}),
+                ]
+        });
+        let live = talk_to(&view, &voicing, cx);
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "What is left before voice?"}, "at": "2026-10-08T09:31:00Z"}"#);
+        yard.emit(&answer_event(22, "Everything before voice."));
+        wait(cx, "the pre-session answer shown", |cx| {
+            texts(&view, cx).contains(&"Everything before voice.".to_string())
+        });
+        cx.run_until_parked();
+        assert!(commentary(&live).is_empty());
+
+        // A mail typed while the session stands: its answer is held while
+        // the person is speaking, and spoken under no delegation once they
+        // have stopped.
+        cx.simulate_input("And what is left now?");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the typed mail sent in the session", |_| {
+            yard.asked("Mail").len() == 2
+        });
+        live.person_says("Hello", 1000, 1200);
+        wait(cx, "the person speaking", |cx| {
+            caption_of(&view, cx) == "Hello"
+        });
+        live.person_says(" there", 1500, 1600);
+        wait(cx, "the person continuing to speak", |cx| {
+            caption_of(&view, cx) == "Hello there"
+        });
+        yard.emit(&answer_event(23, "Only the Windows zip is left."));
+        wait(cx, "the typed answer shown", |cx| {
+            texts(&view, cx).contains(&"Only the Windows zip is left.".to_string())
+        });
+        // Keep the utterance open after the answer lands. The direction for
+        // this ask is a voice-command barrier after the answer command.
+        live.person_says(" still here", 1800, 2000);
+        wait(cx, "the person still speaking", |cx| {
+            caption_of(&view, cx) == "Hello there still here"
+        });
+        yard.answer(
+            "UserAsks",
+            r#"{"result":{"open":[{"bead":"yd-barrier","bead_title":"Barrier","ask":1,"question":"May I proceed?","asker":"yardmaster","since":"2026-10-08T09:40:00Z"}],"decided":[]}}"#,
+        );
+        yard.emit(r#"{"seq":25,"kind":"noted","actor":"yardmaster","bead":"yd-barrier","data":{},"at":"2026-10-08T09:40:00Z"}"#);
+        wait(cx, "the ask direction reaches the session", |_| {
+            live.appends().iter().any(|a| {
+                a.kind == "thinking" && a.content.contains("Take no answer to it by voice")
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            commentary(&live).is_empty(),
+            "not while the person is speaking"
+        );
+        wait(cx, "the typed answer spoken", |_| {
+            !commentary(&live).is_empty()
+        });
+        let spoken = commentary(&live);
+        assert_eq!(spoken.len(), 1);
+        assert_eq!(
+            (
+                spoken[0].delegation_id.as_deref(),
+                spoken[0].content.as_str()
+            ),
+            (None, "Only the Windows zip is left.")
+        );
+
+        // Unasked mail, with no flight waiting, is shown and not spoken.
+        yard.emit(&answer_event(24, "Unasked."));
+        wait(cx, "the unasked mail", |cx| {
+            texts(&view, cx).contains(&"Unasked.".to_string())
+        });
+        cx.run_until_parked();
+        assert_eq!(commentary(&live).len(), 1);
+
+        // Another conversation: opening it ends the session, and a mail
+        // typed there registers nothing with any voice.
+        yard.answer("Conversation", r#"{"result": []}"#);
+        cx.simulate_keystrokes("tab");
+        wait_hung_up(&view, &voicing, &live, 0, cx);
+        cx.simulate_input("Hello north.");
+        cx.simulate_keystrokes("enter");
+        wait(cx, "the mail to the linked yard", |_| {
+            yard.asked("MailPeer").len() == 1
+        });
+        yard.emit(r#"{"seq": 26, "kind": "mail", "actor": "clerk@north", "data": {"to": "jo", "to_user": true, "text": "The ledger is closed."}, "at": "2026-10-08T09:33:00Z"}"#);
+        cx.run_until_parked();
+        assert_eq!(commentary(&live).len(), 1);
+        assert_eq!(voicing.lives.borrow().len(), 1);
+        let server = voicing.lives.borrow_mut().remove(0).1;
+        wait(cx, "the socket's thread gone", |_| {
+            server.thread.is_finished()
+        });
+    }
+
     /// The composer's one button, for each combination of whether a session
     /// stands, whether voice is offered and whether the box holds anything.
     #[test]

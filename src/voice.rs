@@ -110,8 +110,9 @@ pub struct Append {
     pub id: String,
     pub kind: Kind,
     /// The delegation it belongs to, or none for what no delegation owns (a
-    /// card waiting in the window). An answer never has none: nothing would
-    /// tie it to the question it answers.
+    /// card waiting in the window, a typed mail's answer). An answer to a
+    /// spoken request never has none: nothing would tie it to the question
+    /// it answers.
     pub delegation: Option<String>,
     /// At most [`APPEND_BYTES`] bytes of the yard's words, or the module's.
     pub content: String,
@@ -742,20 +743,44 @@ pub enum Ask {
 /// no bead, no asker and nothing of the question or its options.
 const ASK_DIRECTION: &str = "A decision has come up in the window. Take no answer to it by voice. If the person speaks of it, tell them in your own words that it waits in the window and needs a tap there.";
 
-/// Mails sent to the yard and not yet answered, oldest first, each with the
-/// delegation that waits for its answer, if the model raised one.
+/// One mail sent to the yard and not yet answered, by what waits for its
+/// answer: a delegation the model raised, the person themselves where they
+/// typed the mail during a session, or nothing, where a held task went out
+/// after its delegation had closed.
+#[derive(Clone, Debug, PartialEq)]
+enum Flight {
+    Delegated(String),
+    /// A mail the person typed in the voiced conversation: its answer is
+    /// spoken under no delegation, the one sanctioned null (design 3.3,
+    /// step 4, as this bead amended it).
+    Typed,
+    /// A mail no delegation waits for: its answer is shown, not spoken.
+    Silent,
+}
+
+/// Mails sent to the yard and not yet answered, oldest first.
 #[derive(Default)]
-struct Flights(VecDeque<Option<String>>);
+struct Flights(VecDeque<Flight>);
 
 impl Flights {
     fn sent(&mut self, delegation: Option<String>) {
-        self.0.push_back(delegation);
+        self.0.push_back(match delegation {
+            Some(id) => Flight::Delegated(id),
+            None => Flight::Silent,
+        });
+    }
+
+    /// A mail the person typed joins the flights, behind whatever is in
+    /// flight already: its answer is matched oldest first like a spoken
+    /// mail's.
+    fn typed(&mut self) {
+        self.0.push_back(Flight::Typed);
     }
 
     /// The counterpart's next mail answers the oldest mail in flight: the
     /// yard's mail names nothing it answers, so the order is all there is.
     /// None where nothing is in flight.
-    fn landed(&mut self) -> Option<Option<String>> {
+    fn landed(&mut self) -> Option<Flight> {
         self.0.pop_front()
     }
 
@@ -765,7 +790,9 @@ impl Flights {
 
     /// Whether a delegation waits for an answer.
     fn waits(&self) -> bool {
-        self.0.iter().any(Option::is_some)
+        self.0
+            .iter()
+            .any(|flight| matches!(flight, Flight::Delegated(_)))
     }
 }
 
@@ -792,6 +819,15 @@ pub struct Book {
     /// to hear it again.
     last_answer: Option<String>,
     appended: u64,
+    /// The person is speaking: their input transcript is still arriving, and
+    /// no gap has ended their utterance (step 1 of 3.3). Set by every piece
+    /// heard, cleared by [`Book::stopped`].
+    speaking: bool,
+    /// Typed answers (and a typed mail's refusal) that landed while the
+    /// person was speaking, waiting for [`Book::stopped`]: speech never
+    /// starts over the person. Each stands with whether it is an answer, so
+    /// that only an answer is there to be heard again.
+    held_speech: VecDeque<(String, bool)>,
 }
 
 impl Book {
@@ -806,6 +842,7 @@ impl Book {
         if fragment.text.is_empty() {
             return false;
         }
+        self.speaking = true;
         let began = self
             .last_end
             .is_none_or(|end| fragment.start_ms.saturating_sub(end) >= UTTERANCE_GAP_MS);
@@ -837,14 +874,45 @@ impl Book {
         steps
     }
 
+    /// A mail the person typed in the voiced conversation was sent: it
+    /// joins the flights behind whatever is in flight, and its answer is
+    /// matched oldest first like a spoken mail's (design 3.3, step 4).
+    pub fn typed_sent(&mut self) {
+        self.flights.typed();
+    }
+
+    /// The person has stopped talking: the gap of step 1 of 3.3 has ended
+    /// their utterance, so what landed while they spoke goes to the voice
+    /// now, under no delegation, in the order it landed.
+    pub fn stopped(&mut self) -> Vec<Step> {
+        self.speaking = false;
+        let mut steps = Vec::new();
+        while let Some((text, is_answer)) = self.held_speech.pop_front() {
+            let said = self.say_none(&text);
+            if is_answer && !said.is_empty() {
+                self.last_answer = Some(text.trim().to_string());
+            }
+            steps.extend(said);
+        }
+        steps
+    }
+
+    /// Whether the person is speaking, as [`Book::heard`] last saw them.
+    pub fn speaking(&self) -> bool {
+        self.speaking
+    }
+
     /// An answer to speak: the counterpart's next mail in the open
     /// conversation after the mail in flight, which answers it. Its text goes
     /// back under the id of the delegation that waited for it, in chunks, and
-    /// under no other. Where no mail is in flight, or no delegation waits for
-    /// the one that is, nothing is appended: the mail in the conversation is
-    /// its record. The request held while the mail was in flight goes next.
+    /// under no other; under no delegation at all where the mail was one the
+    /// person typed, the one sanctioned null. Where no mail is in flight, or
+    /// the one that is waits for nothing, nothing is appended: the mail in
+    /// the conversation is its record. A typed answer that lands while the
+    /// person is speaking waits for [`Book::stopped`]. The request held
+    /// while the mail was in flight goes next.
     pub fn answered(&mut self, text: &str) -> Vec<Step> {
-        let Some(mut steps) = self.close(text) else {
+        let Some(mut steps) = self.close(text, true) else {
             return Vec::new();
         };
         if !steps.is_empty() {
@@ -859,7 +927,7 @@ impl Book {
     /// delegation that waited; the mail is not sent again. The request held
     /// behind it goes next.
     pub fn refused(&mut self, words: &str) -> Vec<Step> {
-        let Some(mut steps) = self.close(words) else {
+        let Some(mut steps) = self.close(words, false) else {
             return Vec::new();
         };
         steps.extend(self.release());
@@ -893,18 +961,43 @@ impl Book {
 
     /// `text` to the voice, in chunks, under delegation `id`.
     fn say(&mut self, id: &str, text: &str) -> Vec<Step> {
+        self.say_as(Some(id), text)
+    }
+
+    /// `text` to the voice, in chunks, under no delegation: a typed mail's
+    /// answer, the one sanctioned null.
+    fn say_none(&mut self, text: &str) -> Vec<Step> {
+        self.say_as(None, text)
+    }
+
+    fn say_as(&mut self, delegation: Option<&str>, text: &str) -> Vec<Step> {
         chunks(text)
             .into_iter()
-            .map(|chunk| self.append(Kind::Commentary, Some(id), &chunk))
+            .map(|chunk| self.append(Kind::Commentary, delegation, &chunk))
             .collect()
     }
 
+    /// A typed mail's words for the voice: spoken under no delegation now,
+    /// or held until the person has stopped where they are speaking, so
+    /// that speech never starts over them.
+    fn speak_typed(&mut self, text: &str, is_answer: bool) -> Vec<Step> {
+        if self.speaking {
+            self.held_speech.push_back((text.to_string(), is_answer));
+            Vec::new()
+        } else {
+            self.say_none(text)
+        }
+    }
+
     /// The oldest mail in flight is done with: what is said of it goes under
-    /// its delegation, if one waited. None where nothing was in flight.
-    fn close(&mut self, text: &str) -> Option<Vec<Step>> {
+    /// its delegation, if one waited, under no delegation where the person
+    /// typed the mail, and nowhere where nothing waited. None where nothing
+    /// was in flight.
+    fn close(&mut self, text: &str, is_answer: bool) -> Option<Vec<Step>> {
         Some(match self.flights.landed()? {
-            Some(id) => self.say(&id, text),
-            None => Vec::new(),
+            Flight::Delegated(id) => self.say(&id, text),
+            Flight::Typed => self.speak_typed(text, is_answer),
+            Flight::Silent => Vec::new(),
         })
     }
 
@@ -2009,6 +2102,8 @@ impl Control {
 /// What the caller asks the session's thread, besides the microphone's
 /// frames, which are their own command.
 enum Cmd {
+    /// A mail the person typed in the open conversation was sent.
+    Typed,
     /// The counterpart's next mail in the open conversation: an answer to
     /// speak, under the delegation that waited for it.
     Answered(String),
@@ -2069,9 +2164,16 @@ impl Voice {
         self.speaker.clone()
     }
 
+    /// A mail the person typed in the voiced conversation was sent: its
+    /// answer, when it lands, is spoken under no delegation.
+    pub fn typed_sent(&self) {
+        let _ = self.cmds.send(Cmd::Typed);
+    }
+
     /// The counterpart's answer, to be spoken under the delegation that
-    /// waited for it. One that arrives with no delegation waiting is not
-    /// spoken; the mail in the conversation is its record.
+    /// waited for it, or under no delegation where the person typed the
+    /// mail. One that arrives with nothing waiting is not spoken; the mail
+    /// in the conversation is its record.
     pub fn answered(&self, text: &str) {
         let _ = self.cmds.send(Cmd::Answered(text.to_string()));
     }
@@ -2245,6 +2347,7 @@ fn run(
         deadline: None,
         closing: None,
         expired: false,
+        last_heard: None,
     };
     session.follow(&mut conn, &cmds);
     session.control.socket_ended();
@@ -2275,6 +2378,10 @@ struct Session {
     /// Since when `session.close` has been sent, awaiting `session.closed`.
     closing: Option<Instant>,
     expired: bool,
+    /// When the person's words were last heard, by this thread's clock: a
+    /// gap of [`UTTERANCE_GAP_MS`] from it with nothing more heard is their
+    /// utterance ended (step 1 of 3.3), and what waited for that goes.
+    last_heard: Option<Instant>,
 }
 
 impl Session {
@@ -2320,8 +2427,23 @@ impl Session {
                     .send(Update::Ended(self.end_words("close_requested")));
                 return;
             }
+            // The person has stopped: no words heard for the gap that ends
+            // an utterance, so what a typed answer waited for goes now.
+            if self.book.speaking()
+                && self
+                    .last_heard
+                    .is_some_and(|at| at.elapsed() >= Duration::from_millis(UTTERANCE_GAP_MS))
+            {
+                self.last_heard = None;
+                let steps = self.book.stopped();
+                if let Err(err) = self.obey(conn, steps) {
+                    self.failed(err);
+                    return;
+                }
+            }
             while let Ok(cmd) = cmds.try_recv() {
                 match cmd {
+                    Cmd::Typed => self.book.typed_sent(),
                     Cmd::Answered(text) => {
                         let steps = self.book.answered(&text);
                         if let Err(err) = self.obey(conn, steps) {
@@ -2467,6 +2589,9 @@ impl Session {
                 true
             }
             Server::Heard(fragment) => {
+                if !fragment.text.is_empty() {
+                    self.last_heard = Some(Instant::now());
+                }
                 let _ = self.tell.send(Update::Words(fragment.clone()));
                 if self.book.heard(fragment) {
                     // Speech started: what the voice had queued is dropped,
@@ -3134,12 +3259,12 @@ pub(crate) mod tests {
     }
 
     /// The commentary appends among `steps`: (delegation, content).
-    fn spoken(steps: &[Step]) -> Vec<(String, String)> {
+    fn spoken(steps: &[Step]) -> Vec<(Option<String>, String)> {
         steps
             .iter()
             .filter_map(|step| match step {
                 Step::Append(a) if a.kind == Kind::Commentary => {
-                    Some((a.delegation.clone().unwrap(), a.content.clone()))
+                    Some((a.delegation.clone(), a.content.clone()))
                 }
                 _ => None,
             })
@@ -3198,7 +3323,7 @@ pub(crate) mod tests {
         assert_eq!(
             spoken(&steps),
             [(
-                "del_1".to_string(),
+                Some("del_1".to_string()),
                 "Only the Windows zip is left.".to_string()
             )]
         );
@@ -3217,9 +3342,9 @@ pub(crate) mod tests {
         let said_back = spoken(&steps);
         assert!(said_back.len() > 2);
         assert!(
-            said_back
-                .iter()
-                .all(|(id, content)| id == "del_2" && content.len() <= APPEND_BYTES)
+            said_back.iter().all(
+                |(id, content)| id.as_deref() == Some("del_2") && content.len() <= APPEND_BYTES
+            )
         );
         let mut ids: Vec<&str> = steps.iter().map(|s| append_of(s).id.as_str()).collect();
         ids.sort();
@@ -3249,7 +3374,10 @@ pub(crate) mod tests {
         let steps = book.answered("Everything for the zip.");
         assert_eq!(
             spoken(&steps),
-            [("del_2".to_string(), "Everything for the zip.".to_string())]
+            [(
+                Some("del_2".to_string()),
+                "Everything for the zip.".to_string()
+            )]
         );
     }
 
@@ -3280,7 +3408,10 @@ pub(crate) mod tests {
         let steps = book.answered("Only the Windows zip.");
         assert_eq!(
             spoken(&steps),
-            [("del_1".to_string(), "Only the Windows zip.".to_string())]
+            [(
+                Some("del_1".to_string()),
+                "Only the Windows zip.".to_string()
+            )]
         );
         assert_eq!(requests(&steps), ["And who owns it?"]);
         assert!(
@@ -3291,7 +3422,7 @@ pub(crate) mod tests {
         let steps = book.answered("The windows team.");
         assert_eq!(
             spoken(&steps),
-            [("del_2".to_string(), "The windows team.".to_string())]
+            [(Some("del_2".to_string()), "The windows team.".to_string())]
         );
         assert!(requests(&steps).is_empty());
         assert!(!book.waiting());
@@ -3316,7 +3447,7 @@ pub(crate) mod tests {
         assert_eq!(
             spoken(&steps),
             [(
-                "del_1".to_string(),
+                Some("del_1".to_string()),
                 "the line is congested, but things are still moving".to_string()
             )]
         );
@@ -3339,12 +3470,21 @@ pub(crate) mod tests {
         assert_eq!(flights.landed(), None);
         flights.sent(Some("del_1".into()));
         flights.sent(None);
+        flights.typed();
         flights.sent(Some("del_3".into()));
         assert!(flights.waits());
-        assert_eq!(flights.landed(), Some(Some("del_1".to_string())));
+        assert_eq!(
+            flights.landed(),
+            Some(Flight::Delegated("del_1".to_string()))
+        );
         // A mail no delegation waits for takes its turn, and is not spoken.
-        assert_eq!(flights.landed(), Some(None));
-        assert_eq!(flights.landed(), Some(Some("del_3".to_string())));
+        assert_eq!(flights.landed(), Some(Flight::Silent));
+        // A typed mail takes its turn behind them, and its answer is spoken.
+        assert_eq!(flights.landed(), Some(Flight::Typed));
+        assert_eq!(
+            flights.landed(),
+            Some(Flight::Delegated("del_3".to_string()))
+        );
         assert!(flights.is_empty() && !flights.waits());
     }
 
@@ -3366,7 +3506,7 @@ pub(crate) mod tests {
         let steps = book.answered("They pass.");
         assert_eq!(
             spoken(&steps),
-            [("del_3".to_string(), "They pass.".to_string())]
+            [(Some("del_3".to_string()), "They pass.".to_string())]
         );
         assert!(!book.waiting());
         assert!(book.answered("late").is_empty());
@@ -3397,7 +3537,10 @@ pub(crate) mod tests {
         let steps = book.raised("del_2");
         assert!(requests(&steps).is_empty());
         // The last answer, under the new delegation's id, to be spoken again.
-        assert_eq!(spoken(&steps), [("del_2".to_string(), answer.to_string())]);
+        assert_eq!(
+            spoken(&steps),
+            [(Some("del_2".to_string()), answer.to_string())]
+        );
         assert!(!book.waiting());
         // Before there is an answer there is nothing to say again.
         let mut book = Book::new();
@@ -3417,7 +3560,10 @@ pub(crate) mod tests {
         // what the voice speaks, once, and the book keeps no mail for it.
         let words = "yardmaster is away; footplate is reconnecting";
         let steps = book.refused(words);
-        assert_eq!(spoken(&steps), [("del_1".to_string(), words.to_string())]);
+        assert_eq!(
+            spoken(&steps),
+            [(Some("del_1".to_string()), words.to_string())]
+        );
         assert!(!book.waiting());
         assert!(book.refused("again").is_empty());
         // A refusal is not an answer: asked to say it again, there is none.
@@ -3431,7 +3577,10 @@ pub(crate) mod tests {
         let steps = book.refused("the yard does not answer");
         assert_eq!(
             spoken(&steps),
-            [("del_3".to_string(), "the yard does not answer".to_string())]
+            [(
+                Some("del_3".to_string()),
+                "the yard does not answer".to_string()
+            )]
         );
         assert_eq!(requests(&steps), ["And the zip?"]);
     }
@@ -3913,6 +4062,77 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn a_typed_mails_answer_is_spoken_under_no_delegation() {
+        // Behind a spoken mail in flight: the spoken answer lands first,
+        // under its delegation, and the typed one after it, under none.
+        let mut book = Book::new();
+        hear(&mut book, RUN_4);
+        book.raised("del_1");
+        book.typed_sent();
+        // The person has stopped talking by the time the answers land.
+        assert!(book.stopped().is_empty());
+        let steps = book.answered("Only the Windows zip is left.");
+        assert_eq!(
+            spoken(&steps),
+            [(
+                Some("del_1".to_string()),
+                "Only the Windows zip is left.".to_string()
+            )]
+        );
+        let steps = book.answered("And the typed answer.");
+        assert_eq!(
+            spoken(&steps),
+            [(None, "And the typed answer.".to_string())]
+        );
+        // A long typed answer goes in chunks under no delegation, each with
+        // an id of its own, as a spoken one does under its id.
+        book.typed_sent();
+        let long = "The release waits on the Windows zip. ".repeat(30);
+        let steps = book.answered(&long);
+        let said_back = spoken(&steps);
+        assert!(said_back.len() > 2);
+        assert!(
+            said_back
+                .iter()
+                .all(|(id, content)| id.is_none() && content.len() <= APPEND_BYTES)
+        );
+        // Nothing is in flight now: an unasked mail is shown, not spoken.
+        assert!(book.answered("Unasked.").is_empty());
+    }
+
+    #[test]
+    fn a_typed_answer_lands_only_once_the_person_has_stopped_talking() {
+        let mut book = Book::new();
+        book.typed_sent();
+        // The person is speaking as the answer lands: nothing goes to the
+        // voice yet. (What they say here asks nothing of the yard, so no
+        // held request goes either.)
+        hear(&mut book, &[("Hello", 1000, 1200)]);
+        assert!(book.speaking());
+        assert!(book.answered("Only the Windows zip is left.").is_empty());
+        // They go on: still speaking, and still nothing has gone.
+        hear(&mut book, &[("Thanks", 1700, 2000)]);
+        assert!(book.speaking());
+        // They have stopped: the answer goes, under no delegation.
+        let steps = book.stopped();
+        assert!(!book.speaking());
+        assert_eq!(
+            spoken(&steps),
+            [(None, "Only the Windows zip is left.".to_string())]
+        );
+        // And it is the last answer, to be heard again under a delegation.
+        hear(&mut book, &[("Say that again, please", 20000, 21000)]);
+        let steps = book.raised("del_1");
+        assert_eq!(
+            spoken(&steps),
+            [(
+                Some("del_1".to_string()),
+                "Only the Windows zip is left.".to_string()
+            )]
+        );
+    }
+
     /// The part of a session's thread that matters here, with no thread: it
     /// reads what the stand-in says, lets the book decide, and does what the
     /// book says: the appends go to the stand-in, the requests are the
@@ -4098,6 +4318,49 @@ pub(crate) mod tests {
         let count = appends.len();
         session.mail("Unasked.");
         assert_eq!(session.live.appends().len(), count);
+
+        // A mail the person typed while the session stands: its answer is
+        // appended under no delegation, and the stand-in acknowledges it by
+        // its id as it does a delegation's answer. The person has stopped
+        // talking by now.
+        assert!(session.book.stopped().is_empty());
+        session.book.typed_sent();
+        session.mail("The typed answer.");
+        session.pump();
+        let appends = session.live.appends();
+        assert_eq!(appends.len(), count + 1);
+        assert_eq!(
+            (
+                appends.last().unwrap().kind.as_str(),
+                appends.last().unwrap().delegation_id.as_deref(),
+                appends.last().unwrap().content.as_str()
+            ),
+            ("commentary", None, "The typed answer.")
+        );
+        assert_eq!(
+            session.acknowledged.last().map(String::as_str),
+            Some(appends.last().unwrap().event_id.as_str())
+        );
+        // A second typed answer lands while the person is speaking: it goes
+        // only once they have stopped.
+        session.book.typed_sent();
+        session.person_says(&[("One more thing", 50000, 50600)]);
+        session.mail("The held answer.");
+        session.pump();
+        assert_eq!(session.live.appends().len(), count + 1);
+        let steps = session.book.stopped();
+        session.obey(steps);
+        session.pump();
+        let appends = session.live.appends();
+        assert_eq!(appends.len(), count + 2);
+        assert_eq!(
+            (
+                appends.last().unwrap().delegation_id.as_deref(),
+                appends.last().unwrap().content.as_str()
+            ),
+            (None, "The held answer.")
+        );
+        let count = appends.len();
 
         // A secret ask appends nothing; another says only that one waits.
         let steps = session.book.asked(Ask::Secret);
@@ -4380,6 +4643,7 @@ pub(crate) mod tests {
             deadline: None,
             closing: None,
             expired: false,
+            last_heard: None,
         };
 
         session.failed(WsError::Io(io::Error::new(

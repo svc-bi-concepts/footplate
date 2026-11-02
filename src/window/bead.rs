@@ -192,6 +192,15 @@ impl Footplate {
         };
         let (yard, opening, session) = (self.yard.clone(), self.opening, self.session);
         let identity = self.yard_identity(&yard);
+        // The voice session standing in this conversation, if one does: a
+        // typed mail sent while it stands awaits its answer there. Another
+        // conversation or yard has none standing in this one, and a session
+        // that ends before the mail goes registers nothing.
+        let voice_id = self
+            .voice
+            .as_ref()
+            .filter(|talk| talk.with == to)
+            .map(|talk| talk.id);
         self.ask_through(
             cx,
             move |client, me| match post(client, me, &target, &text, &files) {
@@ -205,6 +214,18 @@ impl Footplate {
             },
             move |this, sent, cx| match sent {
                 Ok(sent) => {
+                    // It went while the session that was standing when it
+                    // was written still stands in this conversation: the
+                    // mail awaits its answer in the voice.
+                    if let Some(talk) = this
+                        .voice
+                        .as_mut()
+                        .filter(|talk| Some(talk.id) == voice_id && talk.with == to)
+                    {
+                        talk.voice.typed_sent();
+                        talk.unanswered = true;
+                        talk.quiet_since = (this.means.now)();
+                    }
                     // The bytes are here already: the yard is not asked.
                     // Where another yard was opened since, nothing of
                     // this one's shows them.
