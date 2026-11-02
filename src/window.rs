@@ -1339,7 +1339,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -6356,30 +6356,45 @@ yardr.dev
         base
     }
 
-    /// A base address nothing answers at: one that was bound, and is not
-    /// now. The view, down.
-    fn view_down() -> String {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        format!("http://127.0.0.1:{port}")
+    /// A view that `view_down` has stood up, until `view_serve` has it
+    /// answer.
+    #[derive(Default)]
+    struct Standing {
+        serving: AtomicBool,
+        hits: Arc<AtomicUsize>,
     }
 
-    /// A listener started after the first probe at the down address
-    /// `base`: the view, now answering its front page there. Counts the
-    /// connections it answers.
-    fn view_serve(base: &str) -> Arc<std::sync::atomic::AtomicUsize> {
+    /// The views `view_down` has stood up, by the base address it gave.
+    fn standing() -> &'static Mutex<HashMap<String, Arc<Standing>>> {
+        static STANDING: std::sync::OnceLock<Mutex<HashMap<String, Arc<Standing>>>> =
+            std::sync::OnceLock::new();
+        STANDING.get_or_init(Mutex::default)
+    }
+
+    /// A base address nothing answers at: the view, down. Its port is held
+    /// from here on, so that nothing else is handed the number before
+    /// `view_serve` starts the view there: a port let go is free to any
+    /// other test or process that asks for one, and the suite asks all the
+    /// time. The listener takes each connection and lets it go with no
+    /// answer, which a probe reads as down. It listens, and is not left
+    /// bound alone, since macOS drops the first packet to a port that is
+    /// bound and does not listen: a probe at it would wait out its whole
+    /// connect timeout, where a port let go refuses at once.
+    fn view_down() -> String {
         use std::io::{Read as _, Write as _};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let counted = hits.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let view = Arc::new(Standing::default());
+        standing()
+            .lock()
+            .unwrap()
+            .insert(base.clone(), view.clone());
         std::thread::spawn(move || {
             for mut conn in listener.incoming().flatten() {
-                counted.fetch_add(1, Ordering::SeqCst);
+                if !view.serving.load(Ordering::SeqCst) {
+                    continue;
+                }
+                view.hits.fetch_add(1, Ordering::SeqCst);
                 let mut asked = [0u8; 1024];
                 let _ = conn.read(&mut asked);
                 let _ = conn.write_all(
@@ -6387,7 +6402,18 @@ yardr.dev
                 );
             }
         });
-        hits
+        base
+    }
+
+    /// The view started after the first probe at the down address `base`:
+    /// now answering its front page there, on the port `view_down` held.
+    /// Counts the connections it answers.
+    fn view_serve(base: &str) -> Arc<AtomicUsize> {
+        let view = standing().lock().unwrap().remove(base);
+        let view = view
+            .unwrap_or_else(|| panic!("{base} is no address view_down gave, or is served already"));
+        view.serving.store(true, Ordering::SeqCst);
+        view.hits.clone()
     }
 
     /// Whether the window has the web view up, down, or not asked yet.
@@ -6767,6 +6793,14 @@ yardr.dev
         // Nothing answers at the view's address or the run base.
         let base = view_down();
         let run = view_down();
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        let bind_again = || {
+            std::net::TcpListener::bind(("127.0.0.1", port))
+                .err()
+                .map(|err| err.kind())
+        };
+        assert_eq!(bind_again(), Some(std::io::ErrorKind::AddrInUse));
+        assert!(!api::Address::parse_view(&base).unwrap().answers());
         set_view(&view, cx, &base);
         set_run(&view, cx, &run);
         wait(cx, "the view not answering", |cx| {
@@ -6775,10 +6809,12 @@ yardr.dev
         wait(cx, "the run base not answering", |cx| {
             run_answered(&view, cx) == Some(false)
         });
+        assert_eq!(bind_again(), Some(std::io::ErrorKind::AddrInUse));
         // Both answer now, but no row is drawn: the timer ticks on, and
         // nothing is asked again.
         let hits = view_serve(&base);
         let run_hits = view_serve(&run);
+        assert_eq!(bind_again(), Some(std::io::ErrorKind::AddrInUse));
         cx.executor().advance_clock(PROBE_AGAIN);
         cx.run_until_parked();
         assert_eq!(hits.load(Ordering::SeqCst), 0);

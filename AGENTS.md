@@ -217,8 +217,10 @@ Setup, release and tests:
   origin are not asked in a test (`rail::reaches`), since the person's own
   may answer there, and Windows refuses a connection to a closed port only
   after two seconds, on the test's own thread. A view a test needs it
-  stands up (`view_up`); `view_down` costs those two seconds for each
-  probe, so use it only where down is the point.
+  stands up (`view_up`). One that is down it stands up as well
+  (`view_down`): a listener that lets every connection go with no answer,
+  which holds its port until `view_serve` has it answer there, since a
+  port let go is free to any other test that asks for one.
 - Windows is remote only: it has no yard of its own, so the unix socket,
   file modes, symlinks, the shell stand-in for yardr and the Linux
   desktop's taskbar sit behind `cfg(unix)` (or the OS), and so do the tests
