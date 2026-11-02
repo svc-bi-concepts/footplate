@@ -476,9 +476,10 @@ the hosted way's fields open and filled), `signedout` (the away
 screen of a hosted yard that is signed out), `away` (the away
 screen of a yard at an address that no longer lets the device in,
 with a way's fields open), `arrivals` (the
-arrivals panel open on the arrivals row, with its lamps, headcodes
-and quiet lines), `departures` (the departures board open under the
-toggle, with its banner), `arrival` (one
+arrivals panel open on the arrivals row, with its lamps, headcodes,
+a line with two beads being worked and two waiting for a slot, and quiet
+lines), `departures` (the departures board open under the toggle, with its
+banner), `arrival` (one
 arrival's bead open from the panel), `flow` (yardr's line open on
 its flow), `old-lines` (the Lines pane against a yard too old to
 serve it, saying so in plain words), `grants` (the grants view open on

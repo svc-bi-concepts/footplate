@@ -49,9 +49,11 @@ pub(crate) const HEAD_INSET: f32 = titlebar::CLEAR - RAIL;
 /// Measured as DejaVu Sans draws `● 7mcg` (the widest sans of the
 /// desktops here, and the font the Linux shots draw in), 47 pixels at
 /// the meta size, with the cell's 16 pixels of padding and the running
-/// dot's 10 (6 with its 4-pixel gap), rounded up to 96 pixels to hold
-/// the longest stage word `contributor` (67 pixels) with its lamp and
-/// padding without cutting, at the usual 16-pixel rem. In rems because
+/// dot's 12 (the lamp's 8 with its 4-pixel gap), rounded up to 96 pixels
+/// to hold the longest stage word `contributor` (67 pixels) with its lamp
+/// and padding without cutting, at the usual 16-pixel rem. The 80 pixels
+/// under the padding hold each phrase of a "+N" whole up to two digits:
+/// `+10 working` is 77 as DejaVu draws it. In rems because
 /// the words in it are: a cell in pixels cut its words at the larger
 /// text sizes. Stage heads longer than the cell wrap whole onto a
 /// second line; headcodes longer than this truncate, as they did on the

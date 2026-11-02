@@ -1304,15 +1304,15 @@ mod tests {
     use super::asks::{dir_url, file_url};
     use super::bead::{Button, bar_top, hover_clock};
     use super::keys::{KeysView, SECONDARY, keys_for};
-    use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, RAIL, drawer_fits};
+    use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, PANEL_MIN, RAIL, drawer_fits};
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
     use super::rail::{PROBE_AGAIN, post, run_address_of};
     use super::state::{Counts, pairing_failure, rail_counts, waiting};
     use super::words::{
-        ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words,
-        footplate_words, headcode_color, remark_color, stage_group_words, stage_lamp, unread_words,
-        waiting_words, waits_for_seat, worker_words, working_group_words, working_tip,
-        working_words, yardr_place, yardr_words,
+        LineCounts, ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words,
+        footplate_words, headcode_color, line_counts, more_words, remark_color, stage_group_words,
+        stage_lamp, stage_state, unread_words, waiting_words, waits_for_seat, worked_first,
+        worker_words, working_group_words, working_tip, working_words, yardr_place, yardr_words,
     };
     use super::*;
     use crate::api::{Flow, FlowBead, FlowDepot, FlowStage};
@@ -5691,14 +5691,65 @@ mod tests {
         .to_string()
     }
 
+    /// The flows view the moving test draws: yardr's default flow as
+    /// yardr.dev's stood at 16:44 on 2 Nov 2026, two beads worked and two
+    /// waiting for a slot in `new`, the waiting ones listed first and the
+    /// worked ones last; `review` lists a waiting bead before a worked one;
+    /// a second yardr flow holds one waiting bead and none worked, and
+    /// footplate's three waiting beads share one stage.
+    fn flows_moving() -> String {
+        let bead = |bead: &str, working: bool| {
+            json!({"bead": bead, "title": "A bead", "expected": "1h–2h",
+                   "remark": "", "tone": "none", "working": working})
+        };
+        let stage = |stage: &str, human: bool, beads: Vec<Value>| {
+            json!({"stage": stage, "group": "g", "human": human, "lamp": "none",
+                   "terminal": false, "beads": beads})
+        };
+        json!({"result": {
+            "travelling": 10,
+            "depots": [
+                {"name": "yardr", "kind": "git", "travelling": 7, "flows": [
+                    {"name": "default", "type": "", "source": "store", "stages": [
+                        stage("backlog", true,
+                              vec![bead("yd-b1", false), bead("yd-b2", false)]),
+                        stage("new", false, vec![
+                            bead("yd-wait1", false), bead("yd-wait2", false),
+                            bead("yd-run1", true), bead("yd-run2", true)]),
+                        stage("review", false,
+                              vec![bead("yd-late", false), bead("yd-run3", true)]),
+                        stage("approved", false, vec![]),
+                    ]},
+                    {"name": "design", "type": "", "source": "store", "stages": [
+                        stage("draft", true, vec![bead("yd-qskt", false)]),
+                    ]},
+                ], "elsewhere": []},
+                {"name": "footplate", "kind": "git", "travelling": 3, "flows": [
+                    {"name": "default", "type": "task", "source": "store", "stages": [
+                        stage("new", false, vec![
+                            bead("footplate-a", false), bead("footplate-b", false),
+                            bead("footplate-c", false)]),
+                    ]},
+                ], "elsewhere": []},
+            ],
+            "unassigned": [],
+        }})
+        .to_string()
+    }
+
     /// The flows view the squeeze test draws: five travelling depots,
     /// so the tracks cannot fit the narrowest panel, yardr's with
-    /// three beads on one stage, two beads travelling with no line,
-    /// and two quiet depots folded to the Quiet row.
+    /// three beads on one stage, two of them worked, two beads
+    /// travelling with no line, and two quiet depots folded to the
+    /// Quiet row.
     fn flows_squeezed() -> String {
         let bead = |bead: &str, title: &str| {
             json!({"bead": bead, "title": title, "expected": "1h–2h",
                    "remark": "", "tone": "none", "working": false})
+        };
+        let worked = |bead: &str, title: &str| {
+            json!({"bead": bead, "title": title, "expected": "1h–2h",
+                   "remark": "", "tone": "none", "working": true})
         };
         let stage = |stage: &str, beads: Vec<Value>| {
             json!({"stage": stage, "group": "g", "human": false,
@@ -5728,9 +5779,9 @@ mod tests {
                          "beads": [bead("yd-b1", "First to shape")]},
                         {"stage": "new", "group": "muse-builders", "human": false,
                          "lamp": "fault", "beads": [
-                            bead("yd-first", "First on the stage"),
+                            worked("yd-first", "First on the stage"),
                             bead("yd-second", "Second on the stage"),
-                            bead("yd-third", "Third on the stage")]},
+                            worked("yd-third", "Third on the stage")]},
                         {"stage": "review", "group": "muse-reviewers",
                          "human": false, "lamp": "none",
                          "beads": [bead("yd-zulu", "Zulu's late turn")]},
@@ -14716,6 +14767,9 @@ yardr.dev
 
     /// A stage's lamp burns only where a bead stands on it: the served
     /// fault or turn, and nothing on an empty stage whatever it serves.
+    /// The panel's cell adds the running green where a bead is worked and
+    /// no fault or turn burns, as the phones' strips mark a stage moving;
+    /// the line view's columns draw the served lamp alone.
     #[test]
     fn a_stage_s_lamp_burns_only_where_a_bead_stands_on_it() {
         let stage = |lamp: &str, beads: usize| FlowStage {
@@ -14728,6 +14782,138 @@ yardr.dev
         assert_eq!(stage_lamp(&stage("none", 1)), "none");
         assert_eq!(stage_lamp(&stage("fault", 0)), "none");
         assert_eq!(stage_lamp(&stage("turn", 0)), "none");
+        let worked = |lamp: &str| {
+            let mut stage = stage(lamp, 2);
+            stage.beads[1].working = true;
+            stage
+        };
+        assert_eq!(stage_state(&worked("none")), "moving");
+        assert_eq!(stage_state(&worked("fault")), "fault");
+        assert_eq!(stage_state(&worked("turn")), "turn");
+        assert_eq!(stage_state(&stage("none", 2)), "none");
+        assert_eq!(stage_state(&stage("none", 0)), "none");
+        // The line view's columns keep to the served lamp.
+        assert_eq!(stage_lamp(&worked("none")), "none");
+    }
+
+    /// A cell draws its worked beads first, each group in the served
+    /// order, and never reorders what no bead is worked in.
+    #[test]
+    fn a_cell_draws_its_worked_beads_before_the_waiting_ones() {
+        let bead = |id: &str, working: bool| FlowBead {
+            bead: id.to_string(),
+            working,
+            ..FlowBead::default()
+        };
+        let order = |beads: &[FlowBead]| {
+            worked_first(beads)
+                .iter()
+                .map(|bead| bead.bead.clone())
+                .collect::<Vec<_>>()
+        };
+        let served = [
+            bead("a", false),
+            bead("b", true),
+            bead("c", false),
+            bead("d", true),
+        ];
+        assert_eq!(order(&served), ["b", "d", "a", "c"]);
+        // The worked bead listed last comes first.
+        assert_eq!(order(&[bead("a", false), bead("b", true)]), ["b", "a"]);
+        assert_eq!(order(&[bead("a", false), bead("c", false)]), ["a", "c"]);
+        assert_eq!(order(&[bead("b", true), bead("d", true)]), ["b", "d"]);
+        assert!(order(&[]).is_empty());
+    }
+
+    /// A cell's "+N" says what it hides where any of it is worked: the
+    /// worked and the waiting apart, the waiting left out where none
+    /// waits. Where none of it is worked it is the number alone.
+    #[test]
+    fn a_cell_s_more_says_what_it_hides_where_any_of_it_is_worked() {
+        let hidden = |worked: usize, waiting: usize| -> Vec<String> {
+            let beads: Vec<FlowBead> = (0..worked + waiting)
+                .map(|n| FlowBead {
+                    working: n < worked,
+                    ..FlowBead::default()
+                })
+                .collect();
+            more_words(&beads.iter().collect::<Vec<_>>())
+        };
+        assert_eq!(hidden(0, 1), ["+1"]);
+        assert_eq!(hidden(0, 3), ["+3"]);
+        assert_eq!(hidden(1, 2), ["+1 working", "2 waiting"]);
+        assert_eq!(hidden(2, 0), ["+2 working"]);
+        assert_eq!(hidden(1, 0), ["+1 working"]);
+        assert_eq!(hidden(3, 1), ["+3 working", "1 waiting"]);
+    }
+
+    /// A line's head counts what is worked and what waits on its stages
+    /// but the backlog's, and the backlog; its lamp is the worst of those
+    /// stages': fault over turn over moving, and none where nothing stands.
+    /// The backlog's own lamp burns nowhere, since the panel draws it as a
+    /// count.
+    #[test]
+    fn a_line_s_head_counts_what_is_worked_what_waits_and_the_backlog() {
+        let stage = |name: &str, lamp: &str, worked: usize, waiting: usize| FlowStage {
+            stage: name.to_string(),
+            lamp: lamp.to_string(),
+            beads: (0..worked + waiting)
+                .map(|n| FlowBead {
+                    working: n < worked,
+                    ..FlowBead::default()
+                })
+                .collect(),
+            ..FlowStage::default()
+        };
+        let flow = |stages: Vec<FlowStage>| Flow {
+            stages,
+            ..Flow::default()
+        };
+        let moving = flow(vec![
+            stage("backlog", "turn", 0, 2),
+            stage("new", "none", 2, 2),
+            stage("review", "none", 0, 1),
+            stage("approved", "none", 0, 0),
+        ]);
+        assert_eq!(
+            line_counts(&moving),
+            LineCounts {
+                working: 2,
+                waiting: 3,
+                backlog: 2,
+                lamp: "moving"
+            }
+        );
+        // A stage that burns fault or turn outranks one that moves, and
+        // fault outranks turn.
+        let lamp = |stages: Vec<FlowStage>| line_counts(&flow(stages)).lamp;
+        assert_eq!(
+            lamp(vec![
+                stage("new", "none", 1, 0),
+                stage("review", "turn", 0, 1)
+            ]),
+            "turn"
+        );
+        assert_eq!(
+            lamp(vec![
+                stage("new", "none", 1, 0),
+                stage("review", "turn", 0, 1),
+                stage("approved", "fault", 0, 1),
+            ]),
+            "fault"
+        );
+        // Waiting beads alone light nothing, and an empty line says none.
+        assert_eq!(lamp(vec![stage("new", "none", 0, 3)]), "none");
+        assert_eq!(
+            line_counts(&flow(vec![stage("backlog", "turn", 0, 1)])),
+            LineCounts {
+                working: 0,
+                waiting: 0,
+                backlog: 1,
+                lamp: "none"
+            }
+        );
+        assert_eq!(line_counts(&Flow::default()).lamp, "none");
     }
 
     /// A headcode reads its marker: working in the text colour,
@@ -16818,6 +17004,128 @@ yardr.dev
         });
     }
 
+    /// The panel shows at a glance that a line is moving. A cell draws
+    /// its worked beads first, so the one headcode a crowded cell has
+    /// room for is a worked bead's though the yard lists it last, and
+    /// its "+N" counts what it hides, the worked and the waiting apart;
+    /// the worked headcode wears the running dot and a waiting one none;
+    /// a stage burns the running lamp where a bead is worked; and the
+    /// line's head carries a lamp and what is worked, what waits and the
+    /// backlog, where a line that nothing works carries no lamp and no
+    /// worked words. The served order stays in the model and in the line
+    /// view, whose columns burn the served lamp alone.
+    #[gpui::test]
+    fn the_panel_shows_a_line_is_moving_with_its_worked_beads_first(cx: &mut TestAppContext) {
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Arrivals", &arrivals_board());
+        yard.answer("Flows", &flows_moving());
+        let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
+        to_timetable(&view, cx);
+        click_on(cx, "row arrivals");
+        wait(cx, "the panel", |cx| drawn(cx, "panel track yardr default"));
+        // `new` lists its two waiting beads first and its worked ones
+        // last. Its one headcode is the first worked one, with the
+        // running dot, and the three others stand in the "+N", which
+        // says one of them is worked and two wait.
+        assert!(drawn(cx, "panel headcode yd-run1"));
+        assert!(drawn(cx, "panel running yd-run1"));
+        for hidden in ["yd-wait1", "yd-wait2", "yd-run2"] {
+            assert!(!drawn(cx, &format!("panel headcode {hidden}")), "{hidden}");
+        }
+        assert!(drawn(cx, "panel more yardr default new"));
+        assert!(drawn(cx, "panel more yardr default new +1 working"));
+        assert!(drawn(cx, "panel more yardr default new 2 waiting"));
+        // `review` draws both its beads, the worked one above the
+        // waiting one it is listed after, and only that one marked.
+        let run = bounds_of(cx, "panel headcode yd-run3");
+        let late = bounds_of(cx, "panel headcode yd-late");
+        assert!(
+            run.bottom() <= late.top() + px(1.),
+            "the worked headcode stands under the waiting one: {run:?} {late:?}"
+        );
+        assert!(drawn(cx, "panel running yd-run3"));
+        assert!(!drawn(cx, "panel running yd-late"));
+        // Three waiting beads stand in "+2" alone, as before.
+        assert!(drawn(cx, "panel headcode footplate-a"));
+        assert!(!drawn(cx, "panel running footplate-a"));
+        assert!(drawn(cx, "panel more footplate default new +2"));
+        assert!(!drawn(cx, "panel more footplate default new 1 waiting"));
+        // A stage burns the running lamp where a bead is worked, and
+        // none where none is or none stands.
+        assert!(drawn(cx, "panel lamp yardr default new"));
+        assert!(drawn(cx, "panel lamp yardr default review"));
+        assert!(!drawn(cx, "panel lamp yardr default approved"));
+        assert!(!drawn(cx, "panel lamp yardr design draft"));
+        assert!(!drawn(cx, "panel lamp footplate default new"));
+        // The head: the lamp, then what is worked, what waits and the
+        // backlog. The line nothing works has no lamp and no worked
+        // words, and counts its waiting bead.
+        for part in ["lamp", "working", "waiting", "backlog"] {
+            let part = format!("panel name yardr default {part}");
+            assert!(drawn(cx, &part), "{part}");
+        }
+        assert!(!drawn(cx, "panel name yardr design lamp"));
+        assert!(!drawn(cx, "panel name yardr design working"));
+        assert!(drawn(cx, "panel name yardr design waiting"));
+        assert!(drawn(cx, "panel name yardr design backlog"));
+        assert!(!drawn(cx, "panel name footplate default lamp"));
+        assert!(!drawn(cx, "panel name footplate default working"));
+        // The model keeps the order the yard served.
+        view.read_with(cx, |v, _| {
+            let stages = &v.model.as_ref().unwrap().depots()[0].flows[0].stages;
+            let new: Vec<&str> = stages[1].beads.iter().map(|b| b.bead.as_str()).collect();
+            assert_eq!(new, ["yd-wait1", "yd-wait2", "yd-run1", "yd-run2"]);
+        });
+        // The line view draws the served lamp alone: no lamp on a stage
+        // whose own lamp is none, though a bead is worked there.
+        click_on(cx, "panel name yardr default");
+        wait(cx, "the line", |cx| drawn(cx, "column default new"));
+        assert!(!drawn(cx, "column default new lamp"));
+        // The narrowest window, at every text size: the cells stand at
+        // their narrowest, and each phrase of the "+N" stands whole on
+        // one line inside its cell, as each part of the head does.
+        cx.simulate_resize(gpui::size(px(WINDOW_MIN), px(360.)));
+        view.update_in(cx, |v, window, cx| v.select(Selected::Arrivals, window, cx));
+        wait(cx, "the panel", |cx| drawn(cx, "panel track yardr default"));
+        for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
+            view.update(cx, |v, cx| {
+                let set = Settings {
+                    text,
+                    ..v.settings.clone()
+                };
+                v.set(set, cx)
+            });
+            let rem = f32::from(settings_of(&view, cx).rem());
+            drawn(cx, "panel");
+            let cell = bounds_now(cx, "panel stage yardr default new");
+            // At the smallest text the pane has room for wider cells.
+            assert!(
+                text == settings::TEXT_MIN
+                    || (f32::from(cell.size.width) - PANEL_MIN * rem).abs() < 1.,
+                "at {text} px the cell is {cell:?}, not its narrowest"
+            );
+            for phrase in ["+1 working", "2 waiting"] {
+                let at = bounds_now(cx, &format!("panel more yardr default new {phrase}"));
+                assert!(
+                    cell.left() <= at.left() && at.right() <= cell.right(),
+                    "at {text} px {phrase} stands off its cell: {cell:?} {at:?}"
+                );
+                assert!(
+                    f32::from(at.size.height) < rem * 1.5,
+                    "at {text} px {phrase} wraps inside itself: {at:?}"
+                );
+            }
+            for part in ["depot", "flow", "working", "waiting", "backlog"] {
+                let at = bounds_now(cx, &format!("panel name yardr default {part}"));
+                assert!(
+                    f32::from(at.size.height) < rem * 1.5,
+                    "at {text} px the head's {part} is wrapped: {at:?}"
+                );
+            }
+        }
+    }
+
     /// An unreadable quiet depot stays visible on the panel so its
     /// error is not folded away as a quiet line.
     #[gpui::test]
@@ -17188,12 +17496,13 @@ yardr.dev
         }
         // Level: in every row the rules stand at one height, whether
         // the heads wrapped (`decide · people`, `draft · people`) or not.
+        // `new` draws its worked bead, listed third, as its one headcode.
         let rem = f32::from(settings_of(&view, cx).rem());
         let mixed = rules_level(
             cx,
             rem,
             &[
-                held("yardr", "default", "new", Some("footplate-p512")),
+                held("yardr", "default", "new", Some("yd-extra")),
                 held("yardr", "default", "decide", None),
                 held("yardr", "default", "review", Some("yd-zulu")),
                 held("yardr", "default", "approved", None),
@@ -17284,11 +17593,12 @@ yardr.dev
     /// The No line card holds its headcodes: with beads travelling with
     /// no line and quiet depots folded, each headcode stands inside the
     /// card and the card ends above the Quiet row, at every text size;
-    /// a line's track with three beads on one stage holds its headcode
-    /// and its "+2" alike. The panel scrolls over its tracks instead of
-    /// squeezing them, so nothing draws over the row below. With the
-    /// quiet depots unfolded the Quiet row still stands below the card,
-    /// with the quiet tracks under it.
+    /// a line's track with three beads on one stage, two of them worked,
+    /// holds its headcode and its "+1 working · 1 waiting" alike. The
+    /// panel scrolls over its tracks instead of squeezing them, so
+    /// nothing draws over the row below. With the quiet depots unfolded
+    /// the Quiet row still stands below the card, with the quiet tracks
+    /// under it.
     #[gpui::test]
     fn the_no_line_card_holds_its_headcodes_above_the_quiet_row(cx: &mut TestAppContext) {
         let yard = Yard::start();
@@ -17326,8 +17636,11 @@ yardr.dev
                 card.bottom() <= quiet.top(),
                 "at {text} px the No line card runs over the Quiet row: {card:?} {quiet:?}"
             );
-            // A line's track with three beads on one stage: its
-            // headcode and its "+2" stand inside the track's card.
+            // A line's track with three beads on one stage, two of them
+            // worked: its headcode and its "+1 working · 1 waiting" stand
+            // inside the track's card, each phrase whole on one line
+            // inside its cell, the second under the first where the
+            // two cannot stand side by side.
             let track = bounds_now(cx, "panel track yardr default");
             let code = bounds_now(cx, "panel headcode yd-first");
             assert!(
@@ -17343,8 +17656,21 @@ yardr.dev
                     && more.right() <= track.right()
                     && track.top() <= more.top()
                     && more.bottom() <= track.bottom(),
-                "at {text} px the +2 stands off its track: {track:?} {more:?}"
+                "at {text} px the +1 working · 1 waiting stands off its track: {track:?} {more:?}"
             );
+            let cell = bounds_now(cx, "panel stage yardr default new");
+            let rem = f32::from(settings_of(&view, cx).rem());
+            for phrase in ["+1 working", "1 waiting"] {
+                let at = bounds_now(cx, &format!("panel more yardr default new {phrase}"));
+                assert!(
+                    cell.left() <= at.left() && at.right() <= cell.right(),
+                    "at {text} px phrase {phrase} of the +N stands off its cell: {cell:?} {at:?}"
+                );
+                assert!(
+                    f32::from(at.size.height) < rem * 1.5,
+                    "at {text} px phrase {phrase} of the +N wraps inside itself: {at:?}"
+                );
+            }
             quiet
         };
         for text in [settings::TEXT_MIN, settings::TEXT, settings::TEXT_MAX] {
@@ -17774,13 +18100,18 @@ yardr.dev
                         .filter(|(stage, ..)| stage == "backlog")
                         .count();
                     let backlog = format!("{backlogged} backlog");
+                    // Every stage but the backlog stands a waiting bead
+                    // and burns a lamp, so the head says how many wait,
+                    // with the lamp before the depot.
+                    let waiting = flow.stages.len() - backlogged;
+                    let waits = format!("{waiting} waiting");
                     // The name's words stand on one line each: a wrapped
                     // word would be two lines high. They hug their text,
                     // so the test platform's wide font sizes their boxes,
                     // and holding those against DejaVu says nothing; the
                     // row is held instead, as DejaVu draws it, against
                     // the card it stands in.
-                    for part in ["depot", "flow", "backlog"] {
+                    for part in ["depot", "flow", "waiting", "backlog"] {
                         let at = bounds_now(cx, &format!("panel name {depot} {name} {part}"));
                         assert!(
                             f32::from(at.size.height) < rem * 1.5,
@@ -17789,10 +18120,16 @@ yardr.dev
                     }
                     let card = bounds_now(cx, &format!("panel track {depot} {name}"));
                     let available = f32::from(card.size.width) - 1.5 * rem - 2.;
+                    // The row's two gaps and the counts' two (half a rem
+                    // each, a quarter), the dot between the counts, and
+                    // the lamp with its gap.
                     let wide = dejavu_width(depot, bold)
                         + dejavu_width(&line, small)
+                        + dejavu_width(&waits, small)
                         + dejavu_width(&backlog, small)
-                        + rem;
+                        + dejavu_width("·", small)
+                        + 1.5 * rem
+                        + 0.75 * rem;
                     assert!(
                         wide <= available,
                         "at {text} px the name overflows its card in {depot} {name}: {wide} wide in {card:?}"

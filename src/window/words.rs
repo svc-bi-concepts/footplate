@@ -3,10 +3,11 @@
 
 use gpui::{Div, Rgba, div, prelude::*, rems};
 
-use crate::api::{FlowBead, FlowStage};
+use crate::api::{Flow, FlowBead, FlowStage};
 use crate::fetch::Seen;
 use crate::model::{
-    self, ArrivalDetail, Route, Selected, WorkingGroup, held_by_you, is_held, waits_on_you,
+    self, ArrivalDetail, Route, Selected, WorkingGroup, backlog_count, held_by_you, is_held,
+    waits_on_you,
 };
 use crate::theme::Palette;
 
@@ -85,6 +86,80 @@ pub(crate) fn stage_lamp(stage: &FlowStage) -> &str {
     match stage.lamp.as_str() {
         "fault" | "turn" => stage.lamp.as_str(),
         _ => "none",
+    }
+}
+
+/// A stage's lamp as the panel draws it: [`stage_lamp`]'s fault or turn,
+/// else `moving` where a bead stands worked, as the phones' strips mark a
+/// stage, and nothing where none does. The line view's columns draw
+/// [`stage_lamp`] alone.
+pub(crate) fn stage_state(stage: &FlowStage) -> &str {
+    match stage_lamp(stage) {
+        "none" if stage.beads.iter().any(|bead| bead.working) => "moving",
+        lamp => lamp,
+    }
+}
+
+/// A stage's beads as its panel cell draws them: the worked ones first,
+/// each group in the served order, so that the headcode a cell has room
+/// for is a worked bead's whenever one stands there. For the drawing
+/// alone: the model keeps the served order, which the line view and the
+/// departures board draw.
+pub(crate) fn worked_first(beads: &[FlowBead]) -> Vec<&FlowBead> {
+    let (worked, waiting): (Vec<_>, Vec<_>) = beads.iter().partition(|bead| bead.working);
+    worked.into_iter().chain(waiting).collect()
+}
+
+/// What a cell's "+N" says of the beads it draws no headcode for, in the
+/// phrases the cell wraps whole: the number alone where none of them is
+/// worked, and where any is, the worked ones and the waiting ones apart,
+/// "+1 working", "2 waiting". A cell with a worked bead hidden would
+/// otherwise say nothing of it.
+pub(crate) fn more_words(hidden: &[&FlowBead]) -> Vec<String> {
+    let working = hidden.iter().filter(|bead| bead.working).count();
+    if working == 0 {
+        return vec![format!("+{}", hidden.len())];
+    }
+    let mut words = vec![format!("+{working} working")];
+    if hidden.len() > working {
+        words.push(format!("{} waiting", hidden.len() - working));
+    }
+    words
+}
+
+/// What a track's head says of its line: how many of the beads on its
+/// stages but the backlog's a session works and how many none does, the
+/// backlog's own count, and the lamp the line burns. Counts are words: the
+/// head says the first two where any stand, and the backlog always.
+#[derive(Debug, PartialEq)]
+pub(crate) struct LineCounts {
+    pub(crate) working: usize,
+    pub(crate) waiting: usize,
+    pub(crate) backlog: usize,
+    pub(crate) lamp: &'static str,
+}
+
+/// The counts and the lamp of a flow's head. The lamp is the worst of its
+/// stages' states, fault over turn over moving, as the phones' line cards
+/// have it, and reads the stages the panel draws a cell for: the backlog
+/// is a count, so a lamp of its own would burn in the head with none
+/// beneath it.
+pub(crate) fn line_counts(flow: &Flow) -> LineCounts {
+    let stages = || flow.stages.iter().filter(|stage| stage.stage != "backlog");
+    let working = stages()
+        .flat_map(|stage| &stage.beads)
+        .filter(|bead| bead.working)
+        .count();
+    let beads: usize = stages().map(|stage| stage.beads.len()).sum();
+    let lamp = ["fault", "turn", "moving"]
+        .into_iter()
+        .find(|lamp| stages().any(|stage| stage_state(stage) == *lamp))
+        .unwrap_or("none");
+    LineCounts {
+        working,
+        waiting: beads - working,
+        backlog: backlog_count(flow),
+        lamp,
     }
 }
 
@@ -236,13 +311,15 @@ pub(crate) fn remark_color(
     }
 }
 
-/// A stage's wait light as a dot: red for fault, rust for turn, and no
-/// dot where neither burns. Drawn from [`stage_lamp`], so an empty
-/// stage stands unlit.
+/// A lamp as a dot: red for fault, rust for turn, the running green for
+/// moving, and no dot where none burns. A stage's is drawn from
+/// [`stage_lamp`] or [`stage_state`], so an empty stage stands unlit; the
+/// panel's worked headcode wears the same dot.
 pub(crate) fn lamp_dot(lamp: &str, selector: String, palette: Palette) -> Option<Div> {
     let color = match lamp {
         "fault" => palette.warn,
         "turn" => palette.accent,
+        "moving" => palette.ok,
         _ => return None,
     };
     Some(

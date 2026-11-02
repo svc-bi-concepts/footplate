@@ -2090,7 +2090,10 @@ fn populate(yard: &Yard, state: &str) {
         // five tracks with a backlog to count, a bead jo holds, one
         // yardmaster holds and a blocked bead under a fault lamp, a
         // late and a worked bead with one more in review's full group,
-        // a wait and a person's turn under a turn lamp, a terminal
+        // a wait and a person's turn under a turn lamp, footplate's
+        // `new` with two beads worked and two waiting for a slot, as
+        // yardr.dev's line stood at 16:44 on 2 Nov (its cell draws a
+        // worked headcode and says what the rest are), a terminal
         // stage with its buffer stop and two landings under it, an
         // Elsewhere bead, two beads with no line, and drafts quiet.
         // Each stage carries its terminal flag and its routed group's
@@ -2101,7 +2104,7 @@ fn populate(yard: &Yard, state: &str) {
         // name shows in the picture.
         yard.answer(
             "Flows",
-            &with_the_longest_names(json!({"result": {
+            &with_two_at_work(with_the_longest_names(json!({"result": {
                 "travelling": 15,
                 "depots": [
                     {"name": "yardr", "kind": "git", "travelling": 10, "flows": [
@@ -2203,10 +2206,35 @@ fn populate(yard: &Yard, state: &str) {
                      "expected": "—", "remark": "waits for yardmaster, jo",
                      "tone": "amber", "working": false},
                 ],
-            }}))
+            }})))
             .to_string(),
         );
     }
+}
+
+/// The rich flows with three beads more on footplate's `new` stage, two of
+/// them worked, so that two work there and two wait for a slot, as yardr.dev's
+/// line stood at 16:44 on 2 Nov with its waiting beads listed first: the
+/// cell draws one headcode, a worked one, with the running dot, and says
+/// "+1 working · 2 waiting", under a line head that reads "2 working · 2
+/// waiting", its lamp lit. Added to the literal, not written in it: it is
+/// long enough as it stands for json! to reach its recursion limit.
+fn with_two_at_work(mut flows: serde_json::Value) -> serde_json::Value {
+    let bead = |bead: &str, working: bool| {
+        json!({"bead": bead, "title": "A bead on the stage", "expected": "1h–2h",
+               "remark": "", "tone": "none", "working": working})
+    };
+    flows["result"]["travelling"] = json!(18);
+    flows["result"]["depots"][1]["travelling"] = json!(5);
+    flows["result"]["depots"][1]["flows"][0]["stages"][0]["beads"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            bead("footplate-f2", false),
+            bead("footplate-f3", true),
+            bead("footplate-f4", true),
+        ]);
+    flows
 }
 
 /// The rich flows with this yard's longest names added: footplate's flow
@@ -2729,7 +2757,7 @@ mod tests {
                     assert_eq!(
                         loaded.flows.travelling,
                         match rich {
-                            true => 15,
+                            true => 18,
                             false => 3,
                         },
                         "{state}"
@@ -2816,7 +2844,23 @@ mod tests {
                             "{state}"
                         );
                         assert_eq!(loaded.flows.depots[0].elsewhere.len(), 1, "{state}");
-                        assert_eq!(loaded.flows.depots[1].travelling, 2, "{state}");
+                        // footplate's `new`: a bead waiting, one more waiting
+                        // and two worked, the worked ones listed last.
+                        assert_eq!(loaded.flows.depots[1].travelling, 5, "{state}");
+                        assert_eq!(
+                            loaded.flows.depots[1].flows[0].stages[0]
+                                .beads
+                                .iter()
+                                .map(|b| (b.bead.as_str(), b.working))
+                                .collect::<Vec<_>>(),
+                            [
+                                ("footplate-f1", false),
+                                ("footplate-f2", false),
+                                ("footplate-f3", true),
+                                ("footplate-f4", true),
+                            ],
+                            "{state}"
+                        );
                         assert_eq!(loaded.flows.depots[2].travelling, 0, "{state}");
                         // This yard's longest names: the stages of people
                         // with the longest heads, and the longest line.

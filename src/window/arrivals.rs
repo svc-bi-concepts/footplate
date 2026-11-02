@@ -3,8 +3,8 @@
 //! travel with no line.
 
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, SharedString, div, prelude::*, px, relative,
-    rems, rgba,
+    AnyElement, Context, FontWeight, MouseButton, SharedString, div, prelude::*, relative, rems,
+    rgba,
 };
 
 use super::Footplate;
@@ -20,11 +20,12 @@ use super::panel::{
 use super::rail::RailTip;
 use super::screen::screen_control;
 use super::words::{
-    bead_words, flow_words, headcode_color, lamp_dot, landed_age, remark_color, stage_group_words,
-    stage_lamp, waiting_words, waits_for_seat, worker_words, working_tip, working_words,
+    LineCounts, bead_words, flow_words, headcode_color, lamp_dot, landed_age, line_counts,
+    more_words, remark_color, stage_group_words, stage_lamp, stage_state, waiting_words,
+    waits_for_seat, worked_first, worker_words, working_tip, working_words,
 };
 use crate::api::{Arrival, Flow, FlowBead, FlowDepot, FlowLanding, FlowStage};
-use crate::model::{self, Mode, Model, Selected, backlog_count, short_bead, stage_age, you_first};
+use crate::model::{self, Mode, Model, Selected, short_bead, stage_age, you_first};
 use crate::select;
 use crate::theme::Palette;
 
@@ -658,7 +659,7 @@ impl Footplate {
             true => flow.name.clone(),
             false => format!("{} · {}", flow.name, flow.flow_type),
         };
-        let count = backlog_count(flow);
+        let counts = line_counts(flow);
         let mut stages = div().flex().flex_row().flex_wrap().w_full().min_w_0();
         for stage in flow.stages.iter().filter(|stage| stage.stage != "backlog") {
             stages = stages.child(self.panel_cell(
@@ -680,7 +681,7 @@ impl Footplate {
             .child(self.panel_name(
                 depot.name.clone(),
                 second,
-                Some(count),
+                Some(counts),
                 Selected::Line(depot.name.clone()),
                 format!("panel name {} {}", depot.name, flow.name),
                 palette,
@@ -690,21 +691,27 @@ impl Footplate {
     }
 
     /// One track's name above its stages: the depot's name with the
-    /// flow's name and type and the backlog count on one line, opening
+    /// flow's name and type and the line's counts on one line, opening
     /// the line. The depot stands in the label type, the flow and the
-    /// count in the meta type; where one line cannot hold them they wrap
-    /// whole, never cut.
+    /// counts in the meta type; where one line cannot hold them they wrap
+    /// whole, never cut. The counts are words: what is worked and what
+    /// waits, each where any stands, then the backlog, which the track
+    /// has no cell for. The lamp stands before the depot where the line
+    /// burns one, so a line with work under way reads as lit.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn panel_name(
         &self,
         first: String,
         second: String,
-        backlog: Option<usize>,
+        counts: Option<LineCounts>,
         to: Selected,
         what: String,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let lamp = counts
+            .as_ref()
+            .and_then(|counts| lamp_dot(counts.lamp, format!("{what} lamp"), palette));
         let mut row = div()
             .id(SharedString::from(what.clone()))
             .debug_selector({
@@ -726,13 +733,21 @@ impl Footplate {
             .on_click(cx.listener(move |this, _, window, cx| this.select(to.clone(), window, cx)))
             .child(
                 div()
-                    .debug_selector({
-                        let what = what.clone();
-                        move || format!("{what} depot")
-                    })
-                    .line_height(rems(1.25))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(first),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .children(lamp)
+                    .child(
+                        div()
+                            .debug_selector({
+                                let what = what.clone();
+                                move || format!("{what} depot")
+                            })
+                            .line_height(rems(1.25))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(first),
+                    ),
             );
         if !second.is_empty() {
             row = row.child(
@@ -745,34 +760,64 @@ impl Footplate {
                     .child(second),
             );
         }
-        if let Some(count) = backlog {
-            row = row.child(
-                panel_meta()
-                    .debug_selector(move || format!("{what} backlog"))
-                    .text_color(match count {
-                        0 => palette.faint,
-                        _ => palette.text,
-                    })
-                    .child(format!("{count} backlog")),
-            );
+        if let Some(counts) = counts {
+            let mut words = Vec::new();
+            if counts.working > 0 {
+                words.push(("working", counts.working, palette.text));
+            }
+            if counts.waiting > 0 {
+                words.push(("waiting", counts.waiting, palette.text));
+            }
+            words.push((
+                "backlog",
+                counts.backlog,
+                match counts.backlog {
+                    0 => palette.faint,
+                    _ => palette.text,
+                },
+            ));
+            let mut tally = div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_baseline()
+                .gap_x_1();
+            for (n, (part, count, color)) in words.into_iter().enumerate() {
+                if n > 0 {
+                    tally = tally.child(panel_meta().text_color(palette.faint).child("·"));
+                }
+                tally = tally.child(
+                    panel_meta()
+                        .debug_selector({
+                            let what = what.clone();
+                            move || format!("{what} {part}")
+                        })
+                        .text_color(color)
+                        .child(format!("{count} {part}")),
+                );
+            }
+            row = row.child(tally);
         }
         row
     }
 
-    /// One stage's cell: its name with the lamp where one burns and
-    /// the buffer stop where the stage is terminal, the track through
+    /// One stage's cell: its name with the lamp where one burns (the
+    /// running green where a bead is worked and no fault or turn burns)
+    /// and the buffer stop where the stage is terminal, the track through
     /// it, and two headcodes, the second reading "+N" where a third bead
-    /// stands on it. Lit only with a bead on it: an empty stage stands
-    /// on its track's card, its name faint, and an occupied one steps up
-    /// to the raised surface. The cells of a track share its width, each
-    /// one of `columns` to the card and never narrower than a headcode;
-    /// a head longer than its cell wraps whole onto a second line. Every
-    /// head stands two lines high with its words on the rule, so a head
-    /// of one line and a head of two put the rule at one place: the
-    /// rules of a row are one straight track, and of every track alike,
-    /// with no row measured for its tallest head. A name that wants a
-    /// third line makes its own cell taller rather than run over the row
-    /// above.
+    /// stands on it. The worked beads stand first, so the headcode drawn
+    /// is a worked bead's whenever one is there, and the "+N" says what
+    /// it hides where any of that is worked. Lit only with a bead on it:
+    /// an empty stage stands on its track's card, its name faint, and an
+    /// occupied one steps up to the raised surface. The cells of a track
+    /// share its width, each one of `columns` to the card and never
+    /// narrower than a headcode; a head longer than its cell wraps whole
+    /// onto a second line. Every head stands two lines high with its
+    /// words on the rule, so a head of one line and a head of two put the
+    /// rule at one place: the rules of a row are one straight track, and
+    /// of every track alike, with no row measured for its tallest head.
+    /// A name that wants a third line makes its own cell taller rather
+    /// than run over the row above.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn panel_cell(
         &self,
@@ -786,7 +831,7 @@ impl Footplate {
     ) -> impl IntoElement + use<> {
         let lit = !stage.beads.is_empty();
         let lamp = lamp_dot(
-            stage_lamp(stage),
+            stage_state(stage),
             format!("panel lamp {} {} {}", depot.name, flow.name, stage.stage),
             palette,
         );
@@ -854,7 +899,7 @@ impl Footplate {
                 move || format!("panel rule {depot} {flow} {stage}")
             }));
         let mut codes = div().flex().flex_col().px_2().pb_1p5();
-        match stage.beads.as_slice() {
+        match worked_first(&stage.beads).as_slice() {
             [] => {}
             [one] => {
                 codes = codes.child(self.panel_headcode(one, mono, palette, cx));
@@ -863,18 +908,43 @@ impl Footplate {
                 codes = codes.child(self.panel_headcode(one, mono.clone(), palette, cx));
                 codes = codes.child(self.panel_headcode(two, mono, palette, cx));
             }
-            [one, ..] => {
+            [one, hidden @ ..] => {
                 codes = codes.child(self.panel_headcode(one, mono, palette, cx));
-                codes = codes.child(
-                    panel_meta()
-                        .debug_selector({
-                            let (depot, flow, stage) =
-                                (depot.name.clone(), flow.name.clone(), stage.stage.clone());
-                            move || format!("panel more {depot} {flow} {stage}")
-                        })
-                        .text_color(palette.faint)
-                        .child(format!("+{}", stage.beads.len() - 1)),
-                );
+                // The phrases wrap whole, so that a narrow cell breaks
+                // between "+1 working" and "2 waiting" and never inside
+                // either; the dot joins them as the summary's does.
+                let mut more = panel_meta()
+                    .debug_selector({
+                        let (depot, flow, stage) =
+                            (depot.name.clone(), flow.name.clone(), stage.stage.clone());
+                        move || format!("panel more {depot} {flow} {stage}")
+                    })
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_x_1()
+                    .text_color(palette.faint);
+                for (n, words) in more_words(hidden).into_iter().enumerate() {
+                    if n > 0 {
+                        more = more.child("·");
+                    }
+                    // Named by its words, which is how a test reads them.
+                    more = more.child(
+                        div()
+                            .debug_selector({
+                                let (depot, flow, stage, words) = (
+                                    depot.name.clone(),
+                                    flow.name.clone(),
+                                    stage.stage.clone(),
+                                    words.clone(),
+                                );
+                                move || format!("panel more {depot} {flow} {stage} {words}")
+                            })
+                            .whitespace_nowrap()
+                            .child(words),
+                    );
+                }
+                codes = codes.child(more);
             }
         }
         cell = cell.child(codes);
@@ -883,8 +953,10 @@ impl Footplate {
 
     /// One bead's headcode on the panel: the short handle in its
     /// marker drawing, in mono, opening the bead. A bead being worked
-    /// carries the running dot at its left, and hovering it says which
-    /// session works it, with its group, kind and model.
+    /// carries the running dot at its left, the lamp's own dot, and the
+    /// semibold weight, so that it stands apart from a waiting one by a
+    /// mark and a weight, not by colour; hovering it says which session
+    /// works it, with its group, kind and model.
     pub(crate) fn panel_headcode(
         &self,
         bead: &FlowBead,
@@ -929,10 +1001,14 @@ impl Footplate {
             .when_some(tip, |el, tip| {
                 el.tooltip(move |_, cx| cx.new(|_| RailTip(tip.clone())).into())
             })
-            .children(
-                bead.working
-                    .then(|| div().size(px(6.)).rounded_full().bg(palette.ok).flex_none()),
-            )
+            .children(lamp_dot(
+                match bead.working {
+                    true => "moving",
+                    false => "none",
+                },
+                format!("panel running {name}"),
+                palette,
+            ))
             .child(text)
     }
 
