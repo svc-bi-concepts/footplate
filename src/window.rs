@@ -11485,7 +11485,9 @@ yardr.dev
 
         // The person speaks: the caption shows their words as they come.
         // The model delegates, and the request goes to the yard as their
-        // own mail in the open conversation, as Enter's would.
+        // own mail in the open conversation, as Enter's would, once the
+        // session's clock has ended their utterance: two seconds after the
+        // last words.
         live.person_says("What's blocking", 1000, 1600);
         wait(cx, "the first words", |cx| {
             caption_of(&view, cx) == "What's blocking"

@@ -862,6 +862,10 @@ impl Flights {
 /// that one, so a request spoken while it waits is held, and goes when it
 /// lands. Run 6 showed what happens otherwise: the answer to one question
 /// came in as the next was asked, and was spoken as that one's.
+///
+/// A task is taken only from a finished utterance. A request held while the
+/// person is still speaking waits for them to stop, so that half a sentence
+/// is never a mail of its own with the rest going as another.
 #[derive(Default)]
 pub struct Book {
     heard: Vec<Fragment>,
@@ -869,8 +873,9 @@ pub struct Book {
     /// when a task is taken, since a pause is told from it.
     last_end: Option<u64>,
     flights: Flights,
-    /// Delegations the model raised while a mail was in flight. Their
-    /// request is held, and goes as one mail when that lands.
+    /// Delegations the model raised while a mail was in flight or the person
+    /// was speaking. Their request is held, and goes as one mail when the
+    /// mail has landed and the person has stopped.
     parked: VecDeque<String>,
     /// The last answer the voice was given to speak, for the person who asks
     /// to hear it again.
@@ -878,7 +883,8 @@ pub struct Book {
     appended: u64,
     /// The person is speaking: their input transcript is still arriving, and
     /// no gap has ended their utterance (step 1 of 3.3). Set by every piece
-    /// heard, cleared by [`Book::stopped`].
+    /// heard, cleared by [`Book::stopped`]. No task is taken while it stands:
+    /// what is held is not a whole utterance yet.
     speaking: bool,
     /// Typed answers (and a typed mail's refusal) that landed while the
     /// person was speaking, waiting for [`Book::stopped`]: speech never
@@ -918,12 +924,14 @@ impl Book {
     /// known whether one will be made (the words may hold no request, the mail
     /// may be held behind another, the yard may be away).
     ///
-    /// Where a mail is in flight the request stays held with the delegation
-    /// parked, and goes when the mail lands. Otherwise it goes now, as a
-    /// request.
+    /// Where a mail is in flight, or the person is still speaking, the
+    /// request stays held with the delegation parked, and goes when the mail
+    /// has landed and the person has stopped: a delegation carries no words,
+    /// and what is held so far may be half a sentence. Otherwise it goes
+    /// now, as a request.
     pub fn raised(&mut self, id: &str) -> Vec<Step> {
         let mut steps = vec![self.append(Kind::Thinking, Some(id), "")];
-        if self.flights.is_empty() {
+        if self.ready() {
             steps.extend(self.settle(Some(id.to_string())));
         } else {
             self.parked.push_back(id.to_string());
@@ -940,7 +948,10 @@ impl Book {
 
     /// The person has stopped talking: the gap of step 1 of 3.3 has ended
     /// their utterance, so what landed while they spoke goes to the voice
-    /// now, under no delegation, in the order it landed.
+    /// now, under no delegation, in the order it landed. Then the request a
+    /// delegation was parked for goes, whole, where no mail is in flight.
+    /// Words no delegation was raised for stay held for the model's next:
+    /// nothing sends them on silence.
     pub fn stopped(&mut self) -> Vec<Step> {
         self.speaking = false;
         let mut steps = Vec::new();
@@ -950,6 +961,9 @@ impl Book {
                 self.last_answer = Some(text.trim().to_string());
             }
             steps.extend(said);
+        }
+        if !self.parked.is_empty() {
+            steps.extend(self.release());
         }
         steps
     }
@@ -967,7 +981,8 @@ impl Book {
     /// the one that is waits for nothing, nothing is appended: the mail in
     /// the conversation is its record. A typed answer that lands while the
     /// person is speaking waits for [`Book::stopped`]. The request held
-    /// while the mail was in flight goes next.
+    /// while the mail was in flight goes next, unless the person is still
+    /// speaking: it waits for them to stop too.
     pub fn answered(&mut self, text: &str) -> Vec<Step> {
         let Some(mut steps) = self.close(text, true) else {
             return Vec::new();
@@ -982,7 +997,7 @@ impl Book {
     /// The yard refused the mail, or went away after it was sent. The yard's
     /// own `words` are what the voice is given to speak, once, under the
     /// delegation that waited; the mail is not sent again. The request held
-    /// behind it goes next.
+    /// behind it goes next, as it does after an answer.
     pub fn refused(&mut self, words: &str) -> Vec<Step> {
         let Some(mut steps) = self.close(words, false) else {
             return Vec::new();
@@ -1058,12 +1073,19 @@ impl Book {
         })
     }
 
-    /// A mail has landed: the request held while it was in flight goes now,
-    /// for the newest delegation parked. That one was raised for the last
-    /// request, and the older ones for what it replaced; they close.
+    /// Whether a task may be taken now: no mail is in flight (the
+    /// counterpart's next could answer only that one), and the person has
+    /// finished speaking, so that what is held is a whole utterance.
+    fn ready(&self) -> bool {
+        self.flights.is_empty() && !self.speaking
+    }
+
+    /// A mail has landed, or the person has stopped: the request held goes
+    /// now, for the newest delegation parked. That one was raised for the
+    /// last request, and the older ones for what it replaced; they close.
+    /// Until both have happened it stays held, whole, with the delegations.
     fn release(&mut self) -> Vec<Step> {
-        // A request goes only when no mail is in flight.
-        if !self.flights.is_empty() {
+        if !self.ready() {
             return Vec::new();
         }
         let delegation = self.parked.pop_back();
@@ -2536,7 +2558,9 @@ impl Session {
                 return;
             }
             // The person has stopped: no words heard for the gap that ends
-            // an utterance, so what a typed answer waited for goes now.
+            // an utterance, so what waited for that goes now: a typed
+            // answer for the voice, and the request of a delegation raised
+            // while they spoke.
             if self.book.speaking()
                 && self
                     .last_heard
@@ -3476,10 +3500,20 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn hear(book: &mut Book, pieces: &[(&str, u64, u64)]) {
+    /// The person says `pieces` and goes on: no gap has ended their
+    /// utterance, so no task is taken from it yet.
+    fn hear_part(book: &mut Book, pieces: &[(&str, u64, u64)]) {
         for fragment in said(pieces) {
             book.heard(fragment);
         }
+    }
+
+    /// The person says `pieces` and falls silent: the gap that ends their
+    /// utterance passes before the model or the yard does anything, as the
+    /// session's thread sees it. Nothing waited for it.
+    fn hear(book: &mut Book, pieces: &[(&str, u64, u64)]) {
+        hear_part(book, pieces);
+        assert!(book.stopped().is_empty());
     }
 
     #[test]
@@ -3524,6 +3558,39 @@ pub(crate) mod tests {
             ["What's blocking the release? And who owns it?"]
         );
         assert!(steps.contains(&Step::Taken));
+        // Not while the person is still speaking: a delegation carries no
+        // words, and what is held so far may be half a sentence. It gets its
+        // quiet append, parks, and takes nothing, with no mail in flight.
+        let mut book = Book::new();
+        hear_part(&mut book, &[("What's blocking the", 1000, 2000)]);
+        let steps = book.raised("del_3");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(append_of(&steps[0]).delegation.as_deref(), Some("del_3"));
+        assert!(!book.waiting());
+        // They finish the sentence, and when they stop it goes whole, as one
+        // mail, for the delegation that was raised in the middle of it.
+        hear_part(&mut book, &[(" release", 2300, 2800)]);
+        let steps = book.stopped();
+        assert_eq!(requests(&steps), ["What's blocking the release"]);
+        assert!(steps.contains(&Step::Taken));
+        assert!(book.waiting());
+        let steps = book.answered("Only the Windows zip is left.");
+        assert_eq!(
+            spoken(&steps),
+            [(
+                Some("del_3".to_string()),
+                "Only the Windows zip is left.".to_string()
+            )]
+        );
+        // Words no delegation was raised for are not sent when the person
+        // stops, however plain the request: nothing sends on silence. The
+        // delegation that comes after takes them, whole.
+        let mut book = Book::new();
+        hear_part(&mut book, &[("What's blocking the release", 1000, 2000)]);
+        assert!(book.stopped().is_empty());
+        assert!(!book.waiting());
+        let steps = book.raised("del_4");
+        assert_eq!(requests(&steps), ["What's blocking the release"]);
     }
 
     #[test]
@@ -3616,6 +3683,9 @@ pub(crate) mod tests {
             ),
             (Kind::Thinking, Some("del_2"), "")
         );
+        // They stop while the yard still works: the mail in flight holds the
+        // request back, as it did while they spoke.
+        assert!(book.stopped().is_empty());
         // The answer to the first goes under the first's id; only then does
         // the held request go, as the second's.
         let steps = book.answered("Only the Windows zip.");
@@ -3729,6 +3799,32 @@ pub(crate) mod tests {
         );
         assert!(!book.waiting());
         assert!(book.answered("late").is_empty());
+
+        // The mail lands while the person is still speaking: the answer is
+        // spoken at once, and the request waits for them to stop, then goes
+        // whole, for the newest delegation, which was parked while they
+        // spoke with no mail in flight.
+        let mut book = Book::new();
+        hear(&mut book, RUN_6_FIRST);
+        book.raised("del_1");
+        hear_part(&mut book, &[("What about the zip", 20000, 21000)]);
+        book.raised("del_2");
+        let steps = book.answered("Left.");
+        assert_eq!(
+            spoken(&steps),
+            [(Some("del_1".to_string()), "Left.".to_string())]
+        );
+        assert!(requests(&steps).is_empty() && !steps.contains(&Step::Taken));
+        hear_part(&mut book, &[(" and the tests", 21300, 22000)]);
+        book.raised("del_3");
+        let steps = book.stopped();
+        assert_eq!(requests(&steps), ["What about the zip and the tests"]);
+        let steps = book.answered("They pass.");
+        assert_eq!(
+            spoken(&steps),
+            [(Some("del_3".to_string()), "They pass.".to_string())]
+        );
+        assert!(!book.waiting());
     }
 
     #[test]
@@ -4390,25 +4486,26 @@ pub(crate) mod tests {
         let mut book = Book::new();
         book.typed_sent();
         // The person is speaking as the answer lands: nothing goes to the
-        // voice yet. (What they say here asks nothing of the yard, so no
-        // held request goes either, though the words are taken.)
-        hear(&mut book, &[("Hello", 1000, 1200)]);
+        // voice yet, and no task is taken from what they have said so far,
+        // which is no whole utterance: the words stay held.
+        hear_part(&mut book, &[("Hello", 1000, 1200)]);
         assert!(book.speaking());
-        assert_eq!(
-            book.answered("Only the Windows zip is left."),
-            [Step::Taken]
-        );
+        assert!(book.answered("Only the Windows zip is left.").is_empty());
         // They go on: still speaking, and still nothing has gone.
-        hear(&mut book, &[("Thanks", 1700, 2000)]);
+        hear_part(&mut book, &[("Thanks", 1700, 2000)]);
         assert!(book.speaking());
-        // They have stopped: the answer goes, under no delegation.
+        // They have stopped: the answer goes, under no delegation, and only
+        // it. No delegation is parked for their words, so they stay held for
+        // the model's next.
         let steps = book.stopped();
         assert!(!book.speaking());
         assert_eq!(
             spoken(&steps),
             [(None, "Only the Windows zip is left.".to_string())]
         );
-        // And it is the last answer, to be heard again under a delegation.
+        assert!(requests(&steps).is_empty() && !steps.contains(&Step::Taken));
+        // And it is the last answer, to be heard again under a delegation,
+        // which takes what was held with the new words.
         hear(&mut book, &[("Say that again, please", 20000, 21000)]);
         let steps = book.raised("del_1");
         assert_eq!(
@@ -4418,6 +4515,37 @@ pub(crate) mod tests {
                 "Only the Windows zip is left.".to_string()
             )]
         );
+        assert!(steps.contains(&Step::Taken));
+
+        // The answer lands in the middle of a sentence, and the model's
+        // delegation comes for the sentence while the person is still on it.
+        // The half sentence goes as no mail of its own: the answer is
+        // spoken when they stop, and the sentence goes whole after it, as
+        // the one mail of that delegation.
+        let mut book = Book::new();
+        book.typed_sent();
+        hear_part(&mut book, &[("What's blocking the", 1000, 1800)]);
+        assert!(book.answered("Only the Windows zip is left.").is_empty());
+        hear_part(&mut book, &[(" release", 2100, 2500)]);
+        assert_eq!(book.raised("del_2").len(), 1, "only the quiet append");
+        assert!(!book.waiting());
+        let steps = book.stopped();
+        assert_eq!(
+            spoken(&steps),
+            [(None, "Only the Windows zip is left.".to_string())]
+        );
+        assert_eq!(requests(&steps), ["What's blocking the release"]);
+        assert!(
+            matches!(steps.last(), Some(Step::Request(_))),
+            "the request goes after the answer"
+        );
+        // The delegation waits for its own answer now, and nothing else went.
+        let steps = book.answered("The Windows zip.");
+        assert_eq!(
+            spoken(&steps),
+            [(Some("del_2".to_string()), "The Windows zip.".to_string())]
+        );
+        assert!(requests(&steps).is_empty());
     }
 
     /// The part of a session's thread that matters here, with no thread: it
@@ -4529,6 +4657,13 @@ pub(crate) mod tests {
             self.pump();
             id
         }
+
+        /// The gap that ends the person's utterance passes, as the thread
+        /// sees it: what waited for them to stop goes.
+        fn stops(&mut self) {
+            let steps = self.book.stopped();
+            self.obey(steps);
+        }
     }
 
     #[test]
@@ -4541,6 +4676,11 @@ pub(crate) mod tests {
         // Run 4: a greeting, a noise tag cut in two, a question.
         session.person_says(RUN_4);
         let first = session.delegate();
+        // The model's turn ended inside the gap that ends their utterance:
+        // the delegation takes nothing yet.
+        assert!(session.requests.is_empty());
+        assert_eq!(session.taken, 0);
+        session.stops();
         // The mail is the person's request and nothing the model said, and
         // the words are taken.
         assert_eq!(session.requests, ["What's blocking the release"]);
@@ -4571,8 +4711,11 @@ pub(crate) mod tests {
         assert_eq!(session.live.appends().len(), 2);
         assert_eq!(session.live.delay_passes(), 0);
 
-        // The yard answers the first; the answer is spoken under the first's
-        // id, in chunks, and the held request goes after it.
+        // They have stopped, and the mail in flight still holds the request
+        // back. The yard answers the first; the answer is spoken under the
+        // first's id, in chunks, and the held request goes after it.
+        session.stops();
+        assert_eq!(session.requests.len(), 1);
         let answer = "Everything else has landed. ".repeat(20);
         session.mail(&answer);
         session.pump();
@@ -4647,8 +4790,7 @@ pub(crate) mod tests {
         session.mail("The held answer.");
         session.pump();
         assert_eq!(session.live.appends().len(), count + 1);
-        let steps = session.book.stopped();
-        session.obey(steps);
+        session.stops();
         session.pump();
         let appends = session.live.appends();
         assert_eq!(appends.len(), count + 2);
@@ -5024,7 +5166,10 @@ pub(crate) mod tests {
 
         // Run 4's words, then a delegation: the request is what they ask,
         // the words are taken before it goes (the caption's line goes with
-        // them), and the empty thinking append went out as it arrived.
+        // them), and the empty thinking append went out as it arrived. The
+        // delegation comes while they are still speaking, so the request
+        // goes when the thread's clock ends their utterance, two seconds
+        // after the last words (here and for the next request).
         for (text, start, end) in RUN_4 {
             live.person_says(text, *start, *end);
         }

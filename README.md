@@ -1749,9 +1749,9 @@ folder. A change is drawn at once and kept for the next start:
   yet (a pause does not clear it; a long one shows its last words), and
   the head's right counts the minutes and what they have cost at OpenAI's
   rate, $0.05 a minute. When the voice sends something to the yard, it goes
-  as your own mail in that conversation, as Enter would send it, with the
-  requests and replies it has held since its previous send, in the order you
-  said them;
+  as your own mail in that conversation, as Enter would send it, once you
+  have stopped talking, with the requests and replies it has held since its
+  previous send, in the order you said them;
   while the yard is away it is refused, once, and nothing is queued or sent
   when the yard returns. The mail the other side answers with is spoken by the voice
   in its own words, and the written mail stays the record. A decision that comes up in the window is
