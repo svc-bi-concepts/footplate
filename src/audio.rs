@@ -1111,8 +1111,11 @@ mod tests {
         // here take mono PCM16 in and give it out, and name no event, key or
         // delegation of any. This reads the module above its tests, which
         // name these words to look for them.
-        let source = include_str!("audio.rs");
-        let source = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        // A Windows checkout has CRLF line ends, which the cut must not miss.
+        let source = include_str!("audio.rs").replace("\r\n", "\n");
+        let (source, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the module's tests are where the cut looks for them");
         for word in [
             "OpenAI",
             "GPT",
