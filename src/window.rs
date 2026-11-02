@@ -11481,13 +11481,21 @@ yardr.dev
         wait(cx, "the caption", |cx| {
             caption_of(&view, cx) == "What's blocking the release?"
         });
+        // The person pauses and goes on: the caption keeps the first part
+        // beside the second, and the delegation that comes takes both into
+        // the one mail, and the line with them.
+        live.person_says("And who owns it?", 6000, 7000);
+        wait(cx, "both parts in the caption", |cx| {
+            caption_of(&view, cx) == "What's blocking the release? And who owns it?"
+        });
         let first = live.delegate(0);
         wait(cx, "the mail sent", |_| {
             yard.asked("Mail")
                 == [
-                    json!({"to": "yardmaster", "text": "What's blocking the release?", "actor": "jo"}),
+                    json!({"to": "yardmaster", "text": "What's blocking the release? And who owns it?", "actor": "jo"}),
                 ]
         });
+        wait(cx, "the words taken", |cx| caption_of(&view, cx).is_empty());
         // While the yard works the words beside the button say so, as the
         // row names them.
         wait_voice(&view, cx, "yardmaster is working");
@@ -11496,13 +11504,13 @@ yardr.dev
         // and of the yardmaster's answer, which is: whole, under the
         // delegation's id and no other, with both mails standing in the
         // conversation as the record.
-        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "What's blocking the release?"}, "at": "2026-10-08T09:31:00Z"}"#);
+        yard.emit(r#"{"seq": 21, "kind": "mail", "actor": "jo", "data": {"to": "yardmaster", "text": "What's blocking the release? And who owns it?"}, "at": "2026-10-08T09:31:00Z"}"#);
         yard.emit(&answer_event(22, "Only the Windows zip is left."));
         wait(cx, "both mails in the conversation", |cx| {
             texts(&view, cx)
                 == [
                     "Shall I land it?",
-                    "What's blocking the release?",
+                    "What's blocking the release? And who owns it?",
                     "Only the Windows zip is left.",
                 ]
         });
@@ -11559,6 +11567,29 @@ yardr.dev
                         == 0
                 })
         });
+
+        // The person goes on and nothing takes it: the caption holds all of
+        // it, and its line shows the last words, from a whole word on, so
+        // that what it holds cannot fill the window.
+        for n in 0..12_u64 {
+            live.person_says(
+                &format!(" and then {n:02} more of it"),
+                40_300 + n * 100,
+                40_400 + n * 100,
+            );
+        }
+        wait(cx, "all of it in the caption", |cx| {
+            caption_of(&view, cx).ends_with("11 more of it")
+        });
+        let all = caption_of(&view, cx);
+        let line = view
+            .read_with(cx, |v, _| v.voice_caption_words())
+            .expect("a session stands");
+        assert!(all.chars().count() > voice::CAPTION_MAX, "{all:?}");
+        assert!(line.chars().count() <= voice::CAPTION_MAX, "{line:?}");
+        let shown = line.strip_prefix('…').expect("an ellipsis in front");
+        assert!(all.ends_with(shown), "{line:?}");
+        assert!(all[..all.len() - shown.len()].ends_with(' '), "{line:?}");
 
         // A decision of the yardmaster's comes up: the voice is directed
         // to the card in the window, with nothing of it, and given nothing
@@ -11710,8 +11741,10 @@ yardr.dev
         // Keep the utterance open after the answer lands. The direction for
         // this ask is a voice-command barrier after the answer command.
         live.person_says(" still here", 1800, 2000);
+        // The caption ends with them. Whether 'Hello there' stands before
+        // them is no matter here: a mail that lands takes the words held.
         wait(cx, "the person still speaking", |cx| {
-            caption_of(&view, cx) == "Hello there still here"
+            caption_of(&view, cx).ends_with("still here")
         });
         yard.answer(
             "UserAsks",

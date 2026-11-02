@@ -43,7 +43,8 @@ use crate::yard::Env;
 /// the consent words, the yardmaster's conversation with a voice session
 /// standing in it, as a tap on the composer's Voice button makes one, so that
 /// the button is Stop, against a stand-in for OpenAI's socket with the
-/// caption of what the person is saying, and the same conversation with
+/// caption of what the person has said (two asks, a pause between), and the
+/// same conversation with
 /// voice on and no session, the button saying Voice, and with a line typed
 /// in the composer, the button saying Send, the yards with a
 /// far yard's rename form open in its card, a running
@@ -357,10 +358,12 @@ pub(crate) fn voice() -> Option<&'static str> {
 }
 
 /// The stand-in for the voice shot: a socket that serves a `Live` whose
-/// person asks the yardmaster one question once the session has started, so
-/// that the caption stands under the head in the middle of the session the
-/// shot shows. The words come with no question mark, as the transcripts of
-/// runs 3 to 6 have them: the server's transcript marks none.
+/// person asks the yardmaster a question once the session has started, and
+/// after a pause asks another, so that the caption stands under the head in
+/// the middle of the session the shot shows, with both asks in it: the model
+/// raises no delegation, so nothing takes the words. The words come with no
+/// question mark, as the transcripts of runs 3 to 6 have them: the server's
+/// transcript marks none.
 fn stand_voice() -> Talking {
     let live = std::sync::Arc::new(Live::start());
     // An hour on, as a session's moment stands in the window's tests: the
@@ -380,6 +383,9 @@ fn stand_voice() -> Talking {
                 .any(|event| event["type"] == "session.start")
             {
                 live.person_says("What's blocking the release", 0, 1800);
+                // Past the pause that ends an utterance: the second ask is
+                // another, and the caption keeps the first beside it.
+                live.person_says("And who owns it", 4200, 5400);
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3462,9 +3468,10 @@ mod tests {
     /// The voice shot's stand-in makes a session as the window starts one,
     /// with the key the window gives it and a moment that is not past, and
     /// the person's words come once it stands: before it, the caption would
-    /// have nothing to show; past, the session would end as it began.
+    /// have nothing to show; past, the session would end as it began. They
+    /// are two asks, a pause between, which the caption holds together.
     #[test]
-    fn the_voice_shot_stands_a_session_and_the_person_asks_their_question() {
+    fn the_voice_shot_stands_a_session_and_the_person_asks_their_questions() {
         let talking = stand_voice();
         let (tell, updates) = std::sync::mpsc::channel();
         let crate::voice::Start::On(voice) = crate::voice::gated_start(
@@ -3482,12 +3489,23 @@ mod tests {
                 .expect("an update in five seconds")
         };
         assert_eq!(next(), crate::voice::Update::Started);
-        match next() {
-            crate::voice::Update::Words(fragment) => {
-                assert_eq!(fragment.text, "What's blocking the release")
-            }
-            other => panic!("the person's words were expected, not {other:?}"),
+        let mut caption = crate::voice::Caption::default();
+        for ask in ["What's blocking the release", "And who owns it"] {
+            // Each ask begins an utterance, which the session tells of too.
+            let fragment = loop {
+                match next() {
+                    crate::voice::Update::SpeechStarted => {}
+                    crate::voice::Update::Words(fragment) => break fragment,
+                    other => panic!("the person's words were expected, not {other:?}"),
+                }
+            };
+            assert_eq!(fragment.text, ask);
+            caption.heard(fragment);
         }
+        assert_eq!(
+            caption.text(),
+            "What's blocking the release And who owns it"
+        );
         drop(voice);
     }
 }

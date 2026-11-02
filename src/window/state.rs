@@ -470,7 +470,8 @@ pub(crate) struct Talk {
     pub(crate) _updates: Task<()>,
     /// When the session stood, which its minutes count from: none before.
     pub(crate) stood: Option<Instant>,
-    /// What the person is saying, which the caption shows.
+    /// What the person has said that no request has taken, which the
+    /// caption shows.
     pub(crate) caption: Caption,
     /// The window's own words in the caption's place, where what was said did
     /// not go to the yard: why. Gone when the person speaks again.

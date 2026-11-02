@@ -423,6 +423,9 @@ impl Footplate {
                 talk.words = None;
                 talk.quiet_since = now;
             }
+            // What the caption held has gone to the yard, or was no request
+            // for it: the line starts again with the person's next words.
+            Update::Taken => talk.caption.taken(),
             Update::Request(text) => return self.voice_request(text, now, cx),
             Update::Ended(_) => return self.end_voice(cx),
             Update::Refused(words) => {
@@ -765,16 +768,25 @@ impl Footplate {
         })
     }
 
-    /// The caption: what the person is saying, one line under the head and
-    /// over the mail, while a session stands; the window's own words stand
-    /// in its place where what was said did not go. The line keeps its height
-    /// when empty, so that the mail does not move as the person speaks.
-    fn voice_caption(&self, palette: Palette) -> Option<impl IntoElement> {
+    /// What the caption's line says while a session stands: the window's own
+    /// words where what was said did not go, else what the person has said
+    /// that no request has taken yet, its last words where it is long (the
+    /// caption's own rule). None where no session stands.
+    pub(crate) fn voice_caption_words(&self) -> Option<String> {
         let talk = self.voice.as_ref()?;
-        let (said, color) = match &talk.words {
-            Some(words) => (words.clone(), palette.warn),
-            None => (talk.caption.text(), palette.text),
-        };
+        Some(match &talk.words {
+            Some(words) => words.clone(),
+            None => talk.caption.line(),
+        })
+    }
+
+    /// The caption: [`Footplate::voice_caption_words`], one line under the
+    /// head and over the mail while a session stands. The line keeps its
+    /// height when empty, so that the mail does not move as the person speaks.
+    fn voice_caption(&self, palette: Palette) -> Option<impl IntoElement> {
+        let said = self.voice_caption_words()?;
+        let own = self.voice.as_ref().is_some_and(|talk| talk.words.is_some());
+        let color = if own { palette.warn } else { palette.text };
         Some(
             div()
                 .debug_selector(|| "voice caption".to_string())

@@ -454,8 +454,9 @@ telemetry section off),
 it, against the fake yard and a stand-in for OpenAI's socket, with no
 microphone or speaker opened: the composer's button saying Stop with
 `listening` beside it, the session's minutes and what they cost at the
-head's right, and the caption of what the person is saying under the
-head), `voice-ready` and `voice-draft` (that conversation with voice on
+head's right, and the caption of what the person has said under the
+head, two asks with a pause between them, which it holds together until
+a request takes them), `voice-ready` and `voice-draft` (that conversation with voice on
 and no session standing: the composer's button saying Voice, and saying
 Send with a line typed in the composer),
 `settings-yards-rename` (the yards with the far yard's rename form open
@@ -1706,12 +1707,15 @@ folder. A change is drawn at once and kept for the next start:
   sending what you typed (it stays in the line, and Enter sends it).
   While a session stands, quiet words beside the button say what is going
   on (`starting…`, `listening`, `yardmaster is working`, `speaking`), a
-  line under the head shows what you are saying, and the head's right
-  counts the minutes and what they have cost at OpenAI's rate, $0.05 a
-  minute. What you ask of the yard goes to it as
-  your own mail in that conversation, as Enter would send it; while the
-  yard is away it is refused, once, and nothing is queued or sent when the
-  yard returns. The mail the other side answers with is spoken by the voice
+  line under the head shows what you have said that no request has taken
+  yet (a pause does not clear it; a long one shows its last words), and
+  the head's right counts the minutes and what they have cost at OpenAI's
+  rate, $0.05 a minute. When the voice sends something to the yard, it goes
+  as your own mail in that conversation, as Enter would send it, with the
+  requests and replies it has held since its previous send, in the order you
+  said them;
+  while the yard is away it is refused, once, and nothing is queued or sent
+  when the yard returns. The mail the other side answers with is spoken by the voice
   in its own words, and the written mail stays the record. A decision that comes up in the window is
   never answered by voice: the voice says it waits there. A session ends
   when you tap Stop, open another conversation or yard, switch voice off,

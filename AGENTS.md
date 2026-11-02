@@ -38,9 +38,10 @@ The window, its state and the yard:
 - `src/session.rs`: follows one yard on a thread: login, initial state,
   stream, retry.
 - `src/voice.rs`: the voice session's rules, as plain functions and one small
-  book, tested on any system: the request a spoken sentence stands for (the
-  last one, noise tags and greetings cut), which answer the voice is given to
-  speak and under which delegation's id, the queue its speech waits in and
+  book, tested on any system: the request the spoken sentences stand for (every
+  request since the last delegation, in order, noise tags and greetings cut),
+  which answer the voice is given to speak and under which delegation's id,
+  the queue its speech waits in and
   drops (the server's padding let go, a holdoff that counts what it throws
   away), the instructions and the state words, and the events of OpenAI's
   GPT-Live, which this is the one module to speak (no provider trait, no

@@ -39,7 +39,8 @@
 # `voice` (the yardmaster's conversation with a voice session standing in
 # it, against a stand-in for OpenAI's socket: the composer's button
 # saying Stop, `listening` beside it, the session's minutes and the
-# caption of what is said), `voice-ready` and `voice-draft` (that
+# caption of what is said: two asks with a pause between them, held
+# together), `voice-ready` and `voice-draft` (that
 # conversation with voice on and no session: the composer's button
 # saying Voice, and Send with a line typed), `settings-yards-rename` (the yards
 # with the far yard's rename form open in its card), `reconnecting` (a

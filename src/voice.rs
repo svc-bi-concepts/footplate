@@ -272,7 +272,8 @@ pub fn parse(text: &str) -> Result<Server, String> {
 /// What the finished utterances ask of the yard.
 #[derive(Debug, PartialEq)]
 pub enum Task {
-    /// The last request, in the person's own words.
+    /// Every request in them, in the person's own words, one after the other
+    /// in the order they said them.
     Request(String),
     /// Only to hear the last answer again: nothing goes to the yard.
     Again,
@@ -281,23 +282,38 @@ pub enum Task {
     Nothing,
 }
 
-/// The task the person's words since the last delegation stand for: the last
-/// request in them, cut three ways. Bracketed noise tags go, from the joined
-/// words and not fragment by fragment, since a tag arrives in pieces
-/// ('[sniff' and then '] What's'). Greetings, thanks and the like go from
-/// either end of the request. And only the last request is kept, not the
-/// whole transcript. It only cuts: what is left is words of the person's,
-/// as they said them.
+/// The task the person's words since the last delegation stand for: the
+/// request of each utterance in them, joined, each cut two ways. Bracketed
+/// noise tags go, from the joined words and not fragment by fragment, since a
+/// tag arrives in pieces ('[sniff' and then '] What's'). Greetings, thanks and
+/// the like go from either end of a request. Every request is kept, not only
+/// the last: a model that raised no delegation for an utterance leaves its
+/// words held, and they must go with the next one. A stray extra phrase in a
+/// mail costs little; a lost sentence costs the message. It only cuts: what
+/// is left is words of the person's, as they said them.
+///
+/// The final request decides whether the yard is asked at all: one that only
+/// asks to hear the last answer again is the whole task, and an ask like it
+/// among other requests is for the voice and not the yard, so it is left out.
 pub fn task_from(fragments: &[Fragment]) -> Task {
-    for utterance in utterances(fragments).iter().rev() {
-        if let Some(request) = request_in(utterance) {
-            return match wants_again(&request) {
-                true => Task::Again,
-                false => Task::Request(request),
-            };
+    let mut requests = requests_in(fragments);
+    match requests.last() {
+        None => Task::Nothing,
+        Some(last) if wants_again(last) => Task::Again,
+        Some(_) => {
+            requests.retain(|request| !wants_again(request));
+            Task::Request(bare(&join(requests.iter().map(String::as_str))).to_string())
         }
     }
-    Task::Nothing
+}
+
+/// The request of each utterance the person said, in order: an utterance
+/// that holds none has no place among them.
+fn requests_in(fragments: &[Fragment]) -> Vec<String> {
+    utterances(fragments)
+        .iter()
+        .filter_map(|utterance| request_in(utterance))
+        .collect()
 }
 
 /// What the person said, an utterance at a time. A pause of
@@ -337,8 +353,13 @@ fn runs_on(words: &str, next: &str) -> bool {
 
 /// `words` with its bracketed noise tags taken out. A tag may be cut in two
 /// by the transcript: a ']' that no '[' comes before is the end of one begun
-/// before these words, and a '[' not closed by the end is the beginning of one
-/// that goes on after them. Both go.
+/// before these words, and a '[' that nothing closes is the beginning of one
+/// that goes on after them. Both go, but of the second its first word only:
+/// the transcript also leaves a tag open with the person's words after it
+/// ('[sigh No, but ...', mail 133795), and a word lost costs the message where
+/// a tag's second word left in costs little. A bracket that closes after more
+/// than [`TAG_MAX`] characters, or opens on a word longer than that, is the
+/// person's own, and stays.
 fn without_tags(words: &str) -> String {
     let mut rest = words;
     if let Some(close) = rest.find(']')
@@ -351,21 +372,28 @@ fn without_tags(words: &str) -> String {
     while let Some(open) = rest.find('[') {
         kept.push_str(&rest[..open]);
         let tail = &rest[open + 1..];
-        match tail.find([']', '[']) {
+        let next = tail.find([']', '[']);
+        match next {
             // A whole tag.
             Some(at) if tail[at..].starts_with(']') && tail[..at].chars().count() <= TAG_MAX => {
                 rest = &tail[at + 1..]
             }
-            // One that the next tag cuts off.
-            Some(at) if tail[at..].starts_with('[') && tail[..at].chars().count() <= TAG_MAX => {
-                rest = &tail[at..]
-            }
-            // One not closed by the end of the words.
-            None if tail.chars().count() <= TAG_MAX => rest = "",
             // Too long for a noise tag: the person's own bracket.
-            _ => {
+            Some(at) if tail[at..].starts_with(']') => {
                 kept.push('[');
                 rest = tail;
+            }
+            // One that nothing closes before the next tag or the end of the
+            // words: its first word is the tag.
+            _ => {
+                let span = &tail[..next.unwrap_or(tail.len())];
+                let word = span.find(char::is_whitespace).unwrap_or(span.len());
+                if span[..word].chars().count() <= TAG_MAX {
+                    rest = &tail[word..];
+                } else {
+                    kept.push('[');
+                    rest = tail;
+                }
             }
         }
     }
@@ -627,12 +655,37 @@ fn is_social(words: &[String]) -> bool {
     true
 }
 
+/// The marks that end a clause. One at the start of an utterance belongs to
+/// what was said before it: the transcript sends a sentence's period with the
+/// first piece of the next, or a taken-out tag leaves one behind.
+const MARKS: &str = ".,;:!?…";
+
+/// `pieces` one after the other, a space between them but before a mark: the
+/// mark is the end of the piece before it, sent late ('first' and '. Second'
+/// make 'first. Second').
+fn join<'a>(pieces: impl IntoIterator<Item = &'a str>) -> String {
+    let mut joined = String::new();
+    for piece in pieces {
+        if !joined.is_empty() && !piece.starts_with(|c: char| MARKS.contains(c)) {
+            joined.push(' ');
+        }
+        joined.push_str(piece);
+    }
+    joined
+}
+
+/// `text` from its first word on: the marks left at its start, with nothing
+/// before them to end, are cut.
+fn bare(text: &str) -> &str {
+    text.trim_start_matches(|c: char| c.is_whitespace() || MARKS.contains(c))
+}
+
 /// The request in one utterance: from its first clause that is no greeting or
 /// thanks to its last, where there is a clause that asks something. What lies
 /// between stays as it was said. None where it holds no request.
 fn request_in(utterance: &str) -> Option<String> {
     let text = tidy(&without_tags(utterance));
-    let clauses = cut(&text, ".,;:!?…");
+    let clauses = cut(&text, MARKS);
     let classes: Vec<Class> = clauses
         .iter()
         .map(|clause| class_of(&text[clause.clone()]))
@@ -726,6 +779,10 @@ pub enum Step {
     Request(String),
     /// Something for the voice's session.
     Append(Append),
+    /// A delegation took the words the person had said, whether it found a
+    /// request in them or none: the book holds them no more, and the caption
+    /// with them ([`Caption::taken`]).
+    Taken,
 }
 
 /// What an ask is to the voice. Only its standing is known to the rules: what
@@ -1019,22 +1076,30 @@ impl Book {
     /// gives the last answer to the voice under the delegation and sends
     /// nothing; where there is nothing to send the delegation closes. An ask
     /// to hear it again that was held behind a mail is read when the held
-    /// request goes, so it gives the answer that has just landed.
+    /// request goes, so it gives the answer that has just landed. Whatever
+    /// was held is taken, a request in it or none, and the first step says
+    /// so.
     fn settle(&mut self, delegation: Option<String>) -> Vec<Step> {
         let task = task_from(&self.heard);
-        self.heard.clear();
+        let mut steps = Vec::new();
+        if !self.heard.is_empty() {
+            self.heard.clear();
+            steps.push(Step::Taken);
+        }
         match task {
             Task::Request(text) => {
                 self.flights.sent(delegation);
-                vec![Step::Request(text)]
+                steps.push(Step::Request(text));
             }
-            Task::Again => match (delegation, self.last_answer.clone()) {
-                (Some(id), Some(answer)) => self.say(&id, &answer),
+            Task::Again => {
                 // With no delegation an answer cannot be tied to anything.
-                _ => Vec::new(),
-            },
-            Task::Nothing => Vec::new(),
+                if let (Some(id), Some(answer)) = (delegation, self.last_answer.clone()) {
+                    steps.extend(self.say(&id, &answer));
+                }
+            }
+            Task::Nothing => {}
         }
+        steps
     }
 }
 
@@ -1247,35 +1312,73 @@ impl Speaking {
     }
 }
 
-/// What the person is saying, as the caption under the conversation's head
-/// shows it: the words of the utterance they are in, replaced as they grow,
-/// and by the next utterance when a pause has ended this one. It joins and
-/// cuts as the request is ([`task_from`]: the pieces as the server sent
-/// them, the noise tags out) but cuts no greeting, since a caption shows what
-/// was said. It is kept nowhere past the session.
+/// The most characters of the caption the line under the head shows: room
+/// for a remark or two, a line and a half of the default window. A caption
+/// that no delegation takes goes on growing, and a longer one shows its tail,
+/// the words said last.
+pub const CAPTION_MAX: usize = 120;
+
+/// What the person has said that no delegation has taken, as the caption
+/// under the conversation's head shows it: every utterance since, one after
+/// the other, so that a pause costs the line none of its words. It holds what
+/// has not been sent, and goes when a delegation takes the words
+/// ([`Step::Taken`]), so the line shows what will go. It joins and cuts as the
+/// request is ([`task_from`]: the pieces as the server sent them, the noise
+/// tags out) but cuts no greeting, since a caption shows what was said. It is
+/// kept nowhere past the session.
 #[derive(Debug, Default)]
 pub struct Caption(Vec<Fragment>);
 
 impl Caption {
     pub fn heard(&mut self, fragment: Fragment) {
-        if fragment.text.is_empty() {
-            return;
+        if !fragment.text.is_empty() {
+            self.0.push(fragment);
         }
-        let ended = self.0.iter().map(|piece| piece.end_ms).max();
-        if ended.is_some_and(|end| fragment.start_ms.saturating_sub(end) >= UTTERANCE_GAP_MS) {
-            self.0.clear();
-        }
-        self.0.push(fragment);
     }
 
-    /// The utterance as words: empty before anything was said, and while
-    /// all that has come is the beginning of a noise tag.
-    pub fn text(&self) -> String {
-        utterances(&self.0)
-            .last()
-            .map(|words| tidy(&without_tags(words)))
-            .unwrap_or_default()
+    /// A delegation took the words: none stand any more.
+    pub fn taken(&mut self) {
+        self.0.clear();
     }
+
+    /// The words as text: empty before anything was said, and while all
+    /// that has come is the beginning of a noise tag.
+    pub fn text(&self) -> String {
+        let said: Vec<String> = utterances(&self.0)
+            .iter()
+            .map(|words| tidy(&without_tags(words)))
+            .filter(|words| !words.is_empty())
+            .collect();
+        bare(&join(said.iter().map(String::as_str))).to_string()
+    }
+
+    /// What the line draws: [`Caption::text`], or its last [`CAPTION_MAX`]
+    /// characters where it is longer.
+    pub fn line(&self) -> String {
+        tail(&self.text(), CAPTION_MAX)
+    }
+}
+
+/// `text` if it is `max` characters or fewer, else its end from a whole word
+/// on, behind an ellipsis that the count includes: the words said last are the
+/// ones that tell where the person is. Inside a word only where the word
+/// is longer than that.
+fn tail(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let skip = count - max.saturating_sub(1);
+    let mut from = text
+        .char_indices()
+        .nth(skip)
+        .map_or(text.len(), |(at, _)| at);
+    let inside = text[..from].ends_with(|c: char| !c.is_whitespace())
+        && text[from..].starts_with(|c: char| !c.is_whitespace());
+    if inside && let Some(gap) = text[from..].find(char::is_whitespace) {
+        from += gap;
+    }
+    format!("…{}", text[from..].trim_start())
 }
 
 /// What Live charges for a minute of a session, in cents: $0.05, billed by
@@ -1327,6 +1430,8 @@ Backend tools:
 Generate <|SpawnThinking|> when:
 - The person asks anything of the yard, of {counterpart}, or that needs
   a fact you have not already been given in this session.
+- The person tells {counterpart} something, or answers what
+  {counterpart} asked, even if it asks nothing of the yard.
 - A correction changes what was already asked.
 - The person asks to hear an answer again; footplate gives it again.
 
@@ -2031,6 +2136,9 @@ pub enum Update {
     /// A piece of what the person said, with its place on the session's
     /// timeline: the caption's words, kept nowhere past the session.
     Words(Fragment),
+    /// A delegation took the words said so far, whether it made a request of
+    /// them or found none: the caption goes with them.
+    Taken,
     /// A request: the person's words, to go to the yard as their own
     /// message in the open conversation, as Enter would send them. Its
     /// answer comes back by [`Voice::answered`], or its refusal by
@@ -2529,6 +2637,9 @@ impl Session {
                 Step::Request(text) => {
                     let _ = self.tell.send(Update::Request(text));
                 }
+                Step::Taken => {
+                    let _ = self.tell.send(Update::Taken);
+                }
                 Step::Append(append) => {
                     conn.send_text(&append.wire())?;
                 }
@@ -2896,30 +3007,49 @@ pub(crate) mod tests {
     ];
 
     #[test]
-    fn a_task_is_the_last_request_of_what_the_person_said() {
-        // Run 3 sent all four utterances; the last is the question.
+    fn a_task_is_every_request_of_what_the_person_said_in_order() {
+        // Run 3 said four utterances, two of them greetings: the other two go
+        // whole, in the order they were said. (It sent all four; then only
+        // the last, which lost the first question.)
         assert_eq!(
             task_from(&said(RUN_3)),
-            request("Um, well what's- what sort of work is happening")
+            request("What are we going to do Um, well what's- what sort of work is happening")
         );
-        // An earlier request goes too: the last one is the task.
+        // Two requests across a pause both go: a mail that waited for the
+        // person to go on carries what they said before as well.
         let two = said(&[
             ("What's blocking the release?", 1000, 3000),
             ("And who owns it?", 9000, 10000),
         ]);
-        assert_eq!(task_from(&two), request("And who owns it?"));
+        assert_eq!(
+            task_from(&two),
+            request("What's blocking the release? And who owns it?")
+        );
         assert_eq!(
             task_from(&two[..1]),
             request("What's blocking the release?")
         );
-        // Chit-chat in a later utterance does not replace it: the last
-        // utterance that holds a request is the task.
+        // Chit-chat in a later utterance adds nothing to them.
         let after = said(&[
             ("What's blocking the release", 0, 2000),
             ("Thanks", 6000, 6400),
         ]);
         assert_eq!(task_from(&after), request("What's blocking the release"));
         assert_eq!(task_from(&[]), Task::Nothing);
+        // Mail 133790 reached porter as '. Does that make sense': what the
+        // person said before it was lost. That part is not in the mail, so
+        // this one is made up. The period the transcript sent with the second
+        // utterance ends the first, and a task begins with a word.
+        let lost = said(&[
+            ("Let's land the zip before the void platform", 0, 3000),
+            (". Does", 6000, 6400),
+            (" that make sense", 6400, 7400),
+        ]);
+        assert_eq!(
+            task_from(&lost),
+            request("Let's land the zip before the void platform. Does that make sense")
+        );
+        assert_eq!(task_from(&lost[1..]), request("Does that make sense"));
     }
 
     #[test]
@@ -2953,6 +3083,19 @@ pub(crate) mod tests {
             (" ]Thanks", 35200, 35400),
         ]);
         assert_eq!(task_from(&click), Task::Nothing);
+        // Mail 133795 reached porter as '[sigh No, but my the one about the
+        // void platform, we can wait with that': the transcript never closed
+        // the tag, and the words after it kept it. Only its word goes.
+        let open = said(&[
+            ("[sigh", 0, 400),
+            (" No", 800, 1000),
+            (", but my the one about the void platform", 1200, 3200),
+            (", we can wait with that", 3400, 4400),
+        ]);
+        assert_eq!(
+            task_from(&open),
+            request("No, but my the one about the void platform, we can wait with that")
+        );
     }
 
     #[test]
@@ -3016,6 +3159,11 @@ pub(crate) mod tests {
             ("Yes", "Yes"),
             ("No, hold it", "No, hold it"),
             ("Okay, go ahead", "go ahead"),
+            // A mark left at the start has nothing before it to end: mail
+            // 133790's period, sent with the utterance after the one it
+            // ends, or what a taken-out tag leaves behind.
+            (". Does that make sense", "Does that make sense"),
+            ("[sigh]. Does that make sense", "Does that make sense"),
             // A greeting with a word of its own in it is not one.
             (
                 "How are you getting on with the release",
@@ -3074,12 +3222,21 @@ pub(crate) mod tests {
                 "{heard:?}"
             );
         }
-        // The last request decides: a question after it is a request.
+        // The final request decides: a question after it is a request, and
+        // the ask before it, being for the voice, is left out of the mail.
         let then = said(&[
             ("Say that again", 0, 1000),
             ("And what about the zip", 5000, 6000),
         ]);
         assert_eq!(task_from(&then), request("And what about the zip"));
+        // As the final request it is the whole task: nothing goes to the
+        // yard, a request before it as well. The model raised its delegation
+        // for the ask, and the answer the voice is given is the last one.
+        let before = said(&[
+            ("What's blocking the release", 0, 1000),
+            ("Say that again", 5000, 6000),
+        ]);
+        assert_eq!(task_from(&before), Task::Again);
         // More than the ask is a request: the yard is asked.
         assert_eq!(
             task_from(&said(&[("Tell me again what is blocking it", 0, 1000)])),
@@ -3096,24 +3253,41 @@ pub(crate) mod tests {
             // that goes on after them.
             ("] What's", " What's"),
             ("] [laugh] Tell", "  Tell"),
-            ("Thanks [tongue click", "Thanks "),
             ("Hello [sniff", "Hello "),
-            // One tag cut off by the next.
-            ("a [x b [y] c", "a  c"),
+            // A tag nothing closes goes with its first word, and what
+            // follows stays: the person's words after a tag the transcript
+            // left open (mail 133795), or a tag's second word, which costs
+            // little.
+            ("[sigh No, but", " No, but"),
+            (
+                "[sigh No, but my the one about the void platform, we can wait with that",
+                " No, but my the one about the void platform, we can wait with that",
+            ),
+            ("Thanks [tongue click", "Thanks  click"),
+            // One that the next tag cuts off goes the same way.
+            ("a [x b [y] c", "a  b  c"),
+            (
+                "I said [this goes on for a good deal more than a noise tag does",
+                "I said  goes on for a good deal more than a noise tag does",
+            ),
             // Whatever stands before a ']' no '[' precedes is the rest of a tag.
             ("click ] What's", " What's"),
             // Only the first of them: the next is the person's own.
             ("a] b] c", " b] c"),
-            // Not a noise tag: long, so the person's own words.
+            // Not a noise tag: it closes after more than a tag's length, so
+            // the person's own words.
             (
-                "I said [this goes on for a good deal more than a noise tag does",
-                "I said [this goes on for a good deal more than a noise tag does",
+                "I said [this goes on for a good deal more than a noise tag does] ok",
+                "I said [this goes on for a good deal more than a noise tag does] ok",
             ),
             ("no brackets", "no brackets"),
             ("é[🙂]é", "éé"),
         ] {
             assert_eq!(without_tags(words), left, "{words:?}");
         }
+        // Or it opens on a word longer than one, which no noise tag is.
+        let long = format!("I said [{} and more", "x".repeat(TAG_MAX + 1));
+        assert_eq!(without_tags(&long), long);
         assert_eq!(
             tidy("Hello  [sniff]  , what's  up ?"),
             "Hello [sniff], what's up?"
@@ -3128,7 +3302,7 @@ pub(crate) mod tests {
     fn the_task_only_cuts() {
         // Pieces a transcript has: brackets cut anywhere, marks, accents,
         // emoji, pauses of every length. Whatever comes out is words that
-        // stood in the cleaned utterance, and nothing panics.
+        // stood in the cleaned utterances, in their order, and nothing panics.
         let pool = [
             "[",
             "]",
@@ -3177,13 +3351,34 @@ pub(crate) mod tests {
                     fragment
                 })
                 .collect();
+            // Each request is cut from an utterance, one after another.
+            let cleaned: Vec<String> = utterances(&fragments)
+                .iter()
+                .map(|utterance| tidy(&without_tags(utterance)))
+                .collect();
+            let requests = requests_in(&fragments);
+            let mut from = 0;
+            for request in &requests {
+                let at = cleaned[from..]
+                    .iter()
+                    .position(|utterance| utterance.contains(request.as_str()));
+                assert!(at.is_some(), "{request:?} is not cut from {fragments:?}");
+                from += at.unwrap() + 1;
+            }
+            // The task is made of their characters, in order, with spaces
+            // aside: it cuts and it joins, and says nothing of its own.
             if let Task::Request(text) = task_from(&fragments) {
                 assert!(!text.is_empty() && text == text.trim(), "{text:?}");
+                let squash = |text: &str| -> String {
+                    text.chars().filter(|c| !c.is_whitespace()).collect()
+                };
+                let mut stood = squash(&requests.concat())
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .into_iter();
                 assert!(
-                    utterances(&fragments)
-                        .iter()
-                        .any(|utterance| tidy(&without_tags(utterance)).contains(&text)),
-                    "{text:?} is not cut from {fragments:?}"
+                    squash(&text).chars().all(|c| stood.any(|stood| stood == c)),
+                    "{text:?} is not made of {requests:?}"
                 );
             }
         }
@@ -3292,7 +3487,7 @@ pub(crate) mod tests {
         let mut book = Book::new();
         hear(&mut book, RUN_4);
         let steps = book.raised("del_1");
-        assert_eq!(steps.len(), 2);
+        assert_eq!(steps.len(), 3);
         // The guide's way to keep the automatic acknowledgement unspoken: an
         // empty thinking append under the delegation's id, before anything.
         let quiet = append_of(&steps[0]);
@@ -3304,14 +3499,31 @@ pub(crate) mod tests {
             ),
             (Kind::Thinking, Some("del_1"), "")
         );
+        // The words are taken, and the request made of them goes.
+        assert_eq!(steps[1], Step::Taken);
         assert_eq!(
-            steps[1],
+            steps[2],
             Step::Request("What's blocking the release".into())
         );
         assert!(book.waiting());
         // Each append has an id of its own.
         let more = book.asked(Ask::Plain);
         assert_ne!(append_of(&more[0]).id, quiet.id);
+        // Two requests across a pause both go, as one mail.
+        let mut book = Book::new();
+        hear(
+            &mut book,
+            &[
+                ("What's blocking the release?", 1000, 3000),
+                ("And who owns it?", 9000, 10000),
+            ],
+        );
+        let steps = book.raised("del_2");
+        assert_eq!(
+            requests(&steps),
+            ["What's blocking the release? And who owns it?"]
+        );
+        assert!(steps.contains(&Step::Taken));
     }
 
     #[test]
@@ -3393,6 +3605,7 @@ pub(crate) mod tests {
         // model's delegation for it only gets its quiet append.
         assert!(book.heard(said(&[("And who owns it?", 20000, 21000)]).remove(0)));
         let held = book.raised("del_2");
+        // It takes no words: they stay held, and the caption keeps them.
         assert_eq!(held.len(), 1);
         let quiet = append_of(&held[0]);
         assert_eq!(
@@ -3418,6 +3631,8 @@ pub(crate) mod tests {
             matches!(steps.last(), Some(Step::Request(_))),
             "the request goes after the answer"
         );
+        // The held words are taken as it goes.
+        assert!(steps.contains(&Step::Taken));
         // The next mail answers the second, under the second's id.
         let steps = book.answered("The windows team.");
         assert_eq!(
@@ -3500,9 +3715,13 @@ pub(crate) mod tests {
             &[("Actually, what about the tests", 30000, 31000)],
         );
         book.raised("del_3");
-        // One mail for the last request; the older delegations close.
+        // One mail for what was said while the first waited, all of it; the
+        // older delegations close.
         let steps = book.answered("Left.");
-        assert_eq!(requests(&steps), ["Actually, what about the tests"]);
+        assert_eq!(
+            requests(&steps),
+            ["What about the zip Actually, what about the tests"]
+        );
         let steps = book.answered("They pass.");
         assert_eq!(
             spoken(&steps),
@@ -3517,8 +3736,9 @@ pub(crate) mod tests {
         let mut book = Book::new();
         hear(&mut book, &[("Hello", 1000, 1200), ("Thanks", 6000, 6300)]);
         let steps = book.raised("del_1");
-        // Only the quiet append: no mail, nothing waits.
-        assert_eq!(steps.len(), 1);
+        // The quiet append, and the words taken: no mail, nothing waits.
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[1], Step::Taken);
         assert!(!book.waiting());
         // And the words it was raised on are gone: they are not a request for
         // the delegation after it.
@@ -3542,10 +3762,11 @@ pub(crate) mod tests {
             [(Some("del_2".to_string()), answer.to_string())]
         );
         assert!(!book.waiting());
-        // Before there is an answer there is nothing to say again.
+        // Before there is an answer there is nothing to say again: the quiet
+        // append, and the words taken.
         let mut book = Book::new();
         hear(&mut book, &[("Say that again", 0, 1000)]);
-        assert_eq!(book.raised("del_1").len(), 1);
+        assert_eq!(book.raised("del_1").len(), 2);
     }
 
     #[test]
@@ -3566,9 +3787,10 @@ pub(crate) mod tests {
         );
         assert!(!book.waiting());
         assert!(book.refused("again").is_empty());
-        // A refusal is not an answer: asked to say it again, there is none.
+        // A refusal is not an answer: asked to say it again, there is none
+        // (the quiet append, and the words taken).
         hear(&mut book, &[("Say that again", 20000, 21000)]);
-        assert_eq!(book.raised("del_2").len(), 1);
+        assert_eq!(book.raised("del_2").len(), 2);
         // A request held behind a refused mail goes at once.
         hear(&mut book, RUN_6_SECOND);
         book.raised("del_3");
@@ -3775,11 +3997,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_caption_grows_with_the_utterance_and_is_replaced_by_the_next() {
+    fn the_caption_holds_what_is_said_across_a_pause_until_a_delegation_takes_it() {
         let mut caption = Caption::default();
         assert_eq!(caption.text(), "");
         // Run 4: the caption shows what was said, not what the request
-        // cuts: the greeting stays while it is the utterance.
+        // cuts: the greeting stays, and a pause of 2200 ms does not take it
+        // from the line.
         let mut shown = Vec::new();
         for (text, start_ms, end_ms) in RUN_4 {
             caption.heard(Fragment {
@@ -3789,19 +4012,38 @@ pub(crate) mod tests {
             });
             shown.push(caption.text());
         }
-        // 'Hello' alone; then a pause of 2200 ms began another utterance,
-        // whose '[sniff' is the beginning of a noise tag and says nothing
-        // yet; the tag closed 800 ms later in the same utterance, and went.
+        // 'Hello' alone; the next utterance's '[sniff' is the beginning of a
+        // noise tag and adds nothing yet; the tag closed 800 ms later in the
+        // same utterance, and went.
         assert_eq!(
             shown,
             [
                 "Hello",
-                "",
-                "What's",
-                "What's blocking",
-                "What's blocking the",
-                "What's blocking the release",
+                "Hello",
+                "Hello What's",
+                "Hello What's blocking",
+                "Hello What's blocking the",
+                "Hello What's blocking the release",
             ]
+        );
+        // A delegation took the words: the line starts again.
+        caption.taken();
+        assert_eq!(caption.text(), "");
+        caption.heard(said(&[("Next", 20_000, 20_200)]).remove(0));
+        assert_eq!(caption.text(), "Next");
+        // Two requests across a pause stand together; the period the
+        // transcript sent with the second ends the first.
+        let mut caption = Caption::default();
+        for fragment in said(&[
+            ("Let's land the zip before the void platform", 0, 3000),
+            (". Does", 9000, 9400),
+            (" that make sense", 9400, 10400),
+        ]) {
+            caption.heard(fragment);
+        }
+        assert_eq!(
+            caption.text(),
+            "Let's land the zip before the void platform. Does that make sense"
         );
         // Run 6: a pause of 1.6 s inside a question does not end it.
         let mut caption = Caption::default();
@@ -3816,6 +4058,45 @@ pub(crate) mod tests {
             end_ms: 90_000,
         });
         assert_eq!(caption.text(), "Um. And what part is outstanding there");
+        // A long caption holds all its words but shows only its tail, from a
+        // whole word on, so it stays readable under the head.
+        // Forty words of three characters: 159 characters, over the line's.
+        let words: Vec<String> = (1..=40).map(|n| format!("w{n:02}")).collect();
+        let mut caption = Caption::default();
+        for (n, word) in words.iter().enumerate() {
+            let at = n as u64 * 200;
+            caption.heard(Fragment {
+                text: match n {
+                    0 => word.clone(),
+                    _ => format!(" {word}"),
+                },
+                start_ms: at,
+                end_ms: at + 100,
+            });
+        }
+        assert_eq!(caption.text(), words.join(" "));
+        let line = caption.line();
+        assert!(line.chars().count() <= CAPTION_MAX, "{line:?}");
+        // Behind an ellipsis, the last words, from a whole word on.
+        let shown = line.strip_prefix('…').expect("an ellipsis in front");
+        assert!(words.join(" ").ends_with(shown), "{shown:?}");
+        assert!(
+            shown.starts_with('w') && shown.ends_with("w40"),
+            "{shown:?}"
+        );
+        // A caption that fits is as it is, to its last character.
+        let fits = "a ".repeat(CAPTION_MAX / 2 - 1) + "a";
+        assert_eq!(fits.chars().count(), CAPTION_MAX - 1);
+        assert_eq!(tail(&fits, CAPTION_MAX), fits);
+        let exact = "a ".repeat(CAPTION_MAX / 2 - 1) + "ab";
+        assert_eq!(tail(&exact, CAPTION_MAX), exact);
+        // The cut falls on a word, on the space before one, or inside a
+        // word only where the word is longer than the line.
+        assert_eq!(tail("alpha beta gamma delta", 16), "…gamma delta");
+        assert_eq!(tail("aaaa bbbb cccc", 10), "…bbbb cccc");
+        assert_eq!(tail("aaaa bbbb cccc", 11), "…bbbb cccc");
+        assert_eq!(tail(&"x".repeat(200), 10), format!("…{}", "x".repeat(9)));
+        assert_eq!(tail("界界界 界界界界", 6), "…界界界界");
     }
 
     #[test]
@@ -3864,6 +4145,9 @@ pub(crate) mod tests {
             "Generate <|SpawnThinking|> when:",
             "Do not generate <|SpawnThinking|> when:",
             "The person asks to hear an answer again; footplate gives it again.",
+            // Not only a question is delegated: what the person tells
+            // {counterpart}, or answers of what they asked, goes to them.
+            "- The person tells yardmaster something, or answers what\n  yardmaster asked, even if it asks nothing of the yard.",
             "Do not guess the result while waiting, and do not state a\nyard fact you have not been given in this session.",
             "the\nwritten mail in the window is the record",
         ] {
@@ -4107,10 +4391,13 @@ pub(crate) mod tests {
         book.typed_sent();
         // The person is speaking as the answer lands: nothing goes to the
         // voice yet. (What they say here asks nothing of the yard, so no
-        // held request goes either.)
+        // held request goes either, though the words are taken.)
         hear(&mut book, &[("Hello", 1000, 1200)]);
         assert!(book.speaking());
-        assert!(book.answered("Only the Windows zip is left.").is_empty());
+        assert_eq!(
+            book.answered("Only the Windows zip is left."),
+            [Step::Taken]
+        );
         // They go on: still speaking, and still nothing has gone.
         hear(&mut book, &[("Thanks", 1700, 2000)]);
         assert!(book.speaking());
@@ -4142,6 +4429,9 @@ pub(crate) mod tests {
         book: Book,
         /// What went to the yard as the person's mail.
         requests: Vec<String>,
+        /// How many times a delegation took the words the person had said, a
+        /// request in them or none.
+        taken: usize,
         queue: Queue,
         /// How many times the person began to speak, and how much speech
         /// that dropped, in milliseconds.
@@ -4160,6 +4450,7 @@ pub(crate) mod tests {
                 live,
                 book: Book::new(),
                 requests: Vec::new(),
+                taken: 0,
                 queue: Queue::default(),
                 began: 0,
                 dropped_ms: 0,
@@ -4180,6 +4471,7 @@ pub(crate) mod tests {
             for step in steps {
                 match step {
                     Step::Request(text) => self.requests.push(text),
+                    Step::Taken => self.taken += 1,
                     Step::Append(append) => self.live.receive(&append.wire()),
                 }
             }
@@ -4249,8 +4541,10 @@ pub(crate) mod tests {
         // Run 4: a greeting, a noise tag cut in two, a question.
         session.person_says(RUN_4);
         let first = session.delegate();
-        // The mail is the person's last request and nothing the model said.
+        // The mail is the person's request and nothing the model said, and
+        // the words are taken.
         assert_eq!(session.requests, ["What's blocking the release"]);
+        assert_eq!(session.taken, 1);
         // The empty thinking append went out as the delegation arrived, and
         // the stand-in took it for what it is for: the filler it would have
         // spoken when the delay passed is cancelled.
@@ -4271,6 +4565,9 @@ pub(crate) mod tests {
         session.person_says(&[("And who owns it?", 20000, 21000)]);
         let second = session.delegate();
         assert_eq!(session.requests.len(), 1);
+        // A delegation parked behind the mail takes nothing: the words stay
+        // held, and the caption keeps showing what will go.
+        assert_eq!(session.taken, 1);
         assert_eq!(session.live.appends().len(), 2);
         assert_eq!(session.live.delay_passes(), 0);
 
@@ -4298,6 +4595,8 @@ pub(crate) mod tests {
             session.requests,
             ["What's blocking the release", "And who owns it?"]
         );
+        // The held words are taken as the held request goes.
+        assert_eq!(session.taken, 2);
         // Every append was acknowledged by its id.
         assert_eq!(session.acknowledged.len(), appends.len());
         assert_eq!(
@@ -4723,18 +5022,21 @@ pub(crate) mod tests {
                 .all(|p| p == b"mid-fragment")
         );
 
-        // Run 4's words, then a delegation: the request is the last of them,
-        // and the empty thinking append went out as it arrived.
+        // Run 4's words, then a delegation: the request is what they ask,
+        // the words are taken before it goes (the caption's line goes with
+        // them), and the empty thinking append went out as it arrived.
         for (text, start, end) in RUN_4 {
             live.person_says(text, *start, *end);
         }
         let delegation = live.delegate(0);
         let mut saw_words = false;
         let mut saw_speech = false;
+        let mut saw_taken = false;
         loop {
             match next_update(&updates) {
                 Update::Words(_) => saw_words = true,
                 Update::SpeechStarted => saw_speech = true,
+                Update::Taken => saw_taken = true,
                 Update::Request(text) => {
                     assert_eq!(text, "What's blocking the release");
                     break;
@@ -4743,8 +5045,8 @@ pub(crate) mod tests {
             }
         }
         assert!(
-            saw_words && saw_speech,
-            "the caption's words, and speech started"
+            saw_words && saw_speech && saw_taken,
+            "the caption's words, speech started, and the words taken"
         );
         wait_until(|| !live.appends().is_empty());
         let appends = live.appends();
@@ -4778,7 +5080,7 @@ pub(crate) mod tests {
         let second = live.delegate(0);
         loop {
             match next_update(&updates) {
-                Update::Words(_) | Update::SpeechStarted => {}
+                Update::Words(_) | Update::SpeechStarted | Update::Taken => {}
                 Update::Request(text) => {
                     assert_eq!(text, "And who owns it?");
                     break;
