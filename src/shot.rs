@@ -165,6 +165,7 @@ pub const STATES: &[&str] = &[
     "undelivered",
     "answered",
     "setup",
+    "setup-terminal",
     "hosted",
     "signedout",
     "away",
@@ -398,13 +399,14 @@ fn stand_voice() -> Talking {
 }
 
 /// The run for `state`: the fake yard serves it, and the run's socket
-/// points there. For `stopped`, `refusal`, `setup` and `hosted` no yard
-/// listens: the socket names a directory that holds none, so the window
-/// opens on a yard that is down, and the switch says the stopped one is
-/// stopped. The refusal shot is the first screen, with the pairing's
-/// fields open on it; the setup shot is the first run posed at step 2;
-/// the hosted shot is the first screen with the hosted way's fields open
-/// on it. The signedout shot opens the hosted yard south through an edge
+/// points there. For `stopped`, `refusal`, `setup`, `setup-terminal` and
+/// `hosted` no yard listens: the socket names a directory that holds none,
+/// so the window opens on a yard that is down, and the switch says the
+/// stopped one is stopped. The refusal shot is the first screen, with the
+/// pairing's fields open on it; the setup shot is the first run posed at
+/// step 2, and the setup-terminal shot at the step that asks about the PATH
+/// line; the hosted shot is the first screen with the hosted way's fields
+/// open on it. The signedout shot opens the hosted yard south through an edge
 /// that no longer knows its session, so the window opens on the away
 /// screen of a yard that is signed out; the screen-hosted shot opens
 /// that same yard through an edge that still knows it, so the window
@@ -413,7 +415,10 @@ fn stand_voice() -> Talking {
 /// the window opens on the away screen that offers to pair again, with
 /// a way's fields open.
 fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
-    if state == "stopped" || state == "refusal" || state == "setup" || state == "hosted" {
+    if matches!(
+        state,
+        "stopped" | "refusal" | "setup" | "setup-terminal" | "hosted"
+    ) {
         let mut env = env;
         env.socket = std::env::temp_dir().join(format!(
             "footplate-shot-{}-{state}/yard.sock",
@@ -2576,13 +2581,15 @@ mod tests {
     /// of the yard, so the window is for its operator, jo, and the state
     /// opens where the shot says. A state added to [`STATES`] lands in the
     /// unreachable arm until it is covered here. `stopped`, `refusal`,
-    /// `setup` and `hosted` listen nowhere: their run's socket names a
-    /// yard that is down.
+    /// `setup`, `setup-terminal` and `hosted` listen nowhere: their run's
+    /// socket names a yard that is down.
     #[test]
     fn every_state_loads_as_the_window_reads_it() {
         for state in STATES {
-            if *state == "stopped" || *state == "refusal" || *state == "setup" || *state == "hosted"
-            {
+            if matches!(
+                *state,
+                "stopped" | "refusal" | "setup" | "setup-terminal" | "hosted"
+            ) {
                 let env = Env {
                     socket: PathBuf::from("/none"),
                     ..Env::default()
@@ -2590,7 +2597,7 @@ mod tests {
                 let (env, shot) = start_for_state(env, state);
                 assert!(shot.is_none(), "{state}");
                 assert!(!env.socket.exists(), "{state}");
-                if *state == "setup" {
+                if matches!(*state, "setup" | "setup-terminal") {
                     // The canned doctor the second step stands with: two
                     // installed providers with labels and offers, one
                     // recommended each.

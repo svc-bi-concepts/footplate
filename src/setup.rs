@@ -10,11 +10,15 @@
 //! the PATH footplate was started with, and after it the directories
 //! `yardr doctor --json` names, where the person's login shell finds a
 //! program (`login_shell_path`) and where one is fetched to (`fetch`). The
-//! login shells in all of it are doctor's own, and the one question
-//! `fetch::Machine` asks to find yardr itself.
+//! login shells in all of it are doctor's own, and the two questions
+//! `fetch::Machine` asks: where yardr is, and the PATH a terminal starts
+//! with. The one file written is a shell's startup file, one line of it, and
+//! only on the person's yes ([`Reach::add`]), so that a terminal finds the
+//! programs that are fetched to `~/.local/bin`.
 
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread;
@@ -23,7 +27,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::fetch::{Wanted, started};
+use crate::fetch::{Machine, Wanted, started};
 
 /// How long a command of yardr may take. Doctor asks the login shell, and
 /// `up` waits for three servers; none of them is near this.
@@ -451,6 +455,9 @@ pub struct Item {
     pub what_for: String,
     #[serde(default)]
     pub found: bool,
+    /// Where it is, when it is found.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
     /// How it is installed by hand, where it is missing: a page, or a
     /// command with one.
     #[serde(default)]
@@ -620,6 +627,230 @@ pub fn widened(inherited: &OsStr, doctor: &Doctor) -> OsString {
     // A directory with the separator in its name cannot be on a PATH.
     dirs.retain(|dir| std::env::join_paths([dir]).is_ok());
     std::env::join_paths(dirs).unwrap_or_else(|_| inherited.to_os_string())
+}
+
+/// The shells whose startup file footplate knows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shell {
+    Zsh,
+    Bash,
+    Fish,
+}
+
+impl Shell {
+    /// The shell the program `$SHELL` names is, by the program's name: one
+    /// of the three, else none. A shell that is not one of them is never
+    /// given a file by a guess.
+    pub fn of(program: Option<&Path>) -> Option<Shell> {
+        match program?.file_name()?.to_str()? {
+            "zsh" => Some(Shell::Zsh),
+            "bash" => Some(Shell::Bash),
+            "fish" => Some(Shell::Fish),
+            _ => None,
+        }
+    }
+}
+
+/// The line that puts `~/.local/bin` first on a PATH: fish has its own
+/// syntax, and every other shell is shown the one the POSIX shells read.
+pub fn path_line(shell: Option<Shell>) -> &'static str {
+    match shell {
+        Some(Shell::Fish) => "set -gx PATH $HOME/.local/bin $PATH",
+        _ => r#"export PATH="$HOME/.local/bin:$PATH""#,
+    }
+}
+
+/// The file the line goes to, which a terminal's shell reads as it opens.
+/// zsh's is `.zshrc` in `ZDOTDIR` where the environment sets one, else in
+/// the home. A login bash reads the first of three
+/// files that is there and no other, so a `.bash_profile` made beside a
+/// `.profile` would hide the `.profile`: the first that is there is the
+/// file, and `.bash_profile` where none is, the one Terminal's login shells
+/// read.
+pub fn startup_file(shell: Shell, home: &Path, zdotdir: Option<&Path>) -> PathBuf {
+    match shell {
+        Shell::Zsh => zdotdir
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or(home)
+            .join(".zshrc"),
+        Shell::Bash => [".bash_profile", ".bash_login", ".profile"]
+            .map(|name| home.join(name))
+            .into_iter()
+            .find(|file| file.exists())
+            .unwrap_or_else(|| home.join(".bash_profile")),
+        Shell::Fish => home.join(".config/fish/config.fish"),
+    }
+}
+
+/// Whether the startup file `text` has a PATH entry that names
+/// `.local/bin`: a line that holds both. A comment names nothing; the
+/// stock `.zshrc` of oh-my-zsh carries one, `# export PATH=$HOME/bin:$HOME/.local/bin:…`.
+pub fn names_local_bin(text: &str) -> bool {
+    text.lines().any(|line| {
+        !line.trim_start().starts_with('#') && line.contains("PATH") && line.contains(".local/bin")
+    })
+}
+
+/// Whether `dir` is one of the directories of `path`, a PATH as a shell
+/// has it.
+pub fn on_path(path: &OsStr, dir: &Path) -> bool {
+    std::env::split_paths(path).any(|has| has == dir)
+}
+
+/// What setup can do so that a terminal finds the programs in
+/// `~/.local/bin`, where there is anything to do ([`reach`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reach {
+    /// The programs setup knows that are in the directory, by name.
+    pub programs: Vec<String>,
+    /// The shell the terminal runs, by the program's name ("zsh", or
+    /// "tcsh" for one that is not known); none where `$SHELL` names none.
+    pub shell: Option<String>,
+    /// The file the line goes to. None for a shell that is not known, to
+    /// which nothing is written.
+    pub file: Option<PathBuf>,
+    /// The line, which a person is shown whatever the shell is.
+    pub line: &'static str,
+    /// The person's home, which the file is said under.
+    pub home: PathBuf,
+}
+
+/// What adding the line came to, where nothing failed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Added {
+    /// The line is the last of the file now.
+    Written,
+    /// The file names `.local/bin` on a PATH already: nothing was written.
+    Named,
+}
+
+impl Reach {
+    /// The programs as a sentence names them: "yardr, herdr and claude".
+    pub fn named(&self) -> String {
+        match self.programs.split_last() {
+            None => String::new(),
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+
+    /// The file as the person is told of it: `~/.zshrc` for one under the
+    /// home.
+    pub fn shown(&self) -> Option<String> {
+        let file = self.file.as_deref()?;
+        Some(match file.strip_prefix(&self.home) {
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => file.display().to_string(),
+        })
+    }
+
+    /// Adds the line to the shell's file, on the person's yes, and says in
+    /// the refusal's own words why not where it cannot. The line goes at
+    /// the end, on a line of its own, and only where the file names
+    /// `.local/bin` on a PATH nowhere, so that no run adds a second. A file
+    /// that is a link is written through, and stays one.
+    pub fn add(&self) -> Result<Added, String> {
+        let (Some(file), Some(shown)) = (self.file.as_deref(), self.shown()) else {
+            return Err(match self.shell.as_deref() {
+                Some(shell) => format!(
+                    "footplate does not know where {shell} keeps its startup file, so it wrote nothing."
+                ),
+                None => {
+                    "footplate does not know which shell a terminal runs here, so it wrote nothing."
+                        .to_string()
+                }
+            });
+        };
+        let text = match fs::read(file) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => {
+                return Err(format!(
+                    "{shown} could not be read ({err}). Nothing was added."
+                ));
+            }
+        };
+        if names_local_bin(&String::from_utf8_lossy(&text)) {
+            return Ok(Added::Named);
+        }
+        // One write, so that the line is never separated from the newline
+        // that parts it from a last line without one.
+        let mut add = Vec::new();
+        if !text.is_empty() && !text.ends_with(b"\n") {
+            add.push(b'\n');
+        }
+        add.extend_from_slice(self.line.as_bytes());
+        add.push(b'\n');
+        file.parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| OpenOptions::new().append(true).create(true).open(file))
+            .and_then(|mut file| file.write_all(&add))
+            .map(|()| Added::Written)
+            .map_err(|err| format!("{shown} could not be written ({err}). Nothing was added."))
+    }
+}
+
+/// What setup can do so that a terminal finds the programs setup knows
+/// that are in `~/.local/bin`: where fetching puts them, and where a
+/// terminal does not look. None where there is nothing to do: no such
+/// program is there, or the shell's file or the PATH of its login shell
+/// names the directory already. The file is asked first, which costs no
+/// shell; a login shell started to read its PATH does not read zsh's
+/// `.zshrc`, so only the file knows of a line that was added.
+pub fn reach(machine: &Machine, yardr: &Path, doctor: &Doctor) -> Option<Reach> {
+    let home = machine.home.as_deref()?;
+    let dir = home.join(".local/bin");
+    let programs = programs_in(&dir, yardr, doctor);
+    if programs.is_empty() {
+        return None;
+    }
+    let known = Shell::of(machine.shell.as_deref());
+    let file = known.map(|shell| startup_file(shell, home, machine.zdotdir.as_deref()));
+    let text = file.as_deref().and_then(|file| fs::read(file).ok());
+    if text.is_some_and(|text| names_local_bin(&String::from_utf8_lossy(&text))) {
+        return None;
+    }
+    if machine
+        .login_path()
+        .is_some_and(|path| on_path(&path, &dir))
+    {
+        return None;
+    }
+    Some(Reach {
+        programs,
+        shell: machine
+            .shell
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned()),
+        file,
+        line: path_line(known),
+        home: home.to_path_buf(),
+    })
+}
+
+/// The programs in `dir`: the yardr that is run, and each program doctor
+/// found there, in doctor's order.
+fn programs_in(dir: &Path, yardr: &Path, doctor: &Doctor) -> Vec<String> {
+    let mut programs: Vec<String> = Vec::new();
+    if yardr.parent() == Some(dir) {
+        programs.extend(
+            yardr
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        );
+    }
+    for item in doctor
+        .machine
+        .iter()
+        .flat_map(|item| std::iter::once(item).chain(&item.any_of))
+    {
+        let there = item.found && item.path.as_deref().and_then(Path::parent) == Some(dir);
+        if there && !programs.contains(&item.program) {
+            programs.push(item.program.clone());
+        }
+    }
+    programs
 }
 
 /// How agents work with the operator: `operator_style`, with the words
@@ -2184,6 +2415,439 @@ mod tests {
             needs.recv_blocking().unwrap(),
             Need::Failed("stdin closed before a method was chosen".into())
         );
+    }
+
+    /// A login shell for a test: a script called `name` that runs `script`
+    /// whatever it is asked, and keeps what it was asked beside it.
+    fn login_shell(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let script = format!("#!/bin/sh\nprintf '%s|' \"$@\" >> \"$0.asked\"\n{script}\n");
+        crate::fetch::keep(&dir.join("shell"), name, script.as_bytes()).unwrap()
+    }
+
+    /// How many times a test's login shell was asked anything.
+    fn asks(dir: &Path, name: &str) -> usize {
+        let asked = fs::read_to_string(dir.join("shell").join(format!("{name}.asked")));
+        asked.unwrap_or_default().matches("-l|-c|").count()
+    }
+
+    /// Doctor's answer once herdr and claude are fetched to `home`'s
+    /// `.local/bin`, with git where the system has it.
+    fn fetched(home: &Path) -> Doctor {
+        let bin = home.join(".local/bin");
+        serde_json::from_value(json!({
+            "yard": false,
+            "machine": [
+                {"program": "herdr", "found": true, "path": bin.join("herdr")},
+                {"program": "git", "found": true, "path": "/usr/bin/git"},
+                {"program": "claude", "found": true, "path": bin.join("claude"), "harness": "claude"},
+                {"program": "codex", "found": false, "harness": "codex"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    /// A shell is known by its program's name, and has the file a terminal
+    /// reads it from and the line its syntax wants. zsh's file follows
+    /// `ZDOTDIR`; a login bash reads the first of three files, so the
+    /// first that is there is its file; any other shell has none, and is
+    /// never given one by a guess.
+    #[test]
+    fn a_shell_has_the_file_and_the_line_that_are_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let known = |program: &str| Shell::of(Some(Path::new(program)));
+        assert_eq!(known("/bin/zsh"), Some(Shell::Zsh));
+        assert_eq!(known("/usr/local/bin/bash"), Some(Shell::Bash));
+        assert_eq!(known("/opt/homebrew/bin/fish"), Some(Shell::Fish));
+        for other in ["/bin/tcsh", "/bin/sh", "/usr/bin/nu", "/bin/zsh5"] {
+            assert_eq!(known(other), None, "{other}");
+        }
+        assert_eq!(Shell::of(None), None);
+
+        let posix = r#"export PATH="$HOME/.local/bin:$PATH""#;
+        assert_eq!(path_line(Some(Shell::Zsh)), posix);
+        assert_eq!(path_line(Some(Shell::Bash)), posix);
+        assert_eq!(
+            path_line(Some(Shell::Fish)),
+            "set -gx PATH $HOME/.local/bin $PATH"
+        );
+        assert_eq!(path_line(None), posix);
+
+        assert_eq!(startup_file(Shell::Zsh, home, None), home.join(".zshrc"));
+        let moved = home.join("dotfiles/zsh");
+        assert_eq!(
+            startup_file(Shell::Zsh, home, Some(&moved)),
+            moved.join(".zshrc")
+        );
+        // zsh accepts a relative ZDOTDIR; it is relative to the working
+        // directory from which zsh starts.
+        assert_eq!(
+            startup_file(Shell::Zsh, home, Some(Path::new("zsh"))),
+            PathBuf::from("zsh/.zshrc")
+        );
+        assert_eq!(
+            startup_file(Shell::Zsh, home, Some(Path::new(""))),
+            home.join(".zshrc")
+        );
+        assert_eq!(
+            startup_file(Shell::Fish, home, None),
+            home.join(".config/fish/config.fish")
+        );
+
+        assert_eq!(
+            startup_file(Shell::Bash, home, None),
+            home.join(".bash_profile")
+        );
+        for (made, file) in [
+            (".profile", ".profile"),
+            (".bash_login", ".bash_login"),
+            (".bash_profile", ".bash_profile"),
+        ] {
+            fs::write(home.join(made), "").unwrap();
+            assert_eq!(startup_file(Shell::Bash, home, None), home.join(file));
+        }
+    }
+
+    /// A file names the directory by a line that holds a PATH and
+    /// `.local/bin`, whatever else is in it; a comment does not.
+    #[test]
+    fn a_line_with_a_path_and_local_bin_names_the_directory() {
+        for yes in [
+            r#"export PATH="$HOME/.local/bin:$PATH""#,
+            "PATH=$PATH:~/.local/bin",
+            "  export PATH=/opt/homebrew/bin:$HOME/.local/bin:$PATH  ",
+            "set -gx PATH $HOME/.local/bin $PATH",
+            "alias a=b\nexport PATH=\"$HOME/.local/bin:$PATH\"\nalias c=d",
+            "export PATH=$HOME/.local/bin:$PATH # for pipx",
+        ] {
+            assert!(names_local_bin(yes), "{yes}");
+        }
+        for no in [
+            "",
+            "export PATH=/opt/homebrew/bin:$PATH",
+            "alias lb='ls ~/.local/bin'",
+            "# export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH",
+            "   #export PATH=\"$HOME/.local/bin:$PATH\"",
+        ] {
+            assert!(!names_local_bin(no), "{no}");
+        }
+    }
+
+    /// A directory is on a PATH when one of its entries is that directory,
+    /// whatever follows a slash.
+    #[test]
+    fn a_directory_is_on_a_path_when_it_is_one_of_its_entries() {
+        let dir = Path::new("/Users/jo/.local/bin");
+        for yes in [
+            "/Users/jo/.local/bin",
+            "/usr/bin:/Users/jo/.local/bin:/bin",
+            "/usr/bin:/Users/jo/.local/bin/",
+        ] {
+            assert!(on_path(yes.as_ref(), dir), "{yes}");
+        }
+        for no in [
+            "",
+            "/usr/bin:/bin",
+            "/Users/jo/.local/bin/x:/usr/bin",
+            "/Users/jo/.local:/Users/jo/bin",
+            "~/.local/bin",
+        ] {
+            assert!(!on_path(no.as_ref(), dir), "{no}");
+        }
+    }
+
+    /// Yes adds the line to the end of the file on a line of its own, and
+    /// once: a file that has one that names the directory is not touched,
+    /// and neither is one that is a link, which the line goes through.
+    #[test]
+    fn the_line_is_added_once_on_a_line_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let reach = |file: &Path| Reach {
+            programs: vec!["herdr".to_string()],
+            shell: Some("zsh".to_string()),
+            file: Some(file.to_path_buf()),
+            line: path_line(Some(Shell::Zsh)),
+            home: home.clone(),
+        };
+        let line = format!("{}\n", path_line(Some(Shell::Zsh)));
+        let read = |file: &Path| fs::read_to_string(file).unwrap();
+
+        // A file that is not there is made, with the line alone in it.
+        let zshrc = home.join(".zshrc");
+        assert_eq!(reach(&zshrc).add(), Ok(Added::Written));
+        assert_eq!(read(&zshrc), line);
+        // Again, it adds no second.
+        assert_eq!(reach(&zshrc).add(), Ok(Added::Named));
+        assert_eq!(read(&zshrc), line);
+
+        // A last line without its newline is not joined by the line; one
+        // with it gets no blank line.
+        let bare = home.join("bare");
+        fs::write(&bare, "alias ll='ls -l'").unwrap();
+        assert_eq!(reach(&bare).add(), Ok(Added::Written));
+        assert_eq!(read(&bare), format!("alias ll='ls -l'\n{line}"));
+        let ended = home.join("ended");
+        fs::write(&ended, "alias ll='ls -l'\n\n").unwrap();
+        assert_eq!(reach(&ended).add(), Ok(Added::Written));
+        assert_eq!(read(&ended), format!("alias ll='ls -l'\n\n{line}"));
+
+        // A file that names the directory is left byte for byte, and its
+        // time as it was.
+        let named = home.join("named");
+        fs::write(&named, "export PATH=$PATH:~/.local/bin").unwrap();
+        let before = fs::metadata(&named).unwrap().modified().unwrap();
+        assert_eq!(reach(&named).add(), Ok(Added::Named));
+        assert_eq!(read(&named), "export PATH=$PATH:~/.local/bin");
+        assert_eq!(fs::metadata(&named).unwrap().modified().unwrap(), before);
+
+        // A comment is no PATH entry.
+        let commented = home.join("commented");
+        fs::write(&commented, "# export PATH=$HOME/.local/bin:$PATH\n").unwrap();
+        assert_eq!(reach(&commented).add(), Ok(Added::Written));
+        assert_eq!(
+            read(&commented),
+            format!("# export PATH=$HOME/.local/bin:$PATH\n{line}")
+        );
+
+        // A link stays one, and what it leads to has the line.
+        let target = home.join("dotfiles/zshrc");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "alias ll='ls -l'\n").unwrap();
+        let link = home.join("linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(reach(&link).add(), Ok(Added::Written));
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(read(&target), format!("alias ll='ls -l'\n{line}"));
+        assert_eq!(reach(&link).add(), Ok(Added::Named));
+
+        // The directory of fish's file is made.
+        let fish = home.join(".config/fish/config.fish");
+        let mut reach_fish = reach(&fish);
+        reach_fish.line = path_line(Some(Shell::Fish));
+        assert_eq!(reach_fish.add(), Ok(Added::Written));
+        assert_eq!(read(&fish), "set -gx PATH $HOME/.local/bin $PATH\n");
+    }
+
+    /// A file that cannot be read, or cannot be written, is said so in the
+    /// system's words, and nothing is added.
+    #[test]
+    fn a_file_that_cannot_be_read_or_written_says_so_and_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let reach = |file: PathBuf| Reach {
+            programs: vec!["herdr".to_string()],
+            shell: Some("zsh".to_string()),
+            file: Some(file),
+            line: path_line(Some(Shell::Zsh)),
+            home: home.clone(),
+        };
+
+        // A folder where the file would be cannot be read.
+        let folder = home.join(".zshrc");
+        fs::create_dir(&folder).unwrap();
+        let said = reach(folder.clone()).add().unwrap_err();
+        assert!(
+            said.starts_with("~/.zshrc could not be read (")
+                && said.ends_with(" Nothing was added."),
+            "{said}"
+        );
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+
+        // A file the person's account may not write: only without root,
+        // which no mode holds.
+        if crate::yard::running_as_root() {
+            return;
+        }
+        let locked = home.join("locked");
+        fs::write(&locked, "alias ll='ls -l'\n").unwrap();
+        fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+        let said = reach(locked.clone()).add().unwrap_err();
+        assert!(
+            said.starts_with("~/locked could not be written (")
+                && said.ends_with(" Nothing was added."),
+            "{said}"
+        );
+        assert_eq!(fs::read_to_string(&locked).unwrap(), "alias ll='ls -l'\n");
+    }
+
+    /// A shell that is not known has no file: yes writes nothing for it,
+    /// in words that say so, and no file or folder is made.
+    #[test]
+    fn a_shell_that_is_not_known_is_shown_the_line_and_written_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let doctor = fetched(&home);
+        let yardr = home.join(".local/bin/yardr");
+        let machine = |shell: &Path| Machine {
+            home: Some(home.clone()),
+            shell: Some(shell.to_path_buf()),
+            within: Duration::from_secs(60),
+            ..Machine::default()
+        };
+
+        let tcsh = login_shell(dir.path(), "tcsh", "echo /usr/bin:/bin");
+        let reach_tcsh = reach(&machine(&tcsh), &yardr, &doctor).unwrap();
+        assert_eq!(reach_tcsh.file, None);
+        assert_eq!(reach_tcsh.shell.as_deref(), Some("tcsh"));
+        assert_eq!(reach_tcsh.line, r#"export PATH="$HOME/.local/bin:$PATH""#);
+        assert_eq!(
+            reach_tcsh.add(),
+            Err(
+                "footplate does not know where tcsh keeps its startup file, so it wrote nothing."
+                    .to_string()
+            )
+        );
+        // None named at all.
+        let none = reach(
+            &Machine {
+                shell: None,
+                ..machine(&tcsh)
+            },
+            &yardr,
+            &doctor,
+        )
+        .unwrap();
+        assert_eq!((none.file.clone(), none.shell.clone()), (None, None));
+        assert_eq!(
+            none.add(),
+            Err(
+                "footplate does not know which shell a terminal runs here, so it wrote nothing."
+                    .to_string()
+            )
+        );
+        // Nothing was made in the home.
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    }
+
+    /// Setup has something to do for a terminal where a program is in
+    /// `~/.local/bin` and neither the file of the person's shell nor the
+    /// PATH its login shell reports names the directory. The file is asked
+    /// first, and is what stops a second step after a yes: a login shell
+    /// started to answer `-l -c` does not read zsh's `.zshrc`, so it says
+    /// what it said before.
+    #[test]
+    fn a_terminal_is_given_a_step_only_where_nothing_names_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let bin = home.join(".local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let (yardr, doctor) = (bin.join("yardr"), fetched(&home));
+        let machine = |shell: &Path| Machine {
+            home: Some(home.clone()),
+            shell: Some(shell.to_path_buf()),
+            within: Duration::from_secs(60),
+            ..Machine::default()
+        };
+        let zsh = login_shell(dir.path(), "zsh", "echo /usr/bin:/bin");
+        let zshrc = home.join(".zshrc");
+
+        // yardr, herdr and claude are there, and a terminal does not look
+        // in the directory: the step, with the file and the line.
+        let step = reach(&machine(&zsh), &yardr, &doctor).unwrap();
+        assert_eq!(step.programs, ["yardr", "herdr", "claude"]);
+        assert_eq!(step.named(), "yardr, herdr and claude");
+        assert_eq!(step.file, Some(zshrc.clone()));
+        assert_eq!(step.shown().as_deref(), Some("~/.zshrc"));
+        assert_eq!(step.line, r#"export PATH="$HOME/.local/bin:$PATH""#);
+        assert_eq!(asks(dir.path(), "zsh"), 1);
+        assert!(!zshrc.exists(), "asking writes nothing");
+
+        // Yes. A second run has no step, though the login shell still says
+        // what it said: the file does, and the shell is not even asked.
+        assert_eq!(step.add(), Ok(Added::Written));
+        assert_eq!(reach(&machine(&zsh), &yardr, &doctor), None);
+        assert_eq!(asks(dir.path(), "zsh"), 1);
+        assert_eq!(
+            fs::read_to_string(&zshrc).unwrap(),
+            format!("{}\n", step.line)
+        );
+        fs::remove_file(&zshrc).unwrap();
+
+        // The login shell's PATH names it already: no step, and no file.
+        let on = login_shell(
+            dir.path(),
+            "zsh",
+            &format!("echo /usr/bin:{}", bin.display()),
+        );
+        assert_eq!(reach(&machine(&on), &yardr, &doctor), None);
+        assert!(!zshrc.exists());
+
+        // A shell that fails or takes too long has not said it is there.
+        let failing = login_shell(dir.path(), "zsh", "exit 1");
+        assert!(reach(&machine(&failing), &yardr, &doctor).is_some());
+
+        // A comment is no entry.
+        fs::write(&zshrc, "# export PATH=$HOME/bin:$HOME/.local/bin:$PATH\n").unwrap();
+        assert!(reach(&machine(&zsh), &yardr, &doctor).is_some());
+        fs::remove_file(&zshrc).unwrap();
+
+        // No program of setup's is in the directory: nothing to do, and the
+        // shell is not asked. The yardr elsewhere, herdr and claude found
+        // elsewhere, one not found with a path doctor does not vouch for.
+        let before = asks(dir.path(), "zsh");
+        let elsewhere: Doctor = serde_json::from_value(json!({"machine": [
+            {"program": "herdr", "found": true, "path": "/opt/stand-in/bin/herdr"},
+            {"program": "claude", "found": false, "path": bin.join("claude")},
+        ]}))
+        .unwrap();
+        assert_eq!(
+            reach(
+                &machine(&zsh),
+                Path::new("/opt/yardr/bin/yardr"),
+                &elsewhere
+            ),
+            None
+        );
+        assert_eq!(asks(dir.path(), "zsh"), before);
+        // Only the yardr is: it is the step's one program.
+        let alone = reach(&machine(&zsh), &yardr, &elsewhere).unwrap();
+        assert_eq!(alone.named(), "yardr");
+
+        // Doctor can name a found harness under its "a harness" item.
+        // It is still one of the programs this step tells the person about.
+        let nested: Doctor = serde_json::from_value(json!({"machine": [
+            {"program": "a harness", "found": false, "any_of": [
+                {"program": "codex", "harness": "codex", "found": true,
+                 "path": bin.join("codex")}
+            ]}
+        ]}))
+        .unwrap();
+        let nested = reach(&machine(&zsh), &yardr, &nested).unwrap();
+        assert_eq!(nested.programs, ["yardr", "codex"]);
+
+        // bash writes the file a login bash reads: a `.profile` that names
+        // it makes no step, and no `.bash_profile` is made to hide it.
+        let bash = login_shell(dir.path(), "bash", "echo /usr/bin:/bin");
+        fs::write(
+            home.join(".profile"),
+            "export PATH=\"$HOME/.local/bin:$PATH\"\n",
+        )
+        .unwrap();
+        assert_eq!(reach(&machine(&bash), &yardr, &doctor), None);
+        assert!(!home.join(".bash_profile").exists());
+        fs::write(home.join(".profile"), "alias ll='ls -l'\n").unwrap();
+        let step = reach(&machine(&bash), &yardr, &doctor).unwrap();
+        assert_eq!(step.file, Some(home.join(".profile")));
+        assert_eq!(step.add(), Ok(Added::Written));
+        assert!(!home.join(".bash_profile").exists());
+        assert_eq!(reach(&machine(&bash), &yardr, &doctor), None);
+
+        // zsh keeps its files in ZDOTDIR where the environment says so.
+        let moved = dir.path().join("dotfiles/zsh");
+        let step = reach(
+            &Machine {
+                zdotdir: Some(moved.clone()),
+                ..machine(&zsh)
+            },
+            &yardr,
+            &doctor,
+        )
+        .unwrap();
+        assert_eq!(step.file, Some(moved.join(".zshrc")));
+        assert_eq!(step.add(), Ok(Added::Written));
+        assert!(moved.join(".zshrc").exists() && !zshrc.exists());
     }
 
     /// Only a page on the web is handed to the system's opener.

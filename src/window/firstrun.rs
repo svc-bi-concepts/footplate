@@ -6,7 +6,10 @@
 //!
 //! The steps, in order: yardr itself is found or installed (fetch.rs); what
 //! the machine lacks is listed from `yardr doctor --json`, and installed
-//! where yardr names a way; the yard is created (`yardr init`); the harness
+//! where yardr names a way; where the programs are in `~/.local/bin` and a
+//! terminal does not look there, the person is asked whether the line that
+//! makes it look is added to their shell's startup file (setup.rs, `Reach`);
+//! the yard is created (`yardr init`); the harness
 //! is logged in, led by `yardr harness login --json`; the yard is started
 //! (`yardr up`); a folder becomes its first depot, with a first bead. Then
 //! the window opens the yardmaster's conversation.
@@ -27,7 +30,8 @@ use super::small_button;
 use crate::feedback::Project;
 use crate::fetch::{self, Machine};
 use crate::input::{Line, Submitted};
-use crate::setup::{self, Doctor, Form, Item, Login, Need, Offer, Yardr};
+use crate::select;
+use crate::setup::{self, Added, Doctor, Form, Item, Login, Need, Offer, Reach, Yardr};
 use crate::theme::Palette;
 use crate::titlebar::{self, Gesture};
 use crate::voice::{Mic, Queue, Start, Update};
@@ -169,6 +173,9 @@ pub enum Step {
     Yardr,
     /// What the machine has of what a yard needs.
     Needs,
+    /// The programs are in a directory a terminal does not look in: the
+    /// line that makes it look, to add or not.
+    Terminal,
     /// The yard to create.
     Yard,
     /// The harness's login.
@@ -186,6 +193,7 @@ impl Step {
         match self {
             Step::Yardr => "yardr itself",
             Step::Needs => "What this needs",
+            Step::Terminal => "Your terminal",
             Step::Yard => "Your yard",
             Step::Login => "Logging in",
             Step::Start => "Start the yard",
@@ -196,7 +204,7 @@ impl Step {
 
     fn number(self) -> usize {
         match self {
-            Step::Yardr | Step::Needs => 1,
+            Step::Yardr | Step::Needs | Step::Terminal => 1,
             Step::Yard => 2,
             Step::Login => 3,
             Step::Start => 4,
@@ -226,6 +234,10 @@ pub struct FirstRun {
     pub said: Option<String>,
     yardr: Option<Yardr>,
     doctor: Option<Doctor>,
+    /// What can be done for a terminal to find the programs in
+    /// `~/.local/bin`, where doctor's check found anything to do: it is
+    /// asked with the check, which is off the window's thread.
+    reach: Option<Reach>,
     /// The home has a yard already, which is not running: nothing of it
     /// is created again, and it is started.
     existing: bool,
@@ -315,6 +327,31 @@ impl FirstRun {
         this
     }
 
+    /// The terminal's step posed for a screenshot: zsh, a home of `/Users/jo`
+    /// and the three programs fetched, with nothing read or written. A
+    /// debug build's alone, and a unix one's, as the second step's is.
+    #[cfg(all(debug_assertions, unix))]
+    pub fn shot_terminal(
+        means: Means,
+        socket: &Path,
+        name: &str,
+        handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::build(means, socket, name, handle, cx);
+        this.doctor = Some(crate::shot::setup_doctor());
+        let home = PathBuf::from("/Users/jo");
+        this.reach = Some(Reach {
+            programs: ["yardr", "herdr", "claude"].map(String::from).to_vec(),
+            shell: Some("zsh".to_string()),
+            file: Some(home.join(".zshrc")),
+            line: setup::path_line(Some(setup::Shell::Zsh)),
+            home,
+        });
+        this.step = Step::Terminal;
+        this
+    }
+
     /// The first run before it starts: its fields, with the login name
     /// standing in the operator's.
     fn build(
@@ -347,6 +384,7 @@ impl FirstRun {
             said: None,
             yardr: None,
             doctor: None,
+            reach: None,
             existing: false,
             form: Form::default(),
             operator: field("Jo", name, cx),
@@ -459,14 +497,23 @@ impl FirstRun {
             return;
         };
         self.step = Step::Needs;
+        // Only a Mac fetches programs to `~/.local/bin`. The login shell
+        // is asked here, beside doctor, and not when "go on" is pressed.
+        let (machine, apple) = (self.means.machine.clone(), self.means.apple);
         self.work(
             "looking at what this machine has…",
             move || {
                 let doctor = yardr.needs();
-                (yardr, doctor)
+                let reach = doctor
+                    .as_ref()
+                    .ok()
+                    .filter(|_| apple)
+                    .and_then(|doctor| setup::reach(&machine, &yardr.program, doctor));
+                (yardr, doctor, reach)
             },
-            |this, (yardr, doctor), _| {
+            |this, (yardr, doctor, reach), _| {
                 this.yardr = Some(yardr);
+                this.reach = reach;
                 match doctor {
                     Ok(doctor) => this.doctor = Some(doctor),
                     Err(why) => this.said = Some(why),
@@ -560,9 +607,64 @@ impl FirstRun {
         }
     }
 
-    /// Step 2 is shown once git, herdr and a harness are there.
+    /// Step 2 is shown once git, herdr and a harness are there, after the
+    /// terminal's step where that has anything to do.
     fn go_on(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(doctor) = self.doctor.as_ref().filter(|doctor| doctor.ready()) else {
+        if !self.doctor.as_ref().is_some_and(Doctor::ready) {
+            return;
+        }
+        if self.reach.is_some() {
+            self.step = Step::Terminal;
+            self.said = None;
+            cx.notify();
+            return;
+        }
+        self.past_programs(window, cx);
+    }
+
+    /// The terminal's step, answered yes: the line is added to the shell's
+    /// file. A file that cannot be read or written keeps the person on the
+    /// step, with the refusal's words, to try again or go on without.
+    fn add_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(reach) = self.reach.as_ref() else {
+            return;
+        };
+        let shown = reach.shown().unwrap_or_default();
+        let said = match reach.add() {
+            Ok(Added::Written) => format!(
+                "Added to {shown}. A terminal opened from now on finds {}.",
+                reach.named()
+            ),
+            Ok(Added::Named) => {
+                format!("{shown} names ~/.local/bin on a PATH already, so nothing was added.")
+            }
+            Err(why) => {
+                self.said = Some(why);
+                cx.notify();
+                return;
+            }
+        };
+        self.past_terminal(window, cx);
+        // Beside what the step after it says of itself.
+        self.said = Some(match self.said.take() {
+            Some(next) => format!("{said}\n{next}"),
+            None => said,
+        });
+        cx.notify();
+    }
+
+    /// The terminal's step is over, and nothing was written: not now, or a
+    /// shell whose file is not known. Nothing is kept of it, so the step
+    /// comes again in a later run.
+    fn past_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reach = None;
+        self.past_programs(window, cx);
+    }
+
+    /// What follows the programs: the yard's form, or the start of a yard
+    /// that is there.
+    fn past_programs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doctor) = self.doctor.as_ref() else {
             return;
         };
         // A yard that is there is not created over: what its form would
@@ -592,7 +694,7 @@ impl FirstRun {
             Step::Yard => self.create(cx),
             Step::Depot => self.set_up(cx),
             Step::Bead => self.first_bead(cx),
-            Step::Yardr | Step::Needs | Step::Login | Step::Start => {}
+            Step::Yardr | Step::Needs | Step::Terminal | Step::Login | Step::Start => {}
         }
     }
 
@@ -1177,6 +1279,104 @@ impl FirstRun {
                     ));
                 }
             }
+            Step::Terminal => {
+                let Some(reach) = &self.reach else {
+                    return body;
+                };
+                let (are, them) = match reach.programs.len() {
+                    1 => ("is", "it"),
+                    _ => ("are", "them"),
+                };
+                // Each paragraph is named, for the test that holds the rows
+                // apart.
+                let para = |selector: &'static str, text: String| {
+                    div()
+                        .debug_selector(move || selector.to_string())
+                        .child(text)
+                        .into_any_element()
+                };
+                body.push(para(
+                    "setup path why",
+                    format!(
+                        "{} {are} in ~/.local/bin, which a terminal does not look in. footplate finds {them} there, so nothing here waits on this.",
+                        reach.named()
+                    ),
+                ));
+                let shown = reach.shown();
+                body.push(para("setup path where", match (&shown, reach.shell.as_deref()) {
+                    (Some(file), Some(shell)) => format!(
+                        "To have a terminal find {them} too, this line goes in {file}, which {shell} reads when a terminal opens:"
+                    ),
+                    (None, Some(shell)) => format!(
+                        "footplate does not know where {shell} keeps its startup file, so it writes nothing. To have a terminal find {them}, add this line to that file yourself:"
+                    ),
+                    _ => format!(
+                        "footplate does not know which shell a terminal runs here, so it writes nothing. To have a terminal find {them}, add this line to that shell's startup file yourself:"
+                    ),
+                }));
+                let mut line = div()
+                    .debug_selector(|| "setup path line".to_string())
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(palette.code)
+                    .text_sm()
+                    .child(reach.line);
+                if let Some(mono) = select::mono(cx) {
+                    line = line.font_family(mono);
+                }
+                body.push(line.into_any_element());
+                match shown {
+                    Some(file) => {
+                        body.push(
+                            div()
+                                .debug_selector(|| "setup path note".to_string())
+                                .text_sm()
+                                .text_color(palette.faint)
+                                .child(format!(
+                                    "footplate adds it only if you say so, as one line at the end of the file, and changes nothing else in it. A terminal opened after that finds {them}."
+                                ))
+                                .into_any_element(),
+                        );
+                        body.push(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    self.button(
+                                        "setup path add".to_string(),
+                                        &format!("add it to {file}"),
+                                        palette,
+                                    )
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.add_line(window, cx)
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    self.button("setup path later".to_string(), "not now", palette)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.past_terminal(window, cx)
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                    None => body.push(
+                        div()
+                            .flex()
+                            .child(
+                                self.button("setup path go on".to_string(), "go on", palette)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.past_terminal(window, cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    ),
+                }
+            }
             Step::Yard => {
                 body.push(self.typed("your name", &self.operator, palette, cx));
                 let installed = self.doctor.iter().flat_map(|doctor| doctor.installed());
@@ -1584,11 +1784,16 @@ impl Render for FirstRun {
                 // Two divs, not one (reading_column in window.rs stands
                 // the same shape): `w_full` with `max_w` keeps the height
                 // its text has at full width once the max clamps it,
-                // short of the rows it holds.
+                // short of the rows it holds. The column has a width of
+                // its own, which `max_w_full` keeps inside a narrow window:
+                // with `max_w` alone its rows were measured at none, a
+                // paragraph as one line and a row of buttons as two, and
+                // drawn wrapped over the rows below.
                 div().w_full().child(
                     div()
                         .debug_selector(|| "setup column".to_string())
-                        .max_w(rems(36.))
+                        .w(rems(36.))
+                        .max_w_full()
                         .mx_auto()
                         .flex()
                         .flex_col()
@@ -1717,6 +1922,11 @@ impl FirstRun {
     /// The folder is `dir`, as the system's chooser gives one.
     pub fn chose(&mut self, dir: &Path, cx: &mut Context<Self>) {
         self.folder_is(dir, cx);
+    }
+
+    /// What the terminal's step offers, where it has anything to do.
+    pub fn reach(&self) -> Option<Reach> {
+        self.reach.clone()
     }
 
     /// The PATH of what is started.

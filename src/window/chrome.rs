@@ -213,6 +213,22 @@ impl Footplate {
             });
             this.first_run = Some(first_run);
         }
+        // The setup-terminal shot is the step that asks whether the PATH
+        // line goes in the shell's file, posed on a zsh with nothing read
+        // or written. A debug build's alone, and with a socket, as above.
+        #[cfg(all(debug_assertions, unix))]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("setup-terminal") {
+            let first_run = cx.new(|cx| {
+                FirstRun::shot_terminal(
+                    this.means.clone(),
+                    &this.env.socket,
+                    &this.name,
+                    this.handle,
+                    cx,
+                )
+            });
+            this.first_run = Some(first_run);
+        }
         // The switcher shots open with the switcher's list standing, on
         // the open yard's row: four yards are paired, one of them away,
         // and the shot is the list; the second shuts it a second after it

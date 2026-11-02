@@ -24236,6 +24236,250 @@ yardr.dev
         assert!(!home.join(".local/bin/herdr").exists());
     }
 
+    /// The first run's terminal step as it stands: what it offers.
+    fn setup_reach(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> Option<crate::setup::Reach> {
+        view.read_with(cx, |v, cx| {
+            v.first_run.as_ref().and_then(|f| f.read(cx).reach())
+        })
+    }
+
+    /// Every file under `dir` with what is in it: a folder of a test as a
+    /// list, to be compared with itself later.
+    #[cfg(unix)]
+    fn files_under(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut dirs = vec![dir.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).into_iter().flatten() {
+                let path = entry.unwrap().path();
+                match path.is_dir() {
+                    true => dirs.push(path),
+                    false => files.push((path.clone(), std::fs::read(path).unwrap())),
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// The first run on a Mac where herdr and claude were fetched to
+    /// `~/.local/bin` and the person's shell is `shell`, whose PATH does not
+    /// name it: the window with no yard and the means to set one up, herdr
+    /// and claude found where fetching puts them.
+    #[cfg(unix)]
+    fn at_terminal<'a>(
+        dir: &tempfile::TempDir,
+        shell: &str,
+        apple: bool,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Footplate>, &'a mut VisualTestContext) {
+        use crate::setup::standin;
+
+        let (mut means, program, _) = stand_in_means(dir.path(), apple);
+        let bin = dir.path().join("home/.local/bin");
+        let mut doctor = standin::doctor_ready();
+        doctor["machine"][0]["path"] = json!(bin.join("herdr"));
+        doctor["machine"][2]["path"] = json!(bin.join("claude"));
+        standin::answers(&program, "doctor", 0, &doctor);
+        // A login shell that is asked for its PATH, which has no
+        // `.local/bin` in it.
+        means.machine.shell = Some(
+            crate::fetch::keep(
+                &dir.path().join("shell"),
+                shell,
+                b"#!/bin/sh\necho /usr/bin:/bin\n",
+            )
+            .unwrap(),
+        );
+        means.machine.within = std::time::Duration::from_secs(60);
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+        (view, cx)
+    }
+
+    /// Goes through the first run's first screen to its "go on".
+    #[cfg(unix)]
+    fn go_on_from_needs(view: &Entity<Footplate>, cx: &mut VisualTestContext) {
+        click_on(cx, "way here");
+        at_step(view, cx, firstrun::Step::Needs);
+        click_on(cx, "setup go on");
+    }
+
+    /// The programs fetched to `~/.local/bin` and a terminal that does not
+    /// look there: after the programs, a step shows the line and the file
+    /// it goes to, and yes adds the line once and goes on to the yard's
+    /// form. A second run of setup has no step, though the login shell
+    /// answers as it did: a zsh asked with `-l -c` does not read `.zshrc`.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_terminal_is_made_to_find_the_programs_on_the_person_s_yes(cx: &mut TestAppContext) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let (view, cx) = at_terminal(&dir, "zsh", true, cx);
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Terminal));
+        // Which programs, the line to the letter, and the file by its name.
+        let reach = setup_reach(&view, cx).unwrap();
+        assert_eq!(reach.named(), "herdr and claude");
+        assert_eq!(reach.line, r#"export PATH="$HOME/.local/bin:$PATH""#);
+        assert_eq!(reach.shown().as_deref(), Some("~/.zshrc"));
+        assert!(drawn(cx, "setup path line"));
+        assert!(drawn(cx, "setup path add") && drawn(cx, "setup path later"));
+        // A shell whose file is known has a yes and a no, not a go on.
+        assert!(!drawn(cx, "setup path go on"));
+        // The rows stand as tall as the lines they wrap to, and the buttons
+        // as one: a column measured at no width made a paragraph one line
+        // and a row of buttons two, and drew the text over the rows below.
+        let one = bounds_of(cx, "setup step").size.height;
+        for selector in ["setup path why", "setup path where", "setup path note"] {
+            let height = bounds_of(cx, selector).size.height;
+            assert!(
+                height > one * 1.9,
+                "{selector} is {height:?}, a line {one:?}"
+            );
+        }
+        let buttons = bounds_of(cx, "setup path add").size.height;
+        assert!(
+            buttons < one * 1.5,
+            "the buttons are {buttons:?}, a line {one:?}"
+        );
+        // Nothing is written until the person says.
+        assert!(!home.join(".zshrc").exists());
+
+        // Yes: the line is the file, once, and the yard's form follows.
+        click_on(cx, "setup path add");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        assert_eq!(
+            std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+            "export PATH=\"$HOME/.local/bin:$PATH\"\n"
+        );
+        assert_eq!(
+            setup_said(&view, cx),
+            "Added to ~/.zshrc. A terminal opened from now on finds herdr and claude."
+        );
+        assert_eq!(setup_reach(&view, cx), None);
+
+        // The second run: the same machine, and no step.
+        click_on(cx, "setup leave");
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        assert_eq!(
+            std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+            "export PATH=\"$HOME/.local/bin:$PATH\"\n"
+        );
+
+        // A home that has a yard already, which is not running: the step
+        // is still first, and what follows it says its own words too.
+        std::fs::remove_file(home.join(".zshrc")).unwrap();
+        let mut doctor = standin::doctor_ready();
+        doctor["yard"] = json!(true);
+        doctor["machine"][0]["path"] = json!(home.join(".local/bin/herdr"));
+        standin::answers(&dir.path().join("fetched/yardr"), "doctor", 0, &doctor);
+        click_on(cx, "setup leave");
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Terminal));
+        click_on(cx, "setup path add");
+        assert_eq!(step_of(&view, cx), Some(Step::Start));
+        assert_eq!(
+            setup_said(&view, cx),
+            "Added to ~/.zshrc. A terminal opened from now on finds herdr.\nThis machine has a yard already, which is not running."
+        );
+    }
+
+    /// Only a Mac has programs fetched to `~/.local/bin`: the same machine
+    /// on Linux goes from what it needs to the yard's form, and the login
+    /// shell is not asked.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn linux_is_given_no_terminal_step(cx: &mut TestAppContext) {
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = at_terminal(&dir, "zsh", false, cx);
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        assert!(!dir.path().join("shell/zsh.asked").exists());
+    }
+
+    /// Everything the person has and the settings keep, as files with what
+    /// is in them: a step that is declined leaves it as it was.
+    #[cfg(unix)]
+    fn kept_under(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut kept = files_under(&dir.join("home"));
+        kept.extend(files_under(&dir.join("footplate")));
+        kept
+    }
+
+    /// No at the step writes, makes and marks nothing, and setup goes on;
+    /// the step comes again in the next run. A file that cannot be read is
+    /// said so on the step, which stays.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_terminal_s_step_can_be_declined_and_writes_nothing_it_may_not(cx: &mut TestAppContext) {
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let (view, cx) = at_terminal(&dir, "zsh", true, cx);
+        std::fs::write(home.join(".zshrc"), "alias ll='ls -l'").unwrap();
+        let before = kept_under(dir.path());
+
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Terminal));
+        click_on(cx, "setup path later");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        assert_eq!(setup_said(&view, cx), "");
+        assert_eq!(kept_under(dir.path()), before);
+
+        // The step comes again, as nothing was marked.
+        click_on(cx, "setup leave");
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Terminal));
+
+        // A file that cannot be read: said so on the step, which stays,
+        // and nothing is added; not now goes on, as before.
+        std::fs::remove_file(home.join(".zshrc")).unwrap();
+        std::fs::create_dir(home.join(".zshrc")).unwrap();
+        click_on(cx, "setup path add");
+        assert_eq!(step_of(&view, cx), Some(Step::Terminal));
+        assert!(
+            setup_said(&view, cx).starts_with("~/.zshrc could not be read ("),
+            "{}",
+            setup_said(&view, cx)
+        );
+        assert_eq!(std::fs::read_dir(home.join(".zshrc")).unwrap().count(), 0);
+        click_on(cx, "setup path later");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+    }
+
+    /// A shell that is not known has the line shown and no yes offered, and
+    /// going on leaves every file as it was.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_shell_that_is_not_known_is_shown_the_line_and_offered_no_yes(cx: &mut TestAppContext) {
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = at_terminal(&dir, "tcsh", true, cx);
+        let before = kept_under(dir.path());
+        go_on_from_needs(&view, cx);
+        assert_eq!(step_of(&view, cx), Some(Step::Terminal));
+        let reach = setup_reach(&view, cx).unwrap();
+        assert_eq!((reach.file, reach.shell.as_deref()), (None, Some("tcsh")));
+        assert_eq!(reach.line, r#"export PATH="$HOME/.local/bin:$PATH""#);
+        assert!(drawn(cx, "setup path line") && drawn(cx, "setup path go on"));
+        assert!(!drawn(cx, "setup path add") && !drawn(cx, "setup path later"));
+        click_on(cx, "setup path go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        assert_eq!(kept_under(dir.path()), before);
+    }
+
     /// The third way, from no yard to talking with the yardmaster: yardr
     /// is had, what the machine lacks is listed from doctor's JSON with
     /// how each comes, the yard is created without being started, the

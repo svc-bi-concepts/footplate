@@ -128,12 +128,16 @@ Setup, release and tests:
   either empty there is no project, so no button. It sends by
   `api::post_json`, the post to a site that is no yard.
 - `src/fetch.rs`: finds the yardr on this machine (`Machine`: the yard's
-  `<home>/binary`, `~/.local/bin`, the PATH, the login shell), moves the copy
+  `<home>/binary`, `~/.local/bin`, the PATH, the login shell, which it also
+  asks for the PATH a terminal starts with), moves the copy
   an older footplate kept, and runs yardr's installer from yardr.dev; fetches
   `yardr doctor`-named programs by checksum; and asks the yardr its version,
   for the About card.
 - `src/setup.rs`: the first run as yardr's commands, with no window (args in,
-  JSON out, PATH from doctor's data, never through a shell).
+  JSON out, PATH from doctor's data, never through a shell); and the one line
+  that puts `~/.local/bin` on a terminal's PATH, which it appends to the
+  shell's startup file on the person's yes alone (`Reach`, `startup_file`:
+  plain functions, tested with no screen).
 - `src/shot.rs` (debug builds only): scripted states against a fake yard for
   screenshots, named by `FOOTPLATE_SHOT`; the voice state stands a session
   against a fake `Live` as well, with no microphone or speaker opened.

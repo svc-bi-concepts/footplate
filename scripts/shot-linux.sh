@@ -53,6 +53,9 @@
 # answered, with the line that esc opens it), `setup` (step 2 of
 # setting up a yard here, posed: a canned doctor of two providers and
 # their model offers, and the working styles as a numbered scale),
+# `setup-terminal` (the step that asks whether the line that puts
+# `~/.local/bin` on the PATH goes in the shell's startup file, posed on zsh
+# with yardr, herdr and claude in that directory),
 # `hosted` (the first screen with the hosted way's fields open and
 # filled), `signedout` (the away screen of a hosted yard that is
 # signed out), `away` (the away screen of a yard at an address that
@@ -124,7 +127,7 @@ set -e
 caller=$PWD
 # The states src/shot.rs serves, kept as that file's own list has them: a
 # state added there is added here, and refused here until it is.
-states="yardmaster crew thread column column-hover column-copy column-top older-unread plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-voice settings-telemetry settings-telemetry-off voice voice-ready voice-draft reconnecting page mail image refusal undelivered answered setup hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
+states="yardmaster crew thread column column-hover column-copy column-top older-unread plain plain-select lines run teammates teammates-list weighty weighty-mapping stopped far settings settings-appearance settings-yards settings-yards-rename settings-agents settings-notifications settings-connection settings-voice settings-telemetry settings-telemetry-off voice voice-ready voice-draft reconnecting page mail image refusal undelivered answered setup setup-terminal hosted signedout away arrivals departures arrival flow old-lines grants pairing secret secret-shown secret-refused switcher switcher-shut switcher-member member-pair member-paired refs decisions decisions-filtered keys about about-missing feedback reactions reactions-hover reactions-zoom notice drawer delivery screen screen-hosted screen-refused"
 is_state() {
     case " $states " in
         *" $1 "*) return 0 ;;

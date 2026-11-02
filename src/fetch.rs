@@ -68,6 +68,11 @@ const SHELL_WITHIN: Duration = Duration::from_secs(5);
 /// The one question the login shell is asked, as yardr's doctor asks it.
 const SHELL_ASKS: &str = "command -v yardr";
 
+/// What the login shell is asked to learn whether a terminal finds a
+/// directory: the PATH it has once its profile has run. `printenv` rather
+/// than the shell's own `$PATH`, which fish keeps as a list.
+const PATH_ASKS: &str = "printenv PATH";
+
 /// What is said where no yardr is found. The window offers the installer
 /// under exactly these words, and "try again" under any others.
 pub const NOT_THERE: &str = "There is no yardr on this machine.";
@@ -157,6 +162,9 @@ pub struct Machine {
     /// The person's login shell, and how long it has to answer.
     pub shell: Option<PathBuf>,
     pub within: Duration,
+    /// Where zsh keeps its startup files when the environment footplate
+    /// was started in moves them from the home (`ZDOTDIR`).
+    pub zdotdir: Option<PathBuf>,
     /// footplate's own directory for programs ([`dir`]).
     pub own: Option<PathBuf>,
     /// The yards of this machine, by their homes: each may have a login
@@ -187,6 +195,7 @@ impl Machine {
             path: env::var_os("PATH").unwrap_or_default(),
             shell: env::var_os("SHELL").map(PathBuf::from),
             within: SHELL_WITHIN,
+            zdotdir: env::var_os("ZDOTDIR").map(PathBuf::from),
             own: dir(),
             yards,
         }
@@ -232,6 +241,15 @@ impl Machine {
                 let shell = self.shell.as_deref()?;
                 login_shell(shell, self.within).filter(usable)
             })
+    }
+
+    /// The PATH the login shell starts with, asked as yardr is
+    /// ([`login_shell`]): the directories a terminal of the person's looks
+    /// in. None where no shell is named, and where it fails, takes too long
+    /// or says nothing.
+    pub fn login_path(&self) -> Option<OsString> {
+        let said = login_shell_says(self.shell.as_deref()?, PATH_ASKS, self.within)?;
+        Some(OsString::from(said))
     }
 
     /// The yardr to run. Where nothing but the kept one is there, the kept
@@ -402,16 +420,23 @@ fn runs(path: &Path) -> bool {
         && fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
 }
 
-/// Where the login shell finds yardr, asked once. The shell has its own
-/// process group, so that a profile that hangs is stopped with what it
-/// started. Its output is read without waiting for the pipe to close: a
-/// profile may leave something running after the shell has ended. Anything
-/// but a whole path on the last line is no answer: a shell that fails or
-/// takes too long, or an alias.
-#[cfg(unix)]
+/// Where the login shell finds yardr, asked once. Anything but a whole
+/// path on the last line is no answer: a shell that fails or takes too
+/// long, or an alias.
 fn login_shell(shell: &Path, within: Duration) -> Option<PathBuf> {
+    let line = login_shell_says(shell, SHELL_ASKS, within)?;
+    Some(PathBuf::from(line)).filter(|path| path.is_absolute())
+}
+
+/// The last line the login shell prints to `ask`, asked once. The shell
+/// has its own process group, so that a profile that hangs is stopped with
+/// what it started. Its output is read without waiting for the pipe to
+/// close: a profile may leave something running after the shell has ended.
+/// None for a shell that fails or takes too long, or says nothing.
+#[cfg(unix)]
+fn login_shell_says(shell: &Path, ask: &str, within: Duration) -> Option<String> {
     let mut child = Command::new(shell)
-        .args(["-l", "-c", SHELL_ASKS])
+        .args(["-l", "-c", ask])
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -484,7 +509,7 @@ fn login_shell(shell: &Path, within: Duration) -> Option<PathBuf> {
     }
     let said = String::from_utf8_lossy(&said);
     let line = said.lines().rev().find(|line| !line.trim().is_empty())?;
-    Some(PathBuf::from(line.trim())).filter(|path| path.is_absolute())
+    Some(line.trim().to_string())
 }
 
 /// Stops the shell and the processes it started in its own group.
@@ -497,7 +522,7 @@ fn stop_group(child: &mut Child) {
 }
 
 #[cfg(not(unix))]
-fn login_shell(_: &Path, _: Duration) -> Option<PathBuf> {
+fn login_shell_says(_: &Path, _: &str, _: Duration) -> Option<String> {
     None
 }
 
@@ -1384,6 +1409,7 @@ mod tests {
                 path: "/usr/bin:/bin".into(),
                 shell: None,
                 within: Duration::from_secs(60),
+                zdotdir: None,
                 own: Some(self.at("own")),
                 yards: vec![self.at("yard")],
             }
@@ -1601,6 +1627,32 @@ mod tests {
             login_shell(&stage.at("no/shell"), Duration::from_secs(1)),
             None
         );
+    }
+
+    /// The PATH of a terminal is what the login shell prints to
+    /// `printenv PATH`, its last line as with yardr: asked with `-l -c`
+    /// like the other, and none from a shell that is none, fails, or says
+    /// nothing.
+    #[test]
+    fn the_login_shell_is_asked_for_its_path() {
+        let stage = Stage::new();
+        let mut machine = stage.machine();
+        assert_eq!(machine.login_path(), None);
+
+        machine.shell = Some(stage.shell("echo Welcome back; echo /usr/bin:/home/jo/.local/bin"));
+        assert_eq!(
+            machine.login_path(),
+            Some("/usr/bin:/home/jo/.local/bin".into())
+        );
+        let asked = fs::read_to_string(stage.at("shell/zsh.asked")).unwrap();
+        assert_eq!(asked, "-l|-c|printenv PATH|");
+
+        machine.shell = Some(stage.shell("exit 1"));
+        assert_eq!(machine.login_path(), None);
+        machine.shell = Some(stage.shell("echo"));
+        assert_eq!(machine.login_path(), None);
+        machine.shell = Some(stage.at("no/shell"));
+        assert_eq!(machine.login_path(), None);
     }
 
     /// A shell that hangs is stopped at the timeout with what it started,

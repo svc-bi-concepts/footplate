@@ -468,7 +468,10 @@ a linked yard whose mail was refused over the hour), `answered` (the
 first screen with a way's fields open after the yard answered, with the
 line that esc opens it), `setup` (step 2 of setting up a yard here,
 posed: a canned doctor of two providers and their model offers, and the
-working styles as a numbered scale), `hosted` (the first screen with
+working styles as a numbered scale), `setup-terminal` (the step that asks
+whether the line that puts `~/.local/bin` on the PATH goes in the shell's
+startup file, posed on zsh with yardr, herdr and claude in that
+directory), `hosted` (the first screen with
 the hosted way's fields open and filled), `signedout` (the away
 screen of a hosted yard that is signed out), `away` (the away
 screen of a yard at an address that no longer lets the device in,
@@ -1204,6 +1207,7 @@ in, which every command is told (`--home`).
 |---|---|---|
 | yardr itself | that it is found; where it is not, "install yardr", what the installer prints, and "try again" where it failed | the lookup and the installer [above](#yardr-a-dependency) |
 | What this needs | a row for git, herdr and each harness: installed or not, what it is for, and how it comes. "check again" asks once more. A herdr whose server is down is said to wait, and keeps nothing back. "go on" needs git, herdr and one harness | `yardr doctor --json` |
+| Your terminal | shown only on a Mac, and only when a program is in `~/.local/bin` and a terminal does not look there: which programs, the line that makes it look, and the shell's file it goes to. "add it to ~/.zshrc" adds that one line, and "not now" writes nothing. [Below](#your-terminal) | `$SHELL -l -c 'printenv PATH'`; on the yes, one line appended to the shell's startup file |
 | Your yard | your name (the login name to begin with), the harness (the installed ones; one yardr cannot log in for you is marked "needs a terminal once to log in"), the yardmaster's name, a model, how agents work with you (the four styles, "Guide me" to begin with), a line about you | `yardr init --harness … --operator … --yardmaster … --style … [--model …] [--about …]`: it creates the yard and starts nothing |
 | Logging in | "log in", or "it is logged in already". Then what yardr asks for: the ways to log in as buttons, the page as a button, the code in a field, and the question before the one call that proves the login, which costs a model call | `yardr harness login <kind> --json`, answered on its input |
 | Start the yard | "start the yard"; what could not be started, each with the one thing to do, in yardr's words | `yardr up` |
@@ -1261,11 +1265,13 @@ login names.
 footplate was started with, and after it the directory of each place doctor
 names, where your login shell finds a program that the PATH lacks
 (`login_shell_path`) and where a program is fetched to. Doctor is asked
-again with it, and then finds them. footplate writes no profile; the login
-shells in all of this are doctor's own, which it runs once for a program
-missing from the PATH, and the one question that
-[looks for yardr itself](#yardr-a-dependency). A terminal opened later finds a
-fetched program only once its own PATH has `~/.local/bin`.
+again with it, and then finds them. footplate writes no profile unasked: the
+one line [your terminal](#your-terminal) offers goes into a shell's file on
+your yes alone. The login shells in all of this are doctor's
+own, which it runs once for a program missing from the PATH, and the two
+questions that [look for yardr itself](#yardr-a-dependency) and for the PATH
+a terminal starts with. A terminal opened later finds a fetched program only
+once its own PATH has `~/.local/bin`, which that step adds.
 
 **What footplate starts**, all of it, each with its arguments and never
 through a shell:
@@ -1277,6 +1283,7 @@ through a shell:
 | a maker's installer that yardr names, on a Mac (Claude Code's `install <version>`) | "install" on a harness's row |
 | yardr's installer, `https://yardr.dev/install.sh` | "install yardr" where there is none |
 | your login shell, `$SHELL -l -c 'command -v yardr'`, under a timeout | [looking for yardr](#yardr-a-dependency), where the first three steps found none |
+| your login shell, `$SHELL -l -c 'printenv PATH'`, under a timeout | [your terminal](#your-terminal), on a Mac, once a program is in `~/.local/bin` and the shell's file does not name it |
 | `/usr/bin/xcode-select --install`, on a Mac | "install" on git's row |
 | `git`, to read: `rev-parse --is-inside-work-tree`, `branch --show-current` | the branch offered for a folder |
 | `notify-send`, on Linux | a [notification](#notifications) |
@@ -1289,6 +1296,37 @@ is in the field no longer; it is in no file, no setting and no error. The
 credential that login makes is the harness's own, kept where the harness
 keeps it. A hosted-yard sign-in goes to the edge's Kratos API as described
 in [A hosted yard](#a-hosted-yard); it starts no process.
+
+### Your terminal
+
+A program fetched to `~/.local/bin` is found by footplate and not by a
+terminal, which on a Mac as it comes does not look there. After "go on", a
+step is shown when a program of setup's (the yardr that is run, or one that
+doctor found there) is in that directory, the PATH your login shell reports
+(`$SHELL -l -c 'printenv PATH'`, under the timeout of the question that looks
+for yardr) does not name it, and the shell's file does not either. It shows
+the line and the file, and writes only on "add it to …": one line at the end
+of the file, on a line of its own, and never twice. "not now" writes nothing,
+creates nothing and marks nothing, so the step comes again in the next run.
+It is on a Mac alone.
+
+| Shell, by `$SHELL` | The file | The line |
+|---|---|---|
+| zsh | `$ZDOTDIR/.zshrc` where footplate was started with `ZDOTDIR` set, else `~/.zshrc` | `export PATH="$HOME/.local/bin:$PATH"` |
+| bash | the first of `~/.bash_profile`, `~/.bash_login` and `~/.profile` that exists, as a login bash reads that one alone; `~/.bash_profile` where none does | `export PATH="$HOME/.local/bin:$PATH"` |
+| fish | `~/.config/fish/config.fish` | `set -gx PATH $HOME/.local/bin $PATH` |
+| any other, or none named | none: the line is shown with the words that footplate does not know where that shell keeps its file, and nothing is written | `export PATH="$HOME/.local/bin:$PATH"` |
+
+A file that has a line naming both `PATH` and `.local/bin` gets no step and
+no write. A comment names nothing: oh-my-zsh's stock `.zshrc` carries
+`# export PATH=$HOME/bin:$HOME/.local/bin:…`. The file is asked before the
+shell, and has the last word: a zsh started to answer `-l -c` does not read
+`.zshrc`, so it is the file, not the shell, that knows of a line added in an
+earlier run. A file that is a link is written through, and stays one; one
+that does not end in a newline gets one first, so the line is never joined to
+the last. A file that cannot be read or written is said so on the step, in
+the system's words. The step stays: setup does not fail for it, and "not now"
+goes on.
 
 ### Trying the setup without touching your yard
 
