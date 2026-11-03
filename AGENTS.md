@@ -25,10 +25,59 @@ The window, its state and the yard:
 - `src/main.rs`: opens the one window, owns the app lifecycle; draws nothing.
   `--version` is answered before any of it (the Windows build's smoke test
   runs it).
-- `src/window.rs`: draws the window and makes the calls the model asks for;
-  no protocol, no state of its own. `src/window/firstrun.rs` draws the
-  first run where the yard will be, and `src/window/feedback.rs` the
-  Feedback form over the window.
+- `src/window.rs`: draws the window from the model; no protocol. It holds the
+  `Footplate` view, its actions and key bindings, and its `Render`, which
+  picks what the window shows (the list with the open conversation, the
+  settings, the first run, the away screen) and stacks the layers over it.
+  The rest is in `src/window/`:
+  - `src/window/arrivals.rs`: the timetable's views: the arrivals pane with
+    its panel of tracks and departures board, the lines' flows, and the
+    beads that travel with no line.
+  - `src/window/ask.rs`: the words and keys of an ask's card: its heads and
+    counts, its buttons, and the texts a run or a setup holds.
+  - `src/window/asks.rs`: the decisions' views: the decisions list with its
+    decided history, each open ask's card with its secret, run and setup
+    blocks, and what the cards do (answer, approve, give, decline, put
+    aside).
+  - `src/window/bead.rs`: one bead's views: the bead whole, the conversation
+    thread with its mail, and the pictures and attachments of both.
+  - `src/window/chrome.rs`: the shell the views stand in: the rail, the list
+    and the open conversation, the settings and the keys, the tray and the
+    badge. `told` takes in what the yard says, and `Footplate::run_in`
+    performs the `Effect`s the model asks for, each a call by the yard's
+    client. `change`, `change_in`, `keep_place`, `reach_top` and `jump` are
+    the plumbing that applies a change of the model to the view.
+  - `src/window/feedback.rs`: the Feedback form over the window; what it
+    sends is `src/feedback.rs`'s.
+  - `src/window/firstrun.rs`: the first run, "Set up a yard here", where the
+    yard will be; each step is a command of the yardr on this machine, made
+    through `src/setup.rs`.
+  - `src/window/keys.rs`: the contexts the window's key bindings answer in,
+    and the tables the cheatsheet names for each view.
+  - `src/window/metrics.rs`: the window's measures: fixed sizes in pixels,
+    sizes the words set in rems, and the small functions that fit a pane or
+    a drawer to them.
+  - `src/window/panel.rs`: the reading pane's column, day breaks and rows,
+    and the panel's heads, tracks and cards.
+  - `src/window/rail.rs`: the images a mail names, the tooltips under the
+    pointer, the web view's probes, and what leaves the window: the calls
+    that post a draft or a note (`post`, `post_note`).
+  - `src/window/screen.rs`: one session's screen over the window, drawn like
+    the terminal (monospace, dark, the styling as printed) from the
+    `SessionScreen` answer, which `src/ansi.rs` parses.
+  - `src/window/state.rs`: what the window keeps beside the model: where a
+    yard stood when it was left, what waits in the yards it follows, and
+    what the switch and the settings are asking or doing.
+  - `src/window/ui.rs`: the small pieces the window draws with: glyphs, the
+    band of its top (`ui::band`), buttons, segments and checkboxes.
+  - `src/window/words.rs`: the window's words for its rows (what its heads
+    and counts say) and the colours that say what waits and for whom.
+  - `src/window/yards.rs`: the yards' views: the switcher with its rows, each
+    yard's card with its login switch and agents settings, pairing and
+    signing in, and the away screen with the reconnecting strip.
+- `src/ansi.rs`: a session pane's ANSI parsed to styled lines, which
+  `src/window/screen.rs` draws. Pane bytes are untrusted, so vte parses
+  them and keeps only the text and its SGR styling.
 - `src/model.rs`: what the window shows, without the window (rows, the open
   conversation, unread); never calls the yard, it answers an `Effect` the
   window performs.
@@ -156,9 +205,12 @@ Setup, release and tests:
   it, and for a call that only reads to be in `READS`, which is what a
   timeout on it says: a call not there may have run), its answers in
   `src/fake.rs`, the state it needs in `src/model.rs` (an `Effect` for what
-  the window must do), the drawing and the call site in `src/window.rs`.
-- A new view or pane: state in `src/model.rs`, drawing in `src/window.rs`;
-  window chrome in `src/main.rs`. A pane's top row is under the macOS
+  the window must do), its call site in `src/window/chrome.rs` (an arm of
+  `Footplate::run_in`), the drawing in `src/window.rs` or a file of
+  `src/window/`.
+- A new view or pane: state in `src/model.rs`, drawing in `src/window.rs`
+  or a file of `src/window/`; window chrome in `src/window/chrome.rs`. A
+  pane's top row is under the macOS
   title bar's strip (`src/titlebar.rs`): a press on it drags the window, so
   a control there still clicks, and a text field or a drag of its own does
   not belong in the strip. What stands at the rail's edge begins with
