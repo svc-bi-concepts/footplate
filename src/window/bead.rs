@@ -405,17 +405,23 @@ impl Footplate {
         match update {
             // The session stands: its minutes count from here, and the
             // devices open, off the window's thread, since a Mac waits for
-            // the person's answer to the microphone's consent.
+            // the person's answer to the microphone's consent. The
+            // microphone is the one the settings keep now: devices open as a
+            // session starts, so a pick reaches the next one and never moves
+            // one that stands.
             Update::Started => {
                 talk.stood = Some(now);
                 talk.quiet_since = now;
                 talk.meter = voice::meter(Duration::ZERO);
                 let (id, mic, speaker) = (talk.id, talk.voice.microphone(), talk.speaker.clone());
-                let plug = self.means.devices.clone();
+                let (plug, microphone) = (
+                    self.means.devices.clone(),
+                    self.settings.voice_microphone.clone(),
+                );
                 cx.spawn(async move |this, cx| {
                     let opened = cx
                         .background_executor()
-                        .spawn(async move { plug(mic, speaker) })
+                        .spawn(async move { plug(mic, speaker, &microphone) })
                         .await;
                     this.update(cx, |this, cx| this.voice_plugged(id, opened, cx))
                         .ok();

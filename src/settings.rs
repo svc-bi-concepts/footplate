@@ -428,6 +428,14 @@ pub struct Settings {
     /// it stands, for the provider to refuse.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub voice_name: String,
+    /// Which microphone a voice session hears through, by the host's id for
+    /// it (`audio::Input::id`: `coreaudio:<UID>` on a Mac). Empty until one
+    /// is chosen, which is the system's default, and left out of the file
+    /// while it is empty, as `voice_name` is. An id the host no longer lists
+    /// (the microphone is unplugged) is kept as it stands, for the day it is
+    /// back, and the default opens meanwhile.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub voice_microphone: String,
     /// The settings' open section: the one the side list shows. Left out
     /// of the file while it is the first, as the modes are.
     #[serde(skip_serializing_if = "Section::is_first")]
@@ -471,6 +479,7 @@ struct Kept {
     voice: bool,
     voice_idle: u8,
     voice_name: String,
+    voice_microphone: String,
     section: Section,
     web_view: String,
     run_base: String,
@@ -493,6 +502,7 @@ impl Default for Kept {
             voice: false,
             voice_idle: VOICE_IDLE,
             voice_name: String::new(),
+            voice_microphone: String::new(),
             section: Section::default(),
             web_view: String::new(),
             run_base: String::new(),
@@ -571,6 +581,7 @@ impl From<Kept> for Settings {
             voice: kept.voice,
             voice_idle: kept.voice_idle,
             voice_name: kept.voice_name,
+            voice_microphone: kept.voice_microphone,
             section: kept.section,
         }
     }
@@ -677,6 +688,7 @@ impl Default for Settings {
             voice: false,
             voice_idle: VOICE_IDLE,
             voice_name: String::new(),
+            voice_microphone: String::new(),
             section: Section::default(),
         }
     }
@@ -1352,6 +1364,48 @@ mod tests {
         assert_eq!(Settings::read(&file).voice_name, "nobody");
         fs::write(&file, r#"{"voice_name": ""}"#).unwrap();
         assert_eq!(Settings::read(&file).voice_name, "");
+
+        // The microphone heard through is the system's default until one is
+        // chosen: nothing of it is in the file while none is, and the id the
+        // file holds is read as it stands, whether or not the host lists it.
+        assert_eq!(Settings::default().voice_microphone, "");
+        let set = Settings {
+            voice: true,
+            voice_microphone: "coreaudio:BuiltInMicrophoneDevice".to_string(),
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"voice\": true,\n  \"voice_microphone\": \"coreaudio:BuiltInMicrophoneDevice\"\n}\n"
+        );
+        assert_eq!(Settings::read(&file), set);
+        Settings {
+            voice_microphone: String::new(),
+            ..set
+        }
+        .write(&file)
+        .unwrap();
+        assert!(
+            !fs::read_to_string(&file)
+                .unwrap()
+                .contains("voice_microphone")
+        );
+        fs::write(&file, r#"{"voice_microphone": "alsa:gone"}"#).unwrap();
+        assert_eq!(Settings::read(&file).voice_microphone, "alsa:gone");
+        fs::write(&file, r#"{"voice_microphone": ""}"#).unwrap();
+        assert_eq!(Settings::read(&file).voice_microphone, "");
+        // The voice that speaks and the microphone that hears are kept apart.
+        fs::write(
+            &file,
+            r#"{"voice_name": "ash", "voice_microphone": "alsa:default"}"#,
+        )
+        .unwrap();
+        let both = Settings::read(&file);
+        assert_eq!(
+            (both.voice_name.as_str(), both.voice_microphone.as_str()),
+            ("ash", "alsa:default")
+        );
     }
 
     #[test]

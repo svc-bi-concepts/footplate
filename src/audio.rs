@@ -8,8 +8,9 @@
 //! [`Resampler`], [`Capture`] (a microphone's callbacks made mono, brought to
 //! the socket's rate and cut into the 20 ms frames the session sends),
 //! [`Render`] (the queue brought to the speaker's rate and channels, letting
-//! go of what it holds when the queue is dropped) and the names a person
-//! tells the devices by ([`named`]). They are the harness's
+//! go of what it holds when the queue is dropped), the names a person
+//! tells the devices by ([`named`]) and which microphone a kept choice opens
+//! ([`pick`]). They are the harness's
 //! (spikes/voice-harness/src/audio.rs), which runs 3 to 6 ran live on a
 //! Linux desktop; the tests stand in for the devices by calling them as a
 //! device's callbacks do.
@@ -251,6 +252,36 @@ pub fn named(
     format!("{device} ({rate} Hz, {channels} ch, {format})")
 }
 
+/// A microphone the host lists, as the settings offer it: named as
+/// [`named`] names a device, by what cpal calls it and the host's id for it,
+/// so that a row of the list is the start of what the session reports once
+/// it has opened it. The format is left to that report: a device tells it
+/// only when it is opened, ALSA opens a device to read it, and listing must
+/// open none (cpal's own listing is written not to, since a plugin that
+/// refuses the open can leak descriptors for the life of the process).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Input {
+    /// The host's id for it (`coreaudio:<UID>`, `alsa:<pcm id>`), which the
+    /// settings keep: the UID names the same device after a restart, where
+    /// its place in the list does not.
+    pub id: String,
+    /// What cpal calls it.
+    pub description: String,
+}
+
+/// Which of the microphones the host lists a session opens for the id the
+/// settings keep: the one with that id, or none, which is the system's
+/// default, where nothing is kept or the kept id is not listed (the
+/// microphone is unplugged, or the host names it otherwise now). The session
+/// then names the microphone that stands ([`Devices::input`]), as it does for
+/// the default.
+pub fn pick(listed: &[Input], kept: &str) -> Option<usize> {
+    if kept.is_empty() {
+        return None;
+    }
+    listed.iter().position(|input| input.id == kept)
+}
+
 /// What the person is told where the system said no to the microphone: that it
 /// did, and where that is changed, which cpal's own word for it
 /// ("Unauthorized") names neither. A Mac keeps the answer to its consent
@@ -342,13 +373,16 @@ impl Drop for Devices {
     }
 }
 
-/// Opens the default microphone and speaker for a session: the microphone's
-/// frames, mono PCM16 at [`RATE`], go to `sink` (the session's
+/// Opens the microphone and the default speaker for a session: the
+/// microphone's frames, mono PCM16 at [`RATE`], go to `sink` (the session's
 /// [`crate::voice::Mic`]), and the speaker plays `speaker` (the session's
-/// [`crate::voice::Voice::speaker`]). Where it cannot, the reason is said in
-/// words for the person (no microphone, a format it does not handle, a stream
-/// that would not start, and on a Mac the consent refused: [`allowed`]).
-/// Windows has no voice yet.
+/// [`crate::voice::Voice::speaker`]). The microphone is the one `microphone`
+/// names, an [`Input::id`], and the system's default where it is empty or the
+/// host no longer lists it ([`pick`]); the speaker is always the default's.
+/// Where it cannot, the reason is said in words for the person (no
+/// microphone, a format it does not handle, a stream that would not start,
+/// and on a Mac the consent refused: [`allowed`], for the chosen microphone as
+/// for the default). Windows has no voice yet.
 ///
 /// It returns when the devices are open, and the first time a Mac waits here
 /// for the person's answer to its microphone consent: it is no call for the
@@ -356,19 +390,35 @@ impl Drop for Devices {
 pub fn open(
     sink: impl FnMut(Vec<i16>) + Send + 'static,
     speaker: Arc<Mutex<Queue>>,
+    microphone: &str,
 ) -> Result<Devices, String> {
     #[cfg(target_os = "macos")]
     {
-        consenting(mac::consent, || device::open(sink, speaker))
+        consenting(mac::consent, || device::open(sink, speaker, microphone))
     }
     #[cfg(target_os = "linux")]
     {
-        device::open(sink, speaker)
+        device::open(sink, speaker, microphone)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (sink, speaker);
+        let _ = (sink, speaker, microphone);
         Err("voice has no microphone or speaker on this system yet".to_string())
+    }
+}
+
+/// The microphones this machine lists, in the host's order, for the settings
+/// to offer: none where voice has no devices, as [`open`] refuses there. It
+/// opens none of them, so a Mac asks for no consent, and it asks the host
+/// what a host may be slow to answer: it is no call for the window's thread.
+pub fn inputs() -> Vec<Input> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        device::inputs()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Vec::new()
     }
 }
 
@@ -387,14 +437,17 @@ mod device {
     use super::*;
     use crate::voice::say;
 
-    fn describe(device: &cpal::Device, config: &cpal::SupportedStreamConfig) -> String {
-        let description = device
+    fn description_of(device: &cpal::Device) -> String {
+        device
             .description()
             .map(|d| d.to_string())
-            .unwrap_or_else(|_| "an unnamed device".into());
+            .unwrap_or_else(|_| "an unnamed device".into())
+    }
+
+    fn describe(device: &cpal::Device, config: &cpal::SupportedStreamConfig) -> String {
         let id = device.id().ok().map(|id| id.to_string());
         named(
-            &description,
+            &description_of(device),
             id.as_deref(),
             config.sample_rate(),
             config.channels(),
@@ -503,16 +556,63 @@ mod device {
         Ok((describe(&output, &config), stream))
     }
 
-    /// The default microphone's stream, not started, and how it is named.
-    fn microphone(
-        sink: impl FnMut(Vec<i16>) + Send + 'static,
-    ) -> Result<(String, cpal::Stream), String> {
-        let host = cpal::default_host();
-        let input = default_of(host.default_input_device(), || {
+    /// The microphones the host lists, in its order, and the devices behind
+    /// them in the same order. A device with no id cannot be kept, so it is
+    /// not offered. Nothing is opened ([`Input`] says why), and a host that
+    /// cannot be asked lists none.
+    fn listing(host: &cpal::Host) -> (Vec<Input>, Vec<cpal::Device>) {
+        match host.input_devices() {
+            Ok(all) => listing_of(all),
+            Err(_) => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// `devices` as [`listing`] has them.
+    pub(super) fn listing_of(
+        devices: impl Iterator<Item = cpal::Device>,
+    ) -> (Vec<Input>, Vec<cpal::Device>) {
+        devices
+            .filter_map(|device| {
+                let id = device.id().ok()?.to_string();
+                let description = description_of(&device);
+                Some((Input { id, description }, device))
+            })
+            .unzip()
+    }
+
+    pub(super) fn inputs() -> Vec<Input> {
+        listing(&cpal::default_host()).0
+    }
+
+    /// The microphone a session opens for `kept`: the listed one with that
+    /// id, and the default where none is kept or it is not listed ([`pick`]).
+    /// The fall back is logged, since it is the one thing a person would not
+    /// otherwise see: the session names the microphone that stands, and not
+    /// the one that was asked for.
+    pub(super) fn input_device(host: &cpal::Host, kept: &str) -> Option<cpal::Device> {
+        if !kept.is_empty() {
+            let (inputs, mut devices) = listing(host);
+            if let Some(at) = pick(&inputs, kept) {
+                return Some(devices.swap_remove(at));
+            }
+            say(&format!(
+                "voice microphone: {kept} is not listed, so the default opens"
+            ));
+        }
+        default_of(host.default_input_device(), || {
             host.input_devices()
                 .map_or(true, |mut all| all.next().is_some())
         })
-        .ok_or("this machine has no default microphone")?;
+    }
+
+    /// The microphone's stream, not started, and how it is named: the
+    /// microphone `kept` names, or the default's.
+    fn microphone(
+        sink: impl FnMut(Vec<i16>) + Send + 'static,
+        kept: &str,
+    ) -> Result<(String, cpal::Stream), String> {
+        let host = cpal::default_host();
+        let input = input_device(&host, kept).ok_or("this machine has no default microphone")?;
         let config = input
             .default_input_config()
             .map_err(|err| format!("the microphone's format could not be read: {err}"))?;
@@ -530,13 +630,14 @@ mod device {
 
     /// Both devices' streams, started, and how each is named. The speaker
     /// stream is built first; the consent check outside this function applies
-    /// only to the microphone.
+    /// only to the microphone, the chosen one as the default.
     fn build(
         sink: impl FnMut(Vec<i16>) + Send + 'static,
         queue: Arc<Mutex<Queue>>,
+        kept: &str,
     ) -> Result<(String, String, cpal::Stream, cpal::Stream), String> {
         let (output, out_stream) = speaker(queue)?;
-        let (input, in_stream) = microphone(sink)?;
+        let (input, in_stream) = microphone(sink, kept)?;
         out_stream
             .play()
             .map_err(|err| format!("the speaker would not start: {err}"))?;
@@ -551,10 +652,12 @@ mod device {
     pub(super) fn open(
         sink: impl FnMut(Vec<i16>) + Send + 'static,
         speaker: Arc<Mutex<Queue>>,
+        microphone: &str,
     ) -> Result<Devices, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let thread = thread::spawn(move || match build(sink, speaker) {
+        let kept = microphone.to_string();
+        let thread = thread::spawn(move || match build(sink, speaker, &kept) {
             Ok((input, output, in_stream, out_stream)) => {
                 let _ = ready_tx.send(Ok((input, output)));
                 // The streams are held here until the handle is dropped,
@@ -948,6 +1051,51 @@ mod tests {
         );
     }
 
+    fn input(id: &str) -> Input {
+        Input {
+            id: id.to_string(),
+            description: "a microphone".to_string(),
+        }
+    }
+
+    /// Which microphone a session opens for the id the settings keep, with no
+    /// device to open: the listed one that has the id, else the default.
+    #[test]
+    fn the_microphone_kept_is_the_one_opened_and_the_default_where_none_matches() {
+        let listed = [
+            input("coreaudio:BuiltInMicrophoneDevice"),
+            input("coreaudio:AppleUSBAudioEngine:Blue:Yeti:1234"),
+            input("coreaudio:AppleUSBAudioEngine:Blue:Yeti:5678"),
+        ];
+        // Nothing kept is the system's default, whatever is listed.
+        assert_eq!(pick(&listed, ""), None);
+        // A kept id picks its microphone wherever it stands in the list, and
+        // two alike by name are told apart by the id.
+        for (kept, at) in [
+            ("coreaudio:BuiltInMicrophoneDevice", 0),
+            ("coreaudio:AppleUSBAudioEngine:Blue:Yeti:1234", 1),
+            ("coreaudio:AppleUSBAudioEngine:Blue:Yeti:5678", 2),
+        ] {
+            assert_eq!(pick(&listed, kept), Some(at), "{kept}");
+        }
+        // One the host no longer lists (unplugged, or named otherwise now)
+        // is the default's, and so is any near miss: the id is the whole of
+        // the name, as the host wrote it.
+        for gone in [
+            "coreaudio:AppleUSBAudioEngine:Blue:Yeti:9999",
+            "coreaudio:BuiltInMicrophone",
+            "coreaudio:builtinmicrophonedevice",
+            "BuiltInMicrophoneDevice",
+            " coreaudio:BuiltInMicrophoneDevice",
+        ] {
+            assert_eq!(pick(&listed, gone), None, "{gone}");
+        }
+        // A machine with no microphone listed opens the default, if it has
+        // one, whatever is kept.
+        assert_eq!(pick(&[], "coreaudio:BuiltInMicrophoneDevice"), None);
+        assert_eq!(pick(&[], ""), None);
+    }
+
     #[test]
     fn a_refused_microphone_says_where_it_is_changed() {
         // A Mac keeps its consent in System Settings, which the words name.
@@ -1143,6 +1291,7 @@ mod tests {
                 let _ = tx.send(frame);
             },
             Arc::new(Mutex::new(Queue::default())),
+            "",
         )
         .expect("the default microphone and speaker open");
         println!("microphone: {}", devices.input);
@@ -1152,5 +1301,45 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("a frame from the microphone in five seconds");
         assert_eq!(frame.len(), CHUNK);
+    }
+
+    /// The machine's real microphones, listed and found by the id each is
+    /// kept under, and the default found where the id is not listed. Nothing
+    /// is opened, so a Mac asks for no consent and no microphone is heard;
+    /// it is a person's to run for the names it prints:
+    /// `cargo test audio -- --ignored --nocapture`. A machine with no
+    /// microphone (a Mac mini) lists none, and the ids and names of all its
+    /// devices stand in their place, listed the way the microphones are.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[ignore = "lists the machine's real microphones"]
+    fn the_real_microphones_are_listed_and_found_by_the_id_they_are_kept_under() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+
+        let host = cpal::default_host();
+        let listed = inputs();
+        println!(
+            "host: {} devices, {} take input, default input {:?}",
+            host.devices().map_or(0, |all| all.count()),
+            host.input_devices().map_or(0, |all| all.count()),
+            host.default_input_device().and_then(|d| d.id().ok()),
+        );
+        for input in &listed {
+            println!("input: {}  |  {}", input.id, input.description);
+            let found = device::input_device(&host, &input.id).expect("a listed microphone");
+            assert_eq!(found.id().unwrap().to_string(), input.id);
+        }
+        let default = host.default_input_device().and_then(|d| d.id().ok());
+        let gone = device::input_device(&host, "alsa:no such microphone");
+        if default.is_some() && !listed.is_empty() {
+            assert_eq!(gone.and_then(|d| d.id().ok()), default);
+        }
+        // Whatever the machine's devices are, each is listed by the id it is
+        // kept under, which the rule finds at its own place and no other.
+        let (all, _) = device::listing_of(host.devices().expect("the host's devices"));
+        for (at, device) in all.iter().enumerate() {
+            println!("device: {}  |  {}", device.id, device.description);
+            assert_eq!(pick(&all, &device.id), Some(at));
+        }
     }
 }

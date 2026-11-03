@@ -1,5 +1,5 @@
 //! The small pieces the window draws with: its glyphs, the band of its
-//! top, its buttons, its segments and its checkboxes.
+//! top, its buttons, its segments, its checkboxes and its selects.
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FontWeight, Pixels, Rgba, SharedString, Stateful,
@@ -351,6 +351,69 @@ pub(crate) fn chevron(color: Rgba) -> impl IntoElement {
     )
     .size(rems(1.))
     .flex_none()
+}
+
+/// A Select's field, as the design system has it: 32 px high, the choice and
+/// a chevron that says it opens a list, brighter under the pointer. The
+/// caller adds the click that opens the list. `id` is its element id and,
+/// in a test, how it is found.
+pub(crate) fn select_field(id: &'static str, choice: String, palette: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(|| id.to_string())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_h(px(32.))
+        .px_3()
+        .rounded_md()
+        .border_1()
+        .border_color(palette.line)
+        .bg(palette.side)
+        .cursor_pointer()
+        .hover(|style| style.bg(palette.hover))
+        .child(div().flex_1().min_w_0().truncate().child(choice))
+        .child(chevron(palette.faint))
+}
+
+/// The list a Select opens under its field: it stands inline, as the yard
+/// card's menu does, and scrolls past its height. The caller adds its rows
+/// ([`select_option`]).
+pub(crate) fn select_list(id: &'static str, palette: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(|| id.to_string())
+        .flex()
+        .flex_col()
+        .max_h(rems(14.))
+        .overflow_y_scroll()
+        .rounded_md()
+        .border_1()
+        .border_color(palette.line)
+        .bg(palette.side)
+        .p_1()
+}
+
+/// One row of a Select's list, `here` where it is the choice. `at` is its
+/// element id and, in a test, how it is found; the caller adds what it says
+/// and the click that picks it.
+pub(crate) fn select_option(at: String, here: bool, palette: Palette) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(at.clone()))
+        .debug_selector(move || at.clone())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .when(here, |el| {
+            el.bg(palette.open).font_weight(FontWeight::SEMIBOLD)
+        })
+        .when(!here, |el| el.hover(|style| style.bg(palette.hover)))
 }
 
 /// A drawn check mark, so the checkbox does not depend on a text glyph.

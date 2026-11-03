@@ -39,7 +39,8 @@ use crate::yard::Env;
 /// a weighty mapping ask's card beside a routine one's, a yard that is
 /// stopped, a yard at an
 /// address, the settings on each of their sections, the voice section
-/// with a voice chosen and its list open, the telemetry
+/// with a voice chosen and its list open, and with a microphone chosen
+/// among those a stand-in lists and its list open, the telemetry
 /// section on with the install id and the next payload and off with
 /// the consent words, the yardmaster's conversation with a voice session
 /// standing in it, as a tap on the composer's Voice button makes one, so that
@@ -154,6 +155,7 @@ pub const STATES: &[&str] = &[
     "settings-connection",
     "settings-voice",
     "settings-voice-list",
+    "settings-voice-microphone",
     "settings-telemetry",
     "settings-telemetry-off",
     "voice",
@@ -358,6 +360,31 @@ pub(crate) const VOICE_KEY: &str = "sk-shot";
 /// others leave it for a hand). None in every other state.
 pub(crate) fn voice() -> Option<&'static str> {
     TALKING.get().map(|talking| talking.url.as_str())
+}
+
+/// The microphones the microphone shot's machine lists: a stand-in's, named
+/// as a Mac names its own, since the names of the machine a picture is taken
+/// on are no part of it. The shot's choice is the second.
+pub(crate) fn inputs() -> Vec<crate::audio::Input> {
+    [
+        (
+            "MacBook Pro Microphone",
+            "coreaudio:BuiltInMicrophoneDevice",
+        ),
+        (
+            "Studio Display Microphone",
+            "coreaudio:AppleUSBAudioEngine:Apple Inc.:Studio Display:4D7",
+        ),
+        (
+            "Jabra Evolve2 65",
+            "coreaudio:AppleUSBAudioEngine:Jabra:Evolve2 65:0A4F",
+        ),
+    ]
+    .map(|(description, id)| crate::audio::Input {
+        id: id.to_string(),
+        description: description.to_string(),
+    })
+    .into()
 }
 
 /// The stand-in for the voice shot: a socket that serves a `Live` whose
@@ -1108,6 +1135,7 @@ fn populate(yard: &Yard, state: &str) {
         | "settings-connection"
         | "settings-voice"
         | "settings-voice-list"
+        | "settings-voice-microphone"
         | "settings-telemetry"
         | "settings-telemetry-off"
         | "voice"
@@ -2669,6 +2697,7 @@ mod tests {
                 | "settings-connection"
                 | "settings-voice"
                 | "settings-voice-list"
+                | "settings-voice-microphone"
                 | "settings-telemetry"
                 | "settings-telemetry-off"
                 | "voice"

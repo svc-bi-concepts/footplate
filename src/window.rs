@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use crate::api::{self, Address, Client};
+use crate::audio::Input;
 use crate::draft::{Attachment, Drafts};
 use crate::input::{self, Emptied, Line, Pasted, Submitted};
 use crate::model::{self, Mode, Model, Selected};
@@ -523,6 +524,13 @@ pub struct Footplate {
     /// settings, as the yard's ⋯ menu stands open on its card: shut by a
     /// pick, by esc, and by leaving the section.
     voice_menu: bool,
+    /// The microphones the machine lists, as the Voice settings last read
+    /// them (`read_inputs`): none until they have been. A microphone that
+    /// is plugged in later is there when the list is opened again.
+    voice_inputs: Option<Vec<Input>>,
+    /// Whether the list of microphones stands open under its field, shut as
+    /// the list of voices is.
+    voice_input_menu: bool,
     /// The voice session of the open conversation, while one stands or is
     /// being made. Never held with a yard: leaving the conversation, the
     /// yard or the window ends it.
@@ -961,6 +969,8 @@ impl Footplate {
             voice_key,
             voice_said: None,
             voice_menu: false,
+            voice_inputs: None,
+            voice_input_menu: false,
             voice: None,
             voice_refusal: None,
             voices: 0,
@@ -11236,6 +11246,99 @@ yardr.dev
         click_on(cx, "voice pick default");
         assert_eq!(settings_of(&view, cx).voice_name, "");
         assert!(!voice_menu(cx));
+
+        // The microphone that hears is the system's default until one is
+        // picked: the field says so, nothing of it is in the file, the list
+        // stands shut, and the line under it says a pick applies from the
+        // next session.
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let input_menu = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.voice_input_menu);
+        let shown =
+            |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.voice_microphone_shown());
+        assert_eq!(settings_of(&view, cx).voice_microphone, "");
+        assert!(!kept().contains("voice_microphone"));
+        assert!(drawn(cx, "voice microphone") && drawn(cx, "voice microphone line"));
+        assert!(!drawn(cx, "voice microphone list") && !input_menu(cx));
+        assert_eq!(shown(cx), "System default");
+        // A click opens the list: the system's default first, then what the
+        // machine lists, each by what it is called. Esc shuts the list and
+        // not the sheet.
+        click_on(cx, "voice microphone");
+        assert!(input_menu(cx));
+        assert!(drawn(cx, "voice microphone list") && drawn(cx, "voice microphone default"));
+        assert!(drawn(cx, &format!("voice microphone {BUILT_IN}")));
+        assert!(drawn(cx, &format!("voice microphone {HEADSET}")));
+        assert!(
+            bounds_of(cx, "voice microphone default").top()
+                < bounds_of(cx, &format!("voice microphone {BUILT_IN}")).top(),
+            "the system's default stands first"
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(!input_menu(cx) && settings_open(&view, cx));
+        // A click on the field again shuts it too, with nothing picked.
+        click_on(cx, "voice microphone");
+        assert!(input_menu(cx));
+        click_on(cx, "voice microphone");
+        assert!(!input_menu(cx));
+        assert_eq!(settings_of(&view, cx).voice_microphone, "");
+        // One list stands open at a time, whichever was opened last.
+        click_on(cx, "voice microphone");
+        click_on(cx, "voice pick");
+        assert!(voice_menu(cx) && !input_menu(cx));
+        click_on(cx, "voice microphone");
+        assert!(input_menu(cx) && !voice_menu(cx));
+        // A pick keeps the microphone in the file by its host id, shuts the
+        // list, and the field names it as it is called.
+        click_on(cx, &format!("voice microphone {HEADSET}"));
+        assert_eq!(settings_of(&view, cx).voice_microphone, HEADSET);
+        assert!(!input_menu(cx));
+        assert!(kept().contains(&format!("\"voice_microphone\": \"{HEADSET}\"")));
+        assert_eq!(shown(cx), "Jabra Evolve2 65");
+        // The voice that speaks is kept apart from it.
+        assert_eq!(settings_of(&view, cx).voice_name, "");
+        // A microphone the machine no longer lists (taken out since it was
+        // picked) stays picked: the field has its id as the file keeps it,
+        // with the words that it was not found, the list is without it, and
+        // a session opens the system's default meanwhile. It is as it was
+        // when the machine lists it again, as the list is opened.
+        voicing.plug(&[("MacBook Pro Microphone", BUILT_IN)]);
+        click_on(cx, "voice microphone");
+        wait(cx, "the microphones read again", |cx| {
+            view.read_with(cx, |v, _| v.voice_inputs.as_ref().map(Vec::len) == Some(1))
+        });
+        assert_eq!(settings_of(&view, cx).voice_microphone, HEADSET);
+        assert_eq!(shown(cx), format!("{HEADSET} (not found)"));
+        assert!(drawn(cx, &format!("voice microphone {BUILT_IN}")));
+        // Said no longer: the frame's bounds only ever grow, so what is gone
+        // is read, not drawn.
+        assert_eq!(
+            view.read_with(cx, |v, _| v.voice_inputs.clone()),
+            Some(vec![microphone("MacBook Pro Microphone", BUILT_IN)])
+        );
+        voicing.plug(&[
+            ("MacBook Pro Microphone", BUILT_IN),
+            ("Jabra Evolve2 65", HEADSET),
+        ]);
+        click_on(cx, "voice microphone");
+        click_on(cx, "voice microphone");
+        wait(cx, "the microphones read again", |cx| {
+            view.read_with(cx, |v, _| v.voice_inputs.as_ref().map(Vec::len) == Some(2))
+        });
+        assert_eq!(shown(cx), "Jabra Evolve2 65");
+        // The system's default is the way back: the choice is left out of
+        // the file as it was before one was made.
+        click_on(cx, "voice microphone default");
+        assert_eq!(settings_of(&view, cx).voice_microphone, "");
+        assert!(!input_menu(cx));
+        assert!(!kept().contains("voice_microphone"));
+        assert_eq!(shown(cx), "System default");
+        // A list left open is shut by leaving the section.
+        click_on(cx, "voice microphone");
+        assert!(input_menu(cx));
+        click_on(cx, "settings section this window");
+        assert!(!input_menu(cx));
+        click_on(cx, "settings section voice");
         // With no key typed, saving asks for one, and nothing is kept.
         click_on(cx, "voice save");
         assert_eq!(
@@ -11267,7 +11370,13 @@ yardr.dev
         // A restart opens with the section on and the key still kept.
         let (again, cx) = opened_kept(&yard, &file, cx);
         assert!(settings_of(&again, cx).voice);
+        // Nothing asked the machine for its microphones before the section
+        // showed; the settings opening onto it do.
+        assert_eq!(again.read_with(cx, |v, _| v.voice_inputs.clone()), None);
         cx.simulate_keystrokes("secondary-,");
+        wait(cx, "the microphones read", |cx| {
+            again.read_with(cx, |v, _| v.voice_inputs.is_some())
+        });
         click_on(cx, "settings section voice");
         assert!(drawn(cx, "voice state"));
         assert_eq!(
@@ -11310,6 +11419,8 @@ yardr.dev
                 "voice idle line",
                 "voice pick",
                 "voice pick line",
+                "voice microphone",
+                "voice microphone line",
                 "voice plain",
             ] {
                 assert!(!drawn(cx, gone), "{gone}");
@@ -11348,6 +11459,7 @@ yardr.dev
         assert!(drawn(cx, "voice on") && drawn(cx, "voice key"));
         assert!(drawn(cx, "voice idle 5") && drawn(cx, "voice idle line"));
         assert!(drawn(cx, "voice pick") && drawn(cx, "voice pick line"));
+        assert!(drawn(cx, "voice microphone") && drawn(cx, "voice microphone line"));
         assert!(drawn(cx, "voice plain"));
         // Switched on, the composer's button is Voice while the line is
         // empty.
@@ -11358,8 +11470,20 @@ yardr.dev
         assert!(drawn(cx, "voice button"));
     }
 
+    /// The ids two microphones of a test's machine are kept under, as a Mac's
+    /// host gives them.
+    const BUILT_IN: &str = "coreaudio:BuiltInMicrophoneDevice";
+    const HEADSET: &str = "coreaudio:AppleUSBAudioEngine:Jabra:Evolve2 65:0A4F";
+
+    fn microphone(description: &str, id: &str) -> Input {
+        Input {
+            id: id.to_string(),
+            description: description.to_string(),
+        }
+    }
+
     /// What a window test's voice reaches outside with, in place of OpenAI
-    /// and the machine's devices: for each session the window starts, a
+    /// and the machine's devices and microphones: for each session the window starts, a
     /// stand-in for OpenAI's Live socket on a loopback port of its own;
     /// devices that count themselves open and note whether the session had
     /// been hung up on when they closed; a clock the test moves; and whether
@@ -11376,6 +11500,12 @@ yardr.dev
         open: Arc<AtomicUsize>,
         mics: Arc<Mutex<Vec<voice::Mic>>>,
         order: Arc<Mutex<Vec<&'static str>>>,
+        /// The id each set of devices was asked to open the microphone by,
+        /// oldest first: empty for the system's default.
+        asked: Arc<Mutex<Vec<String>>>,
+        /// The microphones the test's machine lists, which a test changes as
+        /// a person plugs one in or takes one out.
+        machine: Arc<Mutex<Vec<Input>>>,
         /// What the Mac says of the microphone's consent, which the devices
         /// are refused by as `audio::open` refuses them: a test has the system
         /// say no by setting it.
@@ -11419,6 +11549,11 @@ yardr.dev
                 open: Arc::default(),
                 mics: Arc::default(),
                 order: Arc::default(),
+                asked: Arc::default(),
+                machine: Arc::new(Mutex::new(vec![
+                    microphone("MacBook Pro Microphone", BUILT_IN),
+                    microphone("Jabra Evolve2 65", HEADSET),
+                ])),
                 consent: Arc::new(Mutex::new(Consent::Authorized)),
                 later: Rc::default(),
                 hidden: Rc::default(),
@@ -11430,6 +11565,7 @@ yardr.dev
             let (lives, key) = (self.lives.clone(), self.key.clone());
             let current: Arc<Mutex<Option<Arc<Live>>>> = Arc::default();
             let (open, mics, order) = (self.open.clone(), self.mics.clone(), self.order.clone());
+            let (asked, machine) = (self.asked.clone(), self.machine.clone());
             let (later, hidden) = (self.later.clone(), self.hidden.clone());
             let consent = self.consent.clone();
             let seen = current.clone();
@@ -11462,8 +11598,9 @@ yardr.dev
                     lives.borrow_mut().push((live, server));
                     started
                 });
-                v.means.devices = Arc::new(move |mic, _| {
+                v.means.devices = Arc::new(move |mic, _, microphone| {
                     audio::allowed(*consent.lock().unwrap())?;
+                    asked.lock().unwrap().push(microphone.to_string());
                     mics.lock().unwrap().push(mic);
                     open.fetch_add(1, Ordering::SeqCst);
                     Ok(Box::new(Plugged {
@@ -11472,14 +11609,29 @@ yardr.dev
                         order: order.clone(),
                     }) as Box<dyn Any + Send>)
                 });
+                v.means.inputs = Arc::new(move || machine.lock().unwrap().clone());
                 v.means.now = Rc::new(move || std::time::Instant::now() + later.get());
                 v.means.hidden = Rc::new(move || hidden.get());
             });
         }
 
+        /// What the test's machine lists as microphones from now on.
+        fn plug(&self, ids: &[(&str, &str)]) {
+            *self.machine.lock().unwrap() = ids
+                .iter()
+                .map(|(description, id)| microphone(description, id))
+                .collect();
+        }
+
         /// The stand-in of the `n`th session started.
         fn live(&self, n: usize) -> Arc<Live> {
             self.lives.borrow()[n].0.clone()
+        }
+
+        /// The ids the sessions' devices were asked to open the microphone
+        /// by so far, oldest first.
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
         }
     }
 
@@ -12265,13 +12417,18 @@ yardr.dev
         wait_hung_up(&view, &voicing, &live, n, cx);
     }
 
-    /// The voice picked in the settings is the next session's: a session
-    /// started with none picked names none, and so speaks in the provider's
-    /// own; a pick while one stands sends it nothing, since OpenAI fixes a
-    /// session's voice when it starts; the next one starts in the voice
-    /// picked; and the way back to `default` names none again.
+    /// The voice and the microphone picked in the settings are the next
+    /// session's. A session started with no voice picked names none, and so
+    /// speaks in the provider's own; one started with no microphone picked
+    /// asks its devices for the system's default. A pick while one stands
+    /// sends it nothing, since OpenAI fixes a session's voice when it starts,
+    /// and opens no devices again; the next one starts in the voice picked,
+    /// with the microphone picked, which is asked for by its id even where
+    /// the machine no longer lists it (the devices open the default in its
+    /// place, and the session still stands); and the way back to `default`
+    /// names no voice and asks for no microphone again.
     #[gpui::test]
-    fn the_voice_picked_in_the_settings_speaks_in_the_next_session_and_never_a_standing_one(
+    fn the_voice_and_microphone_picked_in_the_settings_serve_the_next_session_and_never_a_standing_one(
         cx: &mut TestAppContext,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -12303,34 +12460,64 @@ yardr.dev
             assert!(!settings_open(&view, cx));
         };
 
-        // None picked: none is named, as before a voice could be picked.
+        // The microphone is picked as the voice is, in the settings' list.
+        let pick_microphone = |id: &str, cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-,");
+            click_on(cx, "settings section voice");
+            click_on(cx, "voice microphone");
+            click_on(cx, &format!("voice microphone {id}"));
+            cx.simulate_keystrokes("escape");
+            assert!(!settings_open(&view, cx));
+        };
+
+        // None picked: none is named, as before a voice could be picked, and
+        // the devices are asked for the system's default.
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(audio(&live).get("output"), None);
+        assert_eq!(voicing.asked(), [""]);
         // A pick while it stands is kept for the next, and the session that
-        // stands is sent nothing and goes on.
+        // stands is sent nothing and goes on, its devices as they were.
         let sent = live.sent().len();
         pick("ash", cx);
+        pick_microphone(HEADSET, cx);
         assert_eq!(settings_of(&view, cx).voice_name, "ash");
+        assert_eq!(settings_of(&view, cx).voice_microphone, HEADSET);
         cx.run_until_parked();
         assert_eq!(live.sent().len(), sent);
         assert_eq!(audio(&live).get("output"), None);
+        assert_eq!(voicing.asked(), [""]);
         assert!(voice_stands(&view, cx));
         tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 0, cx);
 
-        // The next session starts in the voice picked, by its API name.
+        // The next session starts in the voice picked, by its API name, and
+        // its devices are asked for the microphone picked, by its id.
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(audio(&live)["output"]["voice"], "ash");
+        assert_eq!(voicing.asked(), ["", HEADSET]);
         tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 1, cx);
 
-        // Back to the provider's own: none is named again.
+        // Back to the provider's own: none is named again. The headset is
+        // taken out meanwhile, and is asked for all the same: the devices
+        // fall back to the default (`audio::pick`), and the session stands.
         pick("default", cx);
+        voicing.plug(&[("MacBook Pro Microphone", BUILT_IN)]);
         assert_eq!(settings_of(&view, cx).voice_name, "");
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(audio(&live).get("output"), None);
+        assert_eq!(voicing.asked(), ["", HEADSET, HEADSET]);
+        assert!(voice_stands(&view, cx));
         tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 2, cx);
+
+        // Back to the system's default: no microphone is asked for by id.
+        pick_microphone("default", cx);
+        assert_eq!(settings_of(&view, cx).voice_microphone, "");
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(voicing.asked(), ["", HEADSET, HEADSET, ""]);
+        tap(&view, cx, Button::Stop);
+        wait_hung_up(&view, &voicing, &live, 3, cx);
     }
 
     /// A session that cannot be made says why in the head, in the words of

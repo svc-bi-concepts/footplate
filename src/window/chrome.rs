@@ -41,14 +41,14 @@ use super::ask::group_head;
 use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
-use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, grown};
+use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, VOICE_LABEL, grown};
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
 use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
-    band, card_layer, checkbox, chevron, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
-    semaphore_glyph, small_button, track_glyph,
+    band, card_layer, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
+    select_field, select_list, select_option, semaphore_glyph, small_button, track_glyph,
 };
 use super::words::{footplate_words, unread_words, yardr_place, yardr_words};
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
@@ -60,6 +60,12 @@ use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 /// says, the yard's and the counterpart's names, their answers, and the
 /// up-to-30-day abuse-monitoring retention with `store` off.
 pub const VOICE_PLAIN: &str = "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands.";
+
+/// A label of the Voice section's rows, in the column their fields stand
+/// after ([`VOICE_LABEL`]).
+fn voice_label(text: &'static str) -> Div {
+    div().w(rems(VOICE_LABEL)).flex_none().child(text)
+}
 
 impl Footplate {
     /// As [`Footplate::opened`], with each yard's stream watched as
@@ -100,6 +106,18 @@ impl Footplate {
             this.settings.voice_name = "beacon".to_string();
             this.voice_menu = true;
         }
+        // The microphone shot is the same for the microphone: voice on, the
+        // machine listing microphones that are a stand-in's (the real
+        // machine's names are none for a picture), the second chosen, and
+        // the list open under its field.
+        #[cfg(all(debug_assertions, unix))]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings-voice-microphone") {
+            this.settings.voice = true;
+            this.means.inputs = std::sync::Arc::new(crate::shot::inputs);
+            this.settings.voice_microphone = crate::shot::inputs()[1].id.clone();
+            this.voice_input_menu = true;
+            this.read_inputs(cx);
+        }
         // The voice shot stands a session in the yardmaster's conversation
         // once the yard is read (below), against a stand-in for OpenAI's
         // socket and devices that open nothing: it reaches no OpenAI, and
@@ -121,7 +139,7 @@ impl Footplate {
                 )
             });
             this.means.devices =
-                std::sync::Arc::new(|_, _| Ok(Box::new(()) as Box<dyn std::any::Any + Send>));
+                std::sync::Arc::new(|_, _, _| Ok(Box::new(()) as Box<dyn std::any::Any + Send>));
         }
         // The reconnecting shot and the voice-draft shot have a draft in the
         // composer: the yardmaster's conversation's, which opens first, in
@@ -3187,7 +3205,7 @@ impl Footplate {
         if self.switching.is_some() {
             return self.toggle_switcher(window, cx);
         }
-        if self.yard_menu.is_some() || self.voice_menu {
+        if self.yard_menu.is_some() || self.voice_menu || self.voice_input_menu {
             self.shut_menu();
             cx.notify();
             return;
@@ -3309,6 +3327,11 @@ impl Footplate {
         // carries Open where the yard's web view answers.
         if self.settings_open && self.settings.section == Section::Telemetry {
             self.view_probe(cx);
+        }
+        // Voice opens onto its section: the microphones it offers are read,
+        // so that the one chosen shows by its name.
+        if self.settings_open && self.settings.section == Section::Voice {
+            self.read_inputs(cx);
         }
         let conversation = self.model.as_ref().and_then(|m| m.selected_conversation());
         let focus = match conversation {
@@ -3489,6 +3512,24 @@ impl Footplate {
         );
         // Picking the voice that is chosen already changes no setting, and
         // the list shuts all the same, which `set` draws nothing for.
+        cx.notify();
+    }
+
+    /// The microphone a voice session hears through is the one with host id
+    /// `id`, or the system's default where `id` is empty, and the list
+    /// shuts. Devices open as a session starts, so the choice reaches the
+    /// next session: one that stands is left as it was.
+    pub(crate) fn pick_voice_input(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.voice_input_menu = false;
+        self.set(
+            Settings {
+                voice_microphone: id.to_string(),
+                ..self.settings.clone()
+            },
+            cx,
+        );
+        // As the list of voices: a pick that is the choice already changes
+        // no setting, and the list shuts all the same.
         cx.notify();
     }
 
@@ -3944,6 +3985,9 @@ impl Footplate {
         if section == Section::Telemetry {
             self.view_probe(cx);
         }
+        if section == Section::Voice {
+            self.read_inputs(cx);
+        }
     }
 
     /// A yard is to be added, in the settings or from where there is no
@@ -3988,17 +4032,48 @@ impl Footplate {
         cx.notify();
     }
 
-    /// No menu of the settings stands open: no yard's ⋯ menu, and not the
-    /// list of voices.
+    /// No menu of the settings stands open: no yard's ⋯ menu, and neither
+    /// list of the Voice section.
     pub(crate) fn shut_menu(&mut self) {
         self.yard_menu = None;
         self.voice_menu = false;
+        self.voice_input_menu = false;
     }
 
-    /// The list of voices stands open under its field, or shuts again.
+    /// The list of voices stands open under its field, or shuts again. One
+    /// list stands open at a time.
     pub(crate) fn toggle_voice_menu(&mut self, cx: &mut Context<Self>) {
+        self.voice_input_menu = false;
         self.voice_menu = !self.voice_menu;
         cx.notify();
+    }
+
+    /// The list of microphones stands open under its field, or shuts again.
+    /// Opened, it reads the machine's again: the headset plugged in since
+    /// the section showed is in it.
+    pub(crate) fn toggle_voice_input_menu(&mut self, cx: &mut Context<Self>) {
+        self.voice_menu = false;
+        self.voice_input_menu = !self.voice_input_menu;
+        if self.voice_input_menu {
+            self.read_inputs(cx);
+        }
+        cx.notify();
+    }
+
+    /// Reads the microphones the machine lists, off the window's thread: a
+    /// host can be slow to answer, and nothing the person does waits on it.
+    /// The Voice section shows what was read last until this answers.
+    pub(crate) fn read_inputs(&mut self, cx: &mut Context<Self>) {
+        let list = self.means.inputs.clone();
+        cx.spawn(async move |this, cx| {
+            let inputs = cx.background_executor().spawn(async move { list() }).await;
+            this.update(cx, |this, cx| {
+                this.voice_inputs = Some(inputs);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The yard called `name` is to be renamed: its card's menu shuts,
@@ -4886,8 +4961,8 @@ impl Footplate {
 
     /// Talking with the yard by voice in the settings: the switch,
     /// which is the opt-in, the masked field the OpenAI key is typed
-    /// in, which voice speaks, how long a session may stand quiet, and
-    /// the plain line of what a voice session sends. The
+    /// in, which voice speaks, which microphone hears, how long a session
+    /// may stand quiet, and the plain line of what a voice session sends. The
     /// section says `voice is on` while it is on; the switch alone
     /// sends nothing, opens no connection and reads no key.
     pub(crate) fn voice_setting(
@@ -4935,7 +5010,7 @@ impl Footplate {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(rems(4.)).flex_none().child("key"))
+                    .child(voice_label("key"))
                     .child(
                         div()
                             .flex_1()
@@ -4980,6 +5055,15 @@ impl Footplate {
                 .text_color(palette.faint)
                 .child("heard from the next session on, since OpenAI sets a session's voice when it starts"),
         );
+        // Which microphone hears, and the same thing to know: the devices
+        // open as a session starts.
+        section = section.child(self.voice_input_picker(palette, cx)).child(
+            div()
+                .debug_selector(|| "voice microphone line".to_string())
+                .text_sm()
+                .text_color(palette.faint)
+                .child("used from the next session on, since a session opens its microphone as it starts"),
+        );
         // How long a session may stand with nobody speaking: Live bills by
         // the second, so a forgotten one ends itself.
         let idle = self.settings.voice_idle;
@@ -4989,7 +5073,7 @@ impl Footplate {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(rems(4.)).flex_none().child("ends after"))
+                    .child(voice_label("ends after"))
                     .child(div().flex().child(segmented(
                         [2u8, 5, 10, 30]
                             .map(|minutes| {
@@ -5032,33 +5116,15 @@ impl Footplate {
     /// stands quiet at the right of its row: its language and accent.
     pub(crate) fn voice_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
         let chosen = self.settings.voice_name.as_str();
-        let field = div()
-            .id("voice pick")
-            .debug_selector(|| "voice pick".to_string())
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .min_h(px(32.))
-            .px_3()
-            .rounded_md()
-            .border_1()
-            .border_color(palette.line)
-            .bg(palette.side)
-            .cursor_pointer()
-            .hover(|style| style.bg(palette.hover))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_menu(cx)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(match chosen.is_empty() {
-                        true => "default".to_string(),
-                        false => chosen.to_string(),
-                    }),
-            )
-            .child(chevron(palette.faint));
+        let field = select_field(
+            "voice pick",
+            match chosen.is_empty() {
+                true => "default".to_string(),
+                false => chosen.to_string(),
+            },
+            palette,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_menu(cx)));
         let mut picker = div()
             .flex()
             .flex_col()
@@ -5075,22 +5141,7 @@ impl Footplate {
                     true => "voice pick default".to_string(),
                     false => format!("voice pick {name}"),
                 };
-                let here = name == chosen;
-                div()
-                    .id(SharedString::from(at.clone()))
-                    .debug_selector(move || at.clone())
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(here, |el| {
-                        el.bg(palette.open).font_weight(FontWeight::SEMIBOLD)
-                    })
-                    .when(!here, |el| el.hover(|style| style.bg(palette.hover)))
+                select_option(at, name == chosen, palette)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_voice(name, cx)))
                     .child(div().flex_none().child(shown))
                     .child(
@@ -5102,19 +5153,8 @@ impl Footplate {
                             .child(note),
                     )
             };
-            let mut list = div()
-                .id("voice list")
-                .debug_selector(|| "voice list".to_string())
-                .flex()
-                .flex_col()
-                .max_h(rems(14.))
-                .overflow_y_scroll()
-                .rounded_md()
-                .border_1()
-                .border_color(palette.line)
-                .bg(palette.side)
-                .p_1()
-                .child(row("", "default", DEFAULT_VOICE));
+            let mut list =
+                select_list("voice list", palette).child(row("", "default", DEFAULT_VOICE));
             for (name, note) in VOICES {
                 list = list.child(row(name, name, note));
             }
@@ -5124,16 +5164,94 @@ impl Footplate {
             .flex()
             .items_start()
             .gap_2()
+            .child(voice_label("voice").min_h(px(32.)).flex().items_center())
+            .child(picker)
+    }
+
+    /// The microphone a voice session hears through, as the voice's picker
+    /// is drawn: a field with the choice and a chevron, and under it, while
+    /// it stands open, `System default` and then each microphone the machine
+    /// lists ([`Footplate::read_inputs`]) by what it is called, with the
+    /// host's id quiet at the right of its row. `System default` keeps the
+    /// choice out of the settings file.
+    pub(crate) fn voice_input_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let kept = self.settings.voice_microphone.as_str();
+        let field = select_field("voice microphone", self.voice_microphone_shown(), palette)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_input_menu(cx)));
+        let mut picker = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_w_0()
+            .max_w(rems(28.))
+            .child(field);
+        if self.voice_input_menu {
+            // One row of the list: the microphone's id as the file keeps it,
+            // empty for the system's default, and what is quiet beside it.
+            let row = |id: String, shown: String, note: String| {
+                let at = match id.is_empty() {
+                    true => "voice microphone default".to_string(),
+                    false => format!("voice microphone {id}"),
+                };
+                let pick = id.clone();
+                select_option(at, id == kept, palette)
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_voice_input(&pick, cx)))
+                    .child(div().flex_none().max_w(rems(16.)).truncate().child(shown))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(note),
+                    )
+            };
+            let mut list = select_list("voice microphone list", palette).child(row(
+                String::new(),
+                "System default".to_string(),
+                String::new(),
+            ));
+            for input in self.voice_inputs.iter().flatten() {
+                list = list.child(row(
+                    input.id.clone(),
+                    input.description.clone(),
+                    input.id.clone(),
+                ));
+            }
+            picker = picker.child(list);
+        }
+        div()
+            .flex()
+            .items_start()
+            .gap_2()
             .child(
-                div()
-                    .w(rems(4.))
-                    .flex_none()
+                voice_label("microphone")
                     .min_h(px(32.))
                     .flex()
-                    .items_center()
-                    .child("voice"),
+                    .items_center(),
             )
             .child(picker)
+    }
+
+    /// What the microphone's field says: `System default` while none is
+    /// chosen, else the chosen one by what it is called. One the list lacks
+    /// (unplugged since it was chosen) stands by its id as the file keeps it,
+    /// so that it is seen and not hidden behind `System default`, with the
+    /// words that it was not found: a session opens the system's default
+    /// meanwhile. Before the list is read it is the id alone.
+    pub(crate) fn voice_microphone_shown(&self) -> String {
+        let kept = self.settings.voice_microphone.as_str();
+        if kept.is_empty() {
+            return "System default".to_string();
+        }
+        match self.voice_inputs.as_deref() {
+            Some(listed) => match listed.iter().find(|input| input.id == kept) {
+                Some(input) => input.description.clone(),
+                None => format!("{kept} (not found)"),
+            },
+            None => kept.to_string(),
+        }
     }
 
     /// Whether the settings offer the Telemetry section: the window runs
@@ -6518,7 +6636,9 @@ fn shot_section() -> Option<Section> {
         Ok("settings-agents") => Some(Section::Agents),
         Ok("settings-notifications") => Some(Section::Notifications),
         Ok("settings-connection") => Some(Section::Connection),
-        Ok("settings-voice") | Ok("settings-voice-list") => Some(Section::Voice),
+        Ok("settings-voice") | Ok("settings-voice-list") | Ok("settings-voice-microphone") => {
+            Some(Section::Voice)
+        }
         Ok("settings-telemetry") | Ok("settings-telemetry-off") => Some(Section::Telemetry),
         _ => None,
     }

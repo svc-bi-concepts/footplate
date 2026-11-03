@@ -27,6 +27,7 @@ use gpui::{
 };
 
 use super::small_button;
+use crate::audio::Input;
 use crate::feedback::Project;
 use crate::fetch::{self, Machine};
 use crate::input::{Line, Submitted};
@@ -59,12 +60,18 @@ pub type Starts = Rc<dyn Fn(bool, Option<&Path>, &str, &str, mpsc::Sender<Update
 
 /// Opens the microphone and the speaker for a session ([`crate::audio::open`]):
 /// the microphone's frames go to the session, the speaker plays its queue.
-/// What it gives is held while the devices stand open, and closes them when
-/// it is dropped; in a sentence, why there are none. It may wait for a person
-/// (a Mac asks for the microphone's consent), so it is no call for the
-/// window's thread.
+/// The microphone is the one the settings keep the id of, empty for the
+/// system's default. What it gives is held while the devices stand open, and
+/// closes them when it is dropped; in a sentence, why there are none. It may
+/// wait for a person (a Mac asks for the microphone's consent), so it is no
+/// call for the window's thread.
 pub type Plugs =
-    Arc<dyn Fn(Mic, Arc<Mutex<Queue>>) -> Result<Box<dyn Any + Send>, String> + Send + Sync>;
+    Arc<dyn Fn(Mic, Arc<Mutex<Queue>>, &str) -> Result<Box<dyn Any + Send>, String> + Send + Sync>;
+
+/// Lists the microphones the machine has ([`crate::audio::inputs`]), for the
+/// Voice settings to offer. It asks the host, which may be slow to answer, so
+/// it is no call for the window's thread.
+pub type Lists = Arc<dyn Fn() -> Vec<Input> + Send + Sync>;
 
 /// The time, for the minutes a session has stood and for how long nobody has
 /// spoken in it.
@@ -99,6 +106,7 @@ pub struct Means {
     /// sessions against a stand-in for OpenAI's socket, with stand-in devices.
     pub voice: Starts,
     pub devices: Plugs,
+    pub inputs: Lists,
     pub now: Clock,
     pub hidden: Hidden,
     /// When the window last had a frame, as a standing voice session keeps
@@ -142,17 +150,24 @@ impl Means {
             #[cfg(test)]
             voice: Rc::new(|_, _, _, _, _| Start::Refused("no voice in a test".to_string())),
             #[cfg(not(test))]
-            devices: Arc::new(|mic, speaker| {
+            devices: Arc::new(|mic, speaker, microphone| {
                 let devices = crate::audio::open(
                     move |frames| {
                         mic.send(frames);
                     },
                     speaker,
+                    microphone,
                 )?;
                 Ok(Box::new(devices) as Box<dyn Any + Send>)
             }),
             #[cfg(test)]
-            devices: Arc::new(|_, _| Ok(Box::new(()) as Box<dyn Any + Send>)),
+            devices: Arc::new(|_, _, _| Ok(Box::new(()) as Box<dyn Any + Send>)),
+            // A test lists no microphone of its machine: one that picks
+            // among them stands in for the list.
+            #[cfg(not(test))]
+            inputs: Arc::new(crate::audio::inputs),
+            #[cfg(test)]
+            inputs: Arc::new(Vec::new),
             now: Rc::new(Instant::now),
             #[cfg(not(test))]
             hidden: {

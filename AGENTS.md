@@ -69,7 +69,8 @@ The window, its state and the yard:
     yard stood when it was left, what waits in the yards it follows, and
     what the switch and the settings are asking or doing.
   - `src/window/ui.rs`: the small pieces the window draws with: glyphs, the
-    band of its top (`ui::band`), buttons, segments and checkboxes.
+    band of its top (`ui::band`), buttons, segments, checkboxes and selects
+    (the field, list and option the Voice settings' two pickers are made of).
   - `src/window/words.rs`: the window's words for its rows (what its heads
     and counts say) and the colours that say what waits and for whom.
   - `src/window/yards.rs`: the yards' views: the switcher with its rows, each
@@ -157,18 +158,23 @@ Platform surface:
   24 kHz in and out whatever the devices speak, and nothing of any provider.
   The rules are plain functions tested with no device, calling the callbacks
   as a device does (the resampler, `Capture` for the microphone's, `Render`
-  for the speaker's, the names a person tells the devices by); the devices
-  are cpal's behind `cfg(any(macos, linux))`, opened on their own default
-  format, and elsewhere `open` says there is no audio. CoreAudio is bound
-  through objc2 and needs no C library; Linux's ALSA backend is the one C
-  library this adds: `libasound2-dev` (with `pkg-config`) to build, and
-  `libasound.so.2` at run time. A Mac's consent to the microphone is read
-  apart from the devices, since an app without it is given silence and no
-  error: `Consent` is AVFoundation's authorization status for audio (through
-  objc2-av-foundation, behind `cfg(macos)`), `allowed` turns a refusal into
-  words, and `open` asks the system and waits for its answer when consent has
-  not been determined, before opening the microphone, then reads it again
-  after (`consenting`).
+  for the speaker's, the names a person tells the devices by, and `pick`,
+  which of the microphones the host lists a kept id opens: the default where
+  it names none); the devices are cpal's behind `cfg(any(macos, linux))`,
+  opened on their own default format, and elsewhere `open` says there is no
+  audio. The microphone `open` takes is the id the settings keep
+  (`Input::id`, the host's own: the UID on a Mac), and `inputs` is the one
+  listing of them, which the Voice settings' picker reads through
+  `Means::inputs` and which opens no device, since ALSA opens one to read its
+  format. CoreAudio is bound through objc2 and needs no C library; Linux's
+  ALSA backend is the one C library this adds: `libasound2-dev` (with
+  `pkg-config`) to build, and `libasound.so.2` at run time. A Mac's consent
+  to the microphone is read apart from the devices, since an app without it
+  is given silence and no error: `Consent` is AVFoundation's authorization
+  status for audio (through objc2-av-foundation, behind `cfg(macos)`),
+  `allowed` turns a refusal into words, and `open` asks the system and waits
+  for its answer when consent has not been determined, before opening the
+  microphone, then reads it again after (`consenting`).
 
 Setup, release and tests:
 

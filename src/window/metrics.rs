@@ -19,6 +19,11 @@ pub(crate) const IMAGE_MARGIN: f32 = 2.;
 /// name stands in it where it is no image, so it goes with the text size.
 pub(crate) const ATTACHMENT: f32 = 3.5;
 
+/// How wide the Voice section's labels stand before their fields, in rems:
+/// the longest of them (`microphone`) whole, and every field after it at one
+/// place. In rems because the words in it are.
+pub(crate) const VOICE_LABEL: f32 = 6.;
+
 /// The rail's width in pixels, fixed: room for a label under each
 /// icon, as the review has it.
 pub(crate) const RAIL: f32 = 64.;

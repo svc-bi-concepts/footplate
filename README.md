@@ -450,7 +450,9 @@ on each of their sections: `settings` is this window, and
 `settings-notifications`, `settings-connection`, `settings-voice` and
 `settings-telemetry` the rest, with `settings-telemetry-off` the
 telemetry section off, and `settings-voice-list` the voice section on,
-with a voice chosen and the list of voices open under its field),
+with a voice chosen and the list of voices open under its field, and
+`settings-voice-microphone` the same with a microphone chosen among a
+stand-in's and its list open),
 `voice` (the yardmaster's conversation with a voice session standing in
 it, against the fake yard and a stand-in for OpenAI's socket, with no
 microphone or speaker opened: the composer's button saying Stop with
@@ -1747,7 +1749,18 @@ folder. A change is drawn at once and kept for the next start:
   the settings file. OpenAI fixes a session's voice when it starts, so a pick
   is heard from the next session, and one that stands is left as it was; a
   voice OpenAI refuses, from a settings file edited by hand, is refused in
-  its own words as a refused key is. With voice on, the composer of an
+  its own words as a refused key is. The `microphone` picker under it
+  chooses which microphone a session hears through, in the same manner:
+  `System default` first, which is what a session uses where nothing is
+  chosen and keeps nothing in the settings file, then each microphone the
+  machine lists, by what the system calls it with its id quiet beside it. The
+  machine is asked when the section shows and each time the list opens, so
+  a headset plugged in since is there. The pick is kept by that id, and the
+  devices open as a session starts, so it is used from the next session
+  and one that stands is left as it was. A microphone that is not
+  plugged in when a session starts is not used: the system's default is,
+  and the field says `not found` beside its id until it is back. With voice
+  on, the composer of an
   open conversation has one button at its bottom right: Voice while the
   line is empty, and a tap starts a session with whom you are talking;
   Send once the line holds words or a file; and Stop while a session
