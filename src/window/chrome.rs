@@ -1599,13 +1599,6 @@ impl Footplate {
         self.anchor = None;
     }
 
-    /// `above` rows were put in above the view of the open conversation:
-    /// the mail at the top of the view stays where it stood. The scroll
-    /// offset is counted from the top of the conversation, and how high
-    /// the new rows are is known only once they are laid out. So the
-    /// layout of the next frame puts that mail at the top of the view, and
-    /// the frame after it moves the view by what the mail stood off the
-    /// top ([`Footplate::reconcile_scroll`]).
     /// The oldest shown mail's body among the conversation's children:
     /// past the line above it, its day's break, and its group's head.
     pub(crate) fn first_mail_item(&self) -> usize {
@@ -1617,6 +1610,13 @@ impl Footplate {
         2 + usize::from(breaks)
     }
 
+    /// `above` rows were put in above the view of the open conversation:
+    /// the mail at the top of the view stays where it stood. The scroll
+    /// offset is counted from the top of the conversation, and how high
+    /// the new rows are is known only once they are laid out. So the
+    /// layout of the next frame puts that mail at the top of the view, and
+    /// the frame after it moves the view by what the mail stood off the
+    /// top ([`Footplate::reconcile_scroll`]).
     pub(crate) fn keep_place(&mut self, above: usize, first_mail: usize) {
         let anchor = match self.anchor.take() {
             // More was put in before the last was laid out.
