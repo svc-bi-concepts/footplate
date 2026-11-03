@@ -1319,10 +1319,14 @@ mod tests {
     use super::asks::{dir_url, file_url};
     use super::bead::{Button, bar_top, hover_clock};
     use super::keys::{KeysView, SECONDARY, keys_for};
-    use super::metrics::{DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, PANEL_MIN, RAIL, drawer_fits};
+    use super::metrics::{
+        DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, INPUT_NOTE, PANEL_MIN, RAIL, VOICE_NOTE,
+        drawer_fits,
+    };
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
     use super::rail::{PROBE_AGAIN, post, run_address_of};
     use super::state::{Counts, pairing_failure, rail_counts, waiting};
+    use super::ui::shorten;
     use super::words::{
         LineCounts, ask_words, bead_back_name, bead_sub, bead_words, decided_words, flow_words,
         footplate_words, headcode_color, line_counts, more_words, remark_color, stage_group_words,
@@ -11197,6 +11201,13 @@ yardr.dev
         assert!(voice_menu(cx));
         assert!(drawn(cx, "voice list") && drawn(cx, "voice pick default"));
         assert!(drawn(cx, "voice pick alloy") && drawn(cx, "voice pick ash"));
+        // A note of OpenAI's guide is not cut by its row's budget: a longer
+        // one added to the list is the time to size that budget again.
+        assert!(
+            voice::VOICES
+                .iter()
+                .all(|(_, note)| shorten(note, VOICE_NOTE) == *note)
+        );
         cx.simulate_keystrokes("escape");
         assert!(!voice_menu(cx) && settings_open(&view, cx));
         // A click on the field again shuts it too, with nothing picked.
@@ -11274,6 +11285,19 @@ yardr.dev
                 < bounds_of(cx, &format!("voice microphone {BUILT_IN}")).top(),
             "the system's default stands first"
         );
+        // An id past its budget ends in the ellipsis `shorten` gives it and
+        // not in a cut through a glyph: its note stands as wide as that
+        // text, which the test platform draws at 0.6 em a char (it cannot
+        // read the text back). Left to its row it would stand as wide as
+        // the room its name leaves, narrower than the whole id.
+        let em = cx.update(|window, _| window.rem_size()) * 0.875 * 0.6;
+        for id in [BUILT_IN, HEADSET] {
+            let note = bounds_of(cx, &format!("voice microphone note {id}"));
+            assert!(
+                (note.size.width - em * (INPUT_NOTE + 1) as f32).abs() < px(1.),
+                "the id {id} stands {note:?} wide, not {INPUT_NOTE} chars and an ellipsis"
+            );
+        }
         cx.simulate_keystrokes("escape");
         assert!(!input_menu(cx) && settings_open(&view, cx));
         // A click on the field again shuts it too, with nothing picked.

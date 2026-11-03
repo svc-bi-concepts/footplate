@@ -1753,7 +1753,8 @@ folder. A change is drawn at once and kept for the next start:
   chooses which microphone a session hears through, in the same manner:
   `System default` first, which is what a session uses where nothing is
   chosen and keeps nothing in the settings file, then each microphone the
-  machine lists, by what the system calls it with its id quiet beside it. The
+  machine lists, by what the system calls it with its id quiet beside it,
+  ended by an ellipsis where it is too long for the row. The
   machine is asked when the section shows and each time the list opens, so
   a headset plugged in since is there. The pick is kept by that id, and the
   devices open as a session starts, so it is used from the next session

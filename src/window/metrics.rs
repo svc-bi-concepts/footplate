@@ -24,6 +24,42 @@ pub(crate) const ATTACHMENT: f32 = 3.5;
 /// place. In rems because the words in it are.
 pub(crate) const VOICE_LABEL: f32 = 6.;
 
+/// How many chars of a microphone's id its row in the Voice settings' list
+/// shows before an ellipsis (`ui::shorten`). Measured as DejaVu Sans draws
+/// it (the widest sans of the desktops here, and the font the Linux shots
+/// draw in) at the base text size, 14 pixels, with the picker at its widest,
+/// 28 rems: the list's border and padding and the row's leave 414 pixels
+/// for the row's two texts and the gap between them. The tightest row of
+/// the shots' microphones is the Studio Display's, the one chosen and so
+/// drawn bold: its name takes 211 of them, which leaves 203 for the id.
+/// 18 chars and the ellipsis take 175 of those; 22 would take 211 and cut
+/// the ellipsis itself. The Mac's own font is narrower still. Everything in
+/// the row is in rems but its hairlines, so this holds at every text size
+/// where the picker stands at its widest; below that, the row's
+/// `truncate()` cuts where the room ends, as it did.
+pub(crate) const INPUT_NOTE: usize = 18;
+
+/// How many chars of a voice's note its row in the Voice settings' list
+/// shows before an ellipsis (`ui::shorten`), measured as
+/// [`INPUT_NOTE`] is, with the picker at its widest, 22 rems: 318 pixels
+/// for the name and the note. Beside the widest name, `meridian`, drawn
+/// bold where it is the choice, 248 are left for the note, and 26 chars and
+/// the ellipsis take 225 of those. The longest note OpenAI's guide gives,
+/// `English, North American`, is 23 chars and stands whole, in the widest
+/// row 262 of the 318 pixels, so no note is cut today; a longer one the
+/// guide adds is cut where it would not fit, and a test holds the notes
+/// to this number.
+pub(crate) const VOICE_NOTE: usize = 26;
+
+/// How many chars of its choice a Select's field shows before an ellipsis
+/// (`ui::shorten`), measured as [`INPUT_NOTE`] is, in the narrower of the
+/// two fields, the voice's, at its widest, 22 rems: its border, padding, gap
+/// and chevron leave 302 pixels for the choice, and 32 chars of a long id and
+/// the ellipsis take 267 of those. The microphone's field, at 28 rems, has
+/// 398 pixels and room over. The choice is a long id where the microphone
+/// that was chosen is not plugged in, or before the list is read.
+pub(crate) const SELECT_CHOICE: usize = 32;
+
 /// The rail's width in pixels, fixed: room for a label under each
 /// icon, as the review has it.
 pub(crate) const RAIL: f32 = 64.;

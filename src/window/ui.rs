@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use super::Footplate;
+use super::metrics::SELECT_CHOICE;
 use crate::theme::Palette;
 
 /// A rail glyph's canvas: 28 pixels, drawn from the mock's geometry
@@ -353,9 +354,33 @@ pub(crate) fn chevron(color: Rgba) -> impl IntoElement {
     .flex_none()
 }
 
+/// `text` cut after its first `budget` chars and ended with an ellipsis where
+/// it is longer than that, else as it is. It is for the text of a flex item
+/// that shrinks, where `truncate()` alone draws no ellipsis but clips the
+/// glyph at the edge: in gpui 0.2.2 a line that does not wrap has no wrap
+/// width (`src/elements/text.rs`, :347-353), is cut to a width only where the
+/// layout gives a definite one (:356-371), and is measured once, at the width
+/// its whole text wants, which every measure after returns (:373-378), so the
+/// width the item shrinks to never reaches the cut and the line is drawn
+/// whole under the item's `overflow_hidden`. The cut is made in the string
+/// instead, which is plain and tested, and which the order gpui measures in
+/// does not touch. The element keeps its `truncate()` as a second net, for a
+/// row narrower than its budget was sized for (`metrics.rs` has them). A char
+/// is a Unicode scalar value, so the cut is never inside a multi-byte one,
+/// though it can part a letter from the accent after it. At the gpui bump,
+/// try `truncate()` alone in a shrunk flex item: where it draws its ellipsis,
+/// this and the budgets go.
+pub(crate) fn shorten(text: &str, budget: usize) -> String {
+    match text.char_indices().nth(budget) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
+    }
+}
+
 /// A Select's field, as the design system has it: 32 px high, the choice and
 /// a chevron that says it opens a list, brighter under the pointer. The
-/// caller adds the click that opens the list. `id` is its element id and,
+/// caller adds the click that opens the list. A choice longer than
+/// [`SELECT_CHOICE`] chars ends in an ellipsis. `id` is its element id and,
 /// in a test, how it is found.
 pub(crate) fn select_field(id: &'static str, choice: String, palette: Palette) -> Stateful<Div> {
     div()
@@ -373,7 +398,13 @@ pub(crate) fn select_field(id: &'static str, choice: String, palette: Palette) -
         .bg(palette.side)
         .cursor_pointer()
         .hover(|style| style.bg(palette.hover))
-        .child(div().flex_1().min_w_0().truncate().child(choice))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(shorten(&choice, SELECT_CHOICE)),
+        )
         .child(chevron(palette.faint))
 }
 
@@ -467,4 +498,54 @@ pub(crate) fn checkbox(label: String, checked: bool, palette: Palette) -> Div {
                 }),
         )
         .child(div().text_sm().child(label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where the text is within its budget it is left as it is, and a cut
+    /// that is one char past it replaces that char by the ellipsis. The
+    /// budget counts chars, not bytes: `日本語` is nine bytes and three
+    /// chars, and a cut among chars of two, three and four bytes falls
+    /// between two of them.
+    #[test]
+    fn a_string_is_cut_after_its_budget_of_chars_and_no_sooner() {
+        for (text, budget, shown) in [
+            ("", 0, ""),
+            ("", 3, ""),
+            ("abc", 3, "abc"),
+            ("abc", 4, "abc"),
+            ("abcd", 3, "abc…"),
+            ("abcd", 0, "…"),
+            (
+                "coreaudio:AppleUSBAudioEngine:Apple Inc.:Studio Display:4D7",
+                18,
+                "coreaudio:AppleUSB…",
+            ),
+            ("日本語", 3, "日本語"),
+            ("日本語のマイク", 3, "日本語…"),
+            ("éé", 2, "éé"),
+            ("ééé", 2, "éé…"),
+            ("🎤🎧", 2, "🎤🎧"),
+            ("🎤🎧🎙🔊", 2, "🎤🎧…"),
+            ("a日🎤z", 2, "a日…"),
+            ("a日🎤z", 3, "a日🎤…"),
+        ] {
+            assert_eq!(shorten(text, budget), shown, "{text:?} in {budget}");
+        }
+
+        // At every budget, from none to past the string's end, the result
+        // is its first chars and the ellipsis or the string whole: chars of
+        // every width never have a cut through one.
+        let text = "aé日🎤z日é🎤a";
+        let chars: Vec<char> = text.chars().collect();
+        for budget in 0..=chars.len() + 2 {
+            let expected = match budget < chars.len() {
+                true => format!("{}…", chars[..budget].iter().collect::<String>()),
+                false => text.to_string(),
+            };
+            assert_eq!(shorten(text, budget), expected, "budget {budget}");
+        }
+    }
 }

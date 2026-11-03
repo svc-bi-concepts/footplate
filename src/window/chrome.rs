@@ -41,14 +41,17 @@ use super::ask::group_head;
 use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
-use super::metrics::{DRAWER_WIDTH, HEAD_INSET, RAIL, RAIL_LABEL, RAIL_TILE, VOICE_LABEL, grown};
+use super::metrics::{
+    DRAWER_WIDTH, HEAD_INSET, INPUT_NOTE, RAIL, RAIL_LABEL, RAIL_TILE, VOICE_LABEL, VOICE_NOTE,
+    grown,
+};
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
 use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
     band, card_layer, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
-    select_field, select_list, select_option, semaphore_glyph, small_button, track_glyph,
+    select_field, select_list, select_option, semaphore_glyph, shorten, small_button, track_glyph,
 };
 use super::words::{footplate_words, unread_words, yardr_place, yardr_words};
 use super::{Dismiss, JumpNewest, JumpOldest, Leave};
@@ -5113,7 +5116,8 @@ impl Footplate {
     /// The field says the voice by its name as the file keeps it, so that a
     /// name the list does not have, from a hand-edited file, is seen and not
     /// hidden behind `default`. A voice's note, where OpenAI's guide has one,
-    /// stands quiet at the right of its row: its language and accent.
+    /// stands quiet at the right of its row: its language and accent, ended
+    /// by an ellipsis past [`VOICE_NOTE`] chars.
     pub(crate) fn voice_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
         let chosen = self.settings.voice_name.as_str();
         let field = select_field(
@@ -5150,7 +5154,7 @@ impl Footplate {
                             .truncate()
                             .text_sm()
                             .text_color(palette.faint)
-                            .child(note),
+                            .child(shorten(note, VOICE_NOTE)),
                     )
             };
             let mut list =
@@ -5172,8 +5176,9 @@ impl Footplate {
     /// is drawn: a field with the choice and a chevron, and under it, while
     /// it stands open, `System default` and then each microphone the machine
     /// lists ([`Footplate::read_inputs`]) by what it is called, with the
-    /// host's id quiet at the right of its row. `System default` keeps the
-    /// choice out of the settings file.
+    /// host's id quiet at the right of its row, ended by an ellipsis past
+    /// [`INPUT_NOTE`] chars. `System default` keeps the choice out of the
+    /// settings file.
     pub(crate) fn voice_input_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
         let kept = self.settings.voice_microphone.as_str();
         let field = select_field("voice microphone", self.voice_microphone_shown(), palette)
@@ -5195,16 +5200,18 @@ impl Footplate {
                     false => format!("voice microphone {id}"),
                 };
                 let pick = id.clone();
+                let note_at = format!("voice microphone note {id}");
                 select_option(at, id == kept, palette)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_voice_input(&pick, cx)))
                     .child(div().flex_none().max_w(rems(16.)).truncate().child(shown))
                     .child(
                         div()
+                            .debug_selector(move || note_at.clone())
                             .min_w_0()
                             .truncate()
                             .text_sm()
                             .text_color(palette.faint)
-                            .child(note),
+                            .child(shorten(&note, INPUT_NOTE)),
                     )
             };
             let mut list = select_list("voice microphone list", palette).child(row(

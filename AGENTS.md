@@ -55,8 +55,9 @@ The window, its state and the yard:
   - `src/window/keys.rs`: the contexts the window's key bindings answer in,
     and the tables the cheatsheet names for each view.
   - `src/window/metrics.rs`: the window's measures: fixed sizes in pixels,
-    sizes the words set in rems, and the small functions that fit a pane or
-    a drawer to them.
+    sizes the words set in rems, the char budgets of the rows that end a long
+    string in an ellipsis (`ui::shorten`), and the small functions that fit a
+    pane or a drawer to them.
   - `src/window/panel.rs`: the reading pane's column, day breaks and rows,
     and the panel's heads, tracks and cards.
   - `src/window/rail.rs`: the images a mail names, the tooltips under the
@@ -70,7 +71,10 @@ The window, its state and the yard:
     what the switch and the settings are asking or doing.
   - `src/window/ui.rs`: the small pieces the window draws with: glyphs, the
     band of its top (`ui::band`), buttons, segments, checkboxes and selects
-    (the field, list and option the Voice settings' two pickers are made of).
+    (the field, list and option the Voice settings' two pickers are made of),
+    and `ui::shorten`, which ends a string in an ellipsis after a char budget:
+    gpui 0.2.2's `truncate()` clips mid-glyph, with no ellipsis, in a flex item
+    that shrinks, so a row whose text may outrun it shortens the string too.
   - `src/window/words.rs`: the window's words for its rows (what its heads
     and counts say) and the colours that say what waits and for whom.
   - `src/window/yards.rs`: the yards' views: the switcher with its rows, each
