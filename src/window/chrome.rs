@@ -42,8 +42,8 @@ use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{
-    DRAWER_WIDTH, HEAD_INSET, INPUT_NOTE, RAIL, RAIL_LABEL, RAIL_TILE, VOICE_LABEL, VOICE_NOTE,
-    grown,
+    DRAWER_WIDTH, HEAD_INSET, INPUT_NAME, INPUT_NOTE, RAIL, RAIL_LABEL, RAIL_TILE, VOICE_LABEL,
+    VOICE_NOTE, grown,
 };
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
 use super::state::{
@@ -5175,10 +5175,10 @@ impl Footplate {
     /// The microphone a voice session hears through, as the voice's picker
     /// is drawn: a field with the choice and a chevron, and under it, while
     /// it stands open, `System default` and then each microphone the machine
-    /// lists ([`Footplate::read_inputs`]) by what it is called, with the
-    /// host's id quiet at the right of its row, ended by an ellipsis past
-    /// [`INPUT_NOTE`] chars. `System default` keeps the choice out of the
-    /// settings file.
+    /// lists ([`Footplate::read_inputs`]) by what it is called, ended by an
+    /// ellipsis past [`INPUT_NAME`] chars, with the host's id quiet at the
+    /// right of its row, ended by one past [`INPUT_NOTE`] chars.
+    /// `System default` keeps the choice out of the settings file.
     pub(crate) fn voice_input_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
         let kept = self.settings.voice_microphone.as_str();
         let field = select_field("voice microphone", self.voice_microphone_shown(), palette)
@@ -5200,10 +5200,18 @@ impl Footplate {
                     false => format!("voice microphone {id}"),
                 };
                 let pick = id.clone();
+                let name_at = format!("voice microphone name {id}");
                 let note_at = format!("voice microphone note {id}");
                 select_option(at, id == kept, palette)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_voice_input(&pick, cx)))
-                    .child(div().flex_none().max_w(rems(16.)).truncate().child(shown))
+                    .child(
+                        div()
+                            .debug_selector(move || name_at.clone())
+                            .flex_none()
+                            .max_w(rems(16.))
+                            .truncate()
+                            .child(shorten(&shown, INPUT_NAME)),
+                    )
                     .child(
                         div()
                             .debug_selector(move || note_at.clone())

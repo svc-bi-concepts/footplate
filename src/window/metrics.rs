@@ -39,6 +39,20 @@ pub(crate) const VOICE_LABEL: f32 = 6.;
 /// `truncate()` cuts where the room ends, as it did.
 pub(crate) const INPUT_NOTE: usize = 18;
 
+/// How many chars of a microphone's name its row in the Voice settings' list
+/// shows before an ellipsis (`ui::shorten`), measured as [`INPUT_NOTE`] is,
+/// in the same 414 pixels of the picker at its widest. The longest name of
+/// the shots' microphones, the Studio Display's, is 25 chars and stands
+/// whole: drawn bold in the chosen row it takes 211 pixels, which leaves the
+/// 203 that [`INPUT_NOTE`] counts on for the id. A longer name is cut there,
+/// and its 25 chars and the ellipsis take 226, which leave 188 for the id's
+/// 175. Left to the name's own cap, 16 rems or 256 pixels, a long name would
+/// leave the id 158, and the id's `truncate()` would clip it mid-glyph, as it
+/// did the name. The Mac's own font is narrower still. A name of wider
+/// letters than the Studio Display's is cut by its `truncate()` where its
+/// room ends, as it was.
+pub(crate) const INPUT_NAME: usize = 25;
+
 /// How many chars of a voice's note its row in the Voice settings' list
 /// shows before an ellipsis (`ui::shorten`), measured as
 /// [`INPUT_NOTE`] is, with the picker at its widest, 22 rems: 318 pixels

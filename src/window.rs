@@ -1320,8 +1320,8 @@ mod tests {
     use super::bead::{Button, bar_top, hover_clock};
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{
-        DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, INPUT_NOTE, PANEL_MIN, RAIL, VOICE_NOTE,
-        drawer_fits,
+        DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, INPUT_NAME, INPUT_NOTE, PANEL_MIN, RAIL,
+        VOICE_NOTE, drawer_fits,
     };
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
     use super::rail::{PROBE_AGAIN, post, run_address_of};
@@ -11275,6 +11275,11 @@ yardr.dev
         // A click opens the list: the system's default first, then what the
         // machine lists, each by what it is called. Esc shuts the list and
         // not the sheet.
+        voicing.plug(&[
+            ("MacBook Pro Microphone", BUILT_IN),
+            ("Jabra Evolve2 65", HEADSET),
+            (STUDIO_NAME, STUDIO),
+        ]);
         click_on(cx, "voice microphone");
         assert!(input_menu(cx));
         assert!(drawn(cx, "voice microphone list") && drawn(cx, "voice microphone default"));
@@ -11289,9 +11294,23 @@ yardr.dev
         // not in a cut through a glyph: its note stands as wide as that
         // text, which the test platform draws at 0.6 em a char (it cannot
         // read the text back). Left to its row it would stand as wide as
-        // the room its name leaves, narrower than the whole id.
+        // the room its name leaves, narrower than the whole id. A name
+        // is held to its own budget the same way: one past it stands
+        // `INPUT_NAME` chars and the ellipsis wide, not the 16 rems that cap
+        // its row, and leaves its id that room, while one within it stands
+        // as wide as it is.
         let em = cx.update(|window, _| window.rem_size()) * 0.875 * 0.6;
-        for id in [BUILT_IN, HEADSET] {
+        for (name, id) in [
+            ("MacBook Pro Microphone", BUILT_IN),
+            ("Jabra Evolve2 65", HEADSET),
+            (STUDIO_NAME, STUDIO),
+        ] {
+            let chars = name.chars().count().min(INPUT_NAME + 1);
+            let stands = bounds_of(cx, &format!("voice microphone name {id}"));
+            assert!(
+                (stands.size.width - em * chars as f32).abs() < px(1.),
+                "the name {name} stands {stands:?} wide, not {chars} chars"
+            );
             let note = bounds_of(cx, &format!("voice microphone note {id}"));
             assert!(
                 (note.size.width - em * (INPUT_NOTE + 1) as f32).abs() < px(1.),
@@ -11498,6 +11517,11 @@ yardr.dev
     /// host gives them.
     const BUILT_IN: &str = "coreaudio:BuiltInMicrophoneDevice";
     const HEADSET: &str = "coreaudio:AppleUSBAudioEngine:Jabra:Evolve2 65:0A4F";
+
+    /// A third, which the Voice settings' test plugs in: its name is past what
+    /// a row of the list shows ([`INPUT_NAME`] chars).
+    const STUDIO: &str = "coreaudio:AppleUSBAudioEngine:Apple Inc.:Studio Display:4D7";
+    const STUDIO_NAME: &str = "Studio Display Microphone with its built-in array of three";
 
     fn microphone(description: &str, id: &str) -> Input {
         Input {

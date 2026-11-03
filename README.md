@@ -1754,12 +1754,12 @@ folder. A change is drawn at once and kept for the next start:
   `System default` first, which is what a session uses where nothing is
   chosen and keeps nothing in the settings file, then each microphone the
   machine lists, by what the system calls it with its id quiet beside it,
-  ended by an ellipsis where it is too long for the row. The
-  machine is asked when the section shows and each time the list opens, so
-  a headset plugged in since is there. The pick is kept by that id, and the
-  devices open as a session starts, so it is used from the next session
-  and one that stands is left as it was. A microphone that is not
-  plugged in when a session starts is not used: the system's default is,
+  the name and the id each ended by an ellipsis where it is too long for
+  the row. The machine is asked when the section shows and each time the
+  list opens, so a headset plugged in since is there. The pick is kept by
+  that id, and the devices open as a session starts, so it is used from the
+  next session and one that stands is left as it was. A microphone that is
+  not plugged in when a session starts is not used: the system's default is,
   and the field says `not found` beside its id until it is back. With voice
   on, the composer of an
   open conversation has one button at its bottom right: Voice while the
