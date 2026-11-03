@@ -42,8 +42,8 @@ use super::asks::{dir_url, yard_field, yard_help, yard_submit};
 use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{
-    DRAWER_WIDTH, HEAD_INSET, INPUT_NAME, INPUT_NOTE, RAIL, RAIL_LABEL, RAIL_TILE, VOICE_LABEL,
-    VOICE_NOTE, grown,
+    DRAWER_WIDTH, HEAD_INSET, INPUT_KEPT, INPUT_NAME, INPUT_NOTE, RAIL, RAIL_LABEL, RAIL_TILE,
+    VOICE_LABEL, VOICE_NOTE, grown,
 };
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
 use super::state::{
@@ -5254,7 +5254,10 @@ impl Footplate {
     /// (unplugged since it was chosen) stands by its id as the file keeps it,
     /// so that it is seen and not hidden behind `System default`, with the
     /// words that it was not found: a session opens the system's default
-    /// meanwhile. Before the list is read it is the id alone.
+    /// meanwhile. The words come last and the id gives way to them, ended by
+    /// an ellipsis past [`INPUT_KEPT`] chars: the field cuts what is longer
+    /// than it shows at the end, and the words are what it is there to say.
+    /// Before the list is read it is the id alone.
     pub(crate) fn voice_microphone_shown(&self) -> String {
         let kept = self.settings.voice_microphone.as_str();
         if kept.is_empty() {
@@ -5263,7 +5266,7 @@ impl Footplate {
         match self.voice_inputs.as_deref() {
             Some(listed) => match listed.iter().find(|input| input.id == kept) {
                 Some(input) => input.description.clone(),
-                None => format!("{kept} (not found)"),
+                None => format!("{} (not found)", shorten(kept, INPUT_KEPT)),
             },
             None => kept.to_string(),
         }

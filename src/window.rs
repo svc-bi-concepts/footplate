@@ -1321,7 +1321,7 @@ mod tests {
     use super::keys::{KeysView, SECONDARY, keys_for};
     use super::metrics::{
         DRAWER_WIDTH, IMAGE_HEIGHT, IMAGE_MARGIN, INPUT_NAME, INPUT_NOTE, PANEL_MIN, RAIL,
-        VOICE_NOTE, drawer_fits,
+        SELECT_CHOICE, VOICE_NOTE, drawer_fits,
     };
     use super::panel::{panel_columns, panel_quiet_head, panel_stage_name, quiet_head, waits_head};
     use super::rail::{PROBE_AGAIN, post, run_address_of};
@@ -11343,15 +11343,23 @@ yardr.dev
         // A microphone the machine no longer lists (taken out since it was
         // picked) stays picked: the field has its id as the file keeps it,
         // with the words that it was not found, the list is without it, and
-        // a session opens the system's default meanwhile. It is as it was
-        // when the machine lists it again, as the list is opened.
+        // a session opens the system's default meanwhile. A long id is cut
+        // to leave the words room: the field cuts a choice past its budget
+        // at the end, which would take them. It is as it was when the
+        // machine lists it again, as the list is opened.
         voicing.plug(&[("MacBook Pro Microphone", BUILT_IN)]);
         click_on(cx, "voice microphone");
         wait(cx, "the microphones read again", |cx| {
             view.read_with(cx, |v, _| v.voice_inputs.as_ref().map(Vec::len) == Some(1))
         });
         assert_eq!(settings_of(&view, cx).voice_microphone, HEADSET);
-        assert_eq!(shown(cx), format!("{HEADSET} (not found)"));
+        let lost = shown(cx);
+        assert_eq!(lost, "coreaudio:AppleUSB… (not found)");
+        assert_eq!(
+            shorten(&lost, SELECT_CHOICE),
+            lost,
+            "the field draws it whole, the words with it"
+        );
         assert!(drawn(cx, &format!("voice microphone {BUILT_IN}")));
         // Said no longer: the frame's bounds only ever grow, so what is gone
         // is read, not drawn.
@@ -11375,6 +11383,12 @@ yardr.dev
         assert_eq!(settings_of(&view, cx).voice_microphone, "");
         assert!(!input_menu(cx));
         assert!(!kept().contains("voice_microphone"));
+        assert_eq!(shown(cx), "System default");
+        // An id the machine does not list that is short enough stands whole,
+        // the words after it.
+        view.update(cx, |v, cx| v.pick_voice_input("coreaudio:Gone", cx));
+        assert_eq!(shown(cx), "coreaudio:Gone (not found)");
+        view.update(cx, |v, cx| v.pick_voice_input("", cx));
         assert_eq!(shown(cx), "System default");
         // A list left open is shut by leaving the section.
         click_on(cx, "voice microphone");

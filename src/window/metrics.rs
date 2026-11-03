@@ -70,9 +70,19 @@ pub(crate) const VOICE_NOTE: usize = 26;
 /// two fields, the voice's, at its widest, 22 rems: its border, padding, gap
 /// and chevron leave 302 pixels for the choice, and 32 chars of a long id and
 /// the ellipsis take 267 of those. The microphone's field, at 28 rems, has
-/// 398 pixels and room over. The choice is a long id where the microphone
-/// that was chosen is not plugged in, or before the list is read.
+/// 398 pixels and room over. The choice is a long id before the list is
+/// read; where the microphone that was chosen is not plugged in it is
+/// [`INPUT_KEPT`] chars of the id and the words that say so.
 pub(crate) const SELECT_CHOICE: usize = 32;
+
+/// How many chars of the id of a microphone that is not plugged in its field
+/// in the Voice settings keeps before an ellipsis (`ui::shorten`), the words
+/// ` (not found)` standing after it. Arithmetic, not measured: the field
+/// shows [`SELECT_CHOICE`] chars whole and cuts a longer choice at its end,
+/// where these words would be, so the id keeps that less the ellipsis (1),
+/// the words (12) and one to spare. An id of as many chars or fewer stands
+/// whole.
+pub(crate) const INPUT_KEPT: usize = SELECT_CHOICE - 14;
 
 /// The rail's width in pixels, fixed: room for a label under each
 /// icon, as the review has it.
