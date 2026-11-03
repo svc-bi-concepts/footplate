@@ -53,9 +53,9 @@ pub type Opens = Rc<dyn Fn(&str, &mut App)>;
 pub type Strip = Rc<dyn Fn(Gesture, &mut Window, &mut App)>;
 
 /// Starts a voice session ([`voice::start_session`]): whether voice is on,
-/// the settings' file, whom the conversation is with, and where the session
-/// tells its updates.
-pub type Starts = Rc<dyn Fn(bool, Option<&Path>, &str, mpsc::Sender<Update>) -> Start>;
+/// the settings' file, whom the conversation is with, the voice that speaks
+/// (empty is the provider's own), and where the session tells its updates.
+pub type Starts = Rc<dyn Fn(bool, Option<&Path>, &str, &str, mpsc::Sender<Update>) -> Start>;
 
 /// Opens the microphone and the speaker for a session ([`crate::audio::open`]):
 /// the microphone's frames go to the session, the speaker plays its queue.
@@ -140,7 +140,7 @@ impl Means {
             #[cfg(not(test))]
             voice: Rc::new(crate::voice::start_session),
             #[cfg(test)]
-            voice: Rc::new(|_, _, _, _| Start::Refused("no voice in a test".to_string())),
+            voice: Rc::new(|_, _, _, _, _| Start::Refused("no voice in a test".to_string())),
             #[cfg(not(test))]
             devices: Arc::new(|mic, speaker| {
                 let devices = crate::audio::open(

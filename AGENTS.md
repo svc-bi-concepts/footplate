@@ -92,11 +92,13 @@ The window, its state and the yard:
   which answer the voice is given to speak and under which delegation's id,
   the queue its speech waits in and
   drops (the server's padding let go, a holdoff that counts what it throws
-  away), the instructions and the state words, and the events of OpenAI's
-  GPT-Live, which this is the one module to speak (no provider trait, no
-  setting). Below the rules, the live socket itself: a hand-written
-  WebSocket over `src/api.rs`'s TLS (its upgrade's accept key is the one
-  SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
+  away), the instructions and the state words, the voices GPT-Live offers
+  (`VOICES`, which the Voice settings' picker lists and a session is started
+  in, from OpenAI's reference), and the events of OpenAI's GPT-Live, which
+  this is the one module to speak (no provider trait, and no setting to
+  choose another provider). Below the rules, the live socket itself: a
+  hand-written WebSocket over `src/api.rs`'s TLS (its upgrade's accept key is
+  the one SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
   `FollowControl` manner, which owns the microphone's frames in and the
   speaker's queue out; the devices that plug into those ends are
   `src/audio.rs`'s, and the window's one composer button (voice, send or

@@ -9,9 +9,6 @@ use gpui::{
 use super::Footplate;
 use crate::theme::Palette;
 
-/// The switcher's mark beside the yard's line: a chevron drawn with two
-/// strokes, in the line's own colour. A character would draw on one
-/// desktop and stand in for a missing glyph on the next.
 /// A rail glyph's canvas: 28 pixels, drawn from the mock's geometry
 /// (docs/design/2026-10-16-footplate-zj5f-rail-mock.html), a 24-grid with
 /// its strokes, scaled to the canvas. Fixed pixels, not rems, as the
@@ -327,6 +324,33 @@ pub(crate) fn segmented(segments: Vec<gpui::Stateful<Div>>, palette: Palette) ->
         row = row.child(segment.when(at > 0, |el| el.border_l_1().border_color(palette.line)));
     }
     row
+}
+
+/// A dropdown's chevron, which says that a field opens a list: drawn with two
+/// strokes, in the field's own colour. A character would draw on one desktop
+/// and stand in for a missing glyph on the next.
+pub(crate) fn chevron(color: Rgba) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let scale = f32::from(bounds.size.width) / 16.;
+            let at = |x: f32, y: f32| {
+                gpui::point(
+                    bounds.origin.x + px(x * scale),
+                    bounds.origin.y + px(y * scale),
+                )
+            };
+            let mut path = gpui::PathBuilder::stroke(px(1.8 * scale));
+            path.move_to(at(3.5, 6.));
+            path.line_to(at(8., 10.5));
+            path.line_to(at(12.5, 6.));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(rems(1.))
+    .flex_none()
 }
 
 /// A drawn check mark, so the checkbox does not depend on a text glyph.

@@ -519,6 +519,10 @@ pub struct Footplate {
     /// draft, and Enter keeps it beside the settings and clears the field.
     voice_key: Entity<Line>,
     voice_said: Option<String>,
+    /// Whether the list of voices stands open under its field in the
+    /// settings, as the yard's ⋯ menu stands open on its card: shut by a
+    /// pick, by esc, and by leaving the section.
+    voice_menu: bool,
     /// The voice session of the open conversation, while one stands or is
     /// being made. Never held with a yard: leaving the conversation, the
     /// yard or the window ends it.
@@ -956,6 +960,7 @@ impl Footplate {
             run_said: None,
             voice_key,
             voice_said: None,
+            voice_menu: false,
             voice: None,
             voice_refusal: None,
             voices: 0,
@@ -11064,12 +11069,14 @@ yardr.dev
         assert!(drawn(cx, "view address") && drawn(cx, "run address"));
         assert!(drawn(cx, "view effect") && drawn(cx, "run effect"));
         assert!(!drawn(cx, "view reset") && !drawn(cx, "run reset"));
-        // Voice: the switch, the masked key field with its save, and the
-        // plain line of what a session sends. Off, the section says no
-        // state; on, it says `voice is on`, and the file has it.
+        // Voice: the switch, the masked key field with its save, the picker
+        // of the voice that speaks with its line, and the plain line of what
+        // a session sends. Off, the section says no state; on, it says
+        // `voice is on`, and the file has it.
         click_on(cx, "settings section voice");
         assert!(drawn(cx, "voice off") && drawn(cx, "voice on"));
         assert!(drawn(cx, "voice key") && drawn(cx, "voice save"));
+        assert!(drawn(cx, "voice pick") && drawn(cx, "voice pick line"));
         assert!(drawn(cx, "voice plain"));
         assert!(!drawn(cx, "voice state"));
         assert!(!drawn(cx, "voice said"));
@@ -11165,6 +11172,70 @@ yardr.dev
                 .unwrap()
                 .contains("voice_idle")
         );
+        // The voice that speaks is the provider's own until one is picked:
+        // nothing of it is in the file, the list stands shut, and the line
+        // under the field says a pick is heard from the next session.
+        let voice_menu = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.voice_menu);
+        let kept = || std::fs::read_to_string(&file).unwrap();
+        assert_eq!(settings_of(&view, cx).voice_name, "");
+        assert!(!kept().contains("voice_name"));
+        assert!(drawn(cx, "voice pick") && drawn(cx, "voice pick line"));
+        assert!(!drawn(cx, "voice list") && !voice_menu(cx));
+        // A click opens the list: the provider's own first, then the voices
+        // OpenAI offers, thirty-one. Esc shuts the list and not the sheet.
+        click_on(cx, "voice pick");
+        assert!(voice_menu(cx));
+        assert!(drawn(cx, "voice list") && drawn(cx, "voice pick default"));
+        assert!(drawn(cx, "voice pick alloy") && drawn(cx, "voice pick ash"));
+        cx.simulate_keystrokes("escape");
+        assert!(!voice_menu(cx) && settings_open(&view, cx));
+        // A click on the field again shuts it too, with nothing picked.
+        click_on(cx, "voice pick");
+        assert!(voice_menu(cx));
+        click_on(cx, "voice pick");
+        assert!(!voice_menu(cx));
+        assert_eq!(settings_of(&view, cx).voice_name, "");
+        // A pick keeps the voice in the file by its API name and shuts the
+        // list.
+        click_on(cx, "voice pick");
+        click_on(cx, "voice pick ash");
+        assert_eq!(settings_of(&view, cx).voice_name, "ash");
+        assert!(!voice_menu(cx));
+        assert!(kept().contains("\"voice_name\": \"ash\""));
+        // The last voice of the list is as reachable as the first: the list
+        // scrolls, and its rows beyond the first few stand in it.
+        click_on(cx, "voice pick");
+        let list = bounds_of(cx, "voice list");
+        assert!(
+            bounds_of(cx, "voice pick willow").top() >= list.bottom(),
+            "the last voice stands past the list's edge until it is scrolled to"
+        );
+        scroll_on(cx, "voice list", gpui::point(px(0.), px(-10_000.)));
+        assert!(
+            list.contains(&bounds_of(cx, "voice pick willow").center()),
+            "scrolled, the last voice stands in the list"
+        );
+        click_on(cx, "voice pick willow");
+        assert_eq!(settings_of(&view, cx).voice_name, "willow");
+        assert!(kept().contains("\"voice_name\": \"willow\""));
+        // `default` is the way back: the choice is left out of the file as
+        // it was before one was made.
+        click_on(cx, "voice pick");
+        click_on(cx, "voice pick default");
+        assert_eq!(settings_of(&view, cx).voice_name, "");
+        assert!(!voice_menu(cx));
+        assert!(!kept().contains("voice_name"));
+        // A list left open is shut by leaving the section, and a pick that
+        // is the choice already changes nothing but the list.
+        click_on(cx, "voice pick");
+        assert!(voice_menu(cx));
+        click_on(cx, "settings section this window");
+        assert!(!voice_menu(cx));
+        click_on(cx, "settings section voice");
+        click_on(cx, "voice pick");
+        click_on(cx, "voice pick default");
+        assert_eq!(settings_of(&view, cx).voice_name, "");
+        assert!(!voice_menu(cx));
         // With no key typed, saving asks for one, and nothing is kept.
         click_on(cx, "voice save");
         assert_eq!(
@@ -11237,6 +11308,8 @@ yardr.dev
                 "voice said",
                 "voice idle 5",
                 "voice idle line",
+                "voice pick",
+                "voice pick line",
                 "voice plain",
             ] {
                 assert!(!drawn(cx, gone), "{gone}");
@@ -11274,6 +11347,7 @@ yardr.dev
         click_on(cx, "settings section voice");
         assert!(drawn(cx, "voice on") && drawn(cx, "voice key"));
         assert!(drawn(cx, "voice idle 5") && drawn(cx, "voice idle line"));
+        assert!(drawn(cx, "voice pick") && drawn(cx, "voice pick line"));
         assert!(drawn(cx, "voice plain"));
         // Switched on, the composer's button is Voice while the line is
         // empty.
@@ -11360,7 +11434,7 @@ yardr.dev
             let consent = self.consent.clone();
             let seen = current.clone();
             view.update(cx, |v, _| {
-                v.means.voice = Rc::new(move |on, _, with, tell| {
+                v.means.voice = Rc::new(move |on, _, with, voice, tell| {
                     if !on {
                         return Start::Off;
                     }
@@ -11372,6 +11446,7 @@ yardr.dev
                             || key,
                             "ws://127.0.0.1:1/never",
                             with,
+                            voice,
                             tell,
                         );
                     }
@@ -11382,7 +11457,7 @@ yardr.dev
                         .as_secs() as i64;
                     live.expires_at(now + 3600);
                     let server = live_socket(live.clone(), "Bearer sk-test");
-                    let started = voice::gated_start(true, || key, &server.url, with, tell);
+                    let started = voice::gated_start(true, || key, &server.url, with, voice, tell);
                     *current.lock().unwrap() = Some(live.clone());
                     lives.borrow_mut().push((live, server));
                     started
@@ -12190,6 +12265,74 @@ yardr.dev
         wait_hung_up(&view, &voicing, &live, n, cx);
     }
 
+    /// The voice picked in the settings is the next session's: a session
+    /// started with none picked names none, and so speaks in the provider's
+    /// own; a pick while one stands sends it nothing, since OpenAI fixes a
+    /// session's voice when it starts; the next one starts in the voice
+    /// picked; and the way back to `default` names none again.
+    #[gpui::test]
+    fn the_voice_picked_in_the_settings_speaks_in_the_next_session_and_never_a_standing_one(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        // What the session was started with: its `audio`, whose `output` is
+        // there where a voice was named.
+        let audio = |live: &Live| live.sent()[0]["session"]["audio"].clone();
+        let pick = |name: &str, cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-,");
+            click_on(cx, "settings section voice");
+            click_on(cx, "voice pick");
+            click_on(cx, &format!("voice pick {name}"));
+            cx.simulate_keystrokes("escape");
+            assert!(!settings_open(&view, cx));
+        };
+
+        // None picked: none is named, as before a voice could be picked.
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(audio(&live).get("output"), None);
+        // A pick while it stands is kept for the next, and the session that
+        // stands is sent nothing and goes on.
+        let sent = live.sent().len();
+        pick("ash", cx);
+        assert_eq!(settings_of(&view, cx).voice_name, "ash");
+        cx.run_until_parked();
+        assert_eq!(live.sent().len(), sent);
+        assert_eq!(audio(&live).get("output"), None);
+        assert!(voice_stands(&view, cx));
+        tap(&view, cx, Button::Stop);
+        wait_hung_up(&view, &voicing, &live, 0, cx);
+
+        // The next session starts in the voice picked, by its API name.
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(audio(&live)["output"]["voice"], "ash");
+        tap(&view, cx, Button::Stop);
+        wait_hung_up(&view, &voicing, &live, 1, cx);
+
+        // Back to the provider's own: none is named again.
+        pick("default", cx);
+        assert_eq!(settings_of(&view, cx).voice_name, "");
+        let live = talk_to(&view, &voicing, cx);
+        assert_eq!(audio(&live).get("output"), None);
+        tap(&view, cx, Button::Stop);
+        wait_hung_up(&view, &voicing, &live, 2, cx);
+    }
+
     /// A session that cannot be made says why in the head, in the words of
     /// whoever refused it, and no session stands: the keeper's own words
     /// where no key is kept, OpenAI's where it refuses the key, the devices'
@@ -12263,11 +12406,33 @@ yardr.dev
         assert!(voicing.mics.lock().unwrap().is_empty());
         assert_eq!(voicing.lives.borrow().len(), 1);
 
-        // A new tap is a new start, and the words in the head go.
+        // A voice OpenAI does not know, as a hand-edited file may name one:
+        // the voice is sent as it stands, and OpenAI's words for it are the
+        // refusal, as its words for the key are. The name is the file's, and
+        // no list of ours has refused it.
         *voicing.key.borrow_mut() = Ok("sk-test".to_string());
+        view.update(cx, |v, cx| v.pick_voice("nobody", cx));
+        tap(&view, cx, Button::Voice);
+        wait(cx, "OpenAI's refusal of the voice", |cx| {
+            refusal(cx).is_some_and(|words| words.contains("Invalid value: 'nobody'"))
+        });
+        assert_eq!(
+            voicing.live(1).sent()[0]["session"]["audio"]["output"]["voice"],
+            "nobody"
+        );
+        assert!(!voice_stands(&view, cx));
+        assert_eq!(button_of(&view, cx), Button::Voice);
+        cx.run_until_parked();
+        assert_eq!(voicing.open.load(Ordering::SeqCst), 0);
+        assert_eq!(voicing.lives.borrow().len(), 2);
+        // Back to the provider's own voice: the next tap is a new start.
+        view.update(cx, |v, cx| v.pick_voice("", cx));
+
+        // A new tap is a new start, and the words in the head go.
         let live = talk_to(&view, &voicing, cx);
         assert_eq!(refusal(cx), None);
-        assert_eq!(voicing.lives.borrow().len(), 2);
+        assert_eq!(voicing.lives.borrow().len(), 3);
+        assert_eq!(live.sent()[0]["session"]["audio"].get("output"), None);
         tap(&view, cx, Button::Stop);
         wait_hung_up(&view, &voicing, &live, 0, cx);
 

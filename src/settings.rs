@@ -421,6 +421,13 @@ pub struct Settings {
     /// five, as the text size is while it is usual.
     #[serde(skip_serializing_if = "is_usual_idle")]
     pub voice_idle: u8,
+    /// Which voice speaks in a voice session, by the API name OpenAI gives
+    /// it (`voice::VOICES`). Empty until one is chosen, which leaves it to
+    /// the provider, and left out of the file while it is empty, as `open`
+    /// is. A name the file holds that the provider does not know is sent as
+    /// it stands, for the provider to refuse.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub voice_name: String,
     /// The settings' open section: the one the side list shows. Left out
     /// of the file while it is the first, as the modes are.
     #[serde(skip_serializing_if = "Section::is_first")]
@@ -463,6 +470,7 @@ struct Kept {
     tray: Look,
     voice: bool,
     voice_idle: u8,
+    voice_name: String,
     section: Section,
     web_view: String,
     run_base: String,
@@ -484,6 +492,7 @@ impl Default for Kept {
             tray: Look::Auto,
             voice: false,
             voice_idle: VOICE_IDLE,
+            voice_name: String::new(),
             section: Section::default(),
             web_view: String::new(),
             run_base: String::new(),
@@ -561,6 +570,7 @@ impl From<Kept> for Settings {
             tray: kept.tray,
             voice: kept.voice,
             voice_idle: kept.voice_idle,
+            voice_name: kept.voice_name,
             section: kept.section,
         }
     }
@@ -666,6 +676,7 @@ impl Default for Settings {
             tray: Look::Auto,
             voice: false,
             voice_idle: VOICE_IDLE,
+            voice_name: String::new(),
             section: Section::default(),
         }
     }
@@ -1314,6 +1325,33 @@ mod tests {
             fs::write(&file, format!("{{\"voice_idle\": {written}}}")).unwrap();
             assert_eq!(Settings::read(&file).voice_idle, read, "{written}");
         }
+
+        // The voice that speaks is the provider's own until one is chosen:
+        // nothing of it is in the file while none is, and a name the file
+        // holds is read as it stands, whether or not the provider has it.
+        assert_eq!(Settings::default().voice_name, "");
+        let set = Settings {
+            voice: true,
+            voice_name: "quartz".to_string(),
+            ..Settings::default()
+        };
+        set.write(&file).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\n  \"text\": 14,\n  \"look\": \"auto\",\n  \"voice\": true,\n  \"voice_name\": \"quartz\"\n}\n"
+        );
+        assert_eq!(Settings::read(&file), set);
+        Settings {
+            voice_name: String::new(),
+            ..set
+        }
+        .write(&file)
+        .unwrap();
+        assert!(!fs::read_to_string(&file).unwrap().contains("voice_name"));
+        fs::write(&file, r#"{"voice_name": "nobody"}"#).unwrap();
+        assert_eq!(Settings::read(&file).voice_name, "nobody");
+        fs::write(&file, r#"{"voice_name": ""}"#).unwrap();
+        assert_eq!(Settings::read(&file).voice_name, "");
     }
 
     #[test]

@@ -38,7 +38,8 @@ use crate::yard::Env;
 /// teammate, a weighty run ask's card beside a routine one's,
 /// a weighty mapping ask's card beside a routine one's, a yard that is
 /// stopped, a yard at an
-/// address, the settings on each of their sections, the telemetry
+/// address, the settings on each of their sections, the voice section
+/// with a voice chosen and its list open, the telemetry
 /// section on with the install id and the next payload and off with
 /// the consent words, the yardmaster's conversation with a voice session
 /// standing in it, as a tap on the composer's Voice button makes one, so that
@@ -152,6 +153,7 @@ pub const STATES: &[&str] = &[
     "settings-notifications",
     "settings-connection",
     "settings-voice",
+    "settings-voice-list",
     "settings-telemetry",
     "settings-telemetry-off",
     "voice",
@@ -1105,6 +1107,7 @@ fn populate(yard: &Yard, state: &str) {
         | "settings-notifications"
         | "settings-connection"
         | "settings-voice"
+        | "settings-voice-list"
         | "settings-telemetry"
         | "settings-telemetry-off"
         | "voice"
@@ -2665,6 +2668,7 @@ mod tests {
                 | "settings-notifications"
                 | "settings-connection"
                 | "settings-voice"
+                | "settings-voice-list"
                 | "settings-telemetry"
                 | "settings-telemetry-off"
                 | "voice"
@@ -3530,6 +3534,7 @@ mod tests {
             || Ok(VOICE_KEY.to_string()),
             &talking.url,
             "yardmaster",
+            "",
             tell,
         ) else {
             panic!("the session stands");

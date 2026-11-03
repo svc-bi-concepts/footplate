@@ -1908,6 +1908,24 @@ const LIVE_APPEND_BYTES: usize = 500;
 #[cfg(any(test, debug_assertions))]
 const LIVE_FILLER: &str = "Lemme check.";
 
+/// The built-in voices a session may start in, and the one it speaks in when
+/// it names none: the Live WebSocket reference's, under `session.start`
+/// (https://developers.openai.com/api/reference/resources/live/primary-websocket,
+/// read 3 Nov 2026), where `audio.output.voice` is `"alloy"`, `"ash"`,
+/// `"ballad"` "or 28 more", or a custom voice's id of 1 to 128 characters,
+/// and "defaults to `marin`". Written out here from the reference and not
+/// taken from the module that starts the session, so that a name that module
+/// offers and the provider does not know is a refusal in a test.
+#[cfg(any(test, debug_assertions))]
+const LIVE_VOICES: [&str; 31] = [
+    "alloy", "ash", "ballad", "beacon", "bossa", "brise", "cedar", "cinder", "coral", "delta",
+    "echo", "flitz", "gleam", "harema", "juni", "marin", "meridian", "nira", "noeul", "nuri",
+    "quartz", "ripple", "sage", "shida", "shimmer", "sillage", "stone", "tempo", "verse", "vesper",
+    "willow",
+];
+#[cfg(any(test, debug_assertions))]
+const LIVE_DEFAULT_VOICE: &str = "marin";
+
 /// An append a [`Live`] took.
 #[cfg(any(test, debug_assertions))]
 #[derive(Clone, Debug, PartialEq)]
@@ -1967,6 +1985,7 @@ impl LiveState {
     fn start(&mut self, event: &Value, id: Option<String>) {
         let session = &event["session"];
         let format = &session["audio"]["format"];
+        let voice = &session["audio"]["output"]["voice"];
         let rate = format["rate"].as_u64().unwrap_or(24_000);
         let delay = session["delegation"]["acknowledgement_delay_ms"]
             .as_u64()
@@ -1987,6 +2006,28 @@ impl LiveState {
         if let Some(problem) = problem {
             return self.refuse(id, problem);
         }
+        // A voice is one of the reference's names or a custom voice's id, or
+        // none at all, which is the provider's own; the refusal says which
+        // value it would not take.
+        let known = voice.is_null()
+            || voice
+                .as_str()
+                .is_some_and(|name| LIVE_VOICES.contains(&name))
+            || voice["id"]
+                .as_str()
+                .is_some_and(|id| (1..=128).contains(&id.len()));
+        if !known {
+            let shown = voice
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| voice.to_string());
+            return self.refuse(
+                id,
+                &format!(
+                    "Invalid value: '{shown}'. 'session.audio.output.voice' is a built-in voice or a custom voice's id."
+                ),
+            );
+        }
         self.started = true;
         let started = serde_json::json!({
             "type": "session.started",
@@ -2000,7 +2041,9 @@ impl LiveState {
                 "input": [],
                 "audio": {
                     "format": { "type": "audio/pcm", "rate": rate },
-                    "output": { "voice": "marin" },
+                    "output": {
+                        "voice": if voice.is_null() { serde_json::json!(LIVE_DEFAULT_VOICE) } else { voice.clone() },
+                    },
                 },
                 "delegation": { "type": "client", "acknowledgement_delay_ms": delay },
             },
@@ -2074,10 +2117,13 @@ impl LiveState {
 /// what it kept ([`Live::sent`], [`Live::appends`]).
 ///
 /// It holds a client to the reference and not to the harness: a start in a
-/// rate the socket does not take, an append with `text` for `content`, one
+/// rate the socket does not take, or in a voice that is neither a built-in
+/// one nor a custom voice's id, an append with `text` for `content`, one
 /// with no `delegation_id`, one under an id no delegation of the session
 /// gave, one over 500 bytes, each is answered with an `error` that names it
-/// by `client_event_id`. A valid append is acknowledged by that id, and
+/// by `client_event_id`. A session says in `session.started` which voice it
+/// speaks in: the one asked for, or the provider's own where none was. A
+/// valid append is acknowledged by that id, and
 /// cancels every acknowledgement still to come ([`Live::delay_passes`]). The
 /// speech the server has queued can be dropped, as the server drops it when
 /// the person speaks over it ([`Live::interrupt`]). No yard is asked
@@ -2350,6 +2396,14 @@ mod tests {
 
     const LIVE_START: &str = r#"{"type":"session.start","event_id":"s1","session":{"model":"gpt-live-1","instructions":"Help.","audio":{"format":{"type":"audio/pcm","rate":24000}},"delegation":{"type":"client","acknowledgement_delay_ms":800},"store":false}}"#;
 
+    /// [`LIVE_START`] asking for `voice` as `audio.output.voice`, whatever it
+    /// is.
+    fn live_start_in(voice: Value) -> String {
+        let mut event: Value = serde_json::from_str(LIVE_START).unwrap();
+        event["session"]["audio"]["output"] = serde_json::json!({ "voice": voice });
+        event.to_string()
+    }
+
     /// A scripted session, as the reference has its events: started with the
     /// moment it ends, deltas of both voices, a delegation, appends recorded
     /// and acknowledged under their ids, speech sent and then dropped, a
@@ -2367,6 +2421,8 @@ mod tests {
         assert_eq!(started[0]["session"]["expires_at"], 1_788_555_600);
         assert_eq!(started[0]["session"]["instructions"], "Help.");
         assert_eq!(started[0]["session"]["audio"]["format"]["rate"], 24000);
+        // No voice was asked for: the session speaks in the provider's own.
+        assert_eq!(started[0]["session"]["audio"]["output"]["voice"], "marin");
         assert_eq!(
             started[0]["session"]["delegation"]["acknowledgement_delay_ms"],
             800
@@ -2504,12 +2560,18 @@ mod tests {
         let early = r#"{"type":"session.commentary.append","event_id":"a0","delegation_id":null,"content":"x"}"#;
         assert_eq!(refused(&live, early).as_deref(), Some("a0"));
         // Audio the socket does not take, another way to delegate, a delay
-        // past the greatest, a second start.
+        // past the greatest, a voice that is no built-in name and no custom
+        // voice's id (one with none, or with one past 128 characters), a
+        // second start.
         for start in [
             LIVE_START.replace("24000", "44100"),
             LIVE_START.replace("audio/pcm", "audio/pcmu"),
             LIVE_START.replace(r#""type":"client""#, r#""type":"responses""#),
             LIVE_START.replace("800", "900"),
+            live_start_in(serde_json::json!("nobody")),
+            live_start_in(serde_json::json!(7)),
+            live_start_in(serde_json::json!({ "id": "" })),
+            live_start_in(serde_json::json!({ "id": "v".repeat(129) })),
         ] {
             assert_eq!(refused(&live, &start).as_deref(), Some("s1"), "{start}");
         }
@@ -2562,6 +2624,31 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A start that names a voice is answered in it: each built-in name of the
+    /// reference, and a custom voice's id, come back as they were asked for.
+    #[test]
+    fn the_live_stand_in_starts_in_the_voice_it_is_asked_for() {
+        let started_in = |voice: Value| -> Value {
+            let live = Live::start();
+            live.receive(&live_start_in(voice));
+            let said = said(&live);
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert_eq!(said[0]["type"], "session.started", "{said:?}");
+            said[0]["session"]["audio"]["output"]["voice"].clone()
+        };
+        for name in LIVE_VOICES {
+            assert_eq!(started_in(serde_json::json!(name)), name);
+        }
+        let custom = serde_json::json!({ "id": "voice_abc123" });
+        assert_eq!(started_in(custom.clone()), custom);
+        // The names are the reference's thirty-one, none twice.
+        let mut names = LIVE_VOICES.to_vec();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 31);
+        assert!(LIVE_VOICES.contains(&LIVE_DEFAULT_VOICE));
     }
 
     #[test]

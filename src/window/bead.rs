@@ -265,8 +265,16 @@ impl Footplate {
         };
         self.voice_refusal = None;
         let (tell, told) = mpsc::channel();
-        let voice = match (self.means.voice)(self.settings.voice, self.kept.as_deref(), &with, tell)
-        {
+        // The voice chosen in the settings speaks, and is the provider's own
+        // where none was: a change since the last session reaches this one,
+        // and never one that stands.
+        let voice = match (self.means.voice)(
+            self.settings.voice,
+            self.kept.as_deref(),
+            &with,
+            &self.settings.voice_name,
+            tell,
+        ) {
             Start::On(voice) => voice,
             Start::Off => return cx.notify(),
             Start::Refused(words) => {

@@ -33,6 +33,7 @@ use crate::settings::{self, Notify, Section, Settings};
 use crate::setup;
 use crate::theme::{Look, Palette, crew_dot, yard_color, yard_ink};
 use crate::titlebar::Gesture;
+use crate::voice::{DEFAULT_VOICE, VOICES};
 use crate::yard::{self, Env};
 
 use super::Footplate;
@@ -46,7 +47,7 @@ use super::state::{
     About, Adding, Anchor, Away, Counts, Held, NOT_OPENED, Place, SwitchBusy, rail_counts, waiting,
 };
 use super::ui::{
-    band, card_layer, checkbox, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
+    band, card_layer, checkbox, chevron, gear_glyph, keys_hint, lamp_glyph, segment, segmented,
     semaphore_glyph, small_button, track_glyph,
 };
 use super::words::{footplate_words, unread_words, yardr_place, yardr_words};
@@ -90,6 +91,15 @@ impl Footplate {
         if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings-notifications") {
             this.settings.notifications.on = true;
         }
+        // The voice list shot shows the picker as it is used: voice on, a
+        // voice chosen, and the list open under its field. The list opens at
+        // its top, so the voice is one that stands in its first rows.
+        #[cfg(debug_assertions)]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("settings-voice-list") {
+            this.settings.voice = true;
+            this.settings.voice_name = "beacon".to_string();
+            this.voice_menu = true;
+        }
         // The voice shot stands a session in the yardmaster's conversation
         // once the yard is read (below), against a stand-in for OpenAI's
         // socket and devices that open nothing: it reaches no OpenAI, and
@@ -100,12 +110,13 @@ impl Footplate {
         if let Some(url) = crate::shot::voice() {
             let url = url.to_string();
             this.settings.voice = true;
-            this.means.voice = std::rc::Rc::new(move |on, _, with, tell| {
+            this.means.voice = std::rc::Rc::new(move |on, _, with, voice, tell| {
                 crate::voice::gated_start(
                     on,
                     || Ok(crate::shot::VOICE_KEY.to_string()),
                     &url,
                     with,
+                    voice,
                     tell,
                 )
             });
@@ -3176,7 +3187,7 @@ impl Footplate {
         if self.switching.is_some() {
             return self.toggle_switcher(window, cx);
         }
-        if self.yard_menu.is_some() {
+        if self.yard_menu.is_some() || self.voice_menu {
             self.shut_menu();
             cx.notify();
             return;
@@ -3461,6 +3472,24 @@ impl Footplate {
             },
             cx,
         );
+    }
+
+    /// The voice that speaks is `name`, or the provider's own where `name`
+    /// is empty, and the list shuts. The provider fixes a session's voice
+    /// when it starts, so the choice reaches the next session: a session that
+    /// stands is sent nothing and speaks as it did.
+    pub(crate) fn pick_voice(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.voice_menu = false;
+        self.set(
+            Settings {
+                voice_name: name.to_string(),
+                ..self.settings.clone()
+            },
+            cx,
+        );
+        // Picking the voice that is chosen already changes no setting, and
+        // the list shuts all the same, which `set` draws nothing for.
+        cx.notify();
     }
 
     /// The text a step larger or smaller.
@@ -3959,9 +3988,17 @@ impl Footplate {
         cx.notify();
     }
 
-    /// No yard's ⋯ menu stands open.
+    /// No menu of the settings stands open: no yard's ⋯ menu, and not the
+    /// list of voices.
     pub(crate) fn shut_menu(&mut self) {
         self.yard_menu = None;
+        self.voice_menu = false;
+    }
+
+    /// The list of voices stands open under its field, or shuts again.
+    pub(crate) fn toggle_voice_menu(&mut self, cx: &mut Context<Self>) {
+        self.voice_menu = !self.voice_menu;
+        cx.notify();
     }
 
     /// The yard called `name` is to be renamed: its card's menu shuts,
@@ -4849,7 +4886,8 @@ impl Footplate {
 
     /// Talking with the yard by voice in the settings: the switch,
     /// which is the opt-in, the masked field the OpenAI key is typed
-    /// in, and the plain line of what a voice session sends. The
+    /// in, which voice speaks, how long a session may stand quiet, and
+    /// the plain line of what a voice session sends. The
     /// section says `voice is on` while it is on; the switch alone
     /// sends nothing, opens no connection and reads no key.
     pub(crate) fn voice_setting(
@@ -4932,6 +4970,16 @@ impl Footplate {
                     .child(said.clone()),
             );
         }
+        // Which voice speaks, and the one thing to know of the choice: the
+        // provider fixes a session's voice when it starts. It stands before
+        // the idle limit, so that its list opens with room under it.
+        section = section.child(self.voice_picker(palette, cx)).child(
+            div()
+                .debug_selector(|| "voice pick line".to_string())
+                .text_sm()
+                .text_color(palette.faint)
+                .child("heard from the next session on, since OpenAI sets a session's voice when it starts"),
+        );
         // How long a session may stand with nobody speaking: Live bills by
         // the second, so a forgotten one ends itself.
         let idle = self.settings.voice_idle;
@@ -4972,6 +5020,120 @@ impl Footplate {
                 .text_color(palette.faint)
                 .child(VOICE_PLAIN),
         )
+    }
+
+    /// The voice that speaks, as the design system's Select has it: a field
+    /// with the choice and a chevron, and under it, while it stands open, the
+    /// list of the voices OpenAI offers ([`VOICES`]) after `default`, which
+    /// is the provider's own and keeps the choice out of the settings file.
+    /// The field says the voice by its name as the file keeps it, so that a
+    /// name the list does not have, from a hand-edited file, is seen and not
+    /// hidden behind `default`. A voice's note, where OpenAI's guide has one,
+    /// stands quiet at the right of its row: its language and accent.
+    pub(crate) fn voice_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let chosen = self.settings.voice_name.as_str();
+        let field = div()
+            .id("voice pick")
+            .debug_selector(|| "voice pick".to_string())
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .min_h(px(32.))
+            .px_3()
+            .rounded_md()
+            .border_1()
+            .border_color(palette.line)
+            .bg(palette.side)
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.hover))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_menu(cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(match chosen.is_empty() {
+                        true => "default".to_string(),
+                        false => chosen.to_string(),
+                    }),
+            )
+            .child(chevron(palette.faint));
+        let mut picker = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_w_0()
+            .max_w(rems(22.))
+            .child(field);
+        if self.voice_menu {
+            // One row of the list: `name` as the file keeps it, empty for
+            // the provider's own, with what is quiet beside it.
+            let row = |name: &'static str, shown: &'static str, note: &'static str| {
+                let at = match name.is_empty() {
+                    true => "voice pick default".to_string(),
+                    false => format!("voice pick {name}"),
+                };
+                let here = name == chosen;
+                div()
+                    .id(SharedString::from(at.clone()))
+                    .debug_selector(move || at.clone())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(here, |el| {
+                        el.bg(palette.open).font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .when(!here, |el| el.hover(|style| style.bg(palette.hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_voice(name, cx)))
+                    .child(div().flex_none().child(shown))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(palette.faint)
+                            .child(note),
+                    )
+            };
+            let mut list = div()
+                .id("voice list")
+                .debug_selector(|| "voice list".to_string())
+                .flex()
+                .flex_col()
+                .max_h(rems(14.))
+                .overflow_y_scroll()
+                .rounded_md()
+                .border_1()
+                .border_color(palette.line)
+                .bg(palette.side)
+                .p_1()
+                .child(row("", "default", DEFAULT_VOICE));
+            for (name, note) in VOICES {
+                list = list.child(row(name, name, note));
+            }
+            picker = picker.child(list);
+        }
+        div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .w(rems(4.))
+                    .flex_none()
+                    .min_h(px(32.))
+                    .flex()
+                    .items_center()
+                    .child("voice"),
+            )
+            .child(picker)
     }
 
     /// Whether the settings offer the Telemetry section: the window runs
@@ -6356,7 +6518,7 @@ fn shot_section() -> Option<Section> {
         Ok("settings-agents") => Some(Section::Agents),
         Ok("settings-notifications") => Some(Section::Notifications),
         Ok("settings-connection") => Some(Section::Connection),
-        Ok("settings-voice") => Some(Section::Voice),
+        Ok("settings-voice") | Ok("settings-voice-list") => Some(Section::Voice),
         Ok("settings-telemetry") | Ok("settings-telemetry-off") => Some(Section::Telemetry),
         _ => None,
     }

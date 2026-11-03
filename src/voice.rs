@@ -6,7 +6,8 @@
 //! here. What stands outside speaks in plain terms: speech started
 //! ([`Book::heard`]), a request ([`Step::Request`]), an answer to speak
 //! ([`Book::answered`]) and stop. There is no trait and no setting for
-//! another voice, since one voice cannot show the right shape for a second.
+//! another voice service, since one cannot show the right shape for a second;
+//! which of this one's voices speaks is [`VOICES`]'s to offer.
 //!
 //! The person's words reach the module as fragments of a transcript, and the
 //! model's delegation carries none of them, so [`task_from`] works out what
@@ -47,6 +48,56 @@ use serde_json::{Value, json};
 /// whole session.
 pub const MODEL: &str = "gpt-live-1";
 pub const RATE: u32 = 24_000;
+
+/// The voice a session speaks in when it names none: the reference's
+/// "Defaults to `marin`".
+pub const DEFAULT_VOICE: &str = "marin";
+
+/// The voices `gpt-live-1` speaks in, as `audio.output.voice` names them,
+/// with what the guide says of each where it says anything: its language and
+/// its accent. The names are the Live WebSocket reference's, under
+/// `session.start` (https://developers.openai.com/api/reference/resources/live/primary-websocket,
+/// read 3 Nov 2026): `"alloy"`, `"ash"`, `"ballad"` "or 28 more", or a custom
+/// voice's id, 31 built-in names in all. The notes are the Live conversations
+/// guide's "Voice options" (https://developers.openai.com/api/docs/guides/live-conversations#voice-options),
+/// which describes 21 of them and says nothing of the other ten, whose notes
+/// are therefore empty. A custom voice is an account's own and no list of
+/// them exists to choose from, so none is offered. A session's voice is fixed
+/// when it starts and cannot change after (the reference), so a choice reaches
+/// the next session.
+pub const VOICES: [(&str, &str); 31] = [
+    ("alloy", ""),
+    ("ash", ""),
+    ("ballad", ""),
+    ("beacon", "English, Filipino"),
+    ("bossa", "Portuguese, Brazilian"),
+    ("brise", "French"),
+    ("cedar", ""),
+    ("cinder", "English, Southern U.S."),
+    ("coral", ""),
+    ("delta", "English, Southern U.S."),
+    ("echo", ""),
+    ("flitz", "German"),
+    ("gleam", "English, North American"),
+    ("harema", "Japanese"),
+    ("juni", "German"),
+    ("marin", ""),
+    ("meridian", "English, North American"),
+    ("nira", "Hindi"),
+    ("noeul", "Korean"),
+    ("nuri", "German"),
+    ("quartz", "English, Australian"),
+    ("ripple", "English, Australian"),
+    ("sage", ""),
+    ("shida", "Japanese"),
+    ("shimmer", ""),
+    ("sillage", "French"),
+    ("stone", "English, Irish"),
+    ("tempo", "Portuguese, Brazilian"),
+    ("verse", ""),
+    ("vesper", "English, British"),
+    ("willow", "English, Irish"),
+];
 
 /// How long the server waits before it acknowledges a delegation by itself:
 /// the reference's greatest, so that the empty thinking append [`Book::raised`]
@@ -133,14 +184,22 @@ impl Append {
 
 /// `session.start`: the model, the instructions, PCM at [`RATE`], delegation
 /// to the application with its acknowledgement delay, and no stored session.
-pub fn start(instructions: &str) -> String {
+/// `voice` is the name of the voice to speak in ([`VOICES`]); empty leaves it
+/// to the provider ([`DEFAULT_VOICE`]), and then no voice is sent at all. A
+/// name that is none of the provider's is sent as it stands, for the provider
+/// to refuse in its own words.
+pub fn start(instructions: &str, voice: &str) -> String {
+    let mut audio = json!({ "format": { "type": "audio/pcm", "rate": RATE } });
+    if !voice.is_empty() {
+        audio["output"] = json!({ "voice": voice });
+    }
     json!({
         "type": "session.start",
         "event_id": START_ID,
         "session": {
             "model": MODEL,
             "instructions": instructions,
-            "audio": { "format": { "type": "audio/pcm", "rate": RATE } },
+            "audio": audio,
             "delegation": { "type": "client", "acknowledgement_delay_ms": ACK_DELAY_MS },
             "store": false,
         },
@@ -2356,10 +2415,13 @@ pub enum Start {
 /// started and the key is never read — the closure that reads it is not
 /// called — so a person who never turns voice on has the footplate of
 /// today. A session is made on its own thread; this call only starts it.
+/// `voice` is the voice it speaks in ([`VOICES`]), empty for the provider's
+/// own.
 pub fn start_session(
     voice_on: bool,
     settings: Option<&Path>,
     counterpart: &str,
+    voice: &str,
     tell: mpsc::Sender<Update>,
 ) -> Start {
     gated_start(
@@ -2367,6 +2429,7 @@ pub fn start_session(
         || crate::yard::voice_key(settings),
         LIVE_URL,
         counterpart,
+        voice,
         tell,
     )
 }
@@ -2379,6 +2442,7 @@ pub(crate) fn gated_start(
     key: impl FnOnce() -> Result<String, String>,
     url: &str,
     counterpart: &str,
+    voice: &str,
     tell: mpsc::Sender<Update>,
 ) -> Start {
     if !voice_on {
@@ -2388,21 +2452,28 @@ pub(crate) fn gated_start(
         Ok(key) => key,
         Err(words) => return Start::Refused(words),
     };
-    start_at(url, key, counterpart, tell)
+    start_at(url, key, counterpart, voice, tell)
 }
 
 /// A session's thread at `url` with `key`, whatever stands there: the live
-/// socket in [`start_session`], a stand-in in the tests.
-fn start_at(url: &str, key: String, counterpart: &str, tell: mpsc::Sender<Update>) -> Start {
+/// socket in [`start_session`], a stand-in in the tests. What it opens the
+/// session with is made here, so that the thread is given the finished event.
+fn start_at(
+    url: &str,
+    key: String,
+    counterpart: &str,
+    voice: &str,
+    tell: mpsc::Sender<Update>,
+) -> Start {
     let control = Control::default();
     let (cmds, heard_cmds) = mpsc::channel();
     let speaker = Arc::new(Mutex::new(Queue::default()));
+    let hello = start(&instructions(counterpart), voice);
     let thread = std::thread::spawn({
         let control = control.clone();
         let speaker = speaker.clone();
-        let counterpart = counterpart.to_string();
         let url = url.to_string();
-        move || run(url, key, counterpart, heard_cmds, speaker, control, tell)
+        move || run(url, key, hello, heard_cmds, speaker, control, tell)
     });
     Start::On(Voice {
         control,
@@ -2425,13 +2496,14 @@ pub(crate) fn say(line: &str) {
 }
 
 /// The session's thread: connects, makes the session as the harness proved
-/// it, and follows it until it ends — on its own moment (`expires_at`, read
-/// from `session.started` and expected), on the provider's close, on a
-/// hang-up ([`Cmd::Close`]) or on [`Control::stop`], which wakes its read.
+/// it (`hello` is its `session.start`), and follows it until it ends — on its
+/// own moment (`expires_at`, read from `session.started` and expected), on
+/// the provider's close, on a hang-up ([`Cmd::Close`]) or on
+/// [`Control::stop`], which wakes its read.
 fn run(
     url: String,
     key: String,
-    counterpart: String,
+    hello: String,
     cmds: mpsc::Receiver<Cmd>,
     speaker: Arc<Mutex<Queue>>,
     control: Control,
@@ -2463,7 +2535,7 @@ fn run(
         return;
     }
     let _ = conn.set_poll(POLL);
-    if conn.send_text(&start(&instructions(&counterpart))).is_err() {
+    if conn.send_text(&hello).is_err() {
         let _ = tell.send(Update::Refused("the session could not be started".into()));
         return;
     }
@@ -4314,7 +4386,7 @@ pub(crate) mod tests {
 
     #[test]
     fn what_is_sent_has_the_references_field_names() {
-        let hello: Value = serde_json::from_str(&start("Speak plainly.")).unwrap();
+        let hello: Value = serde_json::from_str(&start("Speak plainly.", "")).unwrap();
         assert_eq!(hello["type"], "session.start");
         assert_eq!(hello["session"]["model"], "gpt-live-1");
         assert_eq!(hello["session"]["instructions"], "Speak plainly.");
@@ -4328,6 +4400,25 @@ pub(crate) mod tests {
             800
         );
         assert_eq!(hello["session"]["store"], false);
+        // No voice named, none is sent: the audio is the format alone, as it
+        // was before a voice could be chosen, and the provider's own speaks.
+        assert_eq!(
+            hello["session"]["audio"],
+            json!({ "format": { "type": "audio/pcm", "rate": RATE } })
+        );
+        // A voice named goes as `audio.output.voice` and changes nothing
+        // else, whatever its name: one the provider does not know is its to
+        // refuse.
+        for voice in ["quartz", "nobody"] {
+            let voiced: Value = serde_json::from_str(&start("Speak plainly.", voice)).unwrap();
+            assert_eq!(voiced["session"]["audio"]["output"]["voice"], voice);
+            let mut plain = voiced.clone();
+            plain["session"]["audio"]
+                .as_object_mut()
+                .unwrap()
+                .remove("output");
+            assert_eq!(plain, hello, "{voice}");
+        }
         let answer = Append {
             id: "fp-1".into(),
             kind: Kind::Commentary,
@@ -4356,6 +4447,50 @@ pub(crate) mod tests {
         let mic: Value = serde_json::from_str(&input_audio(&[1, -254])).unwrap();
         assert_eq!(mic["type"], "session.input_audio.append");
         assert_eq!(mic["audio"], "AQAC/w==");
+    }
+
+    /// The list a person chooses from is the reference's: thirty-one names,
+    /// none twice, the provider's own among them. The stand-in holds a list
+    /// written out apart from this one (src/fake.rs), so that a name offered
+    /// here that the reference does not give is refused there.
+    #[test]
+    fn the_voices_offered_are_the_references_thirty_one() {
+        assert_eq!(VOICES.len(), 31);
+        let mut names: Vec<&str> = VOICES.iter().map(|(name, _)| *name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 31, "a name stands twice");
+        // As the file keeps them and the provider takes them: its API names.
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()))
+        );
+        assert!(names.contains(&DEFAULT_VOICE));
+        // The guide describes twenty-one of them and says nothing of ten, and
+        // nothing is said for those ten that it did not say.
+        assert_eq!(
+            VOICES.iter().filter(|(_, note)| !note.is_empty()).count(),
+            21
+        );
+        for name in [
+            "alloy", "ash", "ballad", "cedar", "coral", "echo", "marin", "sage", "shimmer", "verse",
+        ] {
+            assert_eq!(VOICES.iter().find(|(n, _)| *n == name).unwrap().1, "");
+        }
+        // Each one starts a session in it, as far as the stand-in knows.
+        for (name, _) in VOICES {
+            let live = Live::start();
+            live.receive(&start("Speak plainly.", name));
+            let said: Vec<Value> = live
+                .take()
+                .iter()
+                .map(|event| serde_json::from_str(event).unwrap())
+                .collect();
+            assert_eq!(said.len(), 1, "{name}: {said:?}");
+            assert_eq!(said[0]["type"], "session.started", "{name}: {said:?}");
+            assert_eq!(said[0]["session"]["audio"]["output"]["voice"], name);
+        }
     }
 
     #[test]
@@ -4573,7 +4708,7 @@ pub(crate) mod tests {
 
     impl Driver {
         fn start(live: Live) -> Driver {
-            live.receive(&start(&instructions("yardmaster")));
+            live.receive(&start(&instructions("yardmaster"), ""));
             let mut driver = Driver {
                 live,
                 book: Book::new(),
@@ -5113,11 +5248,17 @@ pub(crate) mod tests {
             || Ok("sk-test".to_string()),
             &server.url,
             "yardmaster",
+            "quartz",
             tell,
         ) else {
             panic!("the session stands");
         };
         assert_eq!(next_update(&updates), Update::Started);
+        // The voice asked for is what the socket was started with.
+        assert_eq!(
+            live.sent()[0]["session"]["audio"]["output"]["voice"],
+            "quartz"
+        );
 
         // A stand-in microphone, as the Linux desktop's default of runs 3 to
         // 6 runs (48000 Hz, two channels), calls back in pieces of 333
@@ -5334,6 +5475,7 @@ pub(crate) mod tests {
             || Ok("sk-test".to_string()),
             &server.url,
             "yardmaster",
+            "",
             tell,
         ) else {
             panic!("the session stands");
@@ -5378,6 +5520,7 @@ pub(crate) mod tests {
             || Ok("sk-test".to_string()),
             &server.url,
             "yardmaster",
+            "",
             tell,
         ) else {
             panic!("the session stands");
@@ -5401,6 +5544,7 @@ pub(crate) mod tests {
             || Ok("sk-test".to_string()),
             &server.url,
             "yardmaster",
+            "",
             tell,
         ) else {
             panic!("the session stands");
@@ -5423,6 +5567,7 @@ pub(crate) mod tests {
             || Ok("sk-wrong".to_string()),
             &server.url,
             "yardmaster",
+            "",
             tell,
         ) else {
             panic!("the session stands");
@@ -5444,6 +5589,39 @@ pub(crate) mod tests {
         assert!(updates.try_recv().is_err());
         drop(voice);
         server.thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_voice_the_provider_refuses_is_carried_in_its_own_words_and_not_retried() {
+        let live = Arc::new(Live::start());
+        let server = live_socket(live.clone(), "Bearer sk-test");
+        let (tell, updates) = mpsc::channel();
+        let Start::On(voice) = gated_start(
+            true,
+            || Ok("sk-test".to_string()),
+            &server.url,
+            "yardmaster",
+            "nobody",
+            tell,
+        ) else {
+            panic!("the session stands");
+        };
+        // The same refusal a key gets: an `error` before the session stands,
+        // in the provider's words, which name what it would not take.
+        let Update::Refused(words) = next_update(&updates) else {
+            panic!("a refusal, in words");
+        };
+        assert!(words.contains("Invalid value: 'nobody'"), "{words}");
+        // It was the voice that was sent, as it stood.
+        assert_eq!(
+            live.sent()[0]["session"]["audio"]["output"]["voice"],
+            "nobody"
+        );
+        // No session stands and none is made unasked.
+        assert!(updates.try_recv().is_err());
+        drop(voice);
+        server.thread.join().unwrap();
+        assert_eq!(live.sent().len(), 1, "nothing followed the refused start");
     }
 
     #[test]
@@ -5539,6 +5717,7 @@ pub(crate) mod tests {
             || Ok("sk-test".to_string()),
             &format!("ws://127.0.0.1:{port}/v1/live/sessions"),
             "yardmaster",
+            "",
             tell,
         ) else {
             panic!("the session stands");
@@ -5562,6 +5741,7 @@ pub(crate) mod tests {
             || -> Result<String, String> { panic!("the key was read while voice is off") },
             "ws://127.0.0.1:1/never",
             "yardmaster",
+            "",
             tell.clone(),
         );
         assert!(matches!(off, Start::Off));
@@ -5571,7 +5751,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");
         std::fs::write(dir.path().join("voice.key"), "not a kept key\n").unwrap();
-        let off = start_session(false, Some(&settings), "yardmaster", tell);
+        let off = start_session(false, Some(&settings), "yardmaster", "", tell);
         assert!(matches!(off, Start::Off));
 
         // On, with no key standing: the keeper's own words, and no session.
@@ -5581,6 +5761,7 @@ pub(crate) mod tests {
             || Err("There is no voice key: it is not there.".to_string()),
             "ws://127.0.0.1:1/never",
             "yardmaster",
+            "",
             tell,
         );
         match refused {

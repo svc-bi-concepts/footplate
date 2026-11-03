@@ -449,7 +449,8 @@ on each of their sections: `settings` is this window, and
 `settings-appearance`, `settings-yards`, `settings-agents`,
 `settings-notifications`, `settings-connection`, `settings-voice` and
 `settings-telemetry` the rest, with `settings-telemetry-off` the
-telemetry section off),
+telemetry section off, and `settings-voice-list` the voice section on,
+with a voice chosen and the list of voices open under its field),
 `voice` (the yardmaster's conversation with a voice session standing in
 it, against the fake yard and a stand-in for OpenAI's socket, with no
 microphone or speaker opened: the composer's button saying Stop with
@@ -1738,7 +1739,15 @@ folder. A change is drawn at once and kept for the next start:
   for you alone, never in the settings file; where
   `FOOTPLATE_OPENAI_KEY` is set it is read first and the file is not
   read. Under the field, one plain line says what a voice session
-  sends to OpenAI and what is kept of it. With voice on, the composer of an
+  sends to OpenAI and what is kept of it. The section's `voice` picker
+  chooses which of OpenAI's voices speaks: a field with a chevron, which
+  opens the list of the thirty-one the Live reference gives, with a note of
+  language and accent on each OpenAI's guide describes, and `default` first,
+  which leaves the choice to OpenAI (marin at present) and keeps nothing in
+  the settings file. OpenAI fixes a session's voice when it starts, so a pick
+  is heard from the next session, and one that stands is left as it was; a
+  voice OpenAI refuses, from a settings file edited by hand, is refused in
+  its own words as a refused key is. With voice on, the composer of an
   open conversation has one button at its bottom right: Voice while the
   line is empty, and a tap starts a session with whom you are talking;
   Send once the line holds words or a file; and Stop while a session
