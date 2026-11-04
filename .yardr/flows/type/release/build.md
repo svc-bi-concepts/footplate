@@ -1,7 +1,7 @@
 summary: The release group builds the archives, tags the base, makes the GitHub release and notes the five signing commands.
 
 The release group works this stage
-(`scripts/release-stage build`, README "Building"): it
+(`scripts/release-stage build`, docs/building.md "Building"): it
 builds the seven archives and `checksums.txt` from the depot's base, tags
 that commit, pushes the tag, and makes the GitHub release with the bead's
 body as its notes. It then notes the five signing commands on the bead, for

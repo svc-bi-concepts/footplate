@@ -328,7 +328,7 @@ fi
 # The pidfile holds dbus-run-session's PID. Stop its Footplate child first.
 docker exec "$name" sh /src/scripts/shot-linux-stop.sh /tmp/shots/footplate.pid >&2
 
-# The window opens against a throwaway home, as the README's "Trying the
+# The window opens against a throwaway home, as docs/yards.md's "Trying the
 # setup without touching your yard" has it: nothing of this yard's socket or
 # pairing is in reach. VK_ICD_FILENAMES leaves lavapipe as the only Vulkan
 # driver, so the picture is drawn in software and says so. A state opens it

@@ -1,7 +1,11 @@
 # footplate
 
 A native chat window onto a yardr yard (Rust, gpui). Product behaviour:
-`README.md`. Design notes: `docs/design/`. The yard's side of the
+`README.md` is the front door (what it is, installing) and `docs/` the
+manual: `docs/yards.md` (what it talks to, setting a yard up, starting it),
+`docs/window.md` (the window, the settings, notifications),
+`docs/windows.md` (Windows) and `docs/building.md` (building, releasing, the
+icon, the code). Design notes: `docs/design/`. The yard's side of the
 protocol (`docs/api.md`, `docs/setup.md`, `docs/doctor.md`) lives in the
 yardr repository, not here. `.yardr/depot.md` holds the yard's rules for
 builders.
@@ -10,14 +14,14 @@ builders.
 
 Top level: `src/` the program, `build.rs` (the Windows stack size, nothing
 else), `scripts/` release, screenshot and shell-test helpers, `assets/`
-icons, the Linux polkit action and the Linux desktop entry, `docs/design/`
-decision notes, `.yardr/` the yard's gate, `.github/` the Windows jobs
-(build and test, which the gate does not try, and the release's Windows zip),
-`spikes/` throwaway programs that try a provider or a dependency before the
-product takes it, each its own cargo package and its own workspace, so that
-neither the gate nor a release sees it: `spikes/voice-harness/` is the GPT-Live
-voice session of `docs/design/2026-10-31-footplate-vqze-voice.md`, run by a
-person with a key (its `RUN.md` has the command); it is deleted when
+icons, the Linux polkit action and the Linux desktop entry, `docs/` the manual
+and `docs/design/` decision notes, `.yardr/` the yard's gate, `.github/` the
+Windows jobs (build and test, which the gate does not try, and the release's
+Windows zip), `spikes/` throwaway programs that try a provider or a dependency
+before the product takes it, each its own cargo package and its own workspace,
+so that neither the gate nor a release sees it: `spikes/voice-harness/` is the
+GPT-Live voice session of `docs/design/2026-10-31-footplate-vqze-voice.md`, run
+by a person with a key (its `RUN.md` has the command); it is deleted when
 `src/voice.rs` and `src/audio.rs` take what it proved.
 
 The window, its state and the yard:
@@ -213,7 +217,7 @@ Setup, release and tests:
 ## Where to start
 
 - A new socket call: the call in `src/api.rs` with its row in
-  `README.md`'s "It reads" or "It writes" (a test in `src/api.rs` asks for
+  `docs/yards.md`'s "It reads" or "It writes" (a test in `src/api.rs` asks for
   it, and for a call that only reads to be in `READS`, which is what a
   timeout on it says: a call not there may have run), its answers in
   `src/fake.rs`, the state it needs in `src/model.rs` (an `Effect` for what
@@ -245,7 +249,7 @@ Setup, release and tests:
   the person's own log: `api::say` keeps in the file its test's thread was
   given (`tests::keep_in`), or none.
 - Screenshots: states in `src/shot.rs`, taken by `scripts/shot-linux.sh`;
-  the states are named in `README.md`.
+  the states are named in `docs/building.md`.
 - Releases: `scripts/release.sh` builds and lists each archive, stopping at
   a yardr in one, `scripts/bundle-mac.sh` bundles, `scripts/release-stage`
   drives the yard's release flow. The Windows zip is not built there: the
@@ -311,7 +315,7 @@ Setup, release and tests:
 
 - Build output ignored by `.gitignore`: generated files, not source to edit.
 - `Cargo.lock`: committed; cargo owns it, never hand-edit.
-- `assets/*.png`: rendered masters (see `README.md` "The icon",
+- `assets/*.png`: rendered masters (see `docs/building.md` "The icon",
   `scripts/bundle-mac.sh`); new marks come from yardr-design.
 - The `eyes` rule in `.yardr/depot.md` still applies: a change that
   shows reads the yardr design system first.

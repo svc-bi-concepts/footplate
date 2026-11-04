@@ -2,7 +2,7 @@
 # titled "footplate vX.Y.Z": build makes the archives and the GitHub release,
 # mckean signs the checksums by hand, verify checks the signature, and
 # publish files the yardr.dev sync bead. The script the exec group runs is
-# scripts/release-stage; README "Building" says how a
+# scripts/release-stage; docs/building.md "Building" says how a
 # release is cut with the yard. A failed verify asks for the signature
 # again; anything else failed or questioned waits in decide for a person,
 # who advances it to the stage it should retry.

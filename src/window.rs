@@ -27181,7 +27181,7 @@ yardr.dev
     }
 
     /// From where there is no yard, a pairing's http address off this
-    /// machine is refused under the fields, in the README's words, the
+    /// machine is refused under the fields, in docs/yards.md's words, the
     /// moment pair is pressed: the button is never silent, nothing is
     /// sent, and the fields stay filled for the fix.
     #[gpui::test]

@@ -1,8 +1,8 @@
 #!/bin/sh
 # release-stage: the release flow's three scripted stages. Run it as the cmd
 # of an exec group routed for build, verify and publish (one group with the
-# stage in cmd: scripts/release-stage $YARDR_STAGE); README "Building" says
-# how a release is cut with the yard.
+# stage in cmd: scripts/release-stage $YARDR_STAGE); docs/building.md
+# "Building" says how a release is cut with the yard.
 #
 #   scripts/release-stage <build|verify|publish>
 #
@@ -54,8 +54,8 @@
 # images when
 # FOOTPLATE_RELEASE_SIGN_IDENTITY and FOOTPLATE_RELEASE_NOTARY_PROFILE are in
 # the environment this runs in, which the exec group takes from its env_file
-# (README "Building"); the build's note says which it was. Needs this Mac
-# logged in, with the keychain that holds the identity unlocked.
+# (docs/building.md "Building"); the build's note says which it was. Needs
+# this Mac logged in, with the keychain that holds the identity unlocked.
 #
 # Vendored from yardr's contrib/release/stage (yardr@a3870526) with
 # footplate's release as the default: one checkout holds the whole release,

@@ -42,9 +42,9 @@
 # identity of the keychain (scripts/bundle-mac.sh), have Apple notarize it
 # under that notarytool keychain profile, and staple the ticket to it before
 # it is zipped for the release; the disk image is made from the stapled app,
-# and is signed, notarized and stapled in its turn (README.md, "Building").
-# With neither, the apps are signed ad hoc and the images not signed, and
-# nothing is notarized. The two variables are named after yardr's
+# and is signed, notarized and stapled in its turn (docs/building.md,
+# "Building"). With neither, the apps are signed ad hoc and the images not
+# signed, and nothing is notarized. The two variables are named after yardr's
 # YARDR_RELEASE_SIGN_IDENTITY and YARDR_RELEASE_NOTARY_PROFILE, and take the
 # same values.
 set -e
@@ -223,8 +223,9 @@ list_archive() {
 
 # Fails the release when the archive $1, called $2 in the messages, holds a
 # member whose path names yardr, in any case: footplate uses the yardr on the
-# machine (README.md, "yardr, a dependency") and carries none, and the listing
-# is how that is known. A listing that is empty proves nothing, and fails too.
+# machine (docs/yards.md, "yardr, a dependency") and carries none, and the
+# listing is how that is known. A listing that is empty proves nothing, and
+# fails too.
 assert_no_yardr() {
     listing=$work/listing
     list_archive "$1" >"$listing" || {

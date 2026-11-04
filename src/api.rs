@@ -4050,11 +4050,11 @@ fn timed_out(err: &io::Error) -> bool {
     )
 }
 
-/// The calls this client makes that only read, as README's "It reads" table
-/// has them; a test holds the two to each other. A call is one POST whether
-/// it reads or writes, so what a timeout on it says is told by its name: a
-/// read that timed out changed nothing, and any other call, one a later
-/// change adds with no row here too, may have run.
+/// The calls this client makes that only read, as the "It reads" table of
+/// docs/yards.md has them; a test holds the two to each other. A call is one
+/// POST whether it reads or writes, so what a timeout on it says is told by
+/// its name: a read that timed out changed nothing, and any other call, one
+/// a later change adds with no row here too, may have run.
 const READS: &[&str] = &[
     "Head",
     "Settings",
@@ -9555,14 +9555,14 @@ mod tests {
     }
 
     /// Every literal method name passed through this file's call helpers has
-    /// a row in README's tables of what the window reads and writes, saying
-    /// when it is made: a new call ships its row. The names are found in the
-    /// text of this file, passed through one of four helpers, so there is no
-    /// list of them to keep. One way only: `GET /blobs/<hash>` has a row and
-    /// no name to find. The row is in the table of reads exactly when
+    /// a row in docs/yards.md's tables of what the window reads and writes,
+    /// saying when it is made: a new call ships its row. The names are found
+    /// in the text of this file, passed through one of four helpers, so there
+    /// is no list of them to keep. One way only: `GET /blobs/<hash>` has a
+    /// row and no name to find. The row is in the table of reads exactly when
     /// `READS` has the name, which is what a timeout on the call says.
     #[test]
-    fn the_readme_rows_every_literal_helper_call() {
+    fn the_yards_doc_rows_every_literal_helper_call() {
         let source = include_str!("api.rs");
         let mut calls = Vec::new();
         for helper in ["answer", "list", "call", "reply"] {
@@ -9586,7 +9586,7 @@ mod tests {
         // From the reads' header to the end of the writes' table, whether the
         // checkout ends its lines with LF or CR LF.
         let mut writes = false;
-        let tables = include_str!("../README.md")
+        let tables = include_str!("../docs/yards.md")
             .lines()
             .skip_while(|line| !line.starts_with("| It reads |"))
             .take_while(|line| {
@@ -9597,7 +9597,7 @@ mod tests {
             .join("\n");
         assert!(
             tables.contains("| It writes |"),
-            "README's tables of what it reads and writes were not found"
+            "docs/yards.md's tables of what it reads and writes were not found"
         );
         // All at once, for a change that adds several.
         let rowless: Vec<_> = calls
@@ -9606,7 +9606,7 @@ mod tests {
             .collect();
         assert!(
             rowless.is_empty(),
-            "called in src/api.rs and with no row in README's tables: {rowless:?}"
+            "called in src/api.rs and with no row in docs/yards.md's tables: {rowless:?}"
         );
 
         // The table a call's row is in says whether a timeout on it is a
@@ -9631,7 +9631,7 @@ mod tests {
             .collect();
         assert!(
             misfiled.is_empty(),
-            "in README's table of what it reads, and not in `READS` (or the other way about): {misfiled:?}"
+            "in docs/yards.md's table of what it reads, and not in `READS` (or the other way about): {misfiled:?}"
         );
         // A name nothing calls says a timeout of nothing.
         let stale: Vec<_> = READS.iter().filter(|name| !calls.contains(name)).collect();

@@ -1,7 +1,8 @@
 //! The window against a fake yard, for the screenshots. `FOOTPLATE_SHOT`
 //! names the state to open at; scripts/shot-linux.sh and scripts/shot-mac.sh
-//! pass it through, and the README names the states. This module is a debug
-//! build's alone: a release build neither compiles it nor reads the variable.
+//! pass it through, and docs/building.md names the states. This module is a
+//! debug build's alone: a release build neither compiles it nor reads the
+//! variable.
 
 use std::fs;
 use std::io;
@@ -3590,9 +3591,9 @@ mod tests {
         }
     }
 
-    /// Each shot script keeps the list of states served here, as the
-    /// README has it: a state that is not in a script's list is refused
-    /// there, as `weighty-mapping` was on the Mac.
+    /// Each shot script keeps the list of states served here, as
+    /// docs/building.md has it: a state that is not in a script's list is
+    /// refused there, as `weighty-mapping` was on the Mac.
     #[test]
     fn the_shot_scripts_list_the_states_served_here() {
         for (name, script) in [

@@ -15,7 +15,7 @@
 #       leaves the window up for trying by hand (drag it by its top,
 #       double-click there); quit it with cmd+q.
 #
-#   state    a FOOTPLATE_SHOT state, as the README names them (yardmaster, crew, ...)
+#   state    a FOOTPLATE_SHOT state, as docs/building.md names them (yardmaster, crew, ...)
 #   binary   default: target/debug/footplate under the checkout
 #   seconds  how long the window stands before the picture (default 4)
 #

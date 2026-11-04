@@ -64,7 +64,7 @@ impl KeysView {
 
 /// Every key the open `view` answers to, each with what it does: the
 /// view's own keys first, then the window's, which answer everywhere.
-/// Named as the footers and the README name them. With the bead drawer
+/// Named as the footers and docs/window.md name them. With the bead drawer
 /// open, the views it stands beside name esc shutting it.
 pub(crate) fn keys_for(view: KeysView, drawer: bool) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = match view {

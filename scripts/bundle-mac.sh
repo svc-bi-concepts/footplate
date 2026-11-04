@@ -11,7 +11,7 @@
 # identity of the keychain, signs the bundle with it instead, with the
 # hardened runtime and a secure timestamp, which Apple's notary service asks
 # of a signature. Notarizing is the release script's, which asks for a
-# notary profile beside the identity (README.md, "Building").
+# notary profile beside the identity (docs/building.md, "Building").
 #
 # The bundle asks the system for the microphone and for nothing else, for a
 # voice session (src/audio.rs): the Info.plist says why, which is what the
