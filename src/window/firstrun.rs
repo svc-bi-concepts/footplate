@@ -253,6 +253,10 @@ pub struct FirstRun {
     /// `~/.local/bin`, where doctor's check found anything to do: it is
     /// asked with the check, which is off the window's thread.
     reach: Option<Reach>,
+    /// The harnesses that another program answers for while the one
+    /// fetched for them stands already: their rows offer no fetch, which
+    /// would do nothing. Read with the check, beside `reach`.
+    shadowed: Vec<String>,
     /// The home has a yard already, which is not running: nothing of it
     /// is created again, and it is started.
     existing: bool,
@@ -367,6 +371,27 @@ impl FirstRun {
         this
     }
 
+    /// The step that lists what the machine has, posed for a screenshot: a
+    /// claude on PATH that is not Claude Code, with the one fetched to
+    /// `~/.local/bin` read as standing behind it, and a codex still to
+    /// fetch. A debug build's alone, and a unix one's: nothing is fetched or
+    /// read, and no command runs.
+    #[cfg(all(debug_assertions, unix))]
+    pub fn shot_needs(
+        means: Means,
+        socket: &Path,
+        name: &str,
+        handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::build(means, socket, name, handle, cx);
+        let doctor = crate::shot::other_doctor();
+        this.shadowed = doctor.shadowed(|_| true);
+        this.doctor = Some(doctor);
+        this.step = Step::Needs;
+        this
+    }
+
     /// The first run before it starts: its fields, with the login name
     /// standing in the operator's.
     fn build(
@@ -400,6 +425,7 @@ impl FirstRun {
             yardr: None,
             doctor: None,
             reach: None,
+            shadowed: Vec::new(),
             existing: false,
             form: Form::default(),
             operator: field("Jo", name, cx),
@@ -513,22 +539,27 @@ impl FirstRun {
         };
         self.step = Step::Needs;
         // Only a Mac fetches programs to `~/.local/bin`. The login shell
-        // is asked here, beside doctor, and not when "go on" is pressed.
+        // is asked here, beside doctor, and not when "go on" is pressed;
+        // so is the file a fetch left, which the rows would otherwise read
+        // as they are drawn.
         let (machine, apple) = (self.means.machine.clone(), self.means.apple);
         self.work(
             "looking at what this machine has…",
             move || {
                 let doctor = yardr.needs();
-                let reach = doctor
-                    .as_ref()
-                    .ok()
-                    .filter(|_| apple)
-                    .and_then(|doctor| setup::reach(&machine, &yardr.program, doctor));
-                (yardr, doctor, reach)
+                let (reach, shadowed) = match doctor.as_ref().ok().filter(|_| apple) {
+                    Some(doctor) => (
+                        setup::reach(&machine, &yardr.program, doctor),
+                        doctor.shadowed(fetch::stands),
+                    ),
+                    None => (None, Vec::new()),
+                };
+                (yardr, doctor, reach, shadowed)
             },
-            |this, (yardr, doctor, reach), _| {
+            |this, (yardr, doctor, reach, shadowed), _| {
                 this.yardr = Some(yardr);
                 this.reach = reach;
+                this.shadowed = shadowed;
                 match doctor {
                     Ok(doctor) => this.doctor = Some(doctor),
                     Err(why) => this.said = Some(why),
@@ -1102,19 +1133,30 @@ impl FirstRun {
     /// A row of what the yard needs: the program, whether it is there,
     /// and where it is missing how it comes: installed from here where
     /// yardr names a way, and else from its maker's page, with the words
-    /// yardr has for it.
+    /// yardr has for it. A harness that another program answers for says
+    /// so, with what that printed; where the one fetched stands behind it,
+    /// the row offers nothing and says what keeps it from running. A
+    /// harness whose version flag failed or hung is installed, with a
+    /// warning.
     fn row(&self, item: &Item, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let program = item.program.clone();
         let can_fetch = self.means.apple
             && item.fetch.is_some()
             && self.means.machine.home.is_some()
             && self.means.machine.own.is_some();
-        let installs = !item.found && (can_fetch || (program == "git" && self.means.apple));
-        let state = match (item.found, item.harness.is_some()) {
-            (true, _) => "installed",
-            (false, true) => "not installed (one harness is enough)",
-            (false, false) => "not installed",
-        };
+        let shadowed = self.shadowed.contains(&program);
+        // A way to get it is wanted: it is missing, and what a fetch left is
+        // not standing behind another program.
+        let to_get = !item.found && !shadowed;
+        let installs = to_get && (can_fetch || (program == "git" && self.means.apple));
+        let state = item.another_state().unwrap_or_else(|| {
+            match (item.found, item.harness.is_some()) {
+                (true, _) => "installed",
+                (false, true) => "not installed (one harness is enough)",
+                (false, false) => "not installed",
+            }
+            .to_string()
+        });
         let mut row = div()
             .flex()
             .flex_col()
@@ -1144,7 +1186,7 @@ impl FirstRun {
                                 ),
                         )
                     })
-                    .children(item.page().filter(|_| !item.found).map(|page| {
+                    .children(item.page().filter(|_| to_get).map(|page| {
                         let page = page.to_string();
                         self.button(format!("setup page {program}"), "open its page", palette)
                             .on_click(cx.listener(move |this, _, _, cx| this.open(&page, cx)))
@@ -1156,8 +1198,26 @@ impl FirstRun {
                     .text_color(palette.faint)
                     .child(item.what_for.clone()),
             );
+        // What doctor's version check came to, in the window's warn tone:
+        // the program that answers as another, and what it printed; what
+        // keeps the fetched one from running; a version flag that failed.
+        let notes = [
+            ("other", item.another_said()),
+            ("shadow", item.shadow_said().filter(|_| shadowed)),
+            ("warns", item.version_warning()),
+        ];
+        for (kind, words) in notes {
+            let program = program.clone();
+            row = row.children(words.map(|words| {
+                div()
+                    .debug_selector(move || format!("setup {kind} {program}"))
+                    .text_sm()
+                    .text_color(palette.warn)
+                    .child(words)
+            }));
+        }
         // Installed by hand: how, as yardr says it.
-        if let Some(get) = item.get.as_ref().filter(|_| !item.found && !installs) {
+        if let Some(get) = item.get.as_ref().filter(|_| to_get && !installs) {
             let program = program.clone();
             row = row.child(
                 div()

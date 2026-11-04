@@ -170,6 +170,7 @@ pub const STATES: &[&str] = &[
     "answered",
     "setup",
     "setup-terminal",
+    "setup-other",
     "hosted",
     "signedout",
     "away",
@@ -428,25 +429,26 @@ fn stand_voice() -> Talking {
 }
 
 /// The run for `state`: the fake yard serves it, and the run's socket
-/// points there. For `stopped`, `refusal`, `setup`, `setup-terminal` and
-/// `hosted` no yard listens: the socket names a directory that holds none,
-/// so the window opens on a yard that is down, and the switch says the
-/// stopped one is stopped. The refusal shot is the first screen, with the
-/// pairing's fields open on it; the setup shot is the first run posed at
-/// step 2, and the setup-terminal shot at the step that asks about the PATH
-/// line; the hosted shot is the first screen with the hosted way's fields
-/// open on it. The signedout shot opens the hosted yard south through an edge
-/// that no longer knows its session, so the window opens on the away
-/// screen of a yard that is signed out; the screen-hosted shot opens
-/// that same yard through an edge that still knows it, so the window
-/// opens on the yard, with no Screen offered. The away shot opens the
-/// yard far at its address with a device the yard no longer knows, so
-/// the window opens on the away screen that offers to pair again, with
-/// a way's fields open.
+/// points there. For `stopped`, `refusal`, `setup`, `setup-terminal`,
+/// `setup-other` and `hosted` no yard listens: the socket names a directory
+/// that holds none, so the window opens on a yard that is down, and the
+/// switch says the stopped one is stopped. The refusal shot is the first
+/// screen, with the pairing's fields open on it; the setup shot is the first
+/// run posed at step 2, the setup-terminal shot at the step that asks about
+/// the PATH line, and the setup-other shot at the step that lists what the
+/// machine has, with a claude that is not Claude Code; the hosted shot is
+/// the first screen with the hosted way's fields open on it. The signedout
+/// shot opens the hosted yard south through an edge that no longer knows its
+/// session, so the window opens on the away screen of a yard that is signed
+/// out; the screen-hosted shot opens that same yard through an edge that
+/// still knows it, so the window opens on the yard, with no Screen offered.
+/// The away shot opens the yard far at its address with a device the yard no
+/// longer knows, so the window opens on the away screen that offers to pair
+/// again, with a way's fields open.
 fn start_for_state(env: Env, state: &str) -> (Env, Option<ShotYard>) {
     if matches!(
         state,
-        "stopped" | "refusal" | "setup" | "setup-terminal" | "hosted"
+        "stopped" | "refusal" | "setup" | "setup-terminal" | "setup-other" | "hosted"
     ) {
         let mut env = env;
         env.socket = std::env::temp_dir().join(format!(
@@ -961,6 +963,49 @@ pub(crate) fn setup_doctor() -> crate::setup::Doctor {
         "faults": []
     }))
     .expect("the setup shot's doctor")
+}
+
+/// Doctor's answer for the `setup-other` shot: git and herdr installed, a
+/// claude on PATH that answers its version flag as another program, in the
+/// shape yardr gives it (the item itself, with what it printed and the way to
+/// fetch the real one, and again among the harnesses that can be fetched), and
+/// a codex that can be fetched. The first run stands at the step that lists
+/// them, having fetched and run nothing, and reads the claude it fetched
+/// before as standing (`FirstRun::shot_needs`).
+pub(crate) fn other_doctor() -> crate::setup::Doctor {
+    let claude = json!({
+        "program": "claude", "for": "a harness a yard can be created on", "found": false,
+        "get": "npm install -g @anthropic-ai/claude-code (https://claude.com/claude-code)",
+        "harness": "claude", "harness_login": true, "label": "Claude Code", "provider": "Anthropic",
+        "fetch": {"version": "2.1.296", "url": "https://downloads.claude.ai/claude/2.1.296",
+                  "sha256": "00", "size": 1, "path": "/Users/jo/.local/bin/claude",
+                  "run": ["install", "2.1.296"]}
+    });
+    let mut other = claude.clone();
+    other["path"] = json!("/usr/local/bin/claude");
+    other["optional"] = json!(true);
+    other["version"] = json!({"state": "not_harness", "output": "claude-tools 0.4.2"});
+    serde_json::from_value(json!({
+        "yard": false,
+        "machine": [
+            {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": true,
+             "path": "/usr/bin/herdr", "server": {"state": "not_running", "output": "no server"}},
+            {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+            other,
+            {"program": "a harness", "for": "the agent yardr starts: a yard is created on one",
+             "found": false, "get": "install one of the agents herdr starts (claude, codex, ...)",
+             "any_of": [
+                 claude,
+                 {"program": "codex", "for": "a harness a yard can be created on", "found": false,
+                  "get": "npm install -g @openai/codex", "harness": "codex",
+                  "harness_login": true, "label": "Codex", "provider": "OpenAI",
+                  "fetch": {"version": "0.160.1", "url": "https://github.com/openai/codex/releases/codex.tar.gz",
+                            "sha256": "00", "size": 1, "path": "/Users/jo/.local/bin/codex",
+                            "member": "codex-aarch64-apple-darwin"}}]}
+        ],
+        "faults": ["a harness: not on PATH"]
+    }))
+    .expect("the setup-other shot's doctor")
 }
 
 /// Serves `state` from `yard`: the yard of the window's tests, with the
@@ -2640,14 +2685,14 @@ mod tests {
     /// of the yard, so the window is for its operator, jo, and the state
     /// opens where the shot says. A state added to [`STATES`] lands in the
     /// unreachable arm until it is covered here. `stopped`, `refusal`,
-    /// `setup`, `setup-terminal` and `hosted` listen nowhere: their run's
-    /// socket names a yard that is down.
+    /// `setup`, `setup-terminal`, `setup-other` and `hosted` listen nowhere:
+    /// their run's socket names a yard that is down.
     #[test]
     fn every_state_loads_as_the_window_reads_it() {
         for state in STATES {
             if matches!(
                 *state,
-                "stopped" | "refusal" | "setup" | "setup-terminal" | "hosted"
+                "stopped" | "refusal" | "setup" | "setup-terminal" | "setup-other" | "hosted"
             ) {
                 let env = Env {
                     socket: PathBuf::from("/none"),
@@ -2672,6 +2717,21 @@ mod tests {
                         assert!(item.label.is_some(), "{state}");
                         assert!(item.recommended_offer().is_some(), "{state}");
                     }
+                }
+                if *state == "setup-other" {
+                    // The canned doctor the needs step stands with: a claude
+                    // that is not Claude Code, once as itself and once among
+                    // the ones that can be fetched, which is one row; the
+                    // fetched claude standing behind it, so that the row
+                    // offers no second fetch; and a codex still to fetch.
+                    let doctor = other_doctor();
+                    assert!(!doctor.ready(), "{state}");
+                    let rows = doctor.rows();
+                    let programs: Vec<_> = rows.iter().map(|item| item.program.as_str()).collect();
+                    assert_eq!(programs, ["git", "herdr", "claude", "codex"], "{state}");
+                    assert!(rows[2].answers_as_another(), "{state}");
+                    assert!(rows[2].another_said().is_some(), "{state}");
+                    assert_eq!(doctor.shadowed(|_| true), ["claude"], "{state}");
                 }
                 continue;
             }

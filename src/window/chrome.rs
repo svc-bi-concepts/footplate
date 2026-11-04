@@ -261,6 +261,23 @@ impl Footplate {
             });
             this.first_run = Some(first_run);
         }
+        // The setup-other shot is the step that lists what the machine has,
+        // posed with a claude on PATH that is not Claude Code and the fetched
+        // one standing behind it, with nothing read or fetched. A debug
+        // build's alone, and with a socket, as above.
+        #[cfg(all(debug_assertions, unix))]
+        if std::env::var("FOOTPLATE_SHOT").as_deref() == Ok("setup-other") {
+            let first_run = cx.new(|cx| {
+                FirstRun::shot_needs(
+                    this.means.clone(),
+                    &this.env.socket,
+                    &this.name,
+                    this.handle,
+                    cx,
+                )
+            });
+            this.first_run = Some(first_run);
+        }
         // The switcher shots open with the switcher's list standing, on
         // the open yard's row: four yards are paired, one of them away,
         // and the shot is the list; the second shuts it a second after it

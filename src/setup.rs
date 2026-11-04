@@ -455,7 +455,8 @@ pub struct Item {
     pub what_for: String,
     #[serde(default)]
     pub found: bool,
-    /// Where it is, when it is found.
+    /// Where it is, when it is found; of a harness that is another program
+    /// answering under its name, where that program is.
     #[serde(default)]
     pub path: Option<PathBuf>,
     /// How it is installed by hand, where it is missing: a page, or a
@@ -489,6 +490,10 @@ pub struct Item {
     /// A program can lead this kind's login.
     #[serde(default)]
     pub harness_login: bool,
+    /// Of a harness doctor found: what its version flag came to. Absent
+    /// from an older doctor, which asked nothing of it.
+    #[serde(default)]
+    pub version: Option<Version>,
     /// Of herdr: whether its server answers.
     #[serde(default)]
     pub server: Option<Server>,
@@ -498,6 +503,21 @@ pub struct Item {
 pub struct Server {
     #[serde(default)]
     pub state: String,
+}
+
+/// What running a harness's version flag came to (`docs/doctor.md` of the
+/// yardr repository, "A program that answers as another").
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Version {
+    /// `answers`, `fails`, `hangs`, `not_harness` or `not_checked`. Setup
+    /// acts on `not_harness`, `fails` and `hangs` alone: any other word,
+    /// one from a newer doctor too, is read as a harness that answers.
+    #[serde(default)]
+    pub state: String,
+    /// The first line it printed; for `not_harness`, what it printed in
+    /// place of the harness's name.
+    #[serde(default)]
+    pub output: String,
 }
 
 /// A model a harness's file suggests a person pick: the id its --model
@@ -525,20 +545,51 @@ impl Doctor {
     }
 
     /// The harnesses doctor speaks of: its own items, and those of the
-    /// item that says none is installed.
+    /// item that says none is installed. A program is one harness: doctor
+    /// speaks twice of another program that answers under a harness's name
+    /// (its own item, with the version, and again among the ones that can be
+    /// fetched), and the first is the one kept, so that the fetch is offered
+    /// once and by the row that knows what stands in the way.
     pub fn harnesses(&self) -> Vec<&Item> {
-        self.machine
+        let items = self
+            .machine
             .iter()
-            .flat_map(|item| std::iter::once(item).chain(&item.any_of))
-            .filter(|item| item.harness.is_some())
-            .collect()
+            .flat_map(|item| std::iter::once(item).chain(&item.any_of));
+        let mut harnesses: Vec<&Item> = Vec::new();
+        for item in items.filter(|item| item.harness.is_some()) {
+            if !harnesses.iter().any(|has| has.program == item.program) {
+                harnesses.push(item);
+            }
+        }
+        harnesses
     }
 
-    /// The kinds that are installed, in doctor's order.
+    /// The kinds that are installed, in doctor's order: found, and not
+    /// another program that answers under the name. Doctor says as much by
+    /// `found` already; setup reads the version as well, so that it believes
+    /// doctor about what the program is and not only about whether it is
+    /// there.
     pub fn installed(&self) -> Vec<&Item> {
         let mut found = self.harnesses();
-        found.retain(|item| item.found);
+        found.retain(|item| item.found && !item.answers_as_another());
         found
+    }
+
+    /// The programs of the harnesses that another program answers for while
+    /// the one fetched for them stands already (`stands` says whether a file
+    /// does): herdr starts the first program of the name on PATH, so
+    /// fetching again would change nothing.
+    pub fn shadowed(&self, stands: impl Fn(&Path) -> bool) -> Vec<String> {
+        self.harnesses()
+            .into_iter()
+            .filter(|item| item.answers_as_another())
+            .filter(|item| {
+                item.fetch
+                    .as_ref()
+                    .is_some_and(|wanted| stands(&wanted.path))
+            })
+            .map(|item| item.program.clone())
+            .collect()
     }
 
     /// Whether a yard can be created: git, herdr and one harness are
@@ -601,6 +652,109 @@ impl Item {
             .find(|c: char| c.is_whitespace() || matches!(c, ')' | ',' | '"' | '\''))
             .unwrap_or(page.len());
         Some(&page[..end])
+    }
+
+    /// Whether the program on PATH under this harness's name is another
+    /// program: its version flag answered without saying who the harness is.
+    pub fn answers_as_another(&self) -> bool {
+        self.version
+            .as_ref()
+            .is_some_and(|version| version.state == "not_harness")
+    }
+
+    /// The harness as people write it: doctor's label, else its kind.
+    fn called(&self) -> &str {
+        let named = |name: &&str| !name.is_empty();
+        self.label
+            .as_deref()
+            .filter(named)
+            .or(self.harness.as_deref().filter(named))
+            .unwrap_or(&self.program)
+    }
+
+    /// What the row says in place of "not installed" of a program that
+    /// answers as another, in the words yardr's onboarding has for it.
+    pub fn another_state(&self) -> Option<String> {
+        self.answers_as_another()
+            .then(|| format!("the {} on PATH is not {}", self.program, self.called()))
+    }
+
+    /// Which program that is and what it printed, for the row of a program
+    /// that answers as another.
+    pub fn another_said(&self) -> Option<String> {
+        let version = self
+            .version
+            .as_ref()
+            .filter(|_| self.answers_as_another())?;
+        let who = match self.path.as_deref() {
+            Some(path) => path.display().to_string(),
+            None => format!("The {} on PATH", self.program),
+        };
+        let said = match printed(&version.output).as_str() {
+            "" => "nothing".to_string(),
+            said => format!("\"{said}\""),
+        };
+        Some(format!("{who} printed {said} for its version flag."))
+    }
+
+    /// What keeps the fetched program from running, for the row of a
+    /// program that answers as another while the fetched one stands
+    /// ([`Doctor::shadowed`]): herdr starts the first program of the name on
+    /// PATH. Where the program that answers is the fetched file itself,
+    /// nothing is behind it and the order of the PATH is no help: the file is
+    /// in the way.
+    pub fn shadow_said(&self) -> Option<String> {
+        if !self.answers_as_another() {
+            return None;
+        }
+        let fetched = self.fetch.as_ref()?.path.as_path();
+        let name = self.called();
+        if self.path.as_deref() == Some(fetched) {
+            return Some(format!(
+                "It stands where {name} would be installed, so footplate puts nothing there. Move it out of the way, then install again."
+            ));
+        }
+        Some(format!(
+            "{name} is at {} already, but herdr starts the first {} on PATH, which is the program above. Take that one off PATH, or put {} before it.",
+            fetched.display(),
+            self.program,
+            fetched.parent()?.display()
+        ))
+    }
+
+    /// The warning for a harness that is there and whose version flag
+    /// failed or did not answer. It reads as installed and setup goes on: a
+    /// real one that is slow or fails once on a first start must not stop
+    /// it, and a session on a dead one shows its fault when it starts.
+    pub fn version_warning(&self) -> Option<String> {
+        let version = self.version.as_ref().filter(|_| self.found)?;
+        let what = match version.state.as_str() {
+            "fails" => match printed(&version.output).as_str() {
+                "" => "failed".to_string(),
+                said => format!("failed: \"{said}\""),
+            },
+            "hangs" => "did not answer".to_string(),
+            _ => return None,
+        };
+        Some(format!(
+            "{} is there, but its version flag {what}. That keeps nothing back: a session started on it shows what is wrong.",
+            self.program
+        ))
+    }
+}
+
+/// The most chars of what a program printed that a row says.
+const PRINTED: usize = 80;
+
+/// What a program printed, as a row may say it: anything that is not text
+/// taken out, as the About card has the line a yardr answers
+/// ([`fetch::version_of`]), and a long line ended in an ellipsis.
+fn printed(text: &str) -> String {
+    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+    let text = text.trim();
+    match text.char_indices().nth(PRINTED) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
     }
 }
 
@@ -1599,6 +1753,49 @@ exit 0
         })
     }
 
+    /// Doctor's answer on a Mac with no yard, git and herdr installed, and a
+    /// program named claude on PATH that answers its version flag as
+    /// another, in the shape yardr gives it: the item itself, not found, with
+    /// the program that answered, what it printed and the way to fetch the
+    /// real one; and again among the harnesses that can be fetched, which is
+    /// where a machine with no harness has them.
+    pub fn doctor_other(home: &Path) -> serde_json::Value {
+        let bin = home.join(".local/bin");
+        let get = "npm install -g @anthropic-ai/claude-code (https://claude.com/claude-code)";
+        let claude = serde_json::json!({
+            "program": "claude", "for": "a harness a yard can be created on", "found": false,
+            "get": get, "harness": "claude", "label": "Claude Code", "provider": "Anthropic",
+            "harness_login": true,
+            "fetch": {"version": "2.1.296", "url": "https://downloads.claude.ai/claude/2.1.296",
+                      "sha256": "00", "size": 1, "path": bin.join("claude"),
+                      "run": ["install", "2.1.296"]}
+        });
+        let mut other = claude.clone();
+        other["path"] = serde_json::json!("/usr/local/bin/claude");
+        other["optional"] = serde_json::json!(true);
+        other["version"] = serde_json::json!({
+            "state": "not_harness", "output": "hello 1.0 from some other program"});
+        serde_json::json!({
+            "home": home.join(".yardr"), "yard": false, "tried": false,
+            "machine": [
+                {"program": "herdr", "for": "it starts every agent in a pane of its own", "found": true,
+                 "path": "/opt/stand-in/bin/herdr", "server": {"state": "not_running", "output": "no server"}},
+                {"program": "git", "for": "a depot is a git repository", "found": true, "path": "/usr/bin/git"},
+                other,
+                {"program": "a harness", "for": "the agent yardr starts: a yard is created on one",
+                 "found": false, "get": "install one of the agents herdr starts (claude, codex, ...)",
+                 "any_of": [
+                     claude,
+                     {"program": "codex", "for": "a harness a yard can be created on", "found": false,
+                      "get": "npm install -g @openai/codex", "harness": "codex", "label": "Codex",
+                      "fetch": {"version": "0.160.1", "url": "https://github.com/openai/codex/releases/codex.tar.gz",
+                                "sha256": "00", "size": 1, "path": bin.join("codex"),
+                                "member": "codex-aarch64-apple-darwin"}}]}
+            ],
+            "faults": ["a harness: not on PATH"]
+        })
+    }
+
     /// Status's answer for a yard that runs, or one that is stopped: the
     /// server and the daemon, and the login services where `login` says
     /// the yard starts at login.
@@ -1840,6 +2037,206 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(other.recommended_offer(), None);
+    }
+
+    /// Setup believes doctor about a harness's version, and not only about
+    /// whether it is found: another program answering under the name is not
+    /// installed, and its row says which program it is and what it printed; a
+    /// flag that fails or hangs warns and stops nothing; a state setup does
+    /// not know, and a doctor that says none, read as they always did.
+    #[test]
+    fn a_harness_s_version_check_decides_whether_it_is_installed_and_what_its_row_says() {
+        // git, herdr and a claude of the given kind.
+        let doctor_of = |found: bool, version: serde_json::Value| -> Doctor {
+            let mut claude = json!({"program": "claude", "harness": "claude", "label": "Claude Code",
+                "found": found, "path": "/usr/local/bin/claude"});
+            if !version.is_null() {
+                claude["version"] = version;
+            }
+            serde_json::from_value(json!({"machine": [
+                {"program": "git", "found": true}, {"program": "herdr", "found": true}, claude]}))
+            .unwrap()
+        };
+        let warns = |what: &str| {
+            format!(
+                "claude is there, but its version flag {what}. That keeps nothing back: a session started on it shows what is wrong."
+            )
+        };
+        let hello = json!({"state": "not_harness", "output": "hello 1.0"});
+        // The version doctor gives, whether it is found, and what follows:
+        // whether a yard can be created, and the warning on the row.
+        let cases = [
+            // An older doctor, a program that answers and one not asked
+            // read as they always did.
+            (true, json!(null), true, None),
+            (
+                true,
+                json!({"state": "answers", "output": "2.1.310 (Claude Code)"}),
+                true,
+                None,
+            ),
+            (true, json!({"state": "not_checked"}), true, None),
+            // A state of a newer doctor is no reason to stop.
+            (
+                true,
+                json!({"state": "asleep", "output": "zzz"}),
+                true,
+                None,
+            ),
+            // A flag that fails or hangs warns, and setup goes on.
+            (
+                true,
+                json!({"state": "fails", "output": "exit status 1"}),
+                true,
+                Some(warns("failed: \"exit status 1\"")),
+            ),
+            (true, json!({"state": "fails"}), true, Some(warns("failed"))),
+            (
+                true,
+                json!({"state": "hangs"}),
+                true,
+                Some(warns("did not answer")),
+            ),
+            // Another program is not the harness, as doctor says by not
+            // finding it, and as it is when a doctor does not.
+            (false, hello.clone(), false, None),
+            (true, hello.clone(), false, None),
+        ];
+        for (found, version, installed, warning) in cases {
+            let doctor = doctor_of(found, version.clone());
+            let claude = doctor.item("claude").unwrap();
+            assert_eq!(
+                doctor.installed().len(),
+                usize::from(installed),
+                "{found} {version}"
+            );
+            assert_eq!(doctor.ready(), installed, "{found} {version}");
+            assert_eq!(claude.version_warning(), warning, "{found} {version}");
+        }
+
+        // The row of a program that answers as another names the harness it
+        // is not, which program it is and what it printed.
+        let item = |path: Option<&str>, output: &str| -> Item {
+            let mut item = json!({"program": "claude", "harness": "claude", "label": "Claude Code",
+                "found": false, "version": {"state": "not_harness", "output": output}});
+            if let Some(path) = path {
+                item["path"] = json!(path);
+            }
+            serde_json::from_value(item).unwrap()
+        };
+        let at = Some("/usr/local/bin/claude");
+        assert!(item(at, "").answers_as_another());
+        assert_eq!(
+            item(at, "").another_state().as_deref(),
+            Some("the claude on PATH is not Claude Code")
+        );
+        let said = |path, output: &str| item(path, output).another_said();
+        assert_eq!(
+            said(at, "hello 1.0").as_deref(),
+            Some(r#"/usr/local/bin/claude printed "hello 1.0" for its version flag."#)
+        );
+        // Nothing printed, and no place known.
+        assert_eq!(
+            said(at, "").as_deref(),
+            Some("/usr/local/bin/claude printed nothing for its version flag.")
+        );
+        assert_eq!(
+            said(None, "hi").as_deref(),
+            Some(r#"The claude on PATH printed "hi" for its version flag."#)
+        );
+        // What is no text is left out, and a line past 80 chars is cut.
+        assert_eq!(
+            said(at, " he\u{7}l\u{1b}lo\n").as_deref(),
+            Some(r#"/usr/local/bin/claude printed "hello" for its version flag."#)
+        );
+        let (whole, long) = ("x".repeat(80), "x".repeat(81));
+        assert_eq!(
+            said(at, &whole),
+            Some(format!(
+                r#"/usr/local/bin/claude printed "{whole}" for its version flag."#
+            ))
+        );
+        assert_eq!(
+            said(at, &long),
+            Some(format!(
+                r#"/usr/local/bin/claude printed "{whole}…" for its version flag."#
+            ))
+        );
+        // A label doctor does not carry is the kind.
+        let mut bare = item(at, "x");
+        bare.label = None;
+        assert_eq!(
+            bare.another_state().as_deref(),
+            Some("the claude on PATH is not claude")
+        );
+        // None of this is said of a harness that answers.
+        let answers = doctor_of(true, json!({"state": "answers", "output": "2.1.310"}));
+        let claude = answers.item("claude").unwrap();
+        assert!(!claude.answers_as_another());
+        assert_eq!(
+            [
+                claude.another_state(),
+                claude.another_said(),
+                claude.shadow_said()
+            ],
+            [None, None, None]
+        );
+    }
+
+    /// With no yard, doctor speaks of a program that answers as another
+    /// twice: as itself, with its version, and again among the harnesses that
+    /// can be fetched. It is one row, the first, so that the fetch is
+    /// offered once; and once the fetched file stands it is offered no more,
+    /// since the other program is first on PATH and herdr starts that.
+    #[test]
+    fn a_program_that_answers_as_another_has_one_row_and_a_fetch_that_stands_is_not_offered_again()
+    {
+        let home = Path::new("/Users/jo");
+        let fetched = home.join(".local/bin/claude");
+        let doctor: Doctor = serde_json::from_value(standin::doctor_other(home)).unwrap();
+        let rows = doctor.rows();
+        let programs: Vec<&str> = rows.iter().map(|row| row.program.as_str()).collect();
+        assert_eq!(programs, ["git", "herdr", "claude", "codex"]);
+        // The row that stands is the one that knows the version, with the
+        // fetch that an install of its program finds.
+        let claude = rows[2];
+        assert!(claude.answers_as_another());
+        assert_eq!(claude.fetch.as_ref().unwrap().path, fetched);
+        assert!(doctor.installed().is_empty() && !doctor.ready());
+
+        // Nothing stands: nothing is shadowed. The file stands: claude is,
+        // and codex, which no other program answers for, is not.
+        assert!(doctor.shadowed(|_| false).is_empty());
+        assert_eq!(doctor.shadowed(|place| place == fetched), ["claude"]);
+        assert_eq!(doctor.shadowed(|_| true), ["claude"]);
+        assert!(
+            doctor
+                .shadowed(|place| place == home.join(".local/bin/codex"))
+                .is_empty()
+        );
+
+        // What keeps it from running: the program above, first on PATH.
+        assert_eq!(
+            claude.shadow_said().as_deref(),
+            Some(
+                "Claude Code is at /Users/jo/.local/bin/claude already, but herdr starts the first claude on PATH, which is the program above. Take that one off PATH, or put /Users/jo/.local/bin before it."
+            )
+        );
+        // Where the program that answers is the fetched file itself, nothing
+        // is behind it: it is in the way.
+        let mut in_place = claude.clone();
+        in_place.path = Some(fetched);
+        assert_eq!(
+            in_place.shadow_said().as_deref(),
+            Some(
+                "It stands where Claude Code would be installed, so footplate puts nothing there. Move it out of the way, then install again."
+            )
+        );
+        // Not of a program that no other answers for, nor one with no fetch.
+        assert_eq!(rows[3].shadow_said(), None);
+        let mut unfetched = claude.clone();
+        unfetched.fetch = None;
+        assert_eq!(unfetched.shadow_said(), None);
     }
 
     /// The commands of the first run, as yardr's documentation lists them

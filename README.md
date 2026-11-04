@@ -474,7 +474,9 @@ posed: a canned doctor of two providers and their model offers, and the
 working styles as a numbered scale), `setup-terminal` (the step that asks
 whether the line that puts `~/.local/bin` on the PATH goes in the shell's
 startup file, posed on zsh with yardr, herdr and claude in that
-directory), `hosted` (the first screen with
+directory), `setup-other` (the step that lists what the machine has, posed
+with a claude on PATH that is not Claude Code, what it printed, and the
+claude fetched to `~/.local/bin` standing behind it), `hosted` (the first screen with
 the hosted way's fields open and filled), `signedout` (the away
 screen of a hosted yard that is signed out), `away` (the away
 screen of a yard at an address that no longer lets the device in,
@@ -1210,7 +1212,7 @@ in, which every command is told (`--home`).
 | Step | What is shown | What is run |
 |---|---|---|
 | yardr itself | that it is found; where it is not, "install yardr", what the installer prints, and "try again" where it failed | the lookup and the installer [above](#yardr-a-dependency) |
-| What this needs | a row for git, herdr and each harness: installed or not, what it is for, and how it comes. "check again" asks once more. A herdr whose server is down is said to wait, and keeps nothing back. "go on" needs git, herdr and one harness | `yardr doctor --json` |
+| What this needs | a row for git, herdr and each harness: installed or not, what it is for, and how it comes. "check again" asks once more. A herdr whose server is down is said to wait, and keeps nothing back. A program that answers a harness's version flag as another (a `claude` that is not Claude Code) is said not to be it, with what it printed, and does not count; a harness whose version flag failed or did not answer is installed, with a warning, and keeps nothing back. "go on" needs git, herdr and one harness | `yardr doctor --json` |
 | Your terminal | shown only on a Mac, and only when a program is in `~/.local/bin` and a terminal does not look there: which programs, the line that makes it look, and the shell's file it goes to. "add it to ~/.zshrc" adds that one line, and "not now" writes nothing. [Below](#your-terminal) | `$SHELL -l -c 'printenv PATH'`; on the yes, one line appended to the shell's startup file |
 | Your yard | your name (the login name to begin with), the harness (the installed ones; one yardr cannot log in for you is marked "needs a terminal once to log in"), the yardmaster's name, a model, how agents work with you (the four styles, "Guide me" to begin with), a line about you | `yardr init --harness … --operator … --yardmaster … --style … [--model …] [--about …]`: it creates the yard and starts nothing |
 | Logging in | "log in", or "it is logged in already". Then what yardr asks for: the ways to log in as buttons, the page as a button, the code in a field, and the question before the one call that proves the login, which costs a model call | `yardr harness login <kind> --json`, answered on its input |
@@ -1252,6 +1254,21 @@ belong to.
   how it is installed by hand, in yardr's words, with a button for its
   maker's page where the words name one. On Linux that is every program:
   there is no one way to install without a terminal there.
+- A program on PATH under a harness's name that answers its version flag as
+  another program (`docs/doctor.md`, "A program that answers as another"):
+  doctor reports the harness not found, with `path` the program that
+  answered, `version` holding `not_harness` and what it printed, and the
+  way to get the real one. The row says "the claude on PATH is not Claude
+  Code", which program it is and what it printed, and offers the real one as
+  it does for a harness that is missing. herdr starts the first program of a
+  name on PATH, so a Claude Code fetched to `~/.local/bin` behind it never
+  runs: where the file at the fetch's place stands already (a file that
+  runs, or a link to one), the row offers no second fetch, which would find
+  it there and do nothing, and says that the other program is first on PATH.
+  That file is looked at with each check, on a Mac. A harness whose version
+  flag failed or did not answer (`fails`, `hangs`) stops nothing: it is
+  installed, with a warning, and a session started on it shows what is
+  wrong. A state footplate does not know is read as a harness that answers.
 
 **What this adds to what footplate reaches.** yardr's own site apart,
 "install" reads from the address yardr names and from wherever that

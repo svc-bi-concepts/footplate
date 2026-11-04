@@ -25066,6 +25066,129 @@ yardr.dev
         assert!(drawn(cx, "setup page herdr"));
         assert!(drawn(cx, "setup get herdr"));
         assert!(!home.join(".local/bin/herdr").exists());
+
+        // A file at the place a fetch would use is not read there either,
+        // since nothing is fetched: the row names the program that answers
+        // as claude and says nothing of a fetch that stands. (The pane
+        // remembers what it drew, so these two were never drawn above.)
+        standin::answers(&program, "doctor", 1, &standin::doctor_other(&home));
+        keep_runnable(&home.join(".local/bin/claude"));
+        click_on(cx, "setup check");
+        wait(cx, "the program that answers as claude", |cx| {
+            drawn(cx, "setup other claude")
+        });
+        assert!(!drawn(cx, "setup install claude") && !drawn(cx, "setup shadow claude"));
+    }
+
+    /// A file that runs at `place`, made as a fetch leaves one.
+    #[cfg(unix)]
+    fn keep_runnable(place: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(place.parent().unwrap()).unwrap();
+        std::fs::write(place, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(place, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Doctor's version check of a harness shows on its row. One whose flag
+    /// failed or hung is installed, with a warning, and setup goes on; one in
+    /// a state setup does not know, from a newer doctor, is installed with
+    /// no warning.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_harness_whose_version_flag_fails_or_hangs_is_installed_with_a_warning(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (means, program, _) = stand_in_means(dir.path(), false);
+        let mut doctor = standin::doctor_ready();
+        doctor["machine"][2]["version"] = json!({"state": "fails", "output": "exit status 1"});
+        doctor["machine"][3]["version"] = json!({"state": "hangs"});
+        doctor["machine"].as_array_mut().unwrap().push(json!({
+            "program": "opencode", "for": "a harness a yard can be created on", "found": true,
+            "path": "/opt/stand-in/bin/opencode", "harness": "opencode",
+            "version": {"state": "asleep", "output": "zzz"}}));
+        standin::answers(&program, "doctor", 0, &doctor);
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+
+        click_on(cx, "way here");
+        at_step(&view, cx, Step::Needs);
+        for row in ["claude", "codex", "opencode"] {
+            assert!(drawn(cx, &format!("setup row {row}")), "{row}");
+            assert!(!drawn(cx, &format!("setup other {row}")), "{row}");
+            assert!(!drawn(cx, &format!("setup install {row}")), "{row}");
+        }
+        assert!(drawn(cx, "setup warns claude") && drawn(cx, "setup warns codex"));
+        assert!(!drawn(cx, "setup warns opencode"));
+        // Nothing waits on them: all three count, and the step goes on.
+        click_on(cx, "setup go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Yard));
+        assert_eq!(
+            setup_providers(&view, cx)
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            ["claude", "codex", "opencode"]
+        );
+    }
+
+    /// A program that answers its version flag as another harness is said
+    /// not to be it, with what it printed, and is not installed. The real
+    /// one is fetched to its place, where it stands behind the other, which
+    /// herdr starts first: the row offers nothing, since fetching would
+    /// change nothing, and says so. It is read again with every check, so
+    /// the offer is back once the file is gone. The pane remembers every
+    /// selector it ever drew, so what must not be drawn is asked of a window
+    /// that never drew it: the file stands from the start.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_program_that_answers_as_another_harness_is_named_and_its_fetch_is_not_offered_again(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::setup::standin;
+        use firstrun::Step;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (means, program, _) = stand_in_means(dir.path(), true);
+        let home = dir.path().join("home");
+        standin::answers(&program, "doctor", 1, &standin::doctor_other(&home));
+        let fetched = home.join(".local/bin/claude");
+        keep_runnable(&fetched);
+        let (view, cx) = no_yard(dir.path(), cx);
+        view.update(cx, |v, _| v.means = means);
+
+        click_on(cx, "way here");
+        at_step(&view, cx, Step::Needs);
+        for row in ["git", "herdr", "claude", "codex"] {
+            assert!(drawn(cx, &format!("setup row {row}")), "{row}");
+        }
+        // The row names the program and what it printed, and what keeps the
+        // fetched one from running; it offers no fetch and no page, and no
+        // word of how it is installed by hand.
+        assert!(drawn(cx, "setup other claude") && drawn(cx, "setup shadow claude"));
+        assert!(!drawn(cx, "setup install claude"));
+        assert!(!drawn(cx, "setup page claude") && !drawn(cx, "setup get claude"));
+        assert!(!drawn(cx, "setup warns claude"));
+        // Codex has nothing behind anything: its offer stands.
+        assert!(drawn(cx, "setup install codex") && !drawn(cx, "setup shadow codex"));
+        // Not a harness a yard can be created on.
+        click_on(cx, "setup go on");
+        assert_eq!(step_of(&view, cx), Some(Step::Needs));
+        assert_eq!(std::fs::read(&fetched).unwrap(), b"#!/bin/sh\n");
+
+        // The file goes, as it does when it is moved out of the way: the
+        // check is made again, and the row offers the fetch as it does for
+        // a harness that is missing.
+        std::fs::remove_file(&fetched).unwrap();
+        click_on(cx, "setup check");
+        wait(cx, "the offer of claude again", |cx| {
+            drawn(cx, "setup install claude")
+        });
+        assert!(drawn(cx, "setup other claude"));
     }
 
     /// The first run's terminal step as it stands: what it offers.

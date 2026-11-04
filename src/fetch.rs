@@ -626,6 +626,15 @@ fn runnable(_: &fs::Metadata) -> bool {
     true
 }
 
+/// Whether a program stands at `place`: a file that runs, or a link to one.
+/// The first run asks it before it offers a fetch again, since a fetch that
+/// finds its program there does nothing, and a maker's installer run again
+/// puts the same program back, which is as good as nothing. A link that
+/// leads nowhere does not stand: the fetch replaces it.
+pub fn stands(place: &Path) -> bool {
+    fs::metadata(place).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
+}
+
 /// Says `line` on stderr, led by the program's name as its other lines are,
 /// and keeps it in the log with the time ([`log`]): an app started by the
 /// Finder or by launchd has its stderr on /dev/null, and would lose it. A
@@ -2064,7 +2073,9 @@ mod tests {
         site.put("/elsewhere", "/storage/herdr?signed=yes");
         site.status("/elsewhere", 307);
         let herdr = wanted(&site, "/download/v1/herdr", b"herdr itself", &place);
+        assert!(!stands(&place));
         program(&herdr, home.path(), &own, path).unwrap();
+        assert!(stands(&place));
         assert_eq!(fs::read(&place).unwrap(), b"herdr itself");
         assert_eq!(
             fs::metadata(&place).unwrap().permissions().mode() & 0o777,
@@ -2106,9 +2117,21 @@ mod tests {
         site.put("/herdr", b"verified herdr");
         let herdr = wanted(&site, "/herdr", b"verified herdr", &place);
 
+        // A file that does not run does not stand, and the fetch replaces it.
+        assert!(!stands(&place));
         program(&herdr, home.path(), &own, path).unwrap();
+        assert!(stands(&place));
         assert_eq!(fs::read(&place).unwrap(), b"verified herdr");
         assert_eq!(site.asked(), ["/herdr"]);
+
+        // A link stands as what it leads to does, as the link Claude's
+        // installer leaves does; one that leads nowhere does not.
+        let link = home.path().join(".local/bin/claude");
+        std::os::unix::fs::symlink(&place, &link).unwrap();
+        assert!(stands(&link));
+        let gone = home.path().join(".local/bin/gone");
+        std::os::unix::fs::symlink(home.path().join("nowhere"), &gone).unwrap();
+        assert!(!stands(&gone));
 
         let folder = home.path().join(".local/bin/codex");
         fs::create_dir(&folder).unwrap();
@@ -2119,6 +2142,7 @@ mod tests {
         let why = program(&codex, home.path(), &own, path).unwrap_err();
 
         assert!(why.contains("is a folder"), "{why}");
+        assert!(!stands(&folder));
         assert_eq!(site.asked().len(), before);
         assert_eq!(fs::read(folder.join("keep")).unwrap(), b"user data");
     }
