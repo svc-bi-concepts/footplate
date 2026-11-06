@@ -37,6 +37,7 @@ fn refusal(status: u16, code: &str, signed: bool) -> String {
         "token_expired" | "signed_url_expired" => "signed address expired",
         _ => match status {
             401 | 403 | 410 if signed => "signed address expired or refused",
+            410 => "signed address expired",
             401 => "authentication refused; check your ElevenLabs key",
             403 | 404 => "agent or model unavailable or forbidden; check access and configuration",
             402 => "quota exhausted; check your account's purchased credits",
@@ -257,11 +258,9 @@ fn site_json(
         response.map_err(|_| "ElevenLabs network request failed. Voice stopped; start again explicitly. No automatic retry was made.")?;
     if status != 200 {
         let event: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        return Err(refusal(
-            status,
-            error_code(&event),
-            path.contains("get-signed-url"),
-        ));
+        // A refusal while minting a URL is still an account refusal;
+        // only the subsequent WebSocket upgrade consumes an expiring URL.
+        return Err(refusal(status, error_code(&event), false));
     }
     serde_json::from_slice(&body).map_err(|_| "ElevenLabs returned an unreadable response".into())
 }
@@ -767,7 +766,7 @@ pub(crate) mod stand_in {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     pub(crate) struct SocketAgent {
-        endpoint: Endpoint,
+        pub(super) endpoint: Endpoint,
         stopped: Arc<AtomicBool>,
         active: Arc<Mutex<Option<TcpStream>>>,
         thread: Option<JoinHandle<()>>,
@@ -1166,6 +1165,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_invalid_keys_refuse_before_any_provider_request() {
+        let agent = Arc::new(Agent::new());
+        let fake = SocketAgent::start(agent.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        for key in [None, Some("SECRET unsafe key".into())] {
+            let (tell, _) = mpsc::channel();
+            let Start::Refused(why) = gated_start(
+                true,
+                || crate::yard::provider_key_as(Provider::ElevenLabs, key, Some(&settings)),
+                "agent_test",
+                "",
+                "south",
+                "chris",
+                tell,
+                fake.endpoint.clone(),
+            ) else {
+                panic!()
+            };
+            assert!(why.contains("ElevenLabs"));
+            assert!(!why.contains("SECRET"));
+        }
+        assert!(agent.heads.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn off_and_invalid_configuration_read_no_key_and_open_nothing() {
         let (tell, _) = mpsc::channel();
         assert!(matches!(
@@ -1265,6 +1290,12 @@ mod tests {
                 panic!()
             };
             assert!(why.contains(&status.to_string()));
+            if status == 401 {
+                assert!(
+                    why.contains("authentication"),
+                    "signing still authenticates the key"
+                );
+            }
             assert!(
                 !why.contains("fake-eleven-key")
                     && !why.contains("FAKE-SIGNED-SECRET")
