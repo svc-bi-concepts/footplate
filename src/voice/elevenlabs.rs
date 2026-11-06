@@ -1162,7 +1162,11 @@ mod tests {
                 .starts_with("busy")
         );
         let pending = calls.finish("a", true).unwrap();
-        assert_eq!(pending["result"], PENDING);
+        let result = pending["result"].as_str().unwrap();
+        assert!(result.starts_with("pending:"));
+        assert!(result.contains("no proven matching reply"));
+        assert!(result.contains("context, not this tool's result"));
+        assert_eq!(pending["is_error"], false);
         assert_eq!(
             calls.call(&call("a", "repeat"), now).unwrap(),
             (None, Some(pending))
