@@ -5,9 +5,9 @@
 //! module that speaks it: its events, its delegations and its appends stay in
 //! here. What stands outside speaks in plain terms: speech started
 //! ([`Book::heard`]), a request ([`Step::Request`]), an answer to speak
-//! ([`Book::answered`]) and stop. There is no trait and no setting for
-//! another voice service, since one cannot show the right shape for a second;
-//! which of this one's voices speaks is [`VOICES`]'s to offer.
+//! ([`Book::answered`]) and stop. [`Provider`] selects the service at explicit
+//! start; ElevenAgents is configured but cannot start until its backend lands.
+//! GPT-Live's wire protocol stays here; its voices are [`VOICES`].
 //!
 //! The person's words reach the module as fragments of a transcript, and the
 //! model's delegation carries none of them, so [`task_from`] works out what
@@ -2397,6 +2397,58 @@ impl Drop for Voice {
     }
 }
 
+/// The two voice services. Older settings keep OpenAI and its existing key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    #[default]
+    OpenAi,
+    ElevenLabs,
+}
+
+impl Provider {
+    pub fn is_openai(&self) -> bool {
+        *self == Self::OpenAi
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI GPT-Live",
+            Self::ElevenLabs => "ElevenLabs Agent",
+        }
+    }
+
+    pub fn key_file(self) -> &'static str {
+        match self {
+            Self::OpenAi => crate::yard::VOICE_KEY_FILE,
+            Self::ElevenLabs => "elevenlabs.key",
+        }
+    }
+
+    pub fn key_env(self) -> &'static str {
+        match self {
+            Self::OpenAi => "FOOTPLATE_OPENAI_KEY",
+            Self::ElevenLabs => "FOOTPLATE_ELEVENLABS_KEY",
+        }
+    }
+}
+
+/// Dispatch before reading credentials or opening devices. Configuration is
+/// available ahead of the ElevenAgents backend, but starting it is refused.
+pub(crate) fn selected_start(
+    on: bool,
+    provider: Provider,
+    openai: impl FnOnce() -> Start,
+) -> Start {
+    if !on {
+        return Start::Off;
+    }
+    match provider {
+        Provider::OpenAi => openai(),
+        Provider::ElevenLabs => Start::Refused("ElevenLabs Agent sessions are not available yet. You can save the key, agent ID and voice for a later version.".into()),
+    }
+}
+
 /// What a start came to.
 pub enum Start {
     /// The session's thread stands. Whether the session itself stands is
@@ -3032,6 +3084,25 @@ pub(crate) mod tests {
     use crate::audio::{CHUNK, Capture, Render};
     use crate::fake::Live;
     use std::net::TcpListener;
+
+    #[test]
+    fn off_and_unavailable_providers_never_read_openai_credentials() {
+        for provider in [Provider::OpenAi, Provider::ElevenLabs] {
+            assert!(matches!(
+                selected_start(false, provider, || panic!("off read a key")),
+                Start::Off
+            ));
+        }
+        assert!(matches!(
+            selected_start(true, Provider::ElevenLabs, || panic!(
+                "Agent read OpenAI key"
+            )),
+            Start::Refused(_)
+        ));
+        assert!(
+            matches!(selected_start(true, Provider::OpenAi, || Start::Refused("OpenAI keeper".into())), Start::Refused(why) if why == "OpenAI keeper")
+        );
+    }
 
     fn said(pieces: &[(&str, u64, u64)]) -> Vec<Fragment> {
         pieces

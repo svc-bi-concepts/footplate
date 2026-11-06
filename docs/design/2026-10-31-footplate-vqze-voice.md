@@ -1,5 +1,18 @@
 # Talk with the yard by voice in footplate
 
+Update, 6 November 2026: the former single-provider choice below is superseded
+in this fork by ADR 0006 (optional ElevenLabs Agent, with OpenAI GPT-Live kept
+selectable). The first implementation adds provider selection and isolated
+local keys only. It reuses Settings, the masked Line and owner-only keeper,
+plus the request/answer/stop seam, without changing GPT-Live's wire events.
+ElevenAgents start is explicitly refused until its separate backend is ready.
+Voice remains off by default; neither key is read and no provider contacted
+while off. Each provider has its own disclosure and non-secret configuration;
+keys never enter settings JSON, mail or telemetry. Provider/key/agent changes
+stop the session and require another explicit start. See
+[Voice settings and manual Agent template](../window.md#settings).
+
+
 Design footplate-vqze, proposed 2026-10-31 and corrected 2026-11-01 under footplate-nqjf to what OpenAI's Live reference and four live runs of the spike harness settled (section 2 names the runs). A proposal as it was decided on, not a description of what the code does today; the decision is on the bead.
 
 Design for bead footplate-vqze (flow `design.design`, stage `draft`). A yard is one installation of yardr: its beads, its crew and its depots. A crew member is an agent of the yard that a person talks with by mail; an ask is one question as data on a bead, which the person answers on its card, and a weighty ask passes the system's unlock, or the typing back of its number, before it is approved. footplate is the yard's native desktop window (Rust, gpui): a person reads conversations with the crew, users of the yard and people of linked yards, and answers asks there. A voice service is a provider outside the yard that hears speech and speaks back; in this design it is OpenAI's API. GPT-Live is OpenAI's full-duplex voice model (`gpt-live-1`): it listens and speaks at the same time and hands work that needs reasoning or tools to a backend, which OpenAI calls delegation. Client delegation is the form where the application itself is that backend. The Realtime API is OpenAI's other voice offer, where one model hears, reasons, calls tools and speaks inside a single session. See `docs/glossary.md` in the yardr repository for all of yardr's words.

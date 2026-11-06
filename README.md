@@ -12,6 +12,11 @@ fetches yardr and runs its commands, with no terminal. Its head starts and
 stops the open yard the same way. Beside those two it starts nothing of
 yardr's. The conversations are as `yardr chat` shows them in a terminal.
 
+Voice is optional and off by default. Settings → Voice offers OpenAI GPT-Live
+and configuration for an existing ElevenLabs Agent. Agent sessions are not yet
+available; OpenAI continues to work with its own key. See
+[Voice settings](docs/window.md#settings) for keys, data flow and setup.
+
 ## Installing
 
 A release is one download for each of macOS, Linux and Windows, and none of

@@ -410,11 +410,20 @@ pub struct Settings {
     pub tray: Look,
     /// Whether talking with the yard by voice is on: off until a person
     /// switches it on in the settings, which is the opt-in, since what a
-    /// voice session sends goes to OpenAI. Left out of the file while it
-    /// is off, as the menu bar's is left out while it is on. The key
-    /// itself is never here: it stands in `voice.key` beside the file.
+    /// voice session sends goes to the chosen provider. Left out of the
+    /// file while off. Credentials stand in separate owner-only files
+    /// beside the settings, never here.
     #[serde(skip_serializing_if = "is_off")]
     pub voice: bool,
+    /// Service chosen for the next explicit start, independent of its key.
+    #[serde(skip_serializing_if = "crate::voice::Provider::is_openai")]
+    pub voice_provider: crate::voice::Provider,
+    /// Existing ElevenLabs workspace agent, configured manually; never a key.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub elevenlabs_agent: String,
+    /// ElevenLabs voice ID, independent of OpenAI's voice name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub elevenlabs_voice: String,
     /// How many minutes a voice session stands with nobody speaking and no
     /// request waiting for its answer before it ends itself: Live bills by
     /// the second. Five until chosen, and left out of the file while it is
@@ -477,6 +486,9 @@ struct Kept {
     menu_bar: bool,
     tray: Look,
     voice: bool,
+    voice_provider: crate::voice::Provider,
+    elevenlabs_agent: String,
+    elevenlabs_voice: String,
     voice_idle: u8,
     voice_name: String,
     voice_microphone: String,
@@ -500,6 +512,9 @@ impl Default for Kept {
             menu_bar: true,
             tray: Look::Auto,
             voice: false,
+            voice_provider: crate::voice::Provider::default(),
+            elevenlabs_agent: String::new(),
+            elevenlabs_voice: String::new(),
             voice_idle: VOICE_IDLE,
             voice_name: String::new(),
             voice_microphone: String::new(),
@@ -579,6 +594,9 @@ impl From<Kept> for Settings {
             menu_bar: kept.menu_bar,
             tray: kept.tray,
             voice: kept.voice,
+            voice_provider: kept.voice_provider,
+            elevenlabs_agent: kept.elevenlabs_agent,
+            elevenlabs_voice: kept.elevenlabs_voice,
             voice_idle: kept.voice_idle,
             voice_name: kept.voice_name,
             voice_microphone: kept.voice_microphone,
@@ -686,6 +704,9 @@ impl Default for Settings {
             menu_bar: true,
             tray: Look::Auto,
             voice: false,
+            voice_provider: crate::voice::Provider::default(),
+            elevenlabs_agent: String::new(),
+            elevenlabs_voice: String::new(),
             voice_idle: VOICE_IDLE,
             voice_name: String::new(),
             voice_microphone: String::new(),
@@ -1247,6 +1268,35 @@ pub fn file() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn voice_provider_migrates_without_changing_openai_or_enabling_voice() {
+        use crate::voice::Provider;
+        for text in ["{}", r#"{"voice_name":"ash"}"#] {
+            let set: Settings = serde_json::from_str(text).unwrap();
+            assert!(!set.voice);
+            assert_eq!(set.voice_provider, Provider::OpenAi);
+            assert!(set.elevenlabs_agent.is_empty());
+        }
+        let set: Settings = serde_json::from_str(r#"{"voice":true,"voice_name":"ash"}"#).unwrap();
+        assert!(set.voice);
+        assert_eq!(set.voice_provider, Provider::OpenAi);
+        assert_eq!(set.voice_name, "ash");
+        let set = Settings {
+            voice_provider: Provider::ElevenLabs,
+            elevenlabs_agent: "agent-test".into(),
+            elevenlabs_voice: "voice-test".into(),
+            ..set
+        };
+        let json = serde_json::to_string(&set).unwrap();
+        let again: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(set, again);
+        assert!(
+            !serde_json::to_string(&Settings::default())
+                .unwrap()
+                .contains("voice_provider")
+        );
+    }
+
     use super::*;
 
     #[test]

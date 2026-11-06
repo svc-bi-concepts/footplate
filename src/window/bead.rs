@@ -268,20 +268,23 @@ impl Footplate {
         // The voice chosen in the settings speaks, and is the provider's own
         // where none was: a change since the last session reaches this one,
         // and never one that stands.
-        let voice = match (self.means.voice)(
-            self.settings.voice,
-            self.kept.as_deref(),
-            &with,
-            &self.settings.voice_name,
-            tell,
-        ) {
-            Start::On(voice) => voice,
-            Start::Off => return cx.notify(),
-            Start::Refused(words) => {
-                self.voice_refusal = Some(words);
-                return cx.notify();
-            }
-        };
+        let voice =
+            match voice::selected_start(self.settings.voice, self.settings.voice_provider, || {
+                (self.means.voice)(
+                    self.settings.voice,
+                    self.kept.as_deref(),
+                    &with,
+                    &self.settings.voice_name,
+                    tell,
+                )
+            }) {
+                Start::On(voice) => voice,
+                Start::Off => return cx.notify(),
+                Start::Refused(words) => {
+                    self.voice_refusal = Some(words);
+                    return cx.notify();
+                }
+            };
         // What the session tells comes to the window as the yard's follower's
         // words do: from a thread of its own, through a channel, to one loop
         // that applies each on the window. The same thread is the loop's timer.
@@ -382,7 +385,7 @@ impl Footplate {
 
     /// What voice session `id` said, or that a moment passed. A session that
     /// ended says nothing to the one that came after it.
-    fn voice_heard(&mut self, id: u64, heard: Heard, cx: &mut Context<Self>) {
+    pub(super) fn voice_heard(&mut self, id: u64, heard: Heard, cx: &mut Context<Self>) {
         if self.voice.as_ref().map(|talk| talk.id) != Some(id) {
             return;
         }

@@ -522,6 +522,8 @@ pub struct Footplate {
     /// A masked line, as a secret ask's field is: what is typed is in no
     /// draft, and Enter keeps it beside the settings and clears the field.
     voice_key: Entity<Line>,
+    elevenlabs_agent: Entity<Line>,
+    elevenlabs_voice: Entity<Line>,
     voice_said: Option<String>,
     /// Whether the list of voices stands open under its field in the
     /// settings, as the yard's ⋯ menu stands open on its card: shut by a
@@ -766,6 +768,14 @@ impl Footplate {
             this.submit_voice_key(cx)
         })
         .detach();
+        let elevenlabs_agent = cx.new(Line::new);
+        let elevenlabs_voice = cx.new(Line::new);
+        for field in [&elevenlabs_agent, &elevenlabs_voice] {
+            cx.subscribe(field, |this, _, _: &Submitted, cx| {
+                this.submit_elevenlabs(cx)
+            })
+            .detach();
+        }
         // Enter in the line about the operator saves it with the chosen
         // style: the next session picks both up.
         let agents_about = cx.new(|cx| {
@@ -971,6 +981,8 @@ impl Footplate {
             run,
             run_said: None,
             voice_key,
+            elevenlabs_agent,
+            elevenlabs_voice,
             voice_said: None,
             voice_menu: false,
             voice_inputs: None,
@@ -1022,6 +1034,12 @@ impl Footplate {
         if let Some(file) = &file {
             self.settings = Settings::read(file);
         }
+        self.elevenlabs_agent.update(cx, |line, cx| {
+            line.set_text(&self.settings.elevenlabs_agent, cx)
+        });
+        self.elevenlabs_voice.update(cx, |line, cx| {
+            line.set_text(&self.settings.elevenlabs_voice, cx)
+        });
         // The addresses' fields hold the shown yard's, or the one the
         // settings open where the window shows none yet.
         let shown = self.yard.clone();
@@ -11590,6 +11608,142 @@ yardr.dev
             yard::voice_key_as(None, Some(&file)).unwrap(),
             "sk-voice-test-key"
         );
+    }
+
+    #[gpui::test]
+    fn provider_settings_save_separate_masked_keys_without_starting_voice(cx: &mut TestAppContext) {
+        use crate::voice::Provider;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        view.update(cx, |v, _| {
+            v.means.voice =
+                Rc::new(|_, _, _, _, _| panic!("settings/off must not start voice or read a key"));
+            v.means.devices = Arc::new(|_, _, _| panic!("settings/off must not open audio"));
+        });
+        cx.simulate_keystrokes("secondary-,");
+        click_on(cx, "settings section voice");
+        click_on(cx, "voice key");
+        cx.simulate_input("openai-unsaved");
+        click_on(cx, "voice provider ElevenLabs Agent");
+        view.read_with(cx, |v, cx| assert_eq!(v.voice_key.read(cx).text(), ""));
+        click_on(cx, "voice key");
+        cx.simulate_input("elevenlabs-test-key");
+        // The same masked Line refuses copying for either provider.
+        cx.simulate_keystrokes("secondary-a secondary-c");
+        assert!(
+            !cx.read(|cx| cx.read_from_clipboard())
+                .is_some_and(|item| item.text() == Some("elevenlabs-test-key".into()))
+        );
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            yard::provider_key_as(Provider::ElevenLabs, None, Some(&file)).unwrap(),
+            "elevenlabs-test-key"
+        );
+        assert!(!file.with_file_name(yard::VOICE_KEY_FILE).exists());
+        click_on(cx, "elevenlabs agent ID");
+        cx.simulate_input("agent-offline");
+        click_on(cx, "elevenlabs voice ID");
+        cx.simulate_input("voice-offline");
+        click_on(cx, "elevenlabs save");
+        let saved = Settings::read(&file);
+        assert!(!saved.voice);
+        assert_eq!(saved.elevenlabs_agent, "agent-offline");
+        assert_eq!(saved.elevenlabs_voice, "voice-offline");
+        assert_eq!(saved.voice_name, "");
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("elevenlabs-test-key")
+        );
+        view.update(cx, |v, cx| v.toggle_voice(cx));
+        assert!(!voice_stands(&view, cx));
+        click_on(cx, "voice on");
+        view.update(cx, |v, cx| v.toggle_voice(cx));
+        assert!(!voice_stands(&view, cx));
+        assert!(view.read_with(cx, |v, _| {
+            v.voice_refusal
+                .as_ref()
+                .unwrap()
+                .contains("not available yet")
+        }));
+        click_on(cx, "voice provider OpenAI GPT-Live");
+        assert_eq!(settings_of(&view, cx).elevenlabs_agent, "agent-offline");
+        click_on(cx, "voice key");
+        cx.simulate_input("openai-test-key");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            yard::voice_key_as(None, Some(&file)).unwrap(),
+            "openai-test-key"
+        );
+        assert_eq!(
+            yard::provider_key_as(Provider::ElevenLabs, None, Some(&file)).unwrap(),
+            "elevenlabs-test-key"
+        );
+    }
+
+    #[gpui::test]
+    fn provider_and_key_changes_end_the_session_and_discard_late_updates(cx: &mut TestAppContext) {
+        use crate::voice::Provider;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let live = talk_to(&view, &voicing, cx);
+        let old_id = view.read_with(cx, |v, _| v.voice.as_ref().unwrap().id);
+        view.update(cx, |v, cx| v.pick_provider(Provider::ElevenLabs, cx));
+        wait_hung_up(&view, &voicing, &live, 0, cx);
+        // Updates queued on the window executor are rejected by session ID.
+        view.update(cx, |v, cx| {
+            v.voice_heard(
+                old_id,
+                bead::Heard::Said(voice::Update::Request("late request".into())),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(!voice_stands(&view, cx));
+        view.update(cx, |v, cx| v.pick_provider(Provider::OpenAi, cx));
+        assert!(!voice_stands(&view, cx));
+        let live = talk_to(&view, &voicing, cx);
+        view.update(cx, |v, cx| {
+            v.voice_heard(
+                old_id,
+                bead::Heard::Said(voice::Update::Refused("old refusal".into())),
+                cx,
+            )
+        });
+        assert!(voice_stands(&view, cx));
+        view.update(cx, |v, cx| {
+            v.voice_key
+                .update(cx, |line, cx| line.set_text("replacement-offline", cx));
+            v.submit_voice_key(cx);
+        });
+        wait_hung_up(&view, &voicing, &live, 1, cx);
+        assert_eq!(
+            yard::voice_key_as(None, Some(&file)).unwrap(),
+            "replacement-offline"
+        );
+        assert_eq!(voicing.lives.borrow().len(), 2);
     }
 
     /// With voice off, nothing but the Voice settings section offers

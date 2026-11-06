@@ -43,7 +43,7 @@ use super::firstrun::{Ended, FirstRun};
 use super::keys::{KeysView, SECONDARY, keys_for};
 use super::metrics::{
     DRAWER_WIDTH, HEAD_INSET, INPUT_KEPT, INPUT_NAME, INPUT_NOTE, RAIL, RAIL_LABEL, RAIL_TILE,
-    VOICE_LABEL, VOICE_NOTE, grown,
+    SELECT_CHOICE, VOICE_LABEL, VOICE_NOTE, grown,
 };
 use super::rail::{PROBE_AGAIN, Picture, Probe, RailTip, Unsent, ViewUp, reaches, run_address_of};
 use super::state::{
@@ -63,6 +63,9 @@ use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 /// says, the yard's and the counterpart's names, their answers, and the
 /// up-to-30-day abuse-monitoring retention with `store` off.
 pub const VOICE_PLAIN: &str = "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands.";
+
+/// Disclosure for the configured Agent; account settings are not inferred.
+pub const ELEVENLABS_PLAIN: &str = "When Agent sessions become available, a session you explicitly start will send microphone audio, transcripts, tool inputs, open-conversation context and replies to ElevenLabs; text context also reaches the Agent's LLM provider. The Agent may paraphrase: written yard mail is the record. Account retention and training settings have not been verified; check them in your workspace before use. Footplate saves no audio or transcripts. Your key stays in elevenlabs.key beside the settings and is never sent to the yard or Agent. Nothing is sent and no key is read while voice is off or no session stands.";
 
 /// A label of the Voice section's rows, in the column their fields stand
 /// after ([`VOICE_LABEL`]).
@@ -3377,6 +3380,13 @@ impl Footplate {
         if settings == self.settings {
             return;
         }
+        if settings.voice_provider != self.settings.voice_provider
+            || settings.elevenlabs_agent != self.settings.elevenlabs_agent
+            || settings.elevenlabs_voice != self.settings.elevenlabs_voice
+        {
+            self.end_voice(cx);
+            self.voice_refusal = None;
+        }
         if settings.notifications != self.settings.notifications {
             self.burst.clear();
             self.burst_generation = self.burst_generation.wrapping_add(1);
@@ -3513,6 +3523,47 @@ impl Footplate {
         );
     }
 
+    /// A provider switch clears unsaved credentials so they cannot be saved
+    /// under another provider. Starting again always takes an explicit tap.
+    pub(crate) fn pick_provider(
+        &mut self,
+        provider: crate::voice::Provider,
+        cx: &mut Context<Self>,
+    ) {
+        if provider == self.settings.voice_provider {
+            return;
+        }
+        self.end_voice(cx);
+        self.voice_key.update(cx, |line, cx| line.set_text("", cx));
+        self.voice_said = None;
+        self.voice_menu = false;
+        self.elevenlabs_agent.update(cx, |line, cx| {
+            line.set_text(&self.settings.elevenlabs_agent, cx)
+        });
+        self.elevenlabs_voice.update(cx, |line, cx| {
+            line.set_text(&self.settings.elevenlabs_voice, cx)
+        });
+        self.set(
+            Settings {
+                voice_provider: provider,
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
+    /// Saves only the non-secret configuration; no agent is contacted.
+    pub(crate) fn submit_elevenlabs(&mut self, cx: &mut Context<Self>) {
+        self.set(
+            Settings {
+                elevenlabs_agent: self.elevenlabs_agent.read(cx).text().trim().to_string(),
+                elevenlabs_voice: self.elevenlabs_voice.read(cx).text().trim().to_string(),
+                ..self.settings.clone()
+            },
+            cx,
+        );
+    }
+
     /// A voice session left standing with nobody speaking ends itself after
     /// `minutes`.
     pub(crate) fn voice_idle(&mut self, minutes: u8, cx: &mut Context<Self>) {
@@ -3640,26 +3691,42 @@ impl Footplate {
         }
     }
 
-    /// Keeps the voice key that is typed, in `voice.key` beside the
-    /// settings: talking with the yard by voice is spoken to OpenAI
-    /// with it. Enter keeps it and clears the field. What is no key is
+    /// Keeps the selected provider's key beside the settings, ending a
+    /// standing session first. Enter keeps it and clears the field. No
+    /// validation request is made, even while on. What is no key is
     /// said, and nothing changed; the key itself is never in the
     /// settings file.
     pub(crate) fn submit_voice_key(&mut self, cx: &mut Context<Self>) {
+        self.end_voice(cx);
+        let provider = self.settings.voice_provider;
         let key = self.voice_key.update(cx, |line, cx| line.take_text(cx));
         cx.notify();
         if key.trim().is_empty() {
-            self.voice_said = Some("A key is wanted: your OpenAI project's.".to_string());
+            self.voice_said = Some(match provider {
+                crate::voice::Provider::OpenAi => {
+                    "A key is wanted: your OpenAI project's.".to_string()
+                }
+                crate::voice::Provider::ElevenLabs => {
+                    "A key is wanted: your ElevenLabs workspace's.".to_string()
+                }
+            });
             return;
         }
         let Some(file) = self.kept.as_ref() else {
-            self.voice_said = Some(
-                "There is no home directory to keep the voice key in. Set FOOTPLATE_OPENAI_KEY."
-                    .to_string(),
-            );
+            self.voice_said = Some(format!(
+                "There is no home directory to keep the voice key in. Set {}.",
+                provider.key_env()
+            ));
             return;
         };
-        match yard::keep_voice_key(&file.with_file_name(yard::VOICE_KEY_FILE), key.trim()) {
+        let file = file.with_file_name(provider.key_file());
+        let saved = match provider {
+            crate::voice::Provider::OpenAi => yard::keep_voice_key(&file, key.trim()),
+            crate::voice::Provider::ElevenLabs => {
+                yard::keep_provider_key(provider, &file, key.trim())
+            }
+        };
+        match saved {
             Ok(()) => self.voice_said = None,
             Err(why) => self.voice_said = Some(why),
         }
@@ -5019,6 +5086,27 @@ impl Footplate {
                 palette,
             )),
         );
+        let provider = self.settings.voice_provider;
+        section = section.child(
+            div().flex().child(segmented(
+                [
+                    crate::voice::Provider::OpenAi,
+                    crate::voice::Provider::ElevenLabs,
+                ]
+                .map(|choice| {
+                    segment(choice.name().to_string(), choice == provider, palette)
+                        .id(SharedString::from(format!(
+                            "voice provider {}",
+                            choice.name()
+                        )))
+                        .debug_selector(move || format!("voice provider {}", choice.name()))
+                        .on_click(cx.listener(move |this, _, _, cx| this.pick_provider(choice, cx)))
+                })
+                .into_iter()
+                .collect(),
+                palette,
+            )),
+        );
         if on {
             section = section.child(
                 div()
@@ -5073,16 +5161,80 @@ impl Footplate {
                     .child(said.clone()),
             );
         }
-        // Which voice speaks, and the one thing to know of the choice: the
-        // provider fixes a session's voice when it starts. It stands before
-        // the idle limit, so that its list opens with room under it.
-        section = section.child(self.voice_picker(palette, cx)).child(
+        if provider == crate::voice::Provider::ElevenLabs {
+            section = section.child(div().text_sm().text_color(palette.faint).child(
+                "ElevenLabs Agent sessions are not available yet. Configure an existing workspace agent manually; opening Settings never creates, changes or lists agents."
+            ));
+            for (label, field, kept) in [
+                (
+                    "agent ID",
+                    &self.elevenlabs_agent,
+                    &self.settings.elevenlabs_agent,
+                ),
+                (
+                    "voice ID",
+                    &self.elevenlabs_voice,
+                    &self.settings.elevenlabs_voice,
+                ),
+            ] {
+                let focus = field.focus_handle(cx);
+                section = section
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(voice_label(label))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .max_w(rems(28.))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(palette.line)
+                                    .bg(palette.side)
+                                    .debug_selector(move || format!("elevenlabs {label}"))
+                                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                                        window.focus(&focus);
+                                        window.prevent_default();
+                                    })
+                                    .child(field.clone()),
+                            ),
+                    )
+                    .child(div().text_sm().text_color(palette.faint).child(format!(
+                        "saved {label}: {}",
+                        if kept.is_empty() {
+                            if label == "agent ID" {
+                                "not set".to_string()
+                            } else {
+                                "default".to_string()
+                            }
+                        } else {
+                            shorten(kept, SELECT_CHOICE)
+                        }
+                    )));
+            }
+            section = section.child(
+                small_button("save agent and voice (enter)".into(), palette)
+                    .id("elevenlabs save")
+                    .debug_selector(|| "elevenlabs save".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_elevenlabs(cx))),
+            );
+        } else {
+            // Which voice speaks, and the one thing to know of the choice: the
+            // provider fixes a session's voice when it starts. It stands before
+            // the idle limit, so that its list opens with room under it.
+            section = section.child(self.voice_picker(palette, cx)).child(
             div()
                 .debug_selector(|| "voice pick line".to_string())
                 .text_sm()
                 .text_color(palette.faint)
                 .child("heard from the next session on, since OpenAI sets a session's voice when it starts"),
         );
+        }
         // Which microphone hears, and the same thing to know: the devices
         // open as a session starts.
         section = section.child(self.voice_input_picker(palette, cx)).child(
@@ -5122,7 +5274,10 @@ impl Footplate {
                     .debug_selector(|| "voice idle line".to_string())
                     .text_sm()
                     .text_color(palette.faint)
-                    .child("with nobody speaking and nothing waited for, since OpenAI bills a session by the second"),
+                    .child(match provider {
+                        crate::voice::Provider::OpenAi => "with nobody speaking and nothing waited for, since OpenAI bills a session by the second",
+                        crate::voice::Provider::ElevenLabs => "with nobody speaking and nothing waited for, once Agent sessions are available",
+                    }),
             );
         section.child(
             div()
@@ -5130,7 +5285,10 @@ impl Footplate {
                 .pr_4()
                 .text_sm()
                 .text_color(palette.faint)
-                .child(VOICE_PLAIN),
+                .child(match provider {
+                    crate::voice::Provider::OpenAi => VOICE_PLAIN,
+                    crate::voice::Provider::ElevenLabs => ELEVENLABS_PLAIN,
+                }),
         )
     }
 
