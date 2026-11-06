@@ -405,7 +405,8 @@ folder. A change is drawn at once and kept for the next start:
   line under the head shows the latest ElevenLabs transcript, or with GPT-Live,
   what you have said that no request has taken yet (a pause does not clear it;
   a long one shows its last words), and
-  the head's right counts connected time and a call-only estimate (ElevenLabs), or the minutes and
+  the head's right shows the [Agent meter](#elevenlabs-agent-template)
+  (ElevenLabs), or the minutes and
   what they have cost at OpenAI's
   rate, $0.05 a minute. When the voice sends something to the yard, it goes
   as your own mail in that conversation, as Enter would send it. With GPT-Live,

@@ -1,24 +1,9 @@
 # Talk with the yard by voice in footplate
 
-Implementation update (6 November 2026): ElevenLabs Agent is now an optional
-provider alongside GPT-Live; its wire and refusal rules live in
-`src/voice/elevenlabs.rs`. It reuses the existing Voice control, audio queue,
-explicit-start gate and ordinary-mail path. Authentication, agent/model access,
-expired URL, rate/concurrency and quota refusals stop the session without
-reconnect, URL refresh, mail replay or provider/billing fallback. Only known
-machine codes select local messages; provider prose and credentials stay out.
-Connected time drives a call-only reference estimate ($0.08/min before discounts,
-excluding burst pricing); pass-through LLM usage remains unknown. Settings
-explains context growth, the silence discount and finite pending-work idle
-exception. Account entitlement, audio saving, retention, training and residency
-remain unverified until human commissioning. Two-year provider-default retention
-is disclosed with separate audio/transcript controls; recommended controls do
-not claim Enterprise ZRM. No local audio/transcript archive is added. See the
-[Agent template and current behaviour](../window.md#elevenlabs-agent-template).
-
-
 The single-provider choice below is historical. For the current provider
 choices, key handling and Agent setup, see [Voice settings](../window.md#settings).
+For ElevenLabs billing, privacy and refusal handling, see the
+[Agent guide](../window.md#elevenlabs-agent-template).
 
 Design footplate-vqze, proposed 2026-10-31 and corrected 2026-11-01 under footplate-nqjf to what OpenAI's Live reference and four live runs of the spike harness settled (section 2 names the runs). A proposal as it was decided on, not a description of what the code does today; the decision is on the bead.
 

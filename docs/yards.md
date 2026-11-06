@@ -22,13 +22,9 @@ yardr's installer when you ask for it ([yardr, a dependency](#yardr-a-dependency
 capture, to which [the Feedback form](window.md#feedback) sends a message when you
 press Send, and never otherwise; and OpenAI's Live API or ElevenLabs, for the
 selected voice provider. [Voice settings](window.md#settings) describes what
-an explicitly started session sends and keeps. ElevenLabs receives microphone
-audio, speech text, yard/crew names, tool text and returned conversation mail;
-text can also reach its LLM provider. Provider refusal ends that voice session,
-without retrying yard mail or changing providers. The yard follower continues,
-so late replies remain readable. Footplate adds no audio or transcript archive;
-ordinary mail remains under the yard's storage rules. Provider retention and
-billing controls are account settings to verify before commissioning.
+an explicitly started session sends and keeps; the
+[ElevenLabs Agent guide](window.md#elevenlabs-agent-template) covers its
+account controls, billing and refusal handling.
 
 | It reads | For |
 |---|---|
