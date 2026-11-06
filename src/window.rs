@@ -12257,12 +12257,19 @@ yardr.dev
                 .filter(|e| e["tool_call_id"] == "uncertain")
                 .all(|e| e["is_error"] == true)
         );
+        // Hold the response to prove quota can end voice while a write
+        // is in flight; its eventual success must not require that voice.
+        yard.answer("Mail", "{}");
+        yard.hold_calls("Mail");
         agent.tool("quota-send", "Mail accepted before quota exhaustion");
-        wait(cx, "mail before quota", |_| {
-            yard.asked("Mail")
+        wait(cx, "mail before quota", |_| yard.calls_held("Mail") == 1);
+        assert!(view.read_with(cx, |v, _| v.voice.as_ref().unwrap().unanswered));
+        assert!(
+            !agent
+                .sent("client_tool_result")
                 .iter()
-                .any(|a| a["text"] == "Mail accepted before quota exhaustion")
-        });
+                .any(|e| e["tool_call_id"] == "quota-send")
+        );
         agent.emit(json!({"type":"client_error","error_event":{"code":1008,"error_name":"quota_exceeded","message":"SECRET"}}));
         wait(cx, "quota stops voice", |cx| !voice_stands(&view, cx));
         wait(cx, "quota closes audio", |_| {
@@ -12274,6 +12281,7 @@ yardr.dev
                 .unwrap()
                 .contains("quota exhausted")
         }));
+        yard.release_calls("Mail");
         yard.emit(&answer_event(25, "Late reply after voice quota"));
         wait(cx, "late written reply", |cx| {
             view.read_with(cx, |v, _| {
