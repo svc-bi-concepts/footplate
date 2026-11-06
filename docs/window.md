@@ -95,7 +95,9 @@ carries a terminal icon at the right of its header, and a bead a session
 works carries Screen where the window says so (its row of the arrivals, its
 details). Either opens what that session's pane shows over the window
 (`SessionScreen`), as the terminal draws it, with Refresh, and `esc` to
-leave it. A screen can show what an agent printed, a secret among it, so the
+leave it. A pane taller than the card opens at its bottom, where the agent's
+input line and its latest output are, and Refresh reads it again and returns
+there. A screen can show what an agent printed, a secret among it, so the
 yard reads it to no request that comes down the link from its edge: a hosted
 yard is not asked and offers no Screen, since the screen is read on the
 yard's machine. A yard reached any other way that refuses the read as such

@@ -351,6 +351,9 @@ pub struct Footplate {
     /// The newest read of a session's screen, so a slower earlier answer
     /// cannot replace a refresh.
     screen_read: u64,
+    /// The open screen's own scroll: each answer stands it at the pane's
+    /// bottom, where the input line is.
+    screen_scroll: ScrollHandle,
     /// Whether the web view answers at the setting's address: what a
     /// note's page is drawn with.
     view_up: ViewUp,
@@ -902,6 +905,7 @@ impl Footplate {
             image_open: None,
             screen_open: None,
             screen_read: 0,
+            screen_scroll: ScrollHandle::new(),
             view_up: ViewUp::Unknown,
             run_up: ViewUp::Unknown,
             rows_shown: Cell::new(false),
@@ -1892,6 +1896,18 @@ mod tests {
                 Some(super::screen::Shown::Not(why)) => why.clone(),
                 None => String::new(),
             }
+        })
+    }
+
+    /// Where the open screen's lines stand in the card, once the frames
+    /// after its answer are drawn: the scroll offset, and how far it goes.
+    fn screen_stand(
+        view: &Entity<Footplate>,
+        cx: &mut VisualTestContext,
+    ) -> (gpui::Point<Pixels>, gpui::Size<Pixels>) {
+        frames(cx);
+        view.read_with(cx, |v, _| {
+            (v.screen_scroll.offset(), v.screen_scroll.max_offset())
         })
     }
 
@@ -7534,10 +7550,9 @@ yardr.dev
     fn a_crew_member_s_screen_opens_over_the_window(cx: &mut TestAppContext) {
         let yard = Yard::start();
         a_yard_of_jo(&yard);
-        yard.answer(
-            "SessionScreen",
-            &json!({"result": {"screen": "\u{1b}[1myardmaster\u{1b}[0m\n❯ "}}).to_string(),
-        );
+        let two_lines =
+            json!({"result": {"screen": "\u{1b}[1myardmaster\u{1b}[0m\n❯ "}}).to_string();
+        yard.answer("SessionScreen", &two_lines);
         let (view, cx) = opened(&yard, &["Shall I land it?"], cx);
         // The operator's window offers the open conversation's screen in
         // its header; the crew rows carry none.
@@ -7586,16 +7601,74 @@ yardr.dev
         wait(cx, "assembly's screen again", |cx| {
             screen_of(&view, cx) == "2 lines"
         });
+        // The lines stand at the pane's bottom, where its input line is. A
+        // screen shorter than the card has nowhere further to go, so it
+        // stands as ever, at its top.
+        let origin = gpui::point(px(0.), px(0.));
+        let (at, max) = screen_stand(&view, cx);
+        assert_eq!((at, max.height), (origin, px(0.)));
+        // A refresh that brings a pane taller than the card stands it at its
+        // bottom.
+        let pane = (1..=120)
+            .map(|n| format!("line {n:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        yard.answer(
+            "SessionScreen",
+            &json!({"result": {"screen": pane}}).to_string(),
+        );
+        click_on(cx, "screen refresh");
+        wait(cx, "the tall screen", |cx| {
+            screen_of(&view, cx) == "120 lines"
+        });
+        let (at, max) = screen_stand(&view, cx);
+        assert!(max.height > px(0.), "the pane does not overflow its card");
+        assert_eq!(at, gpui::point(px(0.), -max.height));
+        // A reader who scrolled up finds it there again after a refresh: it
+        // means the pane's now, which is at its bottom.
+        scroll_on(cx, "screen body assembly", gpui::point(px(0.), px(300.)));
+        let (up, _) = screen_stand(&view, cx);
+        assert!(
+            up.y > -max.height,
+            "the wheel did not move the lines: {up:?}"
+        );
+        let asked = yard.asked("SessionScreen").len();
+        click_on(cx, "screen refresh");
+        wait(cx, "the tall screen read again", |cx| {
+            yard.asked("SessionScreen").len() == asked + 1 && screen_of(&view, cx) == "120 lines"
+        });
+        let (at, max) = screen_stand(&view, cx);
+        assert_eq!(at, gpui::point(px(0.), -max.height));
+        // Scrolled up again and left so: the handle keeps that offset while
+        // the screen is shut.
+        scroll_on(cx, "screen body assembly", gpui::point(px(0.), px(300.)));
+        let (up, _) = screen_stand(&view, cx);
+        assert!(
+            up.y > -max.height,
+            "the wheel did not move the lines: {up:?}"
+        );
         // Esc shuts it, and the line has the keys again.
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert_eq!(overlay_screen(&view, cx), None);
         assert!(line_focused(&view, cx));
-        // A click outside shuts it too.
+        // A click outside shuts it too. This opens on the tall pane again,
+        // at its bottom though the last card was left scrolled up, and a
+        // short screen after it stands at its top.
         click_on(cx, "talk screen assembly");
+        wait(cx, "assembly's tall screen", |cx| {
+            screen_of(&view, cx) == "120 lines"
+        });
+        let (at, max) = screen_stand(&view, cx);
+        assert!(max.height > px(0.), "the pane does not overflow its card");
+        assert_eq!(at, gpui::point(px(0.), -max.height));
+        yard.answer("SessionScreen", &two_lines);
+        click_on(cx, "screen refresh");
         wait(cx, "assembly's screen", |cx| {
             screen_of(&view, cx) == "2 lines"
         });
+        let (at, max) = screen_stand(&view, cx);
+        assert_eq!((at, max.height), (origin, px(0.)));
         let over = bounds_of(cx, "screen overlay");
         let outside = gpui::point(over.origin.x + px(4.), over.origin.y + px(4.));
         cx.simulate_click(outside, gpui::Modifiers::default());

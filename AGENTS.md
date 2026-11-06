@@ -69,7 +69,9 @@ The window, its state and the yard:
     that post a draft or a note (`post`, `post_note`).
   - `src/window/screen.rs`: one session's screen over the window, drawn like
     the terminal (monospace, dark, the styling as printed) from the
-    `SessionScreen` answer, which `src/ansi.rs` parses.
+    `SessionScreen` answer, which `src/ansi.rs` parses. Each answer, the open
+    and every refresh, stands the lines at the pane's bottom, where the
+    agent's input line is (`screen_scroll`).
   - `src/window/state.rs`: what the window keeps beside the model: where a
     yard stood when it was left, what waits in the yards it follows, and
     what the switch and the settings are asking or doing.

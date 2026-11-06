@@ -239,7 +239,15 @@ impl Footplate {
                     return;
                 }
                 let shown = match answer {
-                    Ok(screen) => Shown::Here(ansi::parse(&screen.screen)),
+                    Ok(screen) => {
+                        // The pane's now is at its bottom, where the agent's
+                        // input line is, for the open and for each refresh.
+                        // How far that is, only the layout knows: gpui's flag
+                        // is taken in the prepaint of the frame that first
+                        // draws these lines, from its own measure.
+                        this.screen_scroll.scroll_to_bottom();
+                        Shown::Here(ansi::parse(&screen.screen))
+                    }
                     // However the client came by the yard, it came down
                     // the link from the edge: no Screen is offered from
                     // here, and the refusal's advice is not shown, since
@@ -376,6 +384,7 @@ impl Footplate {
                     .min_h_0()
                     .min_w_0()
                     .overflow_scroll()
+                    .track_scroll(&self.screen_scroll)
                     .child(lines)
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .into_any_element()
