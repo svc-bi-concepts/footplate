@@ -108,6 +108,22 @@ folder you extracted, `%APPDATA%\footplate`, where footplate keeps its
 settings and the token of each yard it is paired with, and
 `%LOCALAPPDATA%\footplate`, where it keeps its log.
 
+## Which version you run
+
+The About card shows the version you run. On a Mac, open it with "About
+footplate" in the application menu. Linux and Windows have no application
+menu, so open the settings and, under "This window", press "show" on the
+"about footplate" row. [About](docs/window.md#about) has the rest.
+
+From a terminal, `--version` prints `footplate <version>` and exits without
+opening the window:
+
+- macOS: `/Applications/Footplate.app/Contents/MacOS/footplate --version`
+- Linux: `~/.local/bin/footplate --version`, where the Linux steps put it
+- Windows: `.\footplate.exe --version | more`, in the folder that holds it.
+  Without `| more` a prompt shows nothing, since `footplate.exe` has no
+  console.
+
 ## Running and building
 
 Rust, drawn with [gpui](https://gpui.rs/), the UI framework Zed is built on.
