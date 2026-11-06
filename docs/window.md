@@ -340,9 +340,9 @@ folder. A change is drawn at once and kept for the next start:
   reset once it is overridden.
 - Voice: talking with the yard by voice, off until it is switched on,
   which is the opt-in. Choose OpenAI GPT-Live or ElevenLabs Agent. Existing
-  settings keep OpenAI. ElevenLabs configuration can be saved now, but its
-  sessions are not available until the Agent backend is ready; starting it
-  says so without reading either key, contacting a provider or opening audio.
+  settings keep OpenAI. ElevenLabs uses an existing authenticated Agent,
+  configured manually with the template below; an explicit start checks that
+  configuration and obtains a fresh signed WebSocket URL.
   Both providers use the same masked key field, cleared on provider switch.
   Saving a key works while off and makes no validation request. Only an
   explicit session start can read a credential, and only the selected
@@ -357,16 +357,14 @@ folder. A change is drawn at once and kept for the next start:
   `FOOTPLATE_ELEVENLABS_KEY`; the files use distinct markers and the same
   keeper. On macOS and Linux it writes mode 0600 and refuses files readable
   by others; on Windows it relies on the profile directory's permissions.
-  When Agent sessions become available, the ElevenLabs key
-  authenticates with ElevenLabs; it never enters settings JSON, yard mail or
+  The ElevenLabs key authenticates with ElevenLabs; it never enters settings JSON, yard mail or
   telemetry. The non-secret `elevenlabs_agent` and `elevenlabs_voice`
   IDs live in settings JSON, separately from OpenAI's `voice_name`. Empty voice
   ID leaves the Agent's configured voice in place. Enter or the save button
   keeps the two IDs. Configure an already existing workspace agent manually
   with the [Agent template](#elevenlabs-agent-template); Settings never creates,
-  modifies or enumerates hosted agents. When sessions become available,
-  active audio, transcripts, tool inputs, open-conversation context and replies
-  will reach ElevenLabs; text also reaches the Agent's LLM provider. The Agent
+  modifies or enumerates hosted agents. Active audio, transcripts, tool inputs,
+  open-conversation context and replies reach ElevenLabs; text also reaches the Agent's LLM provider. The Agent
   may paraphrase and written yard mail remains the record. Footplate adds no
   saved audio or transcript history. Workspace retention and model-improvement
   settings are unverified: check them before live use rather than assuming
@@ -393,8 +391,7 @@ folder. A change is drawn at once and kept for the next start:
   and the field says `not found` beside its id until it is back. With voice
   on, the composer of an
   open conversation has one button at its bottom right: Voice while the
-  line is empty, and a tap starts an OpenAI session with whom you are talking
-  or shows the unavailable-backend refusal for ElevenLabs;
+  line is empty, and a tap starts the selected provider with whom you are talking;
   Send once the line holds words or a file; and Stop while a session
   stands, whatever the line holds, which a second tap ends without
   sending what you typed (it stays in the line, and Enter sends it).
@@ -402,7 +399,8 @@ folder. A change is drawn at once and kept for the next start:
   on (`starting…`, `listening`, `yardmaster is working`, `speaking`), a
   line under the head shows what you have said that no request has taken
   yet (a pause does not clear it; a long one shows its last words), and
-  the head's right counts the minutes and what they have cost at OpenAI's
+  the head's right counts the elapsed time (ElevenLabs), or the minutes and
+  what they have cost at OpenAI's
   rate, $0.05 a minute. When the voice sends something to the yard, it goes
   as your own mail in that conversation, as Enter would send it, once you
   have stopped talking, with the requests and replies it has held since its
@@ -644,9 +642,10 @@ saving an image to disk, or resizing one that is over the cap.
 
 ## ElevenLabs Agent template
 
-Apply this manually in your own workspace when commissioning the backend from
-[step 2](https://github.com/yardr-dev/footplate/issues/4). No account agent is
-created by footplate. The configuration alone does not enable Agent start.
+Apply this manually in your own workspace before starting an Agent session.
+Footplate reads this agent's configuration only on explicit start; it creates
+or modifies no account agent. Live language quality and workspace settings
+still need commissioning; tests use a fake provider, not a model.
 
 - Require authentication. Choose a German/English-capable voice; enable German
   and English language switching and interruptions. Try Swiss German during
@@ -655,12 +654,14 @@ created by footplate. The configuration alone does not enable Agent start.
   where supported; disable unapproved backup-model cascading. Availability and
   bilingual tool-call quality still need a live check later.
 - Define one client tool, `send_to_yard`, with required string `text` and
-  **Wait for response** enabled. The planned desktop backend will implement
-  this tool; use no webhook, other action tools, knowledge base or imported
-  yard history.
-- Permit only the session variables/overrides needed for the selected yard and
-  conversation. Use the open conversation, defaulting to yardmaster-chris where
-  none is selected, when the backend is implemented.
+  **Wait for response** enabled and a **20-second response timeout**. The
+  desktop implements this tool; use no webhook, workflow, other action tools,
+  knowledge base or imported yard history.
+- Permit the system prompt override (`agent.prompt.prompt` in the conversation
+  initiation overrides), and the `tts.voice_id` override only if a desktop
+  voice ID is selected. Footplate supplies its prompt bound to the open
+  conversation and yard; without a conversation it opens yardmaster-chris.
+  No full history, attachments or secret ask contents are uploaded.
 - Check your account's retention, training/data-use settings and costs before
   a live run. This change does not inspect or alter those settings.
 
@@ -675,3 +676,44 @@ Suggested prompt (the backend supplies the two local session values):
 > or permission. You may explain it in your own words; written footplate mail
 > is the record. If no answer is available, say so. Direct approvals, secrets
 > and asks to their cards; you cannot answer them.
+
+Each `send_to_yard(text)` call submits that text as ordinary written mail to
+the captured conversation, using the same sender as the composer. It is not
+labelled a verbatim microphone transcript. Destination fields from the tool
+are refused; approvals and secrets remain in their cards.
+
+This iteration returns **pending** after the mail call succeeds. The yard's
+current mail contract has no explicit reply relation, so no arriving mail can
+be proved to answer that tool call. New selected-counterpart mail is sent as
+`contextual_update`, labelled with its source and mail sequence ID, never as a
+`user_message` or a successful tool reply. Context can inform the next turn;
+it does not promise to interrupt speech. Duplicated and older events are
+ignored. No unrelated history or other conversation is included.
+
+Only one send may be outstanding. Repeated tool-call IDs reuse their original
+result without another send; overlapping calls return busy, including while an
+uncertain write is still in flight after its tool wait expires. A lost or refused
+send returns an explicit unconfirmed-delivery result, with no automatic retry.
+The local wait ends after 20 seconds, releasing the idle exception even if the
+mail callback is late. A late written reply still appears in the conversation
+and may reach the Agent as labelled context, without claiming correlation.
+A session retains at most 256 tool-call IDs, then ends rather than forgetting
+an ID that could send duplicate mail.
+Voice off, stop, a hidden window or a yard/conversation/provider switch closes
+the session and its audio; a new session needs a new explicit start.
+
+The native app requests a signed URL with `xi-api-key`, then connects without
+a key header. It permits only TLS at `api.elevenlabs.io`, follows no redirects,
+never logs error bodies or signed URLs, and never reconnects automatically.
+Signed URLs are consumed immediately in memory; expiry or refusal requires a
+new explicit start. Mono PCM16 negotiated at 8, 16, 22.05, 24, 44.1 or 48 kHz is
+converted to and from the existing 24 kHz audio seam. Compressed formats are
+refused. Managed interruptions flush speaker audio and discard old event IDs.
+
+See the [signed-URL reference](https://elevenlabs.io/docs/api-reference/conversations/get-signed-url),
+[WebSocket guide](https://elevenlabs.io/docs/eleven-agents/libraries/web-sockets),
+and [client tools](https://elevenlabs.io/docs/eleven-agents/customization/tools/client-tools)
+for the provider contract. No paid calls, real microphone, workspace agent or
+subscription settings were exercised by the offline verification. German,
+English and Swiss German tool strings are preserved in fake tests; recognition,
+pronunciation and bilingual model quality remain for live commissioning.

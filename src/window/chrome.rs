@@ -65,7 +65,7 @@ use super::{Dismiss, JumpNewest, JumpOldest, Leave};
 pub const VOICE_PLAIN: &str = "Microphone audio from this machine streams to OpenAI during a voice session you start, with what you say, the yard's name and the name of who you are talking with, and what they answer in the open conversation. The voice speaks answers in its own words, which may differ from the mail; the written mail in the conversation is the record. No saved session is kept with store off, but what was said may appear in OpenAI's abuse-monitoring logs, kept for up to 30 days by default. Your key stays on this machine, in a file beside the settings. Nothing is sent while voice is off, or while no session stands.";
 
 /// Disclosure for the configured Agent; account settings are not inferred.
-pub const ELEVENLABS_PLAIN: &str = "When Agent sessions become available, a session you explicitly start will send microphone audio, transcripts, tool inputs, open-conversation context and replies to ElevenLabs; text context also reaches the Agent's LLM provider. The Agent may paraphrase: written yard mail is the record. Account retention and training settings have not been verified; check them in your workspace before use. Footplate saves no audio or transcripts. Your key stays in elevenlabs.key beside the settings and, when sessions are available, is used to authenticate with ElevenLabs. It never enters settings JSON, yard mail or telemetry. Nothing is sent and no key is read while voice is off or no session stands.";
+pub const ELEVENLABS_PLAIN: &str = "A session you explicitly start sends microphone audio, transcripts, tool inputs, open-conversation context and replies to ElevenLabs; text context also reaches the Agent's LLM provider. The Agent may paraphrase: written yard mail is the record. Account retention and training settings have not been verified; check them in your workspace before use. Footplate saves no audio or transcripts. Your key stays in elevenlabs.key beside the settings and is used to authenticate with ElevenLabs. It never enters settings JSON, yard mail or telemetry. Nothing is sent and no key is read while voice is off or no session stands.";
 
 /// A label of the Voice section's rows, in the column their fields stand
 /// after ([`VOICE_LABEL`]).
@@ -5163,7 +5163,7 @@ impl Footplate {
         }
         if provider == crate::voice::Provider::ElevenLabs {
             section = section.child(div().text_sm().text_color(palette.faint).child(
-                "ElevenLabs Agent sessions are not available yet. Configure an existing workspace agent manually; opening Settings never creates, changes or lists agents."
+                "Configure an existing workspace agent manually; opening Settings never creates, changes or lists agents."
             ));
             for (label, field, kept) in [
                 (
@@ -5276,7 +5276,7 @@ impl Footplate {
                     .text_color(palette.faint)
                     .child(match provider {
                         crate::voice::Provider::OpenAi => "with nobody speaking and nothing waited for, since OpenAI bills a session by the second",
-                        crate::voice::Provider::ElevenLabs => "with nobody speaking and nothing waited for, once Agent sessions are available",
+                        crate::voice::Provider::ElevenLabs => "with nobody speaking and nothing waited for",
                     }),
             );
         section.child(

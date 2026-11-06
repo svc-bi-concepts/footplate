@@ -1636,6 +1636,12 @@ impl Model {
         self.selected.as_ref()
     }
 
+    /// The latest event already read, including the initial snapshot's head.
+    /// A new voice session starts after it, without uploading earlier mail.
+    pub fn seen_through(&self) -> u64 {
+        self.events_seen
+    }
+
     /// The open conversation's name, when a conversation is open.
     pub fn selected_conversation(&self) -> Option<&str> {
         match self.selected.as_ref() {

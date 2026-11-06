@@ -111,8 +111,11 @@ The window, its state and the yard:
   in, from OpenAI's reference), and the events of OpenAI's GPT-Live, which
   this is the one module to speak. `Provider` selects GPT-Live or the optional
   ElevenLabs Agent at explicit start; Agent configuration is saved separately,
-  but start is refused until its backend is ready. No provider wire events
-  enter the window's mail path. Below the rules, the live socket itself: a
+  and its protocol lives in `src/voice/elevenlabs.rs`: signed-URL authentication,
+  configuration checks, negotiated PCM conversion, interruptions and the
+  `send_to_yard` client tool. Tool results are pending or uncertain, never
+  claimed replies; selected-conversation mail is labelled context. No provider
+  wire events enter the window's mail path. Below the rules, the live socket itself: a
   hand-written WebSocket over `src/api.rs`'s TLS (its upgrade's accept key is
   the one SHA-1 in the tree, `sha1_smol`), and the session's one thread in the
   `FollowControl` manner, which owns the microphone's frames in and the

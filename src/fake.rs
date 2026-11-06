@@ -2692,3 +2692,97 @@ mod tests {
         assert_eq!(closed.last().unwrap()["reason"], "expired");
     }
 }
+
+/// ElevenAgents' documented event shapes, scripted independently of the
+/// client. It never invokes a model, opens audio or uses an account key.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Agent {
+    pub(crate) incoming: Mutex<Vec<Value>>,
+    pub(crate) outgoing: Mutex<VecDeque<Value>>,
+    pub(crate) heads: Mutex<Vec<String>>,
+    pub(crate) status: Mutex<Option<u16>>,
+    pub(crate) signed_status: Mutex<Option<u16>>,
+    pub(crate) upgrade_status: Mutex<Option<u16>>,
+    pub(crate) pause: Mutex<Option<String>>,
+    pub(crate) config: Mutex<Value>,
+    pub(crate) metadata: Mutex<Value>,
+    pub(crate) errors: Mutex<Vec<String>>,
+}
+
+#[cfg(test)]
+impl Agent {
+    pub(crate) fn new() -> Self {
+        use serde_json::json;
+        Self {
+            config: Mutex::new(json!({
+                "agent_id": "agent_test",
+                "platform_settings": {"auth": {"enable_auth": true}, "overrides": {
+                    "conversation_config_override": {"agent": {"prompt": {"prompt": true}}, "tts": {"voice_id": true}}
+                }},
+                "conversation_config": {"agent": {"language": "de", "prompt": {
+                    "llm": "gemini-2.5-flash-lite", "backup_llm_config": {"type": "disabled"}, "thinking_budget": 0,
+                    "tools": [{"type": "client", "name": "send_to_yard", "expects_response": true,
+                        "response_timeout_secs": 20,
+                        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]
+                }}}
+            })),
+            metadata: Mutex::new(
+                json!({"type": "conversation_initiation_metadata", "conversation_initiation_metadata_event": {
+                    "conversation_id": "conv_test", "agent_output_audio_format": "pcm_16000", "user_input_audio_format": "pcm_16000"
+                }}),
+            ),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn emit(&self, event: Value) {
+        self.outgoing.lock().unwrap().push_back(event);
+    }
+
+    pub(crate) fn tool(&self, id: &str, text: &str) {
+        self.emit(
+            serde_json::json!({"type": "client_tool_call", "client_tool_call": {
+                "tool_call_id": id, "tool_name": "send_to_yard", "parameters": {"text": text}
+            }}),
+        );
+    }
+
+    pub(crate) fn receive(&self, text: &str) {
+        let event: Value = serde_json::from_str(text).unwrap();
+        match event["type"].as_str() {
+            Some("conversation_initiation_client_data") => {
+                self.emit(self.metadata.lock().unwrap().clone())
+            }
+            Some("client_tool_result") => {
+                if !event["result"].is_string()
+                    || !event["tool_call_id"].is_string()
+                    || !event["is_error"].is_boolean()
+                {
+                    self.errors
+                        .lock()
+                        .unwrap()
+                        .push("invalid client tool result".into());
+                }
+            }
+            Some("contextual_update" | "pong") => {}
+            None if event["user_audio_chunk"].is_string() => {}
+            _ => self
+                .errors
+                .lock()
+                .unwrap()
+                .push("unexpected Agent client event".into()),
+        }
+        self.incoming.lock().unwrap().push(event);
+    }
+
+    pub(crate) fn sent(&self, kind: &str) -> Vec<Value> {
+        self.incoming
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event["type"] == kind)
+            .cloned()
+            .collect()
+    }
+}

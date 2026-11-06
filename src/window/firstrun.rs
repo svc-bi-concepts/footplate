@@ -53,10 +53,12 @@ pub type Opens = Rc<dyn Fn(&str, &mut App)>;
 /// What the window does for a gesture on its top strip: moves, or zooms.
 pub type Strip = Rc<dyn Fn(Gesture, &mut Window, &mut App)>;
 
-/// Starts a voice session ([`voice::start_session`]): whether voice is on,
-/// the settings' file, whom the conversation is with, the voice that speaks
-/// (empty is the provider's own), and where the session tells its updates.
+/// Starts GPT-Live with the off gate, settings path, counterpart and voice.
 pub type Starts = Rc<dyn Fn(bool, Option<&Path>, &str, &str, mpsc::Sender<Update>) -> Start>;
+
+/// Starts an Agent with its separate IDs and captured yard/conversation.
+pub type AgentStarts =
+    Rc<dyn Fn(bool, Option<&Path>, &str, &str, &str, &str, mpsc::Sender<Update>) -> Start>;
 
 /// Opens the microphone and the speaker for a session ([`crate::audio::open`]):
 /// the microphone's frames go to the session, the speaker plays its queue.
@@ -105,6 +107,7 @@ pub struct Means {
     /// time it keeps, and whether the window is out of view. A test starts its
     /// sessions against a stand-in for OpenAI's socket, with stand-in devices.
     pub voice: Starts,
+    pub agent: AgentStarts,
     pub devices: Plugs,
     pub inputs: Lists,
     pub now: Clock,
@@ -149,6 +152,10 @@ impl Means {
             voice: Rc::new(crate::voice::start_session),
             #[cfg(test)]
             voice: Rc::new(|_, _, _, _, _| Start::Refused("no voice in a test".to_string())),
+            #[cfg(not(test))]
+            agent: Rc::new(crate::voice::elevenlabs::start_session),
+            #[cfg(test)]
+            agent: Rc::new(|_, _, _, _, _, _, _| Start::Refused("no Agent in a test".into())),
             #[cfg(not(test))]
             devices: Arc::new(|mic, speaker, microphone| {
                 let devices = crate::audio::open(
