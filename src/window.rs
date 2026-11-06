@@ -12257,6 +12257,46 @@ yardr.dev
                 .filter(|e| e["tool_call_id"] == "uncertain")
                 .all(|e| e["is_error"] == true)
         );
+        agent.tool("quota-send", "Mail accepted before quota exhaustion");
+        wait(cx, "mail before quota", |_| {
+            yard.asked("Mail")
+                .iter()
+                .any(|a| a["text"] == "Mail accepted before quota exhaustion")
+        });
+        agent.emit(json!({"type":"client_error","error_event":{"code":1008,"error_name":"quota_exceeded","message":"SECRET"}}));
+        wait(cx, "quota stops voice", |cx| !voice_stands(&view, cx));
+        wait(cx, "quota closes audio", |_| {
+            voicing.open.load(Ordering::SeqCst) == 0
+        });
+        assert!(view.read_with(cx, |v, _| {
+            v.voice_refusal
+                .as_ref()
+                .unwrap()
+                .contains("quota exhausted")
+        }));
+        yard.emit(&answer_event(25, "Late reply after voice quota"));
+        wait(cx, "late written reply", |cx| {
+            view.read_with(cx, |v, _| {
+                v.model
+                    .as_ref()
+                    .unwrap()
+                    .entries()
+                    .iter()
+                    .any(|m| m.text == "Late reply after voice quota")
+            })
+        });
+        assert_eq!(
+            yard.asked("Mail")
+                .iter()
+                .filter(|a| a["text"] == "Mail accepted before quota exhaustion")
+                .count(),
+            1
+        );
+        assert_eq!(agent.heads.lock().unwrap().len(), 3);
+        assert_eq!(
+            settings_of(&view, cx).voice_provider,
+            voice::Provider::ElevenLabs
+        );
         // The current session's late completion and a queued tool from the
         // old session cannot post into the next conversation after a switch.
         view.update(cx, |v, cx| {

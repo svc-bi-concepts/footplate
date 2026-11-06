@@ -13,7 +13,13 @@ stops the open yard the same way. Beside those two it starts nothing of
 yardr's. The conversations are as `yardr chat` shows them in a terminal.
 
 Optional voice is configured in [Voice settings](docs/window.md#settings),
-including provider choice, keys, data flow and Agent setup.
+including provider choice, keys, data flow and Agent setup. ElevenLabs Agent
+is optional and uses your own authenticated agent. Call minutes and LLM usage
+are charged separately; the meter is an estimate, not an account balance.
+Check Agents entitlement and privacy controls before commissioning: ElevenLabs
+retains conversations for two years by default, and this app changes no account
+settings. Refusal or quota exhaustion stops voice; starting again is explicit.
+Written yard mail stays readable and is the record. GPT-Live remains selectable.
 
 ## Installing
 
