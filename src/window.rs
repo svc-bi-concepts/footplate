@@ -11671,7 +11671,7 @@ yardr.dev
             v.voice_refusal
                 .as_ref()
                 .unwrap()
-                .contains("not available yet")
+                .contains("no Agent in a test")
         }));
         click_on(cx, "voice provider OpenAI GPT-Live");
         assert_eq!(settings_of(&view, cx).elevenlabs_agent, "agent-offline");
@@ -12114,6 +12114,332 @@ yardr.dev
                "data": {"to": "jo", "to_user": true, "text": text},
                "at": "2026-10-08T09:32:00Z"})
         .to_string()
+    }
+
+    /// Agent tool text uses the same ordinary Mail call as typed messages.
+    /// Counterpart mail stays context even while a call is outstanding.
+    #[gpui::test]
+    fn agent_tools_send_ordinary_mail_and_context_stays_in_the_captured_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::voice::elevenlabs::stand_in::SocketAgent;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            voice_provider: voice::Provider::ElevenLabs,
+            elevenlabs_agent: "agent_test".into(),
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let agent = Arc::new(crate::fake::Agent::new());
+        let socket = Rc::new(SocketAgent::start(agent.clone()));
+        view.update(cx, |v, _| {
+            let socket = socket.clone();
+            v.means.agent = Rc::new(move |on, _, _, _, yard, with, tell| {
+                socket.start_voice(on, yard, with, tell)
+            });
+        });
+        view.update(cx, |v, cx| v.toggle_voice(cx));
+        wait(cx, "Agent devices open", |_| {
+            voicing.open.load(Ordering::SeqCst) == 1
+        });
+        let id = view.read_with(cx, |v, _| v.voice.as_ref().unwrap().id);
+        for (call, text) in [
+            ("de", "Bitte prüfe Bead 42 und Version 7."),
+            ("en", "Please check Bead 42 and version 7."),
+            ("gsw", "Bitte lueg Bead 42 aa."),
+        ] {
+            agent.tool(call, text);
+            agent.tool(call, text);
+            wait(cx, "tool result", |_| {
+                agent
+                    .sent("client_tool_result")
+                    .iter()
+                    .any(|e| e["tool_call_id"] == call)
+            });
+            assert_eq!(
+                yard.asked("Mail")
+                    .iter()
+                    .filter(|args| args["text"] == text)
+                    .count(),
+                1
+            );
+            assert!(
+                yard.asked("Mail")
+                    .iter()
+                    .all(|args| args["to"] == "yardmaster")
+            );
+            assert!(
+                agent
+                    .sent("client_tool_result")
+                    .iter()
+                    .filter(|e| e["tool_call_id"] == call)
+                    .all(|e| e["result"].as_str().unwrap().starts_with("pending:"))
+            );
+        }
+        yard.emit(&answer_event(12, "HISTORY MUST STAY LOCAL"));
+        yard.emit(&answer_event(21, "Unsolicited release update"));
+        yard.emit(&answer_event(22, "Bead 42 is ready"));
+        yard.emit(&answer_event(21, "duplicate or out of order"));
+        yard.emit(r#"{"seq":23,"kind":"mail","actor":"assembly","data":{"to":"jo","to_user":true,"text":"UNRELATED"}}"#);
+        yard.emit(
+            r#"{"seq":24,"kind":"mail","actor":"jo","data":{"to":"yardmaster","text":"OWN MAIL"}}"#,
+        );
+        wait(cx, "two context updates", |_| {
+            agent.sent("contextual_update").len() == 2
+        });
+        let context = agent.sent("contextual_update");
+        assert!(
+            context[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Unsolicited release update")
+        );
+        assert!(
+            context[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Bead 42 is ready")
+        );
+        assert!(
+            context
+                .iter()
+                .all(|e| e["text"].as_str().unwrap().contains("not a tool reply"))
+        );
+        assert!(
+            !context
+                .iter()
+                .any(|e| e.to_string().contains("UNRELATED") || e.to_string().contains("OWN MAIL"))
+        );
+        // A lost response is uncertain, never retried, including repeated IDs.
+        yard.answer(
+            "Mail",
+            r#"{"error":{"code":"no_answer","message":"mail may have run"}}"#,
+        );
+        agent.tool("uncertain", "Do not repeat this send");
+        wait(cx, "uncertain send result", |_| {
+            agent
+                .sent("client_tool_result")
+                .iter()
+                .any(|e| e["tool_call_id"] == "uncertain")
+        });
+        agent.tool("uncertain", "Do not repeat this send");
+        wait(cx, "cached uncertain result", |_| {
+            agent
+                .sent("client_tool_result")
+                .iter()
+                .filter(|e| e["tool_call_id"] == "uncertain")
+                .count()
+                == 2
+        });
+        assert_eq!(
+            yard.asked("Mail")
+                .iter()
+                .filter(|a| a["text"] == "Do not repeat this send")
+                .count(),
+            1
+        );
+        assert!(
+            agent
+                .sent("client_tool_result")
+                .iter()
+                .filter(|e| e["tool_call_id"] == "uncertain")
+                .all(|e| e["is_error"] == true)
+        );
+        // The current session's late completion and a queued tool from the
+        // old session cannot post into the next conversation after a switch.
+        view.update(cx, |v, cx| {
+            v.change(cx, |m| m.select(Selected::Conversation("assembly".into())));
+        });
+        assert!(!voice_stands(&view, cx));
+        view.update(cx, |v, cx| {
+            v.voice_heard(
+                id,
+                bead::Heard::Said(voice::Update::Tool {
+                    id: "late".into(),
+                    text: "LATE MUST NOT SEND".into(),
+                    deadline: std::time::Instant::now() + Duration::from_secs(20),
+                }),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(
+            !yard
+                .asked("Mail")
+                .iter()
+                .any(|a| a["text"] == "LATE MUST NOT SEND")
+        );
+        wait(cx, "Agent devices closed", |_| {
+            voicing.open.load(Ordering::SeqCst) == 0
+        });
+        let mic = voicing.mics.lock().unwrap()[0].clone();
+        wait(cx, "Agent microphone ended", |_| !mic.send(vec![0; 480]));
+        assert!(agent.errors.lock().unwrap().is_empty());
+        // Drop the captured fixture too, to join the fake server before handoff.
+        view.update(cx, |v, _| {
+            v.means.agent = Rc::new(|_, _, _, _, _, _, _| Start::Off);
+        });
+        drop(socket);
+    }
+
+    // The default routing contract requires yardmaster-chris; a yard that
+    // lacks that crew member must explain why Voice cannot start, rather
+    // than silently doing nothing or sending to another conversation.
+    #[gpui::test]
+    fn agent_missing_default_conversation_reports_unavailable(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            voice_provider: voice::Provider::ElevenLabs,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        view.update(cx, |v, cx| {
+            v.means.agent = Rc::new(|_, _, _, _, _, _, _| {
+                panic!("a missing conversation must not start the provider")
+            });
+            v.change(cx, |m| m.select(Selected::Yard));
+        });
+        click_on(cx, "rail voice");
+        assert_eq!(
+            notice(&view, cx),
+            "Voice is unavailable: yardmaster-chris is not in this yard. Open a conversation and try again."
+        );
+        assert!(!voice_stands(&view, cx));
+        assert_eq!(
+            view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+            Some(Selected::Yard)
+        );
+        assert!(yard.asked("Mail").is_empty());
+    }
+
+    #[gpui::test]
+    fn agent_default_conversation_idle_wait_and_all_stop_paths_close_audio(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::voice::elevenlabs::stand_in::SocketAgent;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("footplate/settings.json");
+        Settings {
+            voice: true,
+            voice_provider: voice::Provider::ElevenLabs,
+            ..Settings::default()
+        }
+        .write(&file)
+        .unwrap();
+        let yard = Yard::start();
+        a_yard_of_jo(&yard);
+        yard.answer("Crew", r#"{"result":[{"name":"yardmaster-chris","enabled":true,"state":"running"},{"name":"yardmaster","enabled":true,"state":"running"}]}"#);
+        cx.update(|cx| {
+            input::bind_keys(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = opened_kept(&yard, &file, cx);
+        let voicing = Voicing::new();
+        voicing.stand_in(&view, cx);
+        let agent = Arc::new(crate::fake::Agent::new());
+        let socket = Rc::new(SocketAgent::start(agent.clone()));
+        view.update(cx, |v, cx| {
+            let socket = socket.clone();
+            v.means.agent = Rc::new(move |on, _, _, _, yard, with, tell| {
+                socket.start_voice(on, yard, with, tell)
+            });
+            v.change(cx, |m| m.select(Selected::Yard));
+        });
+        for reason in ["idle", "off", "hidden", "provider", "stop"] {
+            voicing.later.set(Duration::ZERO);
+            voicing.hidden.set(false);
+            view.update(cx, |v, cx| {
+                v.pick_provider(voice::Provider::ElevenLabs, cx);
+                v.voice_on(true, cx);
+                let selected = if reason == "idle" {
+                    Selected::Yard
+                } else {
+                    Selected::Arrivals
+                };
+                v.change(cx, |m| m.select(selected));
+            });
+            assert!(view.read_with(cx, |v, _| v.open().is_none()));
+            click_on(cx, "rail voice");
+            wait(cx, "Agent audio open", |_| {
+                voicing.open.load(Ordering::SeqCst) == 1
+            });
+            assert_eq!(
+                view.read_with(cx, |v, _| v.model.as_ref().unwrap().selected().cloned()),
+                Some(Selected::Conversation("yardmaster-chris".into()))
+            );
+            let id = view.read_with(cx, |v, _| v.voice.as_ref().unwrap().id);
+            if reason == "idle" {
+                view.update(cx, |v, _| v.voice.as_mut().unwrap().unanswered = true);
+                voicing.later.set(Duration::from_secs(6 * 60));
+                tick(&view, cx);
+                assert!(voice_stands(&view, cx), "pending send holds idle teardown");
+                // Neither a ping nor selected mail resets the user's idle
+                // clock. A finite tool result/timeout releases the wait.
+                agent.emit(json!({"type":"ping","ping_event":{"event_id":91}}));
+                yard.emit(r#"{"seq":21,"kind":"mail","actor":"yardmaster-chris","data":{"to":"jo","to_user":true,"text":"Background context"}}"#);
+                wait(cx, "background context", |_| {
+                    !agent.sent("contextual_update").is_empty()
+                });
+                view.update(cx, |v, cx| {
+                    v.voice_heard(id, bead::Heard::Said(voice::Update::Settled), cx)
+                });
+                tick(&view, cx);
+            } else {
+                view.update(cx, |v, cx| match reason {
+                    "off" => v.voice_on(false, cx),
+                    "hidden" => {
+                        voicing.hidden.set(true);
+                        v.voice_tick((v.means.now)(), cx);
+                    }
+                    "provider" => v.pick_provider(voice::Provider::OpenAi, cx),
+                    _ => v.end_voice(cx),
+                });
+            }
+            assert!(!voice_stands(&view, cx));
+            wait(cx, "Agent audio closed", |_| {
+                voicing.open.load(Ordering::SeqCst) == 0
+            });
+            let mic = voicing.mics.lock().unwrap().last().unwrap().clone();
+            wait(cx, "closed microphone", |_| !mic.send(vec![1; 480]));
+            view.update(cx, |v, cx| {
+                v.voice_heard(
+                    id,
+                    bead::Heard::Said(voice::Update::Tool {
+                        id: "after_stop".into(),
+                        text: "late".into(),
+                        deadline: std::time::Instant::now() + Duration::from_secs(20),
+                    }),
+                    cx,
+                )
+            });
+            assert!(yard.asked("Mail").is_empty());
+        }
+        view.update(cx, |v, _| {
+            v.means.agent = Rc::new(|_, _, _, _, _, _, _| Start::Off);
+        });
+        drop(socket);
     }
 
     /// A person speaks a request, a voice takes it for the yard, and the

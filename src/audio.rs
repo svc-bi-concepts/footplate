@@ -42,11 +42,11 @@ pub const CHUNK: usize = 480;
 /// heard as silence within the time one callback holds.
 const PIECE: usize = 120;
 
-fn to_i16(x: f32) -> i16 {
+pub(crate) fn to_i16(x: f32) -> i16 {
     (x.clamp(-1.0, 1.0) * 32767.0).round() as i16
 }
 
-fn to_f32(x: i16) -> f32 {
+pub(crate) fn to_f32(x: i16) -> f32 {
     f32::from(x) / 32768.0
 }
 

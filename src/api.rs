@@ -2733,10 +2733,33 @@ fn kratos_errors(bytes: &[u8]) -> Vec<String> {
 /// a redirect is such a status. A file longer than `most` bytes is not
 /// read to its end.
 pub fn read(address: &Address, path: &str, most: u64) -> Result<(u16, Vec<u8>)> {
+    read_with_headers(address, path, most, &[], |_| {})
+}
+
+/// A bounded site read with caller-owned authentication. Redirects remain
+/// statuses, so a credential is never forwarded to another host. `connected`
+/// lets the session cancel a read when the person hangs up.
+pub(crate) fn read_with_headers(
+    address: &Address,
+    path: &str,
+    most: u64,
+    headers: &[(&str, &str)],
+    connected: impl FnOnce(EventStop),
+) -> Result<(u16, Vec<u8>)> {
+    let mut extra = String::new();
+    for (name, value) in headers {
+        if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
+            return Err(Error::Protocol(
+                "a site header contains a line break".into(),
+            ));
+        }
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
     let mut conn = address.connect(Some(CALL_TIMEOUT))?;
+    connected(conn.event_stop()?);
     conn.write_all(
         format!(
-            "GET {}{path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {CLIENT}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+            "GET {}{path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {CLIENT}\r\nAccept-Encoding: identity\r\n{extra}Connection: close\r\n\r\n",
             address.path, address.authority
         )
         .as_bytes(),

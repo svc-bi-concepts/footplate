@@ -1,15 +1,15 @@
 //! The voice session's rules, as plain functions and one small book, tested
 //! on any system: no socket, no microphone, no window, no key. footplate's
-//! voice is OpenAI's GPT-Live in client delegation
+//! GPT-Live provider uses client delegation
 //! (docs/design/2026-10-31-footplate-vqze-voice.md), and this is the one
 //! module that speaks it: its events, its delegations and its appends stay in
 //! here. What stands outside speaks in plain terms: speech started
 //! ([`Book::heard`]), a request ([`Step::Request`]), an answer to speak
 //! ([`Book::answered`]) and stop. [`Provider`] selects the service at explicit
-//! start; ElevenAgents is configured but cannot start until its backend lands.
+//! start; ElevenAgents has its own protocol in [`elevenlabs`].
 //! GPT-Live's wire protocol stays here; its voices are [`VOICES`].
 //!
-//! The person's words reach the module as fragments of a transcript, and the
+//! With GPT-Live, the person's words arrive as fragments of a transcript, and the
 //! model's delegation carries none of them, so [`task_from`] works out what
 //! was asked, and only cuts: whole words of the person's, in the order they
 //! said them, and never one the model said. What the yard answers goes back to
@@ -28,6 +28,8 @@
 //! PCM16 at [`RATE`] in through [`Mic`], and speech out through the
 //! droppable [`Queue`] it shares — and [`crate::audio`] plugs the devices
 //! into it.
+
+pub(crate) mod elevenlabs;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -1303,12 +1305,20 @@ impl Queue {
     /// The person began to speak over the voice at `now`: what is queued and
     /// not played is dropped, and the milliseconds of it are said.
     pub fn drop_queued(&mut self, now: Instant) -> u64 {
+        let dropped = self.clear();
+        self.thrown_away_until = Some(now + HOLDOFF);
+        dropped
+    }
+
+    /// Flushes the speaker generation. An Agent names interrupted audio by
+    /// event ID, so it needs no GPT-Live padding holdoff for the next turn.
+    fn clear(&mut self) -> u64 {
         let dropped = self.queued_ms();
         self.dropped += self.waiting.len() as u64;
         self.gone += self.waiting.len() as u64;
         self.waiting.clear();
         self.generation += 1;
-        self.thrown_away_until = Some(now + HOLDOFF);
+        self.thrown_away_until = None;
         dropped
     }
 
@@ -1968,6 +1978,17 @@ impl WsConn {
     /// here: the key stands among them. TLS is api.rs's, against the
     /// system's roots.
     fn connect(url: &WsUrl, headers: &[(&str, &str)]) -> Result<WsConn, WsError> {
+        Self::connect_controlled(url, headers, None)
+    }
+
+    fn connect_controlled(
+        url: &WsUrl,
+        headers: &[(&str, &str)],
+        control: Option<&Control>,
+    ) -> Result<WsConn, WsError> {
+        if control.is_some_and(Control::stopped) {
+            return Err(WsError::Closed);
+        }
         let mut last = io::Error::new(
             io::ErrorKind::NotFound,
             format!("{} names no address", url.host),
@@ -1983,6 +2004,13 @@ impl WsConn {
             }
         }
         let tcp = tcp.ok_or(last)?;
+        if let Some(control) = control {
+            control.follow_socket(WsStop(tcp.try_clone()?));
+            if control.stopped() {
+                return Err(WsError::Closed);
+            }
+        }
+
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(WS_CONNECT_TIMEOUT))?;
         tcp.set_write_timeout(Some(WS_CONNECT_TIMEOUT))?;
@@ -2225,6 +2253,15 @@ pub enum Update {
     /// answer comes back by [`Voice::answered`], or its refusal by
     /// [`Voice::refused`].
     Request(String),
+    /// An Agent client tool, bound to this session; its text is submitted
+    /// mail, not a verbatim microphone transcript.
+    Tool {
+        id: String,
+        text: String,
+        deadline: Instant,
+    },
+    /// The Agent's finite wait ended; mail may still arrive as context.
+    Settled,
     /// The session ended: why, in a word of the provider's (`expired`,
     /// `close_requested`) or in words for a connection that ended.
     Ended(String),
@@ -2250,6 +2287,7 @@ struct ControlState {
 struct ControlInner {
     stopped: bool,
     socket: Option<WsStop>,
+    site: Option<crate::api::EventStop>,
 }
 
 impl Control {
@@ -2257,6 +2295,9 @@ impl Control {
         let socket = {
             let mut inner = self.0.inner.lock().unwrap();
             inner.stopped = true;
+            if let Some(site) = inner.site.take() {
+                site.stop();
+            }
             inner.socket.take()
         };
         if let Some(socket) = socket {
@@ -2264,7 +2305,7 @@ impl Control {
         }
     }
 
-    fn stopped(&self) -> bool {
+    pub(crate) fn stopped(&self) -> bool {
         self.0.inner.lock().unwrap().stopped
     }
 
@@ -2283,6 +2324,15 @@ impl Control {
         }
     }
 
+    fn follow_site(&self, site: crate::api::EventStop) {
+        let mut inner = self.0.inner.lock().unwrap();
+        if inner.stopped {
+            site.stop();
+        } else {
+            inner.site = Some(site);
+        }
+    }
+
     fn socket_ended(&self) {
         self.0.inner.lock().unwrap().socket = None;
     }
@@ -2293,6 +2343,14 @@ impl Control {
 enum Cmd {
     /// A mail the person typed in the open conversation was sent.
     Typed,
+    /// The ordinary mail call completed. No reply correlation is claimed.
+    ToolResult { id: String, sent: bool },
+    /// Selected counterpart mail, labelled as context rather than a reply.
+    Context {
+        seq: u64,
+        source: String,
+        text: String,
+    },
     /// The counterpart's next mail in the open conversation: an answer to
     /// speak, under the delegation that waited for it.
     Answered(String),
@@ -2331,9 +2389,23 @@ pub struct Voice {
     cmds: mpsc::Sender<Cmd>,
     speaker: Arc<Mutex<Queue>>,
     thread: Option<JoinHandle<()>>,
+    provider: Provider,
 }
 
 impl Voice {
+    pub(crate) fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    pub(crate) fn meter(&self, elapsed: Duration) -> String {
+        if self.provider.is_openai() {
+            meter(elapsed)
+        } else {
+            let seconds = elapsed.as_secs();
+            format!("{}:{:02} · ElevenLabs", seconds / 60, seconds % 60)
+        }
+    }
+
     /// The control the window keeps to stop the session from outside, as
     /// when the yard is switched: it wakes the thread's read at once.
     pub fn control(&self) -> Control {
@@ -2351,6 +2423,18 @@ impl Voice {
     /// and audio for [`HOLDOFF`] after is thrown away).
     pub fn speaker(&self) -> Arc<Mutex<Queue>> {
         self.speaker.clone()
+    }
+
+    pub(crate) fn tool_result(&self, id: String, sent: bool) {
+        let _ = self.cmds.send(Cmd::ToolResult { id, sent });
+    }
+
+    pub(crate) fn context(&self, seq: u64, source: &str, text: &str) {
+        let _ = self.cmds.send(Cmd::Context {
+            seq,
+            source: source.into(),
+            text: text.into(),
+        });
     }
 
     /// A mail the person typed in the voiced conversation was sent: its
@@ -2433,19 +2517,20 @@ impl Provider {
     }
 }
 
-/// Dispatch before reading credentials or opening devices. Configuration is
-/// available ahead of the ElevenAgents backend, but starting it is refused.
+/// Dispatch before reading credentials or opening devices. Only the selected
+/// provider's closure may run, and neither runs while voice is off.
 pub(crate) fn selected_start(
     on: bool,
     provider: Provider,
     openai: impl FnOnce() -> Start,
+    elevenlabs: impl FnOnce() -> Start,
 ) -> Start {
     if !on {
         return Start::Off;
     }
     match provider {
         Provider::OpenAi => openai(),
-        Provider::ElevenLabs => Start::Refused("ElevenLabs Agent sessions are not available yet. You can save the key, agent ID and voice for a later version.".into()),
+        Provider::ElevenLabs => elevenlabs(),
     }
 }
 
@@ -2532,6 +2617,7 @@ fn start_at(
         cmds,
         speaker,
         thread: Some(thread),
+        provider: Provider::OpenAi,
     })
 }
 
@@ -2699,6 +2785,7 @@ impl Session {
             }
             while let Ok(cmd) = cmds.try_recv() {
                 match cmd {
+                    Cmd::ToolResult { .. } | Cmd::Context { .. } => {}
                     Cmd::Typed => self.book.typed_sent(),
                     Cmd::Answered(text) => {
                         let steps = self.book.answered(&text);
@@ -3086,22 +3173,24 @@ pub(crate) mod tests {
     use std::net::TcpListener;
 
     #[test]
-    fn off_and_unavailable_providers_never_read_openai_credentials() {
+    fn only_the_selected_provider_can_read_its_credentials() {
         for provider in [Provider::OpenAi, Provider::ElevenLabs] {
             assert!(matches!(
-                selected_start(false, provider, || panic!("off read a key")),
+                selected_start(
+                    false,
+                    provider,
+                    || panic!("off read OpenAI key"),
+                    || panic!("off read Agent key")
+                ),
                 Start::Off
             ));
         }
-        assert!(matches!(
-            selected_start(true, Provider::ElevenLabs, || panic!(
-                "Agent read OpenAI key"
-            )),
-            Start::Refused(_)
-        ));
-        assert!(
-            matches!(selected_start(true, Provider::OpenAi, || Start::Refused("OpenAI keeper".into())), Start::Refused(why) if why == "OpenAI keeper")
-        );
+        assert!(matches!(selected_start(true, Provider::ElevenLabs,
+            || panic!("Agent read OpenAI key"), || Start::Refused("Agent keeper".into())),
+            Start::Refused(why) if why == "Agent keeper"));
+        assert!(matches!(selected_start(true, Provider::OpenAi,
+            || Start::Refused("OpenAI keeper".into()), || panic!("OpenAI read Agent key")),
+            Start::Refused(why) if why == "OpenAI keeper"));
     }
 
     fn said(pieces: &[(&str, u64, u64)]) -> Vec<Fragment> {

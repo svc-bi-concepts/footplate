@@ -260,6 +260,20 @@ impl Footplate {
         if self.voice.is_some() {
             return self.end_voice(cx);
         }
+        if self.settings.voice
+            && self.settings.voice_provider == voice::Provider::ElevenLabs
+            && self.open().is_none()
+        {
+            self.change(cx, |m| {
+                m.select(Selected::Conversation("yardmaster-chris".into()))
+            });
+            if self.open().is_none() {
+                return self.notice(
+                    "Voice is unavailable: yardmaster-chris is not in this yard. Open a conversation and try again.".into(),
+                    cx,
+                );
+            }
+        }
         let Some((with, _)) = self.open() else {
             return;
         };
@@ -268,23 +282,37 @@ impl Footplate {
         // The voice chosen in the settings speaks, and is the provider's own
         // where none was: a change since the last session reaches this one,
         // and never one that stands.
-        let voice =
-            match voice::selected_start(self.settings.voice, self.settings.voice_provider, || {
+        let voice = match voice::selected_start(
+            self.settings.voice,
+            self.settings.voice_provider,
+            || {
                 (self.means.voice)(
                     self.settings.voice,
                     self.kept.as_deref(),
                     &with,
                     &self.settings.voice_name,
-                    tell,
+                    tell.clone(),
                 )
-            }) {
-                Start::On(voice) => voice,
-                Start::Off => return cx.notify(),
-                Start::Refused(words) => {
-                    self.voice_refusal = Some(words);
-                    return cx.notify();
-                }
-            };
+            },
+            || {
+                (self.means.agent)(
+                    self.settings.voice,
+                    self.kept.as_deref(),
+                    &self.settings.elevenlabs_agent,
+                    &self.settings.elevenlabs_voice,
+                    &self.yard,
+                    &with,
+                    tell.clone(),
+                )
+            },
+        ) {
+            Start::On(voice) => voice,
+            Start::Off => return cx.notify(),
+            Start::Refused(words) => {
+                self.voice_refusal = Some(words);
+                return cx.notify();
+            }
+        };
         // What the session tells comes to the window as the yard's follower's
         // words do: from a thread of its own, through a channel, to one loop
         // that applies each on the window. The same thread is the loop's timer.
@@ -334,7 +362,11 @@ impl Footplate {
             unanswered: false,
             quiet_since: (self.means.now)(),
             speaking: Speaking::default(),
-            answered_through: 0,
+            answered_through: if self.settings.voice_provider == voice::Provider::ElevenLabs {
+                self.model.as_ref().map_or(0, Model::seen_through)
+            } else {
+                0
+            },
             state: State::Listening,
             meter: String::new(),
         });
@@ -415,7 +447,7 @@ impl Footplate {
             Update::Started => {
                 talk.stood = Some(now);
                 talk.quiet_since = now;
-                talk.meter = voice::meter(Duration::ZERO);
+                talk.meter = talk.voice.meter(Duration::ZERO);
                 let (id, mic, speaker) = (talk.id, talk.voice.microphone(), talk.speaker.clone());
                 let (plug, microphone) = (
                     self.means.devices.clone(),
@@ -443,6 +475,23 @@ impl Footplate {
             // What the caption held has gone to the yard, or was no request
             // for it: the line starts again with the person's next words.
             Update::Taken => talk.caption.taken(),
+            Update::Tool { id, text, deadline } => {
+                if !self.settings.voice
+                    || !self.voice_is_here()
+                    || self.reconnecting()
+                    || (self.means.hidden)()
+                    || now >= deadline
+                {
+                    if let Some(talk) = &self.voice {
+                        talk.voice.tool_result(id, false);
+                    }
+                    return;
+                }
+                return self.voice_mail(text, Some((id, deadline)), now, cx);
+            }
+            Update::Settled => {
+                talk.unanswered = false;
+            }
             Update::Request(text) => return self.voice_request(text, now, cx),
             Update::Ended(_) => return self.end_voice(cx),
             Update::Refused(words) => {
@@ -482,10 +531,21 @@ impl Footplate {
     /// arrived. Where it is not sent the voice is told once, and the caption
     /// says so.
     fn voice_request(&mut self, text: String, now: Instant, cx: &mut Context<Self>) {
+        self.voice_mail(text, None, now, cx);
+    }
+
+    fn voice_mail(
+        &mut self,
+        text: String,
+        tool: Option<(String, Instant)>,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
         let Some(talk) = self.voice.as_mut() else {
             return;
         };
         let (id, with) = (talk.id, talk.with.clone());
+        let control = talk.voice.control();
         talk.quiet_since = now;
         talk.unanswered = true;
         talk.words = None;
@@ -498,21 +558,43 @@ impl Footplate {
             let shown = "the yard is away, so nothing was sent".to_string();
             return self.voice_refused(id, YARD_AWAY, shown, cx);
         }
+        let deadline = tool.as_ref().map(|(_, deadline)| *deadline);
         let session = self.session;
         self.ask_through(
             cx,
             move |client, me| {
+                if control.stopped() || deadline.is_some_and(|until| Instant::now() >= until) {
+                    return Err("voice session ended before the mail was sent".into());
+                }
                 post(client, me, &target, &text, &[])
                     .map(|_| ())
                     .map_err(|(_, why)| why)
             },
-            move |this, sent, cx| match sent {
-                // It went in the yard it was spoken in, whose model has it
-                // wherever the window is by now.
-                Ok(()) => this.change_in(session, cx, |m| m.sent(&to)),
-                Err(why) => {
-                    let shown = format!("not sent to {to}: {why}");
-                    this.voice_refused(id, &why, shown, cx)
+            move |this, sent, cx| {
+                if let Some((call, _)) = tool {
+                    if let Some(talk) = this.voice.as_mut().filter(|talk| talk.id == id) {
+                        talk.voice.tool_result(call, sent.is_ok());
+                        talk.unanswered = false;
+                    }
+                    match sent {
+                        Ok(()) => this.change_in(session, cx, |m| m.sent(&to)),
+                        Err(_) => {
+                            if let Some(talk) = this.voice.as_mut().filter(|talk| talk.id == id) {
+                                talk.words = Some(
+                                    "delivery unconfirmed; check the written conversation".into(),
+                                );
+                                cx.notify();
+                            }
+                        }
+                    }
+                } else {
+                    match sent {
+                        Ok(()) => this.change_in(session, cx, |m| m.sent(&to)),
+                        Err(why) => {
+                            let shown = format!("not sent to {to}: {why}");
+                            this.voice_refused(id, &why, shown, cx)
+                        }
+                    }
                 }
             },
         );
@@ -533,10 +615,9 @@ impl Footplate {
         cx.notify();
     }
 
-    /// The yard went away. A request that waits for its answer will not get
-    /// one spoken: the answer, if it comes, comes with the state the yard
-    /// is read in when it is back. The voice says the yard does not answer,
-    /// as it does of a mail the yard refused.
+    /// The yard went away. GPT-Live is told that its awaited answer will not
+    /// be spoken; ElevenLabs settles an outstanding tool as unconfirmed.
+    /// Neither provider retries the mail.
     pub(crate) fn voice_yard_away(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self
             .voice
@@ -552,8 +633,8 @@ impl Footplate {
 
     /// The stream told of `event`. Where it is the other side's mail in the
     /// voiced conversation, the voice is given its text, and its text only:
-    /// the session knows whether an answer is waited for, and speaks it only
-    /// then. The person's own mail never goes.
+    /// GPT-Live speaks it only when awaited; ElevenLabs receives labelled
+    /// context without a reply relation. The person's own mail never goes.
     pub(crate) fn voice_hears(&mut self, event: &Event) {
         let (Some(talk), Some(model)) = (self.voice.as_mut(), self.model.as_ref()) else {
             return;
@@ -565,14 +646,18 @@ impl Footplate {
             return;
         }
         talk.answered_through = event.seq;
-        talk.unanswered = false;
-        talk.quiet_since = (self.means.now)();
-        talk.voice.answered(text);
+        if talk.voice.provider() == voice::Provider::ElevenLabs {
+            talk.voice.context(event.seq, &event.actor, text);
+        } else {
+            talk.unanswered = false;
+            talk.quiet_since = (self.means.now)();
+            talk.voice.answered(text);
+        }
     }
 
-    /// Asks that arrived from the other side of the voiced conversation: the
-    /// voice is directed to the card in the window, never given anything to
-    /// answer it with, and of a secret ask it is told nothing at all.
+    /// Asks that arrived from the other side of the voiced conversation:
+    /// GPT-Live is directed to the card, with nothing to answer it with and
+    /// no secret ask contents. ElevenLabs ignores these notifications.
     pub(crate) fn voice_asked(&self, news: &[News]) {
         let (Some(talk), Some(model)) = (self.voice.as_ref(), self.model.as_ref()) else {
             return;
@@ -616,7 +701,7 @@ impl Footplate {
         let state = State::of(talk.speaking.seen(queued, now), talk.unanswered);
         let meter = talk
             .stood
-            .map(|at| voice::meter(now.saturating_duration_since(at)))
+            .map(|at| talk.voice.meter(now.saturating_duration_since(at)))
             .unwrap_or_default();
         if (state, &meter) != (talk.state, &talk.meter) {
             talk.state = state;
@@ -633,6 +718,9 @@ impl Footplate {
         let Some(Talk { devices, voice, .. }) = self.voice.take() else {
             return;
         };
+        if voice.provider() == voice::Provider::ElevenLabs {
+            voice.control().stop();
+        }
         drop(devices);
         // A thread that cannot be started leaves the hang-up to the
         // handle's drop, which stops the session as the control does.
