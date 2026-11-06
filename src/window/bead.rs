@@ -615,10 +615,9 @@ impl Footplate {
         cx.notify();
     }
 
-    /// The yard went away. A request that waits for its answer will not get
-    /// one spoken: the answer, if it comes, comes with the state the yard
-    /// is read in when it is back. The voice says the yard does not answer,
-    /// as it does of a mail the yard refused.
+    /// The yard went away. GPT-Live is told that its awaited answer will not
+    /// be spoken; ElevenLabs settles an outstanding tool as unconfirmed.
+    /// Neither provider retries the mail.
     pub(crate) fn voice_yard_away(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self
             .voice
@@ -656,9 +655,9 @@ impl Footplate {
         }
     }
 
-    /// Asks that arrived from the other side of the voiced conversation: the
-    /// voice is directed to the card in the window, never given anything to
-    /// answer it with, and of a secret ask it is told nothing at all.
+    /// Asks that arrived from the other side of the voiced conversation:
+    /// GPT-Live is directed to the card, with nothing to answer it with and
+    /// no secret ask contents. ElevenLabs ignores these notifications.
     pub(crate) fn voice_asked(&self, news: &[News]) {
         let (Some(talk), Some(model)) = (self.voice.as_ref(), self.model.as_ref()) else {
             return;
