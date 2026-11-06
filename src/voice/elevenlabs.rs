@@ -764,19 +764,34 @@ pub(crate) mod stand_in {
         }
     }
 
-    fn serve(tcp: &mut TcpStream, agent: &Agent, socket: &str, stopped: &AtomicBool) {
+    fn request_head(reader: &mut impl Read, stopped: &AtomicBool) -> io::Result<String> {
         let mut bytes = Vec::new();
         let mut byte = [0];
         while !bytes.ends_with(b"\r\n\r\n") {
-            if tcp.read(&mut byte).ok() != Some(1) {
-                return;
+            if stopped.load(Ordering::SeqCst) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            // A client delayed by the test runner is still connected. Poll
+            // until it sends the rest or Drop stops and shuts down the socket.
+            if let Err(err) = reader.read_exact(&mut byte) {
+                match err.kind() {
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => continue,
+                    _ => return Err(err),
+                }
             }
             bytes.push(byte[0]);
             if bytes.len() > 16384 {
-                return;
+                return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        let head = String::from_utf8(bytes).unwrap();
+        String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidData.into())
+    }
+
+    fn serve(tcp: &mut TcpStream, agent: &Agent, socket: &str, stopped: &AtomicBool) {
+        let Ok(head) = request_head(tcp, stopped) else {
+            return;
+        };
+        let mut byte = [0];
         agent.heads.lock().unwrap().push(head.clone());
         let line = head.lines().next().unwrap();
         let upgrade = head.to_ascii_lowercase().contains("upgrade: websocket");
@@ -873,6 +888,77 @@ pub(crate) mod stand_in {
                     ) => {}
                 Err(_) => return,
             }
+        }
+    }
+
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn request_head_keeps_partial_bytes_across_transient_reads() {
+            struct Pauses {
+                bytes: io::Cursor<&'static [u8]>,
+                errors: std::collections::VecDeque<io::ErrorKind>,
+                pause: bool,
+            }
+            impl Read for Pauses {
+                fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                    self.pause = !self.pause;
+                    if self.pause
+                        && let Some(kind) = self.errors.pop_front()
+                    {
+                        return Err(kind.into());
+                    }
+                    self.bytes.read(bytes)
+                }
+            }
+            let head = "GET /v1/convai/agents/agent_test HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            let mut reader = Pauses {
+                bytes: io::Cursor::new(head.as_bytes()),
+                errors: [
+                    io::ErrorKind::Interrupted,
+                    io::ErrorKind::TimedOut,
+                    io::ErrorKind::WouldBlock,
+                ]
+                .into(),
+                pause: false,
+            };
+            assert_eq!(
+                request_head(&mut reader, &AtomicBool::new(false)).unwrap(),
+                head
+            );
+            assert!(reader.errors.is_empty());
+        }
+
+        #[test]
+        fn request_head_still_ends_on_stop_eof_and_invalid_input() {
+            assert_eq!(
+                request_head(&mut io::Cursor::new(b"GET /"), &AtomicBool::new(true))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Interrupted
+            );
+            assert_eq!(
+                request_head(&mut io::Cursor::new(b"GET /"), &AtomicBool::new(false))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+            assert_eq!(
+                request_head(
+                    &mut io::Cursor::new(b"\xff\r\n\r\n"),
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                request_head(&mut io::repeat(b'x'), &AtomicBool::new(false))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
         }
     }
 }
